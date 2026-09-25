@@ -1346,6 +1346,18 @@ pub struct OidcValidatedSession {
     /// means "cannot say when", and nothing may substitute a nearby
     /// timestamp for it.
     pub auth_time: Option<i64>,
+    /// When the server-side session row backing this token was created, read
+    /// from the stored session record at full (sub-second) precision.
+    ///
+    /// Distinct from [`Self::auth_time`]: `auth_time` is the integer-second
+    /// ceremony instant the issued code reports, while this is the row's
+    /// creation instant. The pending-auth resume path uses it to decide
+    /// whether the user freshly re-authenticated *for this request* — a
+    /// session row created after the pending record was stored means a
+    /// ceremony just happened for this authorization — which the floored
+    /// `auth_time` claim cannot answer when two ceremonies land in the same
+    /// Unix second.
+    pub session_created_at: jiff::Timestamp,
     /// Granted OAuth scope from the access token JWT.
     pub scope: Option<ScopeSet>,
     /// The OAuth client_id from the access token (used for signed userinfo lookup).
@@ -1436,6 +1448,7 @@ pub async fn validate_session_token(
         client_id,
         hardware_verified,
         auth_time,
+        session_created_at: session.created_at,
     }))
 }
 

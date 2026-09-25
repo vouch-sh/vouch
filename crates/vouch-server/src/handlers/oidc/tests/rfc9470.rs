@@ -1519,6 +1519,151 @@ async fn test_rfc9470_max_age_completion_rejects_session_just_over_max_age() {
     );
 }
 
+#[tokio::test]
+async fn test_rfc9470_max_age_zero_resume_rejects_stale_session_in_pending_second() {
+    // OIDC Core §3.1.2.1: max_age=0 is equivalent to prompt=login — the OP must
+    // ensure a fresh authenticator interaction for *this* authorization. The
+    // pending-resume `max_age` guard must not let a ceremony performed for a
+    // *different* request satisfy max_age=0 for the current one.
+    //
+    // `auth_time` (the access token claim) is an integer Unix second (OIDC
+    // Core §2) and the pending record's `created_at` is a full-precision
+    // `Timestamp`. When a prior ceremony and this authorize request both
+    // floor to the same whole second N, `auth_time == pending.created_at
+    // .as_second()`, and a guard keyed on that floored comparison
+    // (`auth_time < pending.created_at.as_second()`) is false — it skips the
+    // max_age block entirely and issues a code backed by the older ceremony.
+    // The guard instead compares the server-side session row's full-precision
+    // `created_at` to the pending's `created_at`: this session row was
+    // created (the ceremony for a prior request) *before* the pending was
+    // stored, so the guard runs and max_age=0 rejects it.
+    //
+    // The session is minted at the start of a fresh second N so its
+    // `auth_time` floors to N and its row's `created_at` (N + ε1) precedes
+    // the pending's `created_at` (N + ε2 > ε1) — the same-second boundary the
+    // floored guard could not disambiguate. Resuming with that same
+    // (pre-pending) session must yield error=login_required, not a code. The
+    // attempt retries on a fresh second when a boundary slip would land the
+    // pending outside second N (where both fixes agree and the bug would not
+    // manifest), so the assertions run only when the resume is provably at the
+    // equality boundary.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "maxage-same-second@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = sha256_base64url(verifier);
+    let state_param = "maxage-same-second";
+
+    const MAX_ATTEMPTS: u32 = 5;
+
+    let mut landed = false;
+    for _ in 0..MAX_ATTEMPTS {
+        // Start of a fresh integer second N. The session is minted now so its
+        // `auth_time` floors to N and its row's `created_at` is N + ε1.
+        let n = wait_for_fresh_second().await;
+        let session = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let cookie = format!("__Host-vouch_session={session}");
+
+        // Fire the max_age=0 authorize request inside second N so the pending
+        // record's `created_at` also floors to N (N + ε2, with ε2 > ε1 since
+        // this request follows session creation). The direct path measures the
+        // session age at full precision (ε2 > 0), re-authenticates, and stores
+        // the pending.
+        let before = jiff::Timestamp::now().as_second();
+        let response = http_get_full(
+            &app,
+            &format!(
+                "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid\
+                 &code_challenge={}&code_challenge_method=S256&max_age=0&state={}",
+                client.client_id,
+                urlencoding::encode("https://example.com/callback"),
+                challenge,
+                state_param,
+            ),
+            &[("Cookie", &cookie)],
+        )
+        .await;
+        let after = jiff::Timestamp::now().as_second();
+        if before != n || after != n {
+            // The authorize request straddled a second boundary, so the
+            // pending's floored second would differ from the session's
+            // `auth_time`, exercising the strictly-less branch both the fix
+            // and the bug agree on. Retry in a fresh second.
+            continue;
+        }
+
+        let Some(pending_id) = pending_id_from_login_redirect(&response) else {
+            // The direct path re-auths whenever the true age exceeds max_age;
+            // a boundary slip could mean the pending landed outside second N.
+            // Retry.
+            continue;
+        };
+
+        // Resume with the SAME pre-pending session — the ceremony happened
+        // before this request, in the same integer second. The full-precision
+        // row-vs-pending guard runs the max_age check, and max_age=0 rejects a
+        // session whose ceremony preceded the pending.
+        let completion = http_get_full(
+            &app,
+            &format!(
+                "/oauth/authorize?pending_auth={}",
+                urlencoding::encode(&pending_id)
+            ),
+            &[("Cookie", &cookie)],
+        )
+        .await;
+
+        assert!(
+            completion.status == StatusCode::FOUND || completion.status == StatusCode::SEE_OTHER,
+            "completion must redirect, got {} body: {}",
+            completion.status,
+            completion.body
+        );
+
+        let location = completion
+            .headers
+            .get("Location")
+            .expect("completion must have Location header")
+            .to_str()
+            .expect("Valid UTF-8");
+
+        assert!(
+            location.contains("error=login_required"),
+            "a session whose ceremony preceded the max_age=0 request must be rejected on the \
+             pending-resume path even when both floor to the same second: {location}"
+        );
+        assert!(
+            !location.contains("code="),
+            "the pending-resume path must NOT issue a code for a stale session that floors to \
+             the same second as the pending: {location}"
+        );
+        assert!(
+            location.contains(&format!("state={state_param}")),
+            "error redirect must echo state parameter: {location}"
+        );
+        landed = true;
+        break;
+    }
+
+    assert!(
+        landed,
+        "could not land the authorize request inside the session's second after \
+         {MAX_ATTEMPTS} attempts"
+    );
+}
+
 /// Extract the `pending_auth` id from a `/login?pending_auth=<id>` redirect,
 /// or `None` if the response is not such a redirect.
 fn pending_id_from_login_redirect(response: &HttpResponse) -> Option<String> {

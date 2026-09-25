@@ -528,6 +528,18 @@ pub enum AuthorizationSessionState {
         /// was recorded. It stays `None` all the way to the claim: row
         /// creation and code issuance are not authentication.
         auth_time: Option<i64>,
+        /// When the server-side session row was created, at full sub-second
+        /// precision.
+        ///
+        /// The pending-auth resume path uses this — not the integer-second
+        /// `auth_time` — to tell a session freshly minted by re-authenticating
+        /// for this request (row created *after* the pending record) from a
+        /// pre-existing session that a stale-ceremony reuse would carry (row
+        /// created *before* the pending). The floored `auth_time` claim
+        /// cannot make that distinction when two ceremonies floor to the same
+        /// Unix second, which is the `max_age=0` (= `prompt=login`) bypass
+        /// (OIDC Core §3.1.2.1).
+        session_created_at: Timestamp,
     },
     /// User needs to authenticate.
     NeedsAuth,
@@ -894,6 +906,7 @@ pub async fn check_session_for_authorization(
                 user: Box::new(validated.user),
                 authenticator: Box::new(authenticator),
                 auth_time: validated.auth_time,
+                session_created_at: validated.session_created_at,
             })
         }
         None => Ok(AuthorizationSessionState::NeedsAuth),
