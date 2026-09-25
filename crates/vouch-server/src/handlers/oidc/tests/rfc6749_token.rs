@@ -1150,3 +1150,102 @@ async fn test_rfc6749_code_replay_revocation_is_scoped_to_that_code() {
     );
     assert_token_alive(&app, &token_c, "token C after the replay").await;
 }
+
+// ========================================================================
+// Transport-metadata attribution on the OauthTokenIssued audit row
+// ========================================================================
+
+/// Regression test: the `authorization_code` grant's `OauthTokenIssued` audit
+/// row must carry the requester's IP and User-Agent, matching the three sibling
+/// `OauthTokenIssued` writers (`client_credentials`, `device_code`,
+/// `fido2_assertion`).
+///
+/// Before the fix, the `GrantParams::AuthorizationCode` dispatcher arm dropped
+/// the request's `client_info` and `AuthCodeExchangeParams` carried no
+/// transport fields, so `exchange_authorization_code` hardcoded
+/// `ip_address: None` / `user_agent: None` on every auth-code token issuance.
+/// The OCSF projection (`services/policy/events.rs` `OauthTokenIssued` arm)
+/// mapped the null `client_ip` to `input.ip == ""`, producing an asymmetry
+/// where auth-code `IssueToken` events lacked `input.ip` while the three
+/// sibling grants carried a real address.
+///
+/// `build_test_request` (`test_utils.rs`) injects
+/// `ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 0)))`, and `test_config()`
+/// sets no `trusted_proxies`, so `resolve_client_ip` returns the TCP peer IP
+/// `127.0.0.1`. The `User-Agent` is supplied explicitly in the request headers.
+#[tokio::test]
+async fn test_rfc6749_authorization_code_grant_records_transport_metadata() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "authcode-transport@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let code = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec::default(),
+    )
+    .await;
+
+    let auth_header = client.basic_auth_header();
+    let user_agent = "vouch-regression-test/1.0";
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=authorization_code&code={}&redirect_uri=https://example.com/callback",
+            code
+        ),
+        &[("Authorization", &auth_header), ("User-Agent", user_agent)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "Successful token exchange must return 200: {body}"
+    );
+
+    // Audit writes are awaited before the handler responds, so the
+    // `oauth_token_issued` row is visible immediately.
+    let events = state
+        .audit
+        .query_events(&db::AuditEventFilter {
+            event_types: Some(vec!["oauth_token_issued".to_string()]),
+            user_id: Some(user.id.clone()),
+            ..db::AuditEventFilter::default()
+        })
+        .await
+        .expect("query audit events");
+    assert_eq!(
+        events.len(),
+        1,
+        "one auth-code exchange -> one OauthTokenIssued audit row"
+    );
+
+    let row = events
+        .first()
+        .expect("the auth-code OauthTokenIssued audit row exists");
+    let data: serde_json::Value =
+        serde_json::from_str(&row.data).expect("audit row data is valid JSON");
+
+    assert!(
+        data["client_ip"].is_string(),
+        "client_ip must NOT be null on the auth-code OauthTokenIssued row (got {data})"
+    );
+    assert_eq!(
+        data["client_ip"], "127.0.0.1",
+        "client_ip must be the test peer IP (got {data})"
+    );
+    assert_eq!(
+        data["user_agent"], user_agent,
+        "user_agent must match the request's User-Agent header (got {data})"
+    );
+    assert_eq!(
+        data["oauth_client_id"], client.app_id,
+        "oauth_client_id must identify the authenticating client (got {data})"
+    );
+}

@@ -61,6 +61,16 @@ pub struct AuthCodeExchangeParams<'a> {
     pub resource: Option<&'a str>,
     /// RFC 9396 Section 6: Authorization details for downscoping.
     pub authorization_details: Option<&'a str>,
+    /// Transport metadata for the `OauthTokenIssued` audit row: the
+    /// requester's IP (TCP peer or trusted-proxy-resolved `X-Forwarded-For`
+    /// address). Threaded from the handler's `ClientInfo` so the auth-code
+    /// grant records the same transport fields the other `OauthTokenIssued`
+    /// writers (`client_credentials`, `device_code`, `fido2_assertion`) do.
+    pub client_ip: Option<std::net::IpAddr>,
+    /// Transport metadata for the `OauthTokenIssued` audit row: the
+    /// requester's `User-Agent` header. See `client_ip` for the threading
+    /// rationale.
+    pub user_agent: Option<&'a str>,
 }
 
 /// Client credentials for authentication (RFC 6749 Section 2.3).
@@ -425,8 +435,8 @@ pub(crate) async fn exchange_authorization_code(
                 oauth_client_id: &auth_client.id,
                 event_type: db::OAuthEventType::TokenIssued,
                 user_id: Some(&auth_code.user_id),
-                ip_address: None,
-                user_agent: None,
+                ip_address: params.client_ip,
+                user_agent: params.user_agent,
                 details: params
                     .binding
                     .dpop_proof()
