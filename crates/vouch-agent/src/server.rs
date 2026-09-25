@@ -9,7 +9,9 @@ use crate::protocol::{
 };
 use crate::socket::{AuthorizedStream, SocketKind, accept_authorized, bind_socket, socket_path};
 use crate::ssh_agent::SshCredentials;
-use crate::state::{AgentState, CachedCredential, Session, SessionInfo};
+use crate::state::{
+    AgentState, CacheRefusal, CachedCredential, Session, SessionInfo, SshStoreRefusal,
+};
 use crate::wire;
 use serde::de::DeserializeOwned;
 
@@ -275,7 +277,7 @@ async fn handle_get_session(request: &Request, state: &Arc<AgentState>) -> Respo
     match state.get_session().await {
         Some(session) => {
             let mut info = SessionInfo::from(&session);
-            info.server_url = state.get_ssh_server_url().await;
+            info.server_url = state.get_server_url().await;
             success_or_internal_error(request.id, Response::success(request.id, info))
         }
         None => Response::not_authenticated(request.id),
@@ -391,13 +393,23 @@ async fn handle_store_ssh_credentials(request: &Request, state: &Arc<AgentState>
     match SshCredentials::load(key_path, cert_path) {
         Ok(creds) => {
             // Validity is gated on the live session, so the caller-supplied
-            // expiry is no longer recorded.
-            if !state.store_ssh_credentials(creds, params.server_url).await {
-                return Response::error(
-                    request.id,
-                    crate::protocol::INTERNAL_ERROR,
-                    "no active session",
-                );
+            // expiry is no longer recorded, and the server URL is the
+            // session's own, so the caller-supplied one is not either.
+            match state.store_ssh_credentials(creds).await {
+                Ok(()) => {}
+                Err(SshStoreRefusal::NoSession) => {
+                    return Response::error(
+                        request.id,
+                        crate::protocol::INTERNAL_ERROR,
+                        "no active session",
+                    );
+                }
+                Err(SshStoreRefusal::NotIssuedToSession) => {
+                    return Response::invalid_params(
+                        request.id,
+                        "certificate was not issued to the current session",
+                    );
+                }
             }
 
             info!("SSH credentials stored");
@@ -442,13 +454,17 @@ async fn handle_cache_credential(request: &Request, state: &Arc<AgentState>) -> 
     let credential = CachedCredential::new(params.data, expires_at);
     let credential_type = params.credential_type;
 
-    let stored = state
+    match state
         .cache_credential(credential_type.clone(), credential)
-        .await;
-    if !stored {
+        .await
+    {
+        Ok(()) => {}
         // Oversized `credential_type` is a caller-supplied value rejected by an
         // input-length limit — invalid_params (-32602), not INTERNAL_ERROR.
-        return Response::invalid_params(request.id, "credential_type exceeds maximum length");
+        Err(CacheRefusal::KeyTooLong) => {
+            return Response::invalid_params(request.id, "credential_type exceeds maximum length");
+        }
+        Err(CacheRefusal::NoSession) => return Response::not_authenticated(request.id),
     }
 
     info!("Cached credential: {credential_type}");
@@ -770,6 +786,7 @@ mod tests {
         }
 
         let state = AgentState::new();
+        state.store_session(live_session(), None).await;
 
         // Accepted key: handler returns success, caches, and audits.
         let valid_type = "aws:arn:aws:iam::123456789012:role/Example".to_string();
@@ -853,6 +870,46 @@ mod tests {
         );
     }
 
+    /// A session for `user@example.com` that expires in an hour.
+    fn live_session() -> Session {
+        Session::new(
+            secrecy::SecretString::from("token"),
+            "user@example.com".to_string(),
+            Timestamp::now()
+                .checked_add(jiff::Span::new().hours(1))
+                .unwrap(),
+        )
+    }
+
+    /// With no session there is no identity to bind a cache entry to, so the
+    /// agent refuses it as unauthenticated and keeps nothing: an entry cached
+    /// here would be served to whoever logs in next.
+    #[tokio::test]
+    async fn cache_credential_without_a_session_is_refused() {
+        let state = AgentState::new();
+        let params = CacheCredentialParams {
+            credential_type: "aws:role".to_string(),
+            data: serde_json::json!({"AccessKeyId": "AKIAEXAMPLE"}),
+            expires_at: Timestamp::now()
+                .checked_add(jiff::Span::new().hours(1))
+                .unwrap()
+                .to_string(),
+        };
+        let request = Request {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            id: 7,
+            method: Method::CacheCredential,
+            params: Some(serde_json::to_value(&params).unwrap()),
+        };
+
+        let response = handle_request(&request, &state).await;
+
+        let error = response.error.expect("refused without a session");
+        assert_eq!(error.code, crate::protocol::NOT_AUTHENTICATED);
+        state.store_session(live_session(), None).await;
+        assert!(state.get_cached_credential("aws:role").await.is_none());
+    }
+
     /// A `store_session` request for `token` with `server_url`.
     fn store_session_request(id: u64, token: &str, server_url: &str) -> Request {
         let params = StoreSessionParams {
@@ -919,14 +976,14 @@ mod tests {
             &state,
         )
         .await;
-        let prod_url = state.get_ssh_server_url().await;
+        let prod_url = state.get_server_url().await;
         let dev = handle_request(
             &store_session_request(2, "dev", "http://dev.example.com"),
             &state,
         )
         .await;
         let session_after = state.get_session().await;
-        let url_after = state.get_ssh_server_url().await;
+        let url_after = state.get_server_url().await;
         let audit_path = dir.path().join("vouch").join("audit.log");
         let audit_text = std::fs::read_to_string(&audit_path).unwrap_or_default();
 
@@ -971,7 +1028,7 @@ mod tests {
                 &state,
             )
             .await;
-            let url = state.get_ssh_server_url().await;
+            let url = state.get_server_url().await;
             restore_env(prior);
             outcomes.push((value, response.error.is_none(), url));
         }
