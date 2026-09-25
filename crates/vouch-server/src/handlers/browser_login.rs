@@ -1847,9 +1847,15 @@ mod tests {
         let (status, resp_body) = post_complete(&app, &state, &user.id, &credential_id).await;
 
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{resp_body}");
-        assert_eq!(
-            login_failure_reasons(&state, &user.id).await,
-            ["lookup_error"]
+        // A 5xx storage fault is not a login failure: it must not leave a
+        // `login_failed` audit row attributed to the user. Such rows feed
+        // the `failed_login_burst` posture policy on the FIDO2 grant path;
+        // recording them for infrastructure noise would extend a user's
+        // recovery window for a fault that "says nothing about the grant".
+        // The call site logs the fault at `error!` for operational visibility.
+        assert!(
+            login_failure_reasons(&state, &user.id).await.is_empty(),
+            "a storage fault must not be recorded as a login failure"
         );
     }
 

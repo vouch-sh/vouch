@@ -593,3 +593,101 @@ async fn test_issuance_rate_limit_under_cap_allows_and_records() {
         "the FIDO2 grant must write an oauth_token_issued audit row"
     );
 }
+
+/// A storage fault during the FIDO2 assertion grant is a 5xx, not an
+/// authentication refusal, so it must not be recorded as a `login_failed`
+/// audit row. Five document-level storage faults within 10 minutes must
+/// therefore NOT feed the `failed_login_burst` posture policy: after the
+/// authenticator record is repaired, the next successful grant issues a
+/// token instead of being denied. Mirrors `test_failed_login_burst_denies_grant`
+/// but drives the real `record_lookup_failure` path through `fido2_grant`
+/// instead of seeding `login_failed` rows directly into the audit store.
+#[tokio::test]
+async fn test_failed_login_burst_ignores_storage_faults() {
+    // The auth rate limiter (burst 8 per IP, shared by
+    // `/oauth/fido2/challenge` and `/oauth/token`) would throttle the six
+    // rapid grant round-trips (challenge + token each) this test drives.
+    // Setting `certification_test_token` makes `maybe_rate_limit!` a no-op
+    // in the router; it is not read on the FIDO2 assertion grant path or by
+    // the `failed_login_burst` posture policy under test, so disabling the
+    // limiter does not change the behavior being asserted.
+    let (_, state) = vouch_server::test_utils::test_app_with_certification().await;
+    let harness = TestHarness::from_state(state);
+    let org = harness
+        .create_org("storage-fault-burst.example.com")
+        .await
+        .expect("create org");
+    let user = harness
+        .create_user_in_org("storage-fault-burst@example.com", &org.id, false)
+        .await
+        .expect("create user");
+    db::set_preconfigured_active(
+        &harness.state.store,
+        &org.id,
+        ["failed_login_burst"]
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+    )
+    .await
+    .expect("activate failed_login_burst");
+    let device = IntegrationMockDevice::new();
+    let auth_id = register_mock_device_in_db(&harness, &user.id, &device).await;
+    let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
+
+    // Corrupt the authenticator document so each grant's lookup fails at the
+    // storage layer with `LookupError::Service` (a 5xx). The user document is
+    // left intact, so once the authenticator record is repaired the lookup
+    // loads the user cleanly.
+    vouch_server::test_utils::corrupt_document(&harness.state.store, &auth_id).await;
+
+    // Drive five grants — each with a fresh challenge — that each hit the
+    // storage fault and return `server_error`. Before the fix, each of these
+    // wrote a `login_failed` audit row attributed to the user, seeding the
+    // brute-force threshold.
+    for i in 0..5_i64 {
+        let (status, json) = fido2_grant(&harness, &device, &user.id, &client, &pkcs8).await;
+        assert_eq!(
+            status, 500,
+            "storage fault #{i} must surface as a 5xx, got {status}: {json}"
+        );
+        assert_eq!(
+            json["error"].as_str().unwrap_or(""),
+            "server_error",
+            "storage fault #{i} must report `server_error`: {json}"
+        );
+    }
+
+    // None of the five storage faults may feed the brute-force policy: the
+    // user's `login_failed` history must be empty.
+    let failed = harness
+        .state
+        .audit
+        .query_events(&db::AuditEventFilter {
+            event_types: Some(vec!["login_failed".to_string()]),
+            user_id: Some(user.id.clone()),
+            ..db::AuditEventFilter::default()
+        })
+        .await
+        .expect("query audit events");
+    assert!(
+        failed.is_empty(),
+        "storage faults must not record login_failed rows: {failed:?}"
+    );
+
+    // Repair the authenticator record (delete the corrupted document and
+    // re-register the same mock device) and drive one more grant. The user's
+    // history has no `login_failed` rows, so `failed_login_burst` (threshold
+    // ≥5 in 10m) must NOT deny the grant — a token is issued.
+    vouch_server::test_utils::remove_test_authenticator(&harness.state.store, &auth_id).await;
+    register_mock_device_in_db(&harness, &user.id, &device).await;
+    let (status, json) = fido2_grant(&harness, &device, &user.id, &client, &pkcs8).await;
+    assert_eq!(
+        status, 200,
+        "five storage faults must not deny the next successful grant: {json}"
+    );
+    assert!(
+        json.get("access_token").is_some(),
+        "a token must be issued after repairing the authenticator record: {json}"
+    );
+}

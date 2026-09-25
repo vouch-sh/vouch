@@ -509,18 +509,37 @@ async fn test_fido2_token_authenticator_storage_fault_is_server_error() {
         "the lookup must fail at the storage layer"
     );
 
+    let asserted_handle = uuid::Uuid::now_v7();
     let (_, status, body) = post_assertion_with_credential_id(
         &app,
         &state,
         "fido2-storage-fault-client@example.com",
         &URL_SAFE_NO_PAD.encode(&authenticator.credential_id),
-        uuid::Uuid::now_v7(),
+        asserted_handle,
     )
     .await;
 
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
     let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
     assert_eq!(error["error"], "server_error", "{body}");
+
+    // A 5xx storage fault is not an authentication refusal, so it must not
+    // leave a `login_failed` audit row attributed to the asserted user.
+    // Such rows feed the `failed_login_burst` posture policy; recording
+    // them for document-level faults (corrupt authenticator record, stranded
+    // encryption key, schema mismatch) would let infrastructure noise lock
+    // a user out of the next successful grant. The call site logs the fault
+    // at `error!` for operational visibility instead.
+    assert!(
+        login_failed_rows(&state, &asserted_handle.to_string(), None)
+            .await
+            .is_empty(),
+        "a storage fault must not be recorded as a login failure for the asserted user"
+    );
+    assert!(
+        login_failed_rows(&state, &owner.id, None).await.is_empty(),
+        "a storage fault must not be recorded as a login failure for the credential's owner"
+    );
 }
 
 /// Register an authenticator for `owner_id` and return its base64url

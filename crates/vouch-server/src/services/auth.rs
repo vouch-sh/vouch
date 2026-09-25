@@ -81,6 +81,16 @@ pub(crate) enum LookupError {
 /// `user_id` is the asserted `user_handle`. Browser login and the FIDO2
 /// assertion grant both call this, so a refusal leaves the same row on
 /// either path.
+///
+/// [`LookupError::Service`] is deliberately excluded: a 5xx storage/internal
+/// fault is an operational incident, not an authentication refusal (see the
+/// variant's own doc comment), and the call sites already log it at
+/// `error!`. Recording it as `LoginFailed` would feed the
+/// `failed_login_burst` posture policy — five document-level faults
+/// (corrupt authenticator record, stranded encryption key, schema
+/// deserialization mismatch) within 10 minutes would then deny the next
+/// successful grant, extending a user's recovery window for a fault that
+/// "says nothing about the grant" (per the FIDO2 grant call site).
 pub(crate) async fn record_lookup_failure(
     audit: &db::audit::AuditStore,
     client: db::ClientInfo,
@@ -91,7 +101,9 @@ pub(crate) async fn record_lookup_failure(
         LookupError::NotFound(entity) => (format!("{entity}_not_found"), None),
         LookupError::UserMismatch => ("user_mismatch".to_string(), None),
         LookupError::Deactivated { email } => ("user_deactivated".to_string(), Some(email.clone())),
-        LookupError::Service(_) => ("lookup_error".to_string(), None),
+        // A 5xx storage fault is not a login failure; do not feed the
+        // brute-force lockout policy with infrastructure noise.
+        LookupError::Service(_) => return,
     };
     let params = db::AuthEventParams {
         user_id: user_id.to_string(),
