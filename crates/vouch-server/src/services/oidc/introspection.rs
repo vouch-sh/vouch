@@ -261,6 +261,10 @@ pub async fn introspect_token(
 ///
 /// # Returns
 /// Revocation result (always succeeds per RFC 7009).
+#[expect(
+    clippy::too_many_lines,
+    reason = "RFC 7009 revocation: decode, delete by hash, then one audit row per token kind"
+)]
 pub async fn revoke_token(
     state: &Arc<AppState>,
     token: &str,
@@ -420,8 +424,7 @@ pub async fn revoke_token(
                 oauth_client_id: &oauth_client_id,
                 event_type: db::OAuthEventType::TokenRevoked,
                 user_id: None,
-                ip_address: client_info.client_ip,
-                user_agent: client_info.user_agent.as_deref(),
+                client: &client_info,
                 details: None,
                 org_domain: db::RecordedOrgDomain::Known(audit_org_domain.as_deref()),
             };
@@ -466,7 +469,10 @@ pub async fn revoke_token(
             event_type: db::AuthEventType::Logout,
             success: true,
             client: client_info,
-            ..Default::default()
+            authenticator_id: None,
+            failure_reason: None,
+            client_id: None,
+            idp_issuer: None,
         };
         db::record_auth_event(&state.audit, params, email.clone()).await;
 

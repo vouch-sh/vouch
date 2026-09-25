@@ -860,7 +860,8 @@ pub(crate) async fn complete_enrollment_after_identity(
                 ),
                 idp_issuer: Some(issuer),
                 client: client_info,
-                ..Default::default()
+                authenticator_id: None,
+                client_id: None,
             };
             db::record_auth_event(&state.audit, event, Some(identity.email.clone())).await;
             return ErrorTemplate {
@@ -888,7 +889,9 @@ pub(crate) async fn complete_enrollment_after_identity(
                 success: false,
                 failure_reason: Some("user_deactivated".to_string()),
                 client: client_info,
-                ..Default::default()
+                authenticator_id: None,
+                client_id: None,
+                idp_issuer: None,
             };
             db::record_auth_event(&state.audit, event, Some(email)).await;
             return ErrorTemplate {
@@ -932,7 +935,9 @@ pub(crate) async fn complete_enrollment_after_identity(
             success: true,
             idp_issuer: Some(upstream.issuer.clone()),
             client: client_info.clone(),
-            ..Default::default()
+            authenticator_id: None,
+            failure_reason: None,
+            client_id: None,
         };
         db::record_auth_event(&state.audit, event, Some(user.email.clone())).await;
     }
@@ -1129,7 +1134,10 @@ pub(crate) async fn complete_enrollment_after_identity(
             event_type: db::AuthEventType::LoginSuccess,
             success: true,
             client: client_info,
-            ..Default::default()
+            authenticator_id: None,
+            failure_reason: None,
+            client_id: None,
+            idp_issuer: None,
         };
         db::record_auth_event(&state.audit, event, Some(user.email.clone())).await;
     }
@@ -1807,7 +1815,9 @@ async fn finalize_enrollment_audit_and_device_auth(
         authenticator_id: Some(authenticator_id.to_string()),
         success: true,
         client: client_info.clone(),
-        ..AuthEventParams::default()
+        failure_reason: None,
+        client_id: None,
+        idp_issuer: None,
     };
     db::record_auth_event(
         &state.audit,
@@ -1851,7 +1861,9 @@ async fn finalize_enrollment_audit_and_device_auth(
             authenticator_id: Some(authenticator_id.to_string()),
             success: true,
             client: client_info,
-            ..Default::default()
+            failure_reason: None,
+            client_id: None,
+            idp_issuer: None,
         };
         db::record_auth_event(&state.audit, event, Some(reg_state.user_email.clone())).await;
     }

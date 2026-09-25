@@ -448,6 +448,7 @@ pub(crate) async fn update_application_api(
 /// DELETE /api/v1/applications/:id
 pub(crate) async fn delete_application_api(
     State(state): State<Arc<AppState>>,
+    client_info: db::ClientInfo,
     AuthenticatedToken(token): AuthenticatedToken,
     ValidPath(app_id): ValidPath<ValidUuid>,
 ) -> Result<StatusCode, ServiceError> {
@@ -516,8 +517,7 @@ pub(crate) async fn delete_application_api(
             oauth_client_id: &app_id,
             event_type: OAuthEventType::ClientDeleted,
             user_id: Some(&token.sub),
-            ip_address: None,
-            user_agent: None,
+            client: &client_info,
             details: Some("Application deleted via API"),
             org_domain: db::RecordedOrgDomain::Known(audit_org_domain.as_deref()),
         },
@@ -533,6 +533,7 @@ pub(crate) async fn delete_application_api(
 /// POST /api/v1/applications/:id/secrets
 pub(crate) async fn add_secret_api(
     State(state): State<Arc<AppState>>,
+    client_info: db::ClientInfo,
     AuthenticatedToken(token): AuthenticatedToken,
     ValidPath(app_id): ValidPath<ValidUuid>,
     Json(req): Json<AddSecretRequest>,
@@ -587,8 +588,7 @@ pub(crate) async fn add_secret_api(
             oauth_client_id: &app_id,
             event_type: OAuthEventType::SecretAdded,
             user_id: Some(&token.sub),
-            ip_address: None,
-            user_agent: None,
+            client: &client_info,
             details: Some("Secret added"),
             org_domain: db::RecordedOrgDomain::Unresolved,
         },
@@ -671,6 +671,7 @@ pub(crate) async fn list_secrets_api(
 pub(crate) async fn delete_secret_api(
     arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
+    client_info: db::ClientInfo,
     AuthenticatedToken(token): AuthenticatedToken,
     ValidPath((app_id, secret_id)): ValidPath<(ValidUuid, ValidUuid)>,
 ) -> Result<StatusCode, ServiceError> {
@@ -754,8 +755,7 @@ pub(crate) async fn delete_secret_api(
             oauth_client_id: &app_id,
             event_type: OAuthEventType::SecretRevoked,
             user_id: Some(&token.sub),
-            ip_address: None,
-            user_agent: None,
+            client: &client_info,
             details: Some("Secret revoked"),
             org_domain: db::RecordedOrgDomain::Unresolved,
         },
@@ -775,6 +775,7 @@ pub(crate) async fn delete_secret_api(
 /// `POST /api/v1/applications/:id/revoke`
 pub(crate) async fn revoke_tokens_api(
     State(state): State<Arc<AppState>>,
+    client_info: db::ClientInfo,
     AuthenticatedToken(token): AuthenticatedToken,
     ValidPath(app_id): ValidPath<ValidUuid>,
 ) -> Result<StatusCode, ServiceError> {
@@ -874,8 +875,7 @@ pub(crate) async fn revoke_tokens_api(
             oauth_client_id: &app_id,
             event_type: OAuthEventType::TokenRevoked,
             user_id: Some(&token.sub),
-            ip_address: None,
-            user_agent: None,
+            client: &client_info,
             details: Some(if sessions_revoked.is_ok() {
                 "All tokens revoked"
             } else {

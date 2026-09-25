@@ -151,7 +151,10 @@ pub(crate) async fn issue_ssh_certificate(
                 success: true,
                 ..Default::default()
             }
-            .with_client(client_info.client_ip, client_info.user_agent.clone()),
+            .with_client(
+                client_info.client_ip(),
+                client_info.user_agent().map(String::from),
+            ),
             &SshCredentialDetails {
                 serial: signed.serial,
                 principals: signed.principals.clone(),
@@ -550,7 +553,10 @@ pub(crate) async fn get_aws_token(
                 success: true,
                 ..Default::default()
             }
-            .with_client(client_info.client_ip, client_info.user_agent.clone()),
+            .with_client(
+                client_info.client_ip(),
+                client_info.user_agent().map(String::from),
+            ),
             &AwsCredentialDetails {
                 role_arn: pinned_role.map(str::to_string),
                 token_expires_at,
@@ -797,7 +803,10 @@ pub(crate) async fn get_github_token(
                 success: true,
                 ..Default::default()
             }
-            .with_client(client_info.client_ip, client_info.user_agent),
+            .with_client(
+                client_info.client_ip(),
+                client_info.user_agent().map(String::from),
+            ),
             &GitHubCredentialDetails {
                 installation_id: Some(installation.installation_id),
                 repositories: request.repositories.clone(),

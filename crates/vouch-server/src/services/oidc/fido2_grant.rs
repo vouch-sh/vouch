@@ -394,7 +394,8 @@ pub(crate) async fn exchange_fido2_assertion(
                 success: false,
                 failure_reason: Some(e.to_string()),
                 client: failure_client_info,
-                ..AuthEventParams::default()
+                client_id: None,
+                idp_issuer: None,
             };
             db::record_auth_event(&state.audit, failure_event, Some(user.email.clone())).await;
             return Err(ServiceError::oauth(
@@ -438,8 +439,8 @@ pub(crate) async fn exchange_fido2_assertion(
     .map_err(|e| ServiceError::Internal(format!("Failed to update counter: {e}")))?;
 
     // Capture client metadata for the audit events below.
-    let client_ip = params.client_info.client_ip;
-    let client_user_agent = params.client_info.user_agent.clone();
+    let client_ip = params.client_info.client_ip();
+    let audit_client = params.client_info.clone();
 
     // Evaluate device posture policies (if org has active policies).
     // The login audit event is written AFTER this gate: a policy-denied
@@ -468,7 +469,8 @@ pub(crate) async fn exchange_fido2_assertion(
             success: false,
             failure_reason: Some("posture policy denied".to_string()),
             client: params.client_info,
-            ..AuthEventParams::default()
+            client_id: None,
+            idp_issuer: None,
         };
         db::record_auth_event(&state.audit, failed_event, Some(user.email.clone())).await;
         return Err(denied);
@@ -481,7 +483,9 @@ pub(crate) async fn exchange_fido2_assertion(
         authenticator_id: Some(authenticator.id.clone()),
         success: true,
         client: params.client_info,
-        ..AuthEventParams::default()
+        failure_reason: None,
+        client_id: None,
+        idp_issuer: None,
     };
     db::record_auth_event(&state.audit, auth_event_params, Some(user.email.clone())).await;
 
@@ -558,8 +562,7 @@ pub(crate) async fn exchange_fido2_assertion(
             oauth_client_id: &params.client.id,
             event_type: db::OAuthEventType::TokenIssued,
             user_id: Some(&user.id),
-            ip_address: client_ip,
-            user_agent: client_user_agent.as_deref(),
+            client: &audit_client,
             details: Some("grant_type=fido2-assertion"),
             org_domain: db::RecordedOrgDomain::Known(audit_org_domain.as_deref()),
         },

@@ -13,6 +13,7 @@
 //!   with a valid FIDO2 key (hardware-bound) to obtain any token.
 
 use crate::AppState;
+use crate::db::ClientInfo;
 use crate::error::ServiceError;
 use crate::handlers::session::OptionalAuthenticatedToken;
 use crate::services::oidc::registration::{
@@ -37,6 +38,7 @@ use vouch_common::protocol;
 /// Returns 201 Created with the client information response.
 pub(crate) async fn register(
     State(state): State<Arc<AppState>>,
+    client_info: ClientInfo,
     token: Result<OptionalAuthenticatedToken, ServiceError>,
     Json(request): Json<RegistrationRequest>,
 ) -> Response {
@@ -72,7 +74,7 @@ pub(crate) async fn register(
     };
 
     // Delegate to service layer
-    let response = match register_client(&state, request, user_id.as_deref()).await {
+    let response = match register_client(&state, request, user_id.as_deref(), &client_info).await {
         Ok(r) => r,
         Err(e) => return e.into_oauth_response().into_response(),
     };
@@ -130,6 +132,7 @@ pub(crate) async fn read_client(
 /// (including a new `registration_access_token`) on success.
 pub(crate) async fn update_client(
     State(state): State<Arc<AppState>>,
+    client_info: ClientInfo,
     Path(client_id): Path<String>,
     headers: HeaderMap,
     Json(request): Json<RegistrationRequest>,
@@ -139,7 +142,7 @@ pub(crate) async fn update_client(
         None => return missing_token_response(),
     };
 
-    match update_client_configuration(&state, &client_id, token, request).await {
+    match update_client_configuration(&state, &client_id, token, request, &client_info).await {
         Ok(response) => (
             StatusCode::OK,
             [
@@ -162,6 +165,7 @@ pub(crate) async fn update_client(
 /// §2.3/§5 keep these cases indistinguishable).
 pub(crate) async fn delete_client(
     State(state): State<Arc<AppState>>,
+    client_info: ClientInfo,
     Path(client_id): Path<String>,
     headers: HeaderMap,
 ) -> Response {
@@ -170,7 +174,7 @@ pub(crate) async fn delete_client(
         None => return missing_token_response(),
     };
 
-    match delete_client_configuration(&state, &client_id, token).await {
+    match delete_client_configuration(&state, &client_id, token, &client_info).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => into_registration_response(e),
     }

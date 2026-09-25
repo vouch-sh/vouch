@@ -61,6 +61,9 @@ pub struct AuthCodeExchangeParams<'a> {
     pub resource: Option<&'a str>,
     /// RFC 9396 Section 6: Authorization details for downscoping.
     pub authorization_details: Option<&'a str>,
+    /// Transport metadata of the token request, for the `OauthTokenIssued`
+    /// audit row.
+    pub client_info: &'a db::ClientInfo,
 }
 
 /// Client credentials for authentication (RFC 6749 Section 2.3).
@@ -425,8 +428,7 @@ pub(crate) async fn exchange_authorization_code(
                 oauth_client_id: &auth_client.id,
                 event_type: db::OAuthEventType::TokenIssued,
                 user_id: Some(&auth_code.user_id),
-                ip_address: None,
-                user_agent: None,
+                client: params.client_info,
                 details: params
                     .binding
                     .dpop_proof()

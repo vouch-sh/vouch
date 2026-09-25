@@ -4918,3 +4918,77 @@ async fn test_rfc7592_failed_delete_does_not_restore_token_revoked_by_owner_dele
     );
     assert_invalid_token_challenge(&response);
 }
+
+// ========================================================================
+// Transport metadata on the registration lifecycle audit rows
+// ========================================================================
+
+/// The `oauth_client_registered`, `oauth_client_updated`, and
+/// `oauth_client_deleted` rows written by RFC 7591 registration and the RFC
+/// 7592 PUT and DELETE record the requester's IP and User-Agent. Before the
+/// fix all three wrote `ip_address: None, user_agent: None` although each
+/// handler had the request in hand.
+#[tokio::test]
+async fn test_registration_lifecycle_audit_rows_record_transport() {
+    let (app, state) = test_app().await;
+    let ua = "vouch-registration-audit/1.0";
+
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "Audit Transport Client"
+    });
+    let (status, body) = http_post_json(
+        &app,
+        "/oauth/register",
+        &body.to_string(),
+        &[("User-Agent", ua)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "registration failed: {body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let client_id = json["client_id"].as_str().expect("client_id").to_string();
+    let token = json["registration_access_token"]
+        .as_str()
+        .expect("registration_access_token")
+        .to_string();
+
+    let bearer = format!("Bearer {token}");
+    let (status, body) = http_request(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(
+            serde_json::json!({
+                "client_id": client_id,
+                "redirect_uris": ["https://example.com/callback"],
+                "client_name": "Audit Transport Client (renamed)"
+            })
+            .to_string(),
+        ),
+        &[
+            ("Authorization", &bearer),
+            ("Content-Type", "application/json"),
+            ("User-Agent", ua),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "PUT failed: {body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let bearer = format!("Bearer {}", rotated_token(&json));
+
+    let (status, body) = http_delete(
+        &app,
+        &format!("/oauth/register/{client_id}"),
+        &[("Authorization", &bearer), ("User-Agent", ua)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "DELETE failed: {body}");
+
+    for event_type in [
+        "oauth_client_registered",
+        "oauth_client_updated",
+        "oauth_client_deleted",
+    ] {
+        assert_audit_rows_record_transport(&state, event_type, ua).await;
+    }
+}

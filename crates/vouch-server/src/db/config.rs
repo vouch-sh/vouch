@@ -4,10 +4,10 @@
 //! Auth events are now stored via `AuditStore`. This module provides the
 //! domain types and a convenience wrapper.
 
-use std::net::IpAddr;
-
 use super::audit::{AuditEventKind, AuditStore};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
+
+pub use crate::client_info::ClientInfo;
 
 // ============================================================================
 // Authentication Events
@@ -119,7 +119,11 @@ impl Serialize for Principal {
 }
 
 /// Parameters for creating an authentication event.
-#[derive(Debug, Default, Serialize)]
+///
+/// No `Default` outside tests: `client` has no default, so every writer names
+/// the request's [`ClientInfo`].
+#[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(Default))]
 pub struct AuthEventParams {
     #[serde(flatten)]
     pub user_id: Principal,
@@ -135,36 +139,14 @@ pub struct AuthEventParams {
     /// OAuth client ID of the RP that initiated logout, when applicable.
     /// Included in the `data` JSON blob so RP-initiated logouts are
     /// distinguishable from user-initiated ones without a schema migration.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
     /// Upstream IdP issuer for identity-binding events. The upstream
     /// subject is deliberately NOT recorded: a SAML NameID is frequently
     /// an email address, and audit payloads must not carry raw emails
     /// (see the [`crate::db::AuditData`] payload contract).
-    #[serde(skip_serializing_if = "Option::is_none", default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub idp_issuer: Option<String>,
-}
-
-/// Client information extracted from the request.
-///
-/// `client_ip` comes from the TCP socket (`ConnectInfo<SocketAddr>`), not from
-/// proxy headers. This prevents IP spoofing via `X-Forwarded-For` when the
-/// server is exposed directly without a trusted reverse proxy. The axum
-/// extractor and header-parsing impls live in `handlers::extractors`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ClientInfo {
-    /// Client IP address from the TCP peer socket.
-    pub client_ip: Option<IpAddr>,
-    /// User-Agent header.
-    pub user_agent: Option<String>,
-    /// Client hostname (from `Vouch-Client-Hostname` header).
-    pub client_hostname: Option<String>,
-    /// Client OS (from `Vouch-Client-OS` header).
-    pub client_os: Option<String>,
-    /// Client CPU architecture (from `Vouch-Client-Arch` header).
-    pub client_arch: Option<String>,
-    /// Client version (from `Vouch-Client-Version` header).
-    pub client_version: Option<String>,
 }
 
 /// Record an authentication event via the audit store.
@@ -174,7 +156,7 @@ pub struct ClientInfo {
 /// the wire `event_type` and swallowed.
 pub async fn record_auth_event(audit: &AuditStore, params: AuthEventParams, email: Option<String>) {
     let data = crate::db::documents::audit::AuthEventData {
-        geo: crate::db::documents::audit::GeoFields::from_ip(params.client.client_ip),
+        geo: crate::db::documents::audit::GeoFields::from_ip(params.client.client_ip()),
         params: &params,
     };
     audit
@@ -205,14 +187,31 @@ mod tests {
             user_id: Principal::Verified("u1".into()),
             event_type: AuthEventType::LoginSuccess,
             success: true,
-            client: ClientInfo {
-                client_ip: Some("1.2.3.4".parse().unwrap()),
-                user_agent: Some("vouch-cli/1.0".into()),
-                client_hostname: Some("host.local".into()),
-                client_os: Some("macos".into()),
-                client_arch: Some("aarch64".into()),
-                client_version: Some("1.0.0".into()),
-            },
+            client: ClientInfo::for_test(
+                Some("1.2.3.4".parse().unwrap()),
+                &axum::http::HeaderMap::from_iter([
+                    (
+                        axum::http::header::USER_AGENT,
+                        axum::http::HeaderValue::from_static("vouch-cli/1.0"),
+                    ),
+                    (
+                        axum::http::HeaderName::from_static("vouch-client-hostname"),
+                        axum::http::HeaderValue::from_static("host.local"),
+                    ),
+                    (
+                        axum::http::HeaderName::from_static("vouch-client-os"),
+                        axum::http::HeaderValue::from_static("macos"),
+                    ),
+                    (
+                        axum::http::HeaderName::from_static("vouch-client-arch"),
+                        axum::http::HeaderValue::from_static("aarch64"),
+                    ),
+                    (
+                        axum::http::HeaderName::from_static("vouch-client-version"),
+                        axum::http::HeaderValue::from_static("1.0.0"),
+                    ),
+                ]),
+            ),
             ..AuthEventParams::default()
         };
         let value = serde_json::to_value(&params).unwrap();

@@ -890,11 +890,13 @@ mod tests {
             user_id: crate::db::Principal::Verified("u1".to_string()),
             event_type: AuthEventType::LoginFailed,
             authenticator_id: Some("auth-1".to_string()),
-            client: ClientInfo {
-                client_ip: Some("192.0.2.7".parse().unwrap()),
-                user_agent: Some("vouch-cli/1.0".to_string()),
-                ..ClientInfo::default()
-            },
+            client: ClientInfo::for_test(
+                Some("192.0.2.7".parse().unwrap()),
+                &axum::http::HeaderMap::from_iter([(
+                    axum::http::header::USER_AGENT,
+                    axum::http::HeaderValue::from_static("vouch-cli/1.0"),
+                )]),
+            ),
             success: false,
             failure_reason: Some("invalid assertion".to_string()),
             client_id: None,

@@ -132,7 +132,8 @@ pub(crate) async fn record_lookup_failure(
         success: false,
         failure_reason: Some(reason),
         client,
-        ..db::AuthEventParams::default()
+        client_id: None,
+        idp_issuer: None,
     };
     db::record_auth_event(audit, params, email).await;
 }
