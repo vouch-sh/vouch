@@ -35,9 +35,12 @@ python3 .claude/skills/detail-triage/scripts/detail-stats.py
 python3 .claude/skills/detail-triage/scripts/detail-stats.py --json   # for scripting
 ```
 
-The script reads every Detail-authored issue through `gh`, extracts the
-"Introduced in [#N] … on DATE" attribution from each body, and reports volume,
-bug age, and keyword-clustered classes per detection month.
+The script reads every Detail-authored issue from the GitHub REST API, extracts
+the "Introduced in [#N] … on DATE" attribution from each body, and reports
+volume, bug age, and keyword-clustered classes per detection month. It needs no
+`gh` CLI: the token comes from `GH_TOKEN` or `GITHUB_TOKEN` (set in cloud
+sessions), falling back to `gh auth token`, and the repository comes from
+`GH_REPO` or the `origin` remote.
 
 Read three things together:
 

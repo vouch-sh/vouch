@@ -28,16 +28,27 @@ from __future__ import annotations
 
 import argparse
 import collections
+import functools
 import json
 import math
+import os
 import re
+import shutil
 import statistics
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 
 DEFAULT_AUTHOR = "app/detail-app"
+
+# Everything is read through the REST API rather than the gh CLI: cloud
+# sessions have a token but no gh, and their proxy refuses GraphQL and the
+# `repositories/{id}` URLs in REST Link headers, so pages are requested by
+# number.
+API = "https://api.github.com"
 
 # Detail's Dead Code PRs arrive on this branch prefix and file no issue.
 DEAD_CODE_BRANCH = "detail/dead-code/"
@@ -119,53 +130,94 @@ class PullRequest:
     merged: date | None
 
 
+@functools.cache
+def token() -> str:
+    """A GitHub token from the environment, else from a logged-in gh CLI."""
+    for name in ("GH_TOKEN", "GITHUB_TOKEN"):
+        if value := os.environ.get(name):
+            return value
+    if shutil.which("gh"):
+        proc = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True,
+                              check=False)
+        if proc.returncode == 0 and proc.stdout.strip():
+            return proc.stdout.strip()
+    sys.exit("no GitHub token: set GH_TOKEN or GITHUB_TOKEN, or run `gh auth login`")
+
+
+@functools.cache
+def repo() -> str:
+    """`owner/name`, from GH_REPO or the origin remote."""
+    if value := os.environ.get("GH_REPO"):
+        return value
+    proc = subprocess.run(["git", "remote", "get-url", "origin"], capture_output=True,
+                          text=True, check=False)
+    # The last two path segments, so a proxied remote such as
+    # http://proxy@127.0.0.1:1234/git/owner/name resolves too.
+    match = re.search(r"([^/:]+/[^/]+?)(?:\.git)?/?$", proc.stdout.strip())
+    if not match:
+        sys.exit("cannot tell the repository from the origin remote; set GH_REPO=owner/name")
+    return match[1]
+
+
+def api_get(path: str, accept: str = "application/vnd.github+json") -> bytes:
+    request = urllib.request.Request(
+        f"{API}/repos/{repo()}/{path}",
+        headers={"Accept": accept, "Authorization": f"Bearer {token()}",
+                 "X-GitHub-Api-Version": "2022-11-28"},
+    )
+    with urllib.request.urlopen(request) as response:
+        return response.read()
+
+
+def api_list(path: str, limit: int, keep=lambda row: True) -> list[dict]:
+    """Up to `limit` rows passing `keep`, requesting pages by number."""
+    rows: list[dict] = []
+    page = 1
+    while len(rows) < limit:
+        try:
+            batch = json.loads(api_get(f"{path}&per_page=100&page={page}"))
+        except urllib.error.HTTPError as err:
+            sys.exit(f"GET {path} failed: HTTP {err.code} {err.reason}")
+        if not batch:
+            break
+        rows.extend(row for row in batch if keep(row))
+        page += 1
+    return rows[:limit]
+
+
+def login(user: dict | None) -> str:
+    """The author login in gh's spelling: GitHub Apps appear as `app/<slug>`."""
+    if not user:
+        return ""
+    if user.get("type") == "Bot":
+        return "app/" + user["login"].removesuffix("[bot]")
+    return user["login"]
+
+
 def fetch_prs(limit: int) -> list[PullRequest]:
     """Every PR, for attributing findings and counting Detail's arrivals per batch."""
-    proc = subprocess.run(
-        [
-            "gh", "pr", "list",
-            "--state", "all",
-            "--limit", str(limit),
-            "--json", "number,author,headRefName,createdAt,mergedAt",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if proc.returncode != 0:
-        sys.exit(f"gh pr list failed: {proc.stderr.strip()}")
     return [
         PullRequest(
             number=row["number"],
-            author=(row.get("author") or {}).get("login") or "",
-            branch=row.get("headRefName") or "",
-            created=date.fromisoformat(row["createdAt"][:10]),
-            merged=date.fromisoformat(row["mergedAt"][:10]) if row.get("mergedAt") else None,
+            author=login(row.get("user")),
+            branch=(row.get("head") or {}).get("ref") or "",
+            created=date.fromisoformat(row["created_at"][:10]),
+            merged=date.fromisoformat(row["merged_at"][:10]) if row.get("merged_at") else None,
         )
-        for row in json.loads(proc.stdout)
+        for row in api_list("pulls?state=all&sort=created&direction=desc", limit)
     ]
 
 
 def fetch(author: str, limit: int) -> list[Finding]:
-    """Read every Detail-authored issue through the gh CLI."""
-    proc = subprocess.run(
-        [
-            "gh", "issue", "list",
-            "--state", "all",
-            "--limit", str(limit),
-            "--json", "number,title,createdAt,state,author,body",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
+    """Read every Detail-authored issue. The issues endpoint also returns PRs."""
+    rows = api_list(
+        "issues?state=all&sort=created&direction=desc",
+        limit,
+        keep=lambda row: "pull_request" not in row and login(row.get("user")) == author,
     )
-    if proc.returncode != 0:
-        sys.exit(f"gh issue list failed: {proc.stderr.strip()}")
 
     findings: list[Finding] = []
-    for row in json.loads(proc.stdout):
-        if (row.get("author") or {}).get("login") != author:
-            continue
+    for row in rows:
         body = row.get("body") or ""
         introduced = introduced_pr = None
         if match := INTRODUCED_RE.search(body):
@@ -178,8 +230,8 @@ def fetch(author: str, limit: int) -> list[Finding]:
             Finding(
                 number=row["number"],
                 title=row["title"],
-                state=row["state"],
-                detected=date.fromisoformat(row["createdAt"][:10]),
+                state=row["state"].upper(),
+                detected=date.fromisoformat(row["created_at"][:10]),
                 introduced=introduced,
                 introduced_pr=introduced_pr,
                 bug_id=bug.group(1) if bug else None,
@@ -189,7 +241,7 @@ def fetch(author: str, limit: int) -> list[Finding]:
 
 
 def diff_sizes(spec: str) -> list[dict[str, object]]:
-    """Split each PR's added lines into production and test, via `gh pr diff`.
+    """Split each PR's added lines into production and test, from each PR's diff.
 
     Most of a Detail fix PR is tests, so reviewing the whole diff buries the
     logic the fix introduces -- which is where the defects are. This reports
@@ -208,18 +260,16 @@ def diff_sizes(spec: str) -> list[dict[str, object]]:
 
     rows: list[dict[str, object]] = []
     for number in numbers:
-        proc = subprocess.run(
-            ["gh", "pr", "diff", str(number)],
-            capture_output=True, text=True, check=False,
-        )
-        if proc.returncode != 0:
-            rows.append({"pr": number, "error": proc.stderr.strip()[:80]})
+        try:
+            diff = api_get(f"pulls/{number}", "application/vnd.github.diff").decode()
+        except urllib.error.HTTPError as err:
+            rows.append({"pr": number, "error": f"HTTP {err.code} {err.reason}"})
             continue
 
         is_test = False
         prod = test = 0
         prod_files: list[str] = []
-        for line in proc.stdout.splitlines():
+        for line in diff.splitlines():
             if line.startswith("+++ b/"):
                 path = line.removeprefix("+++ b/")
                 is_test = "test" in path or path.startswith("specs/")
@@ -482,9 +532,9 @@ def main() -> int:
     parser.add_argument("--author", default=DEFAULT_AUTHOR,
                         help=f"issue author to treat as Detail (default: {DEFAULT_AUTHOR})")
     parser.add_argument("--limit", type=int, default=1000,
-                        help="maximum issues to read from gh (default: 1000)")
+                        help="maximum issues to read (default: 1000)")
     parser.add_argument("--pr-limit", type=int, default=5000,
-                        help="maximum PRs to read from gh (default: 5000)")
+                        help="maximum PRs to read (default: 5000)")
     parser.add_argument("--since", metavar="YYYY-MM",
                         help="only count detections in this month or later")
     parser.add_argument("--pr-diff-sizes", metavar="RANGE",
