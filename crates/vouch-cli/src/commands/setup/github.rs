@@ -56,7 +56,19 @@ pub(crate) async fn run(server: &ServerUrl, host: &str, configure: bool) -> Resu
             }
         }
         Err(e) => {
-            if e.to_string().contains("not authenticated") {
+            // Match the typed error, not a stale substring: `check_status`
+            // returns `anyhow::Error` whose `Display` is whatever `reason`
+            // string `CliError::NotAuthenticated` carried (e.g.
+            // "no session token — run 'vouch login' to authenticate" from
+            // `session::resolve_token`, or any server 401 reason), which the
+            // old `contains("not authenticated")` guard missed for every
+            // realistic logged-out path. Matching the type is robust to
+            // translation and future rewording, like `register.rs` already
+            // does. Other typed errors (`PermissionDenied`, `NetworkError`)
+            // fall through to the "Could not check" branch.
+            if e.downcast_ref::<CliError>()
+                .is_some_and(|cli| matches!(cli, CliError::NotAuthenticated { .. }))
+            {
                 tr_println!("setup-github-not-logged-in-block");
                 return Ok(());
             }
