@@ -218,11 +218,15 @@ mod redirect_tests {
     )]
 
     use super::*;
+    use crate::config::BaseUrl;
+    use crate::crypto::document_crypto::{DocumentCrypto, PlaintextDocumentCrypto};
     use crate::crypto::keys::OidcSigningKey;
+    use crate::db::pool::PoolConfig;
     use axum::body::Body;
     use axum::http::Request;
     use secrecy::SecretString;
     use tower::ServiceExt;
+    use vouch_common::AaguidPolicy;
 
     fn test_app_state_with_rp_id(rp_id: &str) -> AppState {
         let config = config::ServerConfig {
@@ -233,7 +237,7 @@ mod redirect_tests {
             jwt_secret: SecretString::from("test_jwt_secret_must_be_at_least_32_characters_long"),
             session_hours: 8,
             idps: Vec::new(),
-            base_url: crate::config::BaseUrl::new(format!("https://{rp_id}")),
+            base_url: BaseUrl::new(format!("https://{rp_id}")),
             device_code_expires_seconds: 600,
             device_poll_interval_seconds: 5,
             allowed_domains: None,
@@ -278,14 +282,14 @@ mod redirect_tests {
             aws_partition: None,
             aws_use_fips_endpoint: None,
             jwt_assertion_max_lifetime_seconds: 300,
-            allowed_aaguids: vouch_common::AaguidPolicy::Any,
+            allowed_aaguids: AaguidPolicy::Any,
             log_format: config::LogFormat::Text,
             trusted_proxies: Vec::new(),
             metrics_bearer_token: None,
             certification_test_token: None,
             extra_ca_certs: None,
             mtls_client_ca_certs: None,
-            pool_config: crate::db::pool::PoolConfig::default(),
+            pool_config: PoolConfig::default(),
             session_cache_max_capacity: 10_000,
             session_cache_ttl_secs: 30,
         };
@@ -298,8 +302,8 @@ mod redirect_tests {
         .unwrap();
 
         let pool = Pool::new_test();
-        let crypto: std::sync::Arc<dyn crate::crypto::document_crypto::DocumentCrypto> =
-            std::sync::Arc::new(crate::crypto::document_crypto::PlaintextDocumentCrypto);
+        let crypto: std::sync::Arc<dyn DocumentCrypto> =
+            std::sync::Arc::new(PlaintextDocumentCrypto);
         let store = db::store::DocumentStore::new(pool.clone(), crypto.clone());
         let audit = db::audit::AuditStore::new(pool.clone(), crypto);
 

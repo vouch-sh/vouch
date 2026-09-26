@@ -1,7 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Server configuration.
 
+// Own-crate items are imported with `use`; see `absolute-paths-allowed-crates` in `.clippy.toml`.
+#![deny(clippy::absolute_paths)]
+
 use crate::crypto::webauthn_verify::OriginPolicy;
+use crate::db::pool::PoolConfig;
+use crate::infra::bootstrap::Bootstrap;
 use anyhow::{Context, Result};
 use aws_config::FrameworkMetadata;
 use clap::{ArgAction, CommandFactory, Parser, parser::ValueSource};
@@ -9,6 +14,8 @@ use ipnet::IpNet;
 use secrecy::{ExposeSecret, SecretString};
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
+use vouch_common::AaguidPolicy;
+use vouch_common::env;
 
 /// Build an AWS SDK config loader tagged with vouch-server framework metadata.
 ///
@@ -916,7 +923,7 @@ pub struct ServerConfig {
     /// client certificates. Read once at startup.
     pub mtls_client_ca_certs: Option<String>,
     /// Database pool configuration.
-    pub pool_config: crate::db::pool::PoolConfig,
+    pub pool_config: PoolConfig,
     /// Maximum entries in the session lookup cache.
     pub session_cache_max_capacity: u64,
     /// TTL for session cache entries in seconds.
@@ -982,10 +989,7 @@ impl ServerConfig {
     /// `instance` carries IMDS-discovered facts (region, availability zone,
     /// partition) used only as a fallback beneath `AWS_REGION`/`AWS_AZ`/
     /// `AWS_PARTITION` — see `infra::bootstrap`.
-    pub fn from_args(
-        args: Args,
-        instance: Option<&crate::infra::bootstrap::Bootstrap>,
-    ) -> Result<Self> {
+    pub fn from_args(args: Args, instance: Option<&Bootstrap>) -> Result<Self> {
         // Note: Validation of rp_id and jwt_secret is deferred to validate()
         // to allow these values to come from S3 config.
 
@@ -995,15 +999,15 @@ impl ServerConfig {
         // a blank `Region::new("")` — see `aws_config_loader`. The same
         // empty-means-unset pattern is already used by `ssh_ca_key_path` and
         // `allowed_domains` below.
-        let aws_region = vouch_common::env::non_empty(args.aws_region)
-            .or_else(|| vouch_common::env::non_empty_env("AWS_DEFAULT_REGION"))
+        let aws_region = env::non_empty(args.aws_region)
+            .or_else(|| env::non_empty_env("AWS_DEFAULT_REGION"))
             .or_else(|| instance.map(|b| b.region.clone()));
-        let aws_az = vouch_common::env::non_empty(args.aws_az)
-            .or_else(|| instance.map(|b| b.availability_zone.clone()));
-        let aws_partition = vouch_common::env::non_empty(args.aws_partition)
+        let aws_az =
+            env::non_empty(args.aws_az).or_else(|| instance.map(|b| b.availability_zone.clone()));
+        let aws_partition = env::non_empty(args.aws_partition)
             .or_else(|| instance.and_then(|b| b.partition.clone()));
-        let aws_use_fips_endpoint = vouch_common::env::non_empty(args.aws_use_fips_endpoint)
-            .map(|v| v.eq_ignore_ascii_case("true"));
+        let aws_use_fips_endpoint =
+            env::non_empty(args.aws_use_fips_endpoint).map(|v| v.eq_ignore_ascii_case("true"));
 
         // Normalize: strip any trailing slashes so the issuer and every
         // endpoint derived from `base_url` (OIDC discovery, JWT `iss`, DPoP
@@ -1035,7 +1039,7 @@ impl ServerConfig {
         };
 
         // Parse AAGUID policy
-        let allowed_aaguids = vouch_common::AaguidPolicy::parse(&args.allowed_aaguids)
+        let allowed_aaguids = AaguidPolicy::parse(&args.allowed_aaguids)
             .map_err(|e| anyhow::anyhow!("Invalid VOUCH_ALLOWED_AAGUIDS: {}", e))?;
 
         // Parse log format
@@ -1070,7 +1074,7 @@ impl ServerConfig {
             resource_tos_uri: args
                 .resource_tos_uri
                 .or_else(|| Some("https://vouch.sh/terms/".to_string())),
-            security_contact: vouch_common::env::non_empty(args.security_contact)
+            security_contact: env::non_empty(args.security_contact)
                 .unwrap_or_else(|| "security@vouch.sh".to_string()),
             cli_download_macos: args.cli_download_macos,
             cli_download_linux: args.cli_download_linux,
@@ -1100,7 +1104,7 @@ impl ServerConfig {
             tls_key: args.tls_key.map(SecretString::from),
             s3_config_bucket: args.s3_config_bucket,
             s3_config_key: args.s3_config_key,
-            s3_config_region: vouch_common::env::non_empty(args.s3_config_region),
+            s3_config_region: env::non_empty(args.s3_config_region),
             s3_config_poll_interval: args.s3_config_poll_interval,
             aws_region,
             aws_az,
@@ -1117,7 +1121,7 @@ impl ServerConfig {
             certification_test_token: NonEmptySecret::from_arg(args.certification_test_token),
             extra_ca_certs: args.extra_ca_certs,
             mtls_client_ca_certs: args.mtls_client_ca_certs,
-            pool_config: crate::db::pool::PoolConfig {
+            pool_config: PoolConfig {
                 max_connections: args.db_max_connections,
                 min_connections: args.db_min_connections,
                 idle_timeout_secs: args.db_idle_timeout_secs,
@@ -1395,9 +1399,10 @@ pub fn resolve_dsql_endpoints(
 )]
 mod tests {
     use crate::config::{
-        Args, IdpConfig, NonEmptySecret, SamlProviderConfig, ServerConfig, bootstrap_overlay_args,
-        resolve_dsql_endpoints, validate_provider_slug,
+        Args, BaseUrl, IdpConfig, NonEmptySecret, SamlProviderConfig, ServerConfig,
+        bootstrap_overlay_args, resolve_dsql_endpoints, validate_provider_slug,
     };
+    use crate::infra::bootstrap::Bootstrap;
     use crate::test_utils::test_config;
     use clap::{CommandFactory, Parser};
     use secrecy::{ExposeSecret, SecretString};
@@ -1416,7 +1421,7 @@ mod tests {
     #[test]
     fn test_org_issuer_preserves_scheme_and_port() {
         let mut config = test_config();
-        config.base_url = crate::config::BaseUrl::new("http://localhost:3000");
+        config.base_url = BaseUrl::new("http://localhost:3000");
         assert_eq!(config.primary_host().as_deref(), Some("localhost"));
         assert_eq!(
             config.org_issuer("acme").as_deref(),
@@ -1427,7 +1432,7 @@ mod tests {
     #[test]
     fn test_org_issuer_production_shape() {
         let mut config = test_config();
-        config.base_url = crate::config::BaseUrl::new("https://us.vouch.sh");
+        config.base_url = BaseUrl::new("https://us.vouch.sh");
         assert_eq!(config.primary_host().as_deref(), Some("us.vouch.sh"));
         assert_eq!(
             config.org_issuer("acme").as_deref(),
@@ -1438,7 +1443,7 @@ mod tests {
     #[test]
     fn test_org_issuer_unparseable_base_url() {
         let mut config = test_config();
-        config.base_url = crate::config::BaseUrl::new("not a url");
+        config.base_url = BaseUrl::new("not a url");
         assert!(config.primary_host().is_none());
         assert!(config.org_issuer("acme").is_none());
     }
@@ -1841,8 +1846,8 @@ mod tests {
     // exercised below.
     // ========================================================================
 
-    fn imds_bootstrap() -> crate::infra::bootstrap::Bootstrap {
-        crate::infra::bootstrap::Bootstrap {
+    fn imds_bootstrap() -> Bootstrap {
+        Bootstrap {
             region: "us-east-1".to_string(),
             availability_zone: "us-east-1a".to_string(),
             partition: Some("aws".to_string()),

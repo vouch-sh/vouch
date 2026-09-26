@@ -19,6 +19,7 @@ use crate::config::ServerConfig;
 use crate::infra::s3_config;
 
 use super::startup::ServerComponents;
+use crate::infra::tls;
 
 /// Optional S3 config source (client, source settings, initial ETag).
 type S3ConfigParts = (
@@ -118,7 +119,7 @@ async fn serve_tls(
     app: Router,
     s3_parts: S3ConfigParts,
 ) -> Result<Option<JoinHandle<()>>> {
-    let tls_config = crate::infra::tls::build_tls_config(config)?;
+    let tls_config = tls::build_tls_config(config)?;
 
     // TLS mode: always listen on 443 (HTTPS) and 80 (HTTP redirect)
     let https_addr: std::net::SocketAddr =
@@ -290,7 +291,7 @@ fn spawn_sighup_cert_reload(
             let cfg = config.load();
             match (&cfg.tls_cert, &cfg.tls_key) {
                 (Some(cert), Some(key)) => {
-                    match crate::infra::tls::reload_tls_from_config(&tls_config, cert, key) {
+                    match tls::reload_tls_from_config(&tls_config, cert, key) {
                         Ok(()) => tracing::info!("TLS certificates reloaded successfully"),
                         Err(e) => tracing::error!("Failed to reload TLS certificates: {e:#}"),
                     }
@@ -342,7 +343,7 @@ async fn shutdown_signal() {
 /// with a custom client cert verifier that accepts any certificate
 /// (including self-signed) and delegates validation to the application layer.
 async fn start_mtls_listener(
-    config: &crate::config::ServerConfig,
+    config: &ServerConfig,
     addr: std::net::SocketAddr,
     app: Router,
     shutdown_token: CancellationToken,

@@ -10,6 +10,8 @@ use super::documents::user::{
 };
 use super::organizations::Domain;
 use super::store::DocumentStore;
+use crate::db::organizations;
+use crate::email::Email;
 use crate::error::ServiceError;
 use anyhow::{Context, Result};
 
@@ -146,7 +148,7 @@ async fn get_or_create_org(store: &DocumentStore, domain: &Domain) -> Result<(St
     // domain can still race: the index read above sees nothing while that
     // other org is mid-verification, and the two writes touch different rows.
     // The shared slot is what makes them conflict.
-    let claim_id = crate::db::organizations::deterministic_domain_claim_id(domain.as_str());
+    let claim_id = organizations::deterministic_domain_claim_id(domain.as_str());
     let mut tx = store.begin().await?;
     let slot_taken = match tx.get::<DomainClaimDoc>(&claim_id).await? {
         None => {
@@ -195,7 +197,7 @@ async fn get_or_create_org(store: &DocumentStore, domain: &Domain) -> Result<(St
 /// [`enroll_user_with_org`] for the full contract.
 async fn resolve_user(
     tx: &mut super::store::StoreTransaction<'_>,
-    email: &crate::email::Email,
+    email: &Email,
     name: Option<&str>,
     org: Option<UserOrg<'_>>,
     is_org_admin: bool,
@@ -407,7 +409,7 @@ pub async fn enroll_user_with_org(
     // Canonicalize so the lookup matches a pre-provisioned user regardless
     // of the casing the IdP returned; see `crate::email::Email` for the
     // folding policy.
-    let email = crate::email::Email::new(email);
+    let email = Email::new(email);
 
     let enrolled_org = match domain {
         Some(domain) => Some(get_or_create_org(store, domain).await?),

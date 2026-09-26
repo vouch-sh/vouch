@@ -328,14 +328,14 @@ pub async fn revoke_user_credentials(
 )]
 mod tests {
     use super::*;
-    use crate::crypto::document_crypto::PlaintextDocumentCrypto;
-    use crate::db::pool::Pool;
+    use crate::crypto::document_crypto::{DocumentCrypto, PlaintextDocumentCrypto};
+    use crate::db::pool::{Pool, PoolConfig};
     use crate::db::store::DocumentStore;
     use std::sync::Arc;
 
     /// Create an in-memory test store with SQLite migrations applied.
     async fn test_store() -> DocumentStore {
-        let pool = Pool::connect("sqlite::memory:", &crate::db::pool::PoolConfig::default())
+        let pool = Pool::connect("sqlite::memory:", &PoolConfig::default())
             .await
             .expect("connect");
         match &pool {
@@ -345,8 +345,7 @@ mod tests {
                 .expect("migrate"),
             Pool::Postgres(_) => panic!("unexpected pool type in unit tests"),
         }
-        let crypto: Arc<dyn crate::crypto::document_crypto::DocumentCrypto> =
-            Arc::new(PlaintextDocumentCrypto);
+        let crypto: Arc<dyn DocumentCrypto> = Arc::new(PlaintextDocumentCrypto);
         DocumentStore::new(pool, crypto)
     }
 

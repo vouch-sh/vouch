@@ -7,6 +7,7 @@
 
 use super::*;
 use crate::crypto::alg::JwsAlgorithm;
+use crate::db::ClientKeys;
 
 // ========================================================================
 // JWKS cache — behavioral invariants
@@ -32,7 +33,7 @@ async fn test_update_oauth_client_jwks_uri_clears_cache() {
             org_id: None,
             resource_uris: &[],
             token_endpoint_auth_method: TokenEndpointAuthMethod::ClientSecretBasic,
-            keys: Some(&crate::db::ClientKeys::Uri(
+            keys: Some(&ClientKeys::Uri(
                 "https://original.example.com/jwks".to_string(),
             )),
             fapi_profile: None,
@@ -84,7 +85,7 @@ async fn test_update_oauth_client_jwks_uri_clears_cache() {
             redirect_uris: &[],
             grant_types: None,
             response_types: None,
-            keys: Some(&crate::db::ClientKeys::Uri(
+            keys: Some(&ClientKeys::Uri(
                 "https://rotated.example.com/jwks".to_string(),
             )),
             registration_access_token_hash: "hash",
@@ -140,7 +141,7 @@ async fn test_admin_update_oauth_client_jwks_uri_clears_cache() {
             org_id: None,
             resource_uris: &[],
             token_endpoint_auth_method: TokenEndpointAuthMethod::ClientSecretBasic,
-            keys: Some(&crate::db::ClientKeys::Uri(
+            keys: Some(&ClientKeys::Uri(
                 "https://original.example.com/jwks".to_string(),
             )),
             fapi_profile: None,
@@ -195,7 +196,7 @@ async fn test_admin_update_oauth_client_jwks_uri_clears_cache() {
             org_id: None,
             resource_uris: &[],
             token_endpoint_auth_method: TokenEndpointAuthMethod::ClientSecretBasic,
-            keys: Some(&crate::db::ClientKeys::Uri(
+            keys: Some(&ClientKeys::Uri(
                 "https://rotated.example.com/jwks".to_string(),
             )),
             fapi_profile: FapiProfile::None,
@@ -235,7 +236,7 @@ async fn test_admin_update_oauth_client_preserves_cache_when_jwks_uri_unchanged(
             org_id: None,
             resource_uris: &[],
             token_endpoint_auth_method: TokenEndpointAuthMethod::ClientSecretBasic,
-            keys: Some(&crate::db::ClientKeys::Uri(
+            keys: Some(&ClientKeys::Uri(
                 "https://unchanged.example.com/jwks".to_string(),
             )),
             fapi_profile: None,
@@ -282,7 +283,7 @@ async fn test_admin_update_oauth_client_preserves_cache_when_jwks_uri_unchanged(
             org_id: None,
             resource_uris: &[],
             token_endpoint_auth_method: TokenEndpointAuthMethod::ClientSecretBasic,
-            keys: Some(&crate::db::ClientKeys::Uri(
+            keys: Some(&ClientKeys::Uri(
                 "https://unchanged.example.com/jwks".to_string(),
             )),
             fapi_profile: FapiProfile::None,
@@ -322,7 +323,7 @@ async fn test_jwks_refresh_does_not_modify_oauth_client_doc() {
             org_id: None,
             resource_uris: &[],
             token_endpoint_auth_method: TokenEndpointAuthMethod::ClientSecretBasic,
-            keys: Some(&crate::db::ClientKeys::Uri(
+            keys: Some(&ClientKeys::Uri(
                 "https://immutable.example.com/jwks".to_string(),
             )),
             fapi_profile: None,

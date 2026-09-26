@@ -8,6 +8,8 @@ use super::documents::organization::OrganizationDoc;
 use super::documents::scim::{ScimGroupDoc, ScimGroupMemberDoc, ScimTokenDoc};
 use super::documents::user::{UserDoc, UserOrg};
 use super::store::DocumentStore;
+use crate::db::pool::{self, RetryableError};
+use crate::email::Email;
 use crate::error::ServiceError;
 use crate::scim_filter::{AttrExp, CompareOp, FilterError};
 use anyhow::Result;
@@ -498,7 +500,7 @@ async fn try_indexed_user_lookup(
         // mixed-case filter like `userName eq "Alice@example.com"` misses the
         // user stored as `alice@example.com`.
         UserListFilter::UserName(f) if f.op == ScimFilterOp::Eq => {
-            let email = crate::email::Email::new(&f.value);
+            let email = Email::new(&f.value);
             store
                 .find_by_indexes::<UserDoc>(&[("email", email.as_str()), ("org_id", org_id)])
                 .await?
@@ -592,11 +594,11 @@ pub enum CreateScimUserError {
     Other(#[from] anyhow::Error),
 }
 
-impl crate::db::pool::RetryableError for CreateScimUserError {
+impl RetryableError for CreateScimUserError {
     fn is_retryable(&self) -> bool {
         match self {
             Self::OccConflict => true,
-            Self::Other(e) => crate::db::pool::is_retryable_db_error(e),
+            Self::Other(e) => pool::is_retryable_db_error(e),
             Self::DomainNotOwned | Self::DuplicateEmail => false,
         }
     }
@@ -679,7 +681,7 @@ pub async fn create_scim_user(
     // of `Alice@example.com` would not collide with a subsequent OIDC
     // enrollment as `alice@example.com`, producing two user records for the
     // same person.
-    let email = crate::email::Email::new(email);
+    let email = Email::new(email);
 
     // Derived once outside the retried block: stable across retries and
     // identical for concurrent callers passing the same email in any casing

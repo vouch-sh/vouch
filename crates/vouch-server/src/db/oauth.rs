@@ -11,6 +11,8 @@ use super::documents::oauth::{
 };
 use super::store::{DocumentStore, Transition};
 use crate::crypto::alg::JwsAlgorithm;
+use crate::db::documents::audit::GeoFields;
+use crate::db::documents::oauth;
 use crate::error::ServiceError;
 use anyhow::Result;
 use axum::http::StatusCode;
@@ -1147,7 +1149,7 @@ impl OAuthClientSecret {
     /// Check if this secret is valid (not revoked/expired).
     #[must_use]
     pub fn is_valid(&self, now: &Timestamp) -> bool {
-        crate::db::documents::oauth::is_secret_active(self.revoked_at, self.expires_at, now)
+        oauth::is_secret_active(self.revoked_at, self.expires_at, now)
     }
 }
 
@@ -1644,7 +1646,7 @@ pub async fn record_oauth_event(
         details: params.details.map(String::from),
         client_ip: params.client.client_ip().map(|ip| ip.to_string()),
         user_agent: params.client.user_agent().map(String::from),
-        geo: crate::db::documents::audit::GeoFields::from_ip(params.client.client_ip()),
+        geo: GeoFields::from_ip(params.client.client_ip()),
     };
     let org_domain = match params.org_domain {
         RecordedOrgDomain::Known(domain) => domain.map(String::from),
@@ -2198,6 +2200,10 @@ pub async fn validate_oauth_client_credentials(
 )]
 mod tests {
     use super::*;
+    use crate::crypto::document_crypto::DocumentCrypto;
+    use crate::db::pool::PoolConfig;
+    use crate::db::{self, ClientInfo};
+    use crate::test_utils::{self, TestClientSpec};
 
     /// A stored `None` resolves from the client's `application_type`, not from
     /// RFC 7591 §2's registration default.
@@ -2670,7 +2676,7 @@ mod tests {
     use crate::db::Pool;
 
     async fn test_store() -> DocumentStore {
-        let pool = Pool::connect("sqlite::memory:", &crate::db::pool::PoolConfig::default())
+        let pool = Pool::connect("sqlite::memory:", &PoolConfig::default())
             .await
             .expect("Failed to create test database");
 
@@ -2685,8 +2691,7 @@ mod tests {
                 .expect("Failed to run migrations"),
         }
 
-        let crypto: Arc<dyn crate::crypto::document_crypto::DocumentCrypto> =
-            Arc::new(PlaintextDocumentCrypto);
+        let crypto: Arc<dyn DocumentCrypto> = Arc::new(PlaintextDocumentCrypto);
         DocumentStore::new(pool, crypto)
     }
 
@@ -3032,7 +3037,7 @@ mod tests {
                     oauth_client_id: "oauth-client-1",
                     event_type,
                     user_id: Some("user-1"),
-                    client: &crate::db::ClientInfo::default(),
+                    client: &ClientInfo::default(),
                     details: Some("coverage test"),
                     org_domain: RecordedOrgDomain::Unresolved,
                 },
@@ -3099,7 +3104,7 @@ mod tests {
                 oauth_client_id,
                 event_type: OAuthEventType::TokenIssued,
                 user_id: Some(user_id),
-                client: &crate::db::ClientInfo::default(),
+                client: &ClientInfo::default(),
                 details: None,
                 org_domain,
             },
@@ -3123,15 +3128,15 @@ mod tests {
     async fn test_known_domain_matches_unresolved_user_with_org() {
         let store = test_store().await;
         let audit = AuditStore::new(store.pool().clone(), store.crypto().clone());
-        let org = crate::test_utils::create_test_org(&store, "user-org.example").await;
-        let user_a = crate::test_utils::create_test_user_in_org(
+        let org = test_utils::create_test_org(&store, "user-org.example").await;
+        let user_a = test_utils::create_test_user_in_org(
             &store,
             "member-a@user-org.example",
             &org.id,
             false,
         )
         .await;
-        let user_b = crate::test_utils::create_test_user_in_org(
+        let user_b = test_utils::create_test_user_in_org(
             &store,
             "member-b@user-org.example",
             &org.id,
@@ -3165,8 +3170,8 @@ mod tests {
     async fn test_known_domain_matches_unresolved_personal_user_no_org_client() {
         let store = test_store().await;
         let audit = AuditStore::new(store.pool().clone(), store.crypto().clone());
-        let user_a = crate::test_utils::create_test_user(&store, "solo-a@personal.example").await;
-        let user_b = crate::test_utils::create_test_user(&store, "solo-b@personal.example").await;
+        let user_a = test_utils::create_test_user(&store, "solo-a@personal.example").await;
+        let user_b = test_utils::create_test_user(&store, "solo-b@personal.example").await;
         let (client, _secret, _hash) = create_client_and_secret(&store).await;
 
         let unresolved = stamped_email_domain(
@@ -3198,13 +3203,13 @@ mod tests {
     async fn test_known_domain_matches_unresolved_personal_user_on_org_owned_client() {
         let store = test_store().await;
         let audit = AuditStore::new(store.pool().clone(), store.crypto().clone());
-        let org = crate::test_utils::create_test_org(&store, "org-owned.example").await;
-        let user_a = crate::test_utils::create_test_user(&store, "solo-a@personal.example").await;
-        let user_b = crate::test_utils::create_test_user(&store, "solo-b@personal.example").await;
-        let client = crate::test_utils::create_test_client(
+        let org = test_utils::create_test_org(&store, "org-owned.example").await;
+        let user_a = test_utils::create_test_user(&store, "solo-a@personal.example").await;
+        let user_b = test_utils::create_test_user(&store, "solo-b@personal.example").await;
+        let client = test_utils::create_test_client(
             &store,
             &user_a.id,
-            crate::test_utils::TestClientSpec {
+            TestClientSpec {
                 org_id: Some(org.id.clone()),
                 ..Default::default()
             },
@@ -3222,7 +3227,7 @@ mod tests {
 
         // Hot-path formula: the user has no org, so fall back to the
         // client's own org_id (already in scope for every real call site).
-        let client_org_domain = crate::db::get_organization_domain(&store, &org.id)
+        let client_org_domain = db::get_organization_domain(&store, &org.id)
             .await
             .expect("lookup org domain")
             .expect("org has a domain");
@@ -3248,15 +3253,15 @@ mod tests {
     async fn test_known_domain_is_honored_even_when_it_differs_from_full_resolution() {
         let store = test_store().await;
         let audit = AuditStore::new(store.pool().clone(), store.crypto().clone());
-        let org = crate::test_utils::create_test_org(&store, "real-org.example").await;
-        let user_a = crate::test_utils::create_test_user_in_org(
+        let org = test_utils::create_test_org(&store, "real-org.example").await;
+        let user_a = test_utils::create_test_user_in_org(
             &store,
             "member-a@real-org.example",
             &org.id,
             false,
         )
         .await;
-        let user_b = crate::test_utils::create_test_user_in_org(
+        let user_b = test_utils::create_test_user_in_org(
             &store,
             "member-b@real-org.example",
             &org.id,

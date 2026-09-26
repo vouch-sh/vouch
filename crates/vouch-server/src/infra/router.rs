@@ -16,6 +16,8 @@ use axum::{
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::timeout::TimeoutLayer;
 
+use crate::arrival;
+use crate::infra::{csrf, i18n, org_host};
 use crate::{
     AppState, config, handlers,
     infra::{
@@ -23,6 +25,7 @@ use crate::{
         static_assets,
     },
 };
+use vouch_httpsig::middleware;
 
 /// Body limit for credential endpoints (SSH public key is ~500 bytes).
 const CREDENTIAL_BODY_LIMIT: usize = 8 * 1024;
@@ -181,14 +184,14 @@ pub fn build_app(state: Arc<AppState>, config: &config::ServerConfig) -> anyhow:
     // `/oauth/callback` enrollment errors), so the layer is applied at the
     // merged-router level rather than only inside `build_ui_routes`. Adding
     // a new language is then just dropping an `i18n/<tag>/vouch-server.ftl` catalog.
-    .layer(axum::middleware::from_fn(crate::infra::i18n::i18n_layer))
+    .layer(axum::middleware::from_fn(i18n::i18n_layer))
     // Gate org issuer-subdomain hosts (`{label}.{primary_host}`) to the
     // WIF-only surface: discovery, JWKS, health. Primary-host requests and
     // NLB health checks (IP / NLB-DNS Host values) never match the shape,
     // so this layer is inert for all existing traffic.
     .layer(axum::middleware::from_fn_with_state(
         Arc::clone(&state),
-        crate::infra::org_host::org_host_gate,
+        org_host::org_host_gate,
     ))
     // Global request timeout: 30 seconds.
     //
@@ -219,7 +222,7 @@ pub fn build_app(state: Arc<AppState>, config: &config::ServerConfig) -> anyhow:
     // Outermost: every request-scoped time comparison downstream reads this
     // one instant, so the stamp must be taken before any other layer can
     // await. The last `.layer()` call is the outermost in tower/axum.
-    .layer(axum::middleware::from_fn(crate::arrival::arrival_layer))
+    .layer(axum::middleware::from_fn(arrival::arrival_layer))
     .with_state(state))
 }
 
@@ -243,7 +246,7 @@ fn build_rate_limited_routes(
         )
         .layer(axum::middleware::from_fn_with_state(
             httpsig_resolver,
-            vouch_httpsig::middleware::require_signature::<httpsig::OAuthClientKeyResolver>,
+            middleware::require_signature::<httpsig::OAuthClientKeyResolver>,
         ));
 
     // RFC 7592 dynamic client registration MANAGEMENT endpoints
@@ -321,7 +324,7 @@ fn build_credential_routes(
         )
         .layer(axum::middleware::from_fn_with_state(
             httpsig_resolver,
-            vouch_httpsig::middleware::require_signature::<httpsig::OAuthClientKeyResolver>,
+            middleware::require_signature::<httpsig::OAuthClientKeyResolver>,
         ))
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(state),
@@ -621,7 +624,7 @@ fn build_api_management_routes(
         )
         .layer(axum::middleware::from_fn_with_state(
             httpsig_resolver,
-            vouch_httpsig::middleware::require_signature::<httpsig::OAuthClientKeyResolver>,
+            middleware::require_signature::<httpsig::OAuthClientKeyResolver>,
         ));
 
     // RFC 9728 protected-resource endpoints in this group. Layered with
@@ -840,7 +843,7 @@ fn build_ui_routes(
         .route("/", get(handlers::home::home_page))
         .route("/install", get(handlers::install::install_page))
         // Client-side translation bundle (CSP script-src 'self'); cached via ETag.
-        .route("/i18n.js", get(crate::infra::i18n::i18n_js_handler))
+        .route("/i18n.js", get(i18n::i18n_js_handler))
         .route("/health", get(|| async { "ok" }))
         .route("/health/ready", get(readiness_handler))
         // Legal pages (redirect to vouch.sh)
@@ -930,7 +933,7 @@ fn build_ui_routes(
         // defense). Routes added below this layer are exempt.
         .layer(axum::middleware::from_fn_with_state(
             state,
-            crate::infra::csrf::same_origin,
+            csrf::same_origin,
         ))
         // SAML 2.0 SP endpoints — after the same-origin layer: the IdP
         // delivers the ACS POST binding cross-origin by design.
@@ -955,6 +958,7 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    use crate::test_utils;
     use axum::body::Body;
     use axum::http::Request;
     use tower::ServiceExt;
@@ -1062,11 +1066,11 @@ mod tests {
 
     #[tokio::test]
     async fn ui_mutations_require_same_origin() {
-        let (app, _state) = crate::test_utils::test_app().await;
+        let (app, _state) = test_utils::test_app().await;
 
         // /logout has no per-handler origin check of its own; the layer is
         // its only CSRF defense.
-        let (status, body) = crate::test_utils::http_post_form(&app, "/logout", "", &[]).await;
+        let (status, body) = test_utils::http_post_form(&app, "/logout", "", &[]).await;
         assert_eq!(
             status,
             axum::http::StatusCode::FORBIDDEN,
@@ -1074,7 +1078,7 @@ mod tests {
         );
         assert!(body.contains("missing_origin"), "got: {body}");
 
-        let (status, body) = crate::test_utils::http_post_form(
+        let (status, body) = test_utils::http_post_form(
             &app,
             "/logout",
             "",
@@ -1089,7 +1093,7 @@ mod tests {
         assert!(body.contains("invalid_origin"), "got: {body}");
 
         // The server's own origin passes through to the handler.
-        let (status, _body) = crate::test_utils::http_post_form(
+        let (status, _body) = test_utils::http_post_form(
             &app,
             "/logout",
             "",

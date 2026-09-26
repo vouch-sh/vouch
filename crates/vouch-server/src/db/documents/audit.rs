@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::db::audit::AuditEventKind;
 use crate::db::config::AuthEventParams;
+use crate::geo;
 
 /// Seal for [`AuditData`]. Private to this module on purpose: a new payload
 /// type must be added here, not implemented ad hoc elsewhere in the crate.
@@ -258,7 +259,7 @@ impl GeoFields {
     /// non-global, or not in the GeoIP database.
     #[must_use]
     pub fn from_ip(ip: Option<std::net::IpAddr>) -> Self {
-        let (country_code, asn, org_name) = crate::geo::audit_fields(ip);
+        let (country_code, asn, org_name) = geo::audit_fields(ip);
         Self {
             country_code,
             asn,
@@ -428,6 +429,7 @@ impl CredentialAuditDetails for TokenExchangeDetails {
 )]
 mod tests {
     use super::*;
+    use crate::db::Principal;
 
     #[test]
     fn test_oauth_usage_data_deserialize_without_asn_fields() {
@@ -886,7 +888,7 @@ mod tests {
         // Without geo: identical to serde_json::to_value(AuthEventParams),
         // ClientInfo flattened, client_id/idp_issuer omitted when None.
         let params = AuthEventParams {
-            user_id: crate::db::Principal::Verified("u1".to_string()),
+            user_id: Principal::Verified("u1".to_string()),
             event_type: AuthEventType::LoginFailed,
             authenticator_id: Some("auth-1".to_string()),
             client: ClientInfo::for_test(

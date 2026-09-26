@@ -5,9 +5,13 @@
 //! - GeoLite2-Country for country code lookups
 //! - GeoLite2-ASN for autonomous system number and organization
 
+// Own-crate items are imported with `use`; see `absolute-paths-allowed-crates` in `.clippy.toml`.
+#![deny(clippy::absolute_paths)]
+
 use std::net::IpAddr;
 use std::sync::LazyLock;
 
+use crate::infra::ssrf;
 use maxminddb::Reader;
 
 static COUNTRY_DB: LazyLock<Option<Reader<&'static [u8]>>> = LazyLock::new(|| {
@@ -52,7 +56,7 @@ pub(crate) fn audit_fields(ip: Option<IpAddr>) -> (Option<String>, Option<u32>, 
 /// or if the GeoIP database failed to load.
 pub(crate) fn lookup(ip: IpAddr) -> Option<GeoLocation> {
     let ip = ip.to_canonical();
-    if crate::infra::ssrf::is_non_global(&ip) {
+    if ssrf::is_non_global(&ip) {
         return None;
     }
     let country_db = COUNTRY_DB.as_ref()?;

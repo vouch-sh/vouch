@@ -27,6 +27,10 @@
 // reading their own clock — the nonce consume, the authorization-code
 // consume, the PAR and pending-auth lookups, the SCIM token lookup — none of
 // which the lint could report while the exemption was granted per module.
+
+// Own-crate items are imported with `use`; see `absolute-paths-allowed-crates` in `.clippy.toml`.
+#![deny(clippy::absolute_paths)]
+
 pub(crate) mod audit;
 mod authenticators;
 mod authorization_codes;

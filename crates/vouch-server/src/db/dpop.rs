@@ -5,6 +5,7 @@ use super::claim::ClaimError;
 use super::document_type::DocumentType;
 use super::documents::dpop::{DpopJtiDoc, DpopNonceDoc, SignatureNonceDoc};
 use super::store::DocumentStore;
+use crate::crypto;
 use anyhow::{Context, Result};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -50,7 +51,7 @@ fn deterministic_signature_nonce_id(nonce: &str) -> String {
 /// A fresh random nonce and the instant it expires.
 #[expect(clippy::disallowed_methods, reason = "stamps the nonce's expires_at")]
 fn new_nonce(validity_seconds: i64) -> Result<(String, Timestamp)> {
-    let nonce = URL_SAFE_NO_PAD.encode(crate::crypto::generate_random_bytes(32)?);
+    let nonce = URL_SAFE_NO_PAD.encode(crypto::generate_random_bytes(32)?);
     let expires_at = Timestamp::now()
         .checked_add(validity_seconds.seconds())
         .context("nonce expiry timestamp overflow")?;

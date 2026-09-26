@@ -7,6 +7,8 @@
 )]
 
 use super::*;
+use crate::db::documents::session::SessionDoc;
+use crate::db::documents::user::UserDoc;
 
 // ========================================================================
 // DocumentStore — gaps in store.rs tests
@@ -18,7 +20,7 @@ async fn test_store_get_many_empty_slice() {
 
     // get_many with an empty id slice must return an empty vec, not error
     let result = store
-        .list_all::<crate::db::documents::user::UserDoc>()
+        .list_all::<UserDoc>()
         .await
         .expect("list_all should succeed");
     assert!(result.is_empty());
@@ -30,7 +32,7 @@ async fn test_store_count_zero_for_no_matches() {
 
     // Newly-initialised DB has no sessions; count should be 0
     let count = store
-        .count::<crate::db::documents::session::SessionDoc>("token_hash", "nonexistent")
+        .count::<SessionDoc>("token_hash", "nonexistent")
         .await
         .expect("count should not error");
     assert_eq!(count, 0);

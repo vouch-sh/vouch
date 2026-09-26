@@ -128,9 +128,11 @@ pub async fn get_organization(store: &DocumentStore, org_id: &str) -> Result<Opt
 /// Shared test fixture: a fresh document store on the test database.
 #[cfg(test)]
 pub(super) async fn fresh_store() -> DocumentStore {
-    let pool = crate::test_utils::test_db().await;
-    let crypto: std::sync::Arc<dyn crate::crypto::document_crypto::DocumentCrypto> =
-        std::sync::Arc::new(crate::crypto::document_crypto::PlaintextDocumentCrypto);
+    use crate::crypto::document_crypto::{DocumentCrypto, PlaintextDocumentCrypto};
+    use crate::test_utils;
+
+    let pool = test_utils::test_db().await;
+    let crypto: std::sync::Arc<dyn DocumentCrypto> = std::sync::Arc::new(PlaintextDocumentCrypto);
     DocumentStore::new(pool, crypto)
 }
 
@@ -143,7 +145,9 @@ pub(super) async fn fresh_store() -> DocumentStore {
 mod tests {
     use super::issuer::deterministic_subdomain_claim_id;
     use super::*;
+    use crate::db::UNVERIFY_FAILURE_THRESHOLD;
     use crate::db::documents::organization::SubdomainClaimDoc;
+    use crate::db::sessions::SessionCache;
     #[tokio::test]
     async fn eligible_labels_from_primary_and_verified_only() {
         let store = fresh_store().await;
@@ -186,7 +190,7 @@ mod tests {
             .await
             .unwrap();
 
-        let cache = crate::db::sessions::SessionCache::new(100, 30);
+        let cache = SessionCache::new(100, 30);
         let summary = remove_additional_domain(&store, &cache, &org.id, "widgets.io")
             .await
             .unwrap()
@@ -229,7 +233,7 @@ mod tests {
             .unwrap();
         claim_subdomain(&store, &org.id, "acme-com").await.unwrap();
 
-        let cache = crate::db::sessions::SessionCache::new(100, 30);
+        let cache = SessionCache::new(100, 30);
         let summary = remove_additional_domain(&store, &cache, &org.id, "mail.acme.com")
             .await
             .unwrap()
@@ -257,7 +261,7 @@ mod tests {
             .unwrap();
 
         let mut last_effect = RecheckEffect::StillVerified;
-        for _ in 0..crate::db::UNVERIFY_FAILURE_THRESHOLD {
+        for _ in 0..UNVERIFY_FAILURE_THRESHOLD {
             last_effect =
                 record_recheck_result(&store, &org.id, "widgets.io", RecheckOutcome::Failure)
                     .await

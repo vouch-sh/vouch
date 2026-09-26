@@ -8,7 +8,9 @@
 )]
 
 use super::*;
+use crate::crypto;
 use crate::crypto::alg::JwsAlgorithm;
+use crate::db::ClientInfo;
 
 // ========================================================================
 // OAuth Client Application Tests (Phase 7)
@@ -452,7 +454,7 @@ async fn test_oauth_usage_recording() {
             oauth_client_id: &client.id,
             event_type: OAuthEventType::TokenIssued,
             user_id: Some(&user_id),
-            client: &crate::db::ClientInfo::default(),
+            client: &ClientInfo::default(),
             details: None,
             org_domain: RecordedOrgDomain::Unresolved,
         },
@@ -465,7 +467,7 @@ async fn test_oauth_usage_recording() {
             oauth_client_id: &client.id,
             event_type: OAuthEventType::TokenIssued,
             user_id: Some(&user_id),
-            client: &crate::db::ClientInfo::default(),
+            client: &ClientInfo::default(),
             details: None,
             org_domain: RecordedOrgDomain::Unresolved,
         },
@@ -478,7 +480,7 @@ async fn test_oauth_usage_recording() {
             oauth_client_id: &client.id,
             event_type: OAuthEventType::TokenRevoked,
             user_id: Some(&user_id),
-            client: &crate::db::ClientInfo::default(),
+            client: &ClientInfo::default(),
             details: None,
             org_domain: RecordedOrgDomain::Unresolved,
         },
@@ -820,7 +822,7 @@ async fn test_revoke_all_oauth_client_secrets_blocks_subsequent_credential_valid
     )
     .await;
 
-    let secret_hash = crate::crypto::hash_token(&app.client_secret);
+    let secret_hash = crypto::hash_token(&app.client_secret);
 
     // Sanity: validate succeeds before revoke_all_oauth_client_secrets. If
     // this fails, the test fixture did not seed a usable secret and the
@@ -898,7 +900,7 @@ async fn test_delete_oauth_client_revokes_secrets_before_sweeps_closes_concurren
     let app = create_test_client(&store, "delete-revoke-order", TestClientSpec::default()).await;
     let app_id = app.app_id.clone();
     let client_id = app.client_id.clone();
-    let secret_hash = crate::crypto::hash_token(&app.client_secret);
+    let secret_hash = crypto::hash_token(&app.client_secret);
 
     // Pre-existing M2M (`client_credentials`) session for this client, so the
     // user_id sweep has something to delete. Mirrors the existing handler-tier

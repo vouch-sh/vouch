@@ -33,9 +33,9 @@ use tokio::task::JoinHandle;
 use rustls::crypto::hpke::{HpkePrivateKey, HpkePublicKey};
 
 use crate::config::{
-    IdpConfig, NonEmptySecret, OidcProviderConfig, SamlProviderConfig, ServerConfig,
+    self, BaseUrl, IdpConfig, NonEmptySecret, OidcProviderConfig, SamlProviderConfig, ServerConfig,
 };
-use crate::crypto::document_crypto::{HpkeSuiteId, SUITE_DHKEM_P384_SHA384_AES256};
+use crate::crypto::document_crypto::{self, HpkeSuiteId, SUITE_DHKEM_P384_SHA384_AES256};
 use crate::crypto::tpm_decrypt;
 use crate::infra::kms_arn::KmsArnResolver;
 
@@ -521,7 +521,7 @@ async fn decrypt_document_key(
 
     let (public_key, private_key) = match doc_key.algorithm {
         DocumentKeyAlgorithm::P384 => {
-            crate::crypto::document_crypto::p384_hpke_keys_from_private_key_der(&plaintext)
+            document_crypto::p384_hpke_keys_from_private_key_der(&plaintext)
                 .context("Failed to extract P-384 HPKE keys from document_key DER")?
         }
     };
@@ -769,7 +769,7 @@ impl ServerConfig {
 
         // Database URL - priority: dsql_endpoints > database_url
         if let Some(endpoints) = &s3.dsql_endpoints {
-            match crate::config::resolve_dsql_endpoints(
+            match config::resolve_dsql_endpoints(
                 endpoints,
                 self.aws_az.as_deref(),
                 self.aws_region.as_deref(),
@@ -807,7 +807,7 @@ impl ServerConfig {
             self.rp_name = v.clone();
         }
         if let Some(v) = &s3.base_url {
-            self.base_url = crate::config::BaseUrl::new(v);
+            self.base_url = BaseUrl::new(v);
         }
         if let Some(v) = &s3.jwt_secret {
             self.jwt_secret = v.clone();
@@ -982,10 +982,13 @@ mod tests {
         reason = "test code: panic on assertion failure is acceptable"
     )]
     use super::*;
+    use crate::infra::mtls_listener::{self, MtlsConfigSwap};
+    use crate::infra::tls;
+    use crate::test_utils;
 
     #[test]
     fn test_merge_s3_config_empty() {
-        let mut config = crate::test_utils::test_config();
+        let mut config = test_utils::test_config();
         let s3 = S3Config::default();
 
         let original_rp_id = config.rp_id.clone();
@@ -997,7 +1000,7 @@ mod tests {
 
     #[test]
     fn test_merge_s3_config_overrides() {
-        let mut config = crate::test_utils::test_config();
+        let mut config = test_utils::test_config();
         let s3 = S3Config {
             rp_id: Some("new.example.com".to_string()),
             session_hours: Some(12),
@@ -1014,7 +1017,7 @@ mod tests {
     fn test_merge_s3_config_trims_trailing_slash_from_base_url() {
         // Regression: a trailing slash on an S3-sourced base_url used to
         // produce a spec-violating issuer and double-slash endpoint URLs.
-        let mut config = crate::test_utils::test_config();
+        let mut config = test_utils::test_config();
         let s3 = S3Config {
             base_url: Some("https://auth.example.com/".to_string()),
             ..Default::default()
@@ -1030,7 +1033,7 @@ mod tests {
 
     #[test]
     fn test_merge_s3_config_trims_multiple_trailing_slashes_from_base_url() {
-        let mut config = crate::test_utils::test_config();
+        let mut config = test_utils::test_config();
         let s3 = S3Config {
             base_url: Some("https://auth.example.com///".to_string()),
             ..Default::default()
@@ -1046,7 +1049,7 @@ mod tests {
 
     #[test]
     fn test_merge_s3_config_preserves_base_url_without_trailing_slash() {
-        let mut config = crate::test_utils::test_config();
+        let mut config = test_utils::test_config();
         let s3 = S3Config {
             base_url: Some("https://auth.example.com".to_string()),
             ..Default::default()
@@ -1062,7 +1065,7 @@ mod tests {
 
     #[test]
     fn test_merge_s3_config_nested_tls() {
-        let mut config = crate::test_utils::test_config();
+        let mut config = test_utils::test_config();
         let s3 = S3Config {
             tls: Some(S3TlsConfig {
                 cert: Some("base64cert".to_string()),
@@ -1087,7 +1090,7 @@ mod tests {
             "saml": { "idp_metadata_url": "https://z" }
         }"#;
         let s3: S3Config = serde_json::from_str(json).expect("parse");
-        let mut config = crate::test_utils::test_config();
+        let mut config = test_utils::test_config();
         let original_idp_count = config.idps.len();
 
         config.merge_s3_config(&s3, false).unwrap();
@@ -1101,7 +1104,7 @@ mod tests {
 
     #[test]
     fn test_merge_s3_config_nested_dpop() {
-        let mut config = crate::test_utils::test_config();
+        let mut config = test_utils::test_config();
         let s3 = S3Config {
             dpop: Some(S3DpopConfig {
                 max_age_seconds: Some(600),
@@ -1116,7 +1119,7 @@ mod tests {
 
     #[test]
     fn test_merge_s3_config_nested_github() {
-        let mut config = crate::test_utils::test_config();
+        let mut config = test_utils::test_config();
         let s3 = S3Config {
             github: Some(S3GithubConfig {
                 app_id: Some(12345),
@@ -1148,7 +1151,7 @@ mod tests {
             ..Default::default()
         };
 
-        let mut config = crate::test_utils::test_config();
+        let mut config = test_utils::test_config();
         config.merge_s3_config(&empty, false).unwrap();
         assert!(config.github_webhook_secret.is_none());
 
@@ -1176,7 +1179,7 @@ mod tests {
             ..Default::default()
         };
 
-        let mut config = crate::test_utils::test_config();
+        let mut config = test_utils::test_config();
         config.merge_s3_config(&empty, false).unwrap();
         assert!(config.github_app_client_secret.is_none());
         assert!(!config.github_oauth_configured());
@@ -1191,7 +1194,7 @@ mod tests {
 
     #[test]
     fn test_merge_s3_config_runtime_only_allows_tls() {
-        let mut config = crate::test_utils::test_config();
+        let mut config = test_utils::test_config();
         let original_rp_id = config.rp_id.clone();
         let original_session_hours = config.session_hours;
 
@@ -1219,7 +1222,7 @@ mod tests {
 
     #[test]
     fn test_merge_s3_config_startup_allows_all() {
-        let mut config = crate::test_utils::test_config();
+        let mut config = test_utils::test_config();
 
         let s3 = S3Config {
             rp_id: Some("new.example.com".to_string()),
@@ -1308,10 +1311,7 @@ mod tests {
         let config: S3Config = serde_json::from_str(json).expect("Failed to parse");
         let dk = config.document_key.unwrap();
         assert_eq!(dk.algorithm, DocumentKeyAlgorithm::P384);
-        assert_eq!(
-            dk.algorithm.hpke_suite_id(),
-            crate::crypto::document_crypto::SUITE_DHKEM_P384_SHA384_AES256
-        );
+        assert_eq!(dk.algorithm.hpke_suite_id(), SUITE_DHKEM_P384_SHA384_AES256);
     }
 
     #[test]
@@ -1353,7 +1353,7 @@ mod tests {
 
     #[test]
     fn test_merge_s3_config_kms_key_ids() {
-        let mut config = crate::test_utils::test_config();
+        let mut config = test_utils::test_config();
         assert!(config.ssh_ca_kms_key_id.is_none());
         assert!(config.oidc_signing_kms_key_id.is_none());
         assert!(config.jwt_hmac_kms_key_id.is_none());
@@ -1399,7 +1399,7 @@ mod tests {
 
     #[test]
     fn test_merge_s3_config_runtime_blocks_kms_key_ids() {
-        let mut config = crate::test_utils::test_config();
+        let mut config = test_utils::test_config();
 
         let s3 = S3Config {
             ssh_ca_kms_key_id: Some("mrk-ssh-key".to_string()),
@@ -1442,7 +1442,7 @@ mod tests {
 
     #[test]
     fn test_merge_s3_config_rsa_signing_key_startup() {
-        let mut config = crate::test_utils::test_config();
+        let mut config = test_utils::test_config();
         assert!(config.oidc_rsa_signing_key.is_none());
         assert!(config.oidc_rsa_signing_kms_key_id.is_none());
 
@@ -1464,7 +1464,7 @@ mod tests {
 
     #[test]
     fn test_merge_s3_config_rsa_signing_key_runtime_blocked() {
-        let mut config = crate::test_utils::test_config();
+        let mut config = test_utils::test_config();
 
         let s3 = S3Config {
             oidc_rsa_signing_key: Some("base64encodedpemkey".into()),
@@ -1527,7 +1527,7 @@ mod tests {
             ]
         }"#;
         let s3: S3Config = serde_json::from_str(json).expect("parse");
-        let mut config = crate::test_utils::test_config();
+        let mut config = test_utils::test_config();
         config.idps.clear();
 
         config.merge_s3_config(&s3, false).unwrap();
@@ -1557,7 +1557,7 @@ mod tests {
             ]
         }"#;
         let s3: S3Config = serde_json::from_str(json).expect("parse");
-        let mut config = crate::test_utils::test_config();
+        let mut config = test_utils::test_config();
         config.idps.clear();
 
         config.merge_s3_config(&s3, false).unwrap();
@@ -1584,7 +1584,7 @@ mod tests {
             ]
         }"#;
         let s3: S3Config = serde_json::from_str(json).expect("parse");
-        let mut config = crate::test_utils::test_config();
+        let mut config = test_utils::test_config();
         config.idps.clear();
 
         config.merge_s3_config(&s3, false).unwrap();
@@ -1704,7 +1704,7 @@ mod tests {
 
     #[tokio::test]
     async fn apply_config_update_runtime_swaps_only_tls_fields() {
-        let mut starting = crate::test_utils::test_config();
+        let mut starting = test_utils::test_config();
         starting.tls_cert = None;
         starting.tls_key = None;
         let arcswap = Arc::new(ArcSwap::from_pointee(starting));
@@ -1734,7 +1734,7 @@ mod tests {
 
     #[tokio::test]
     async fn apply_config_update_with_no_tls_change_is_a_noop_on_tls() {
-        let mut starting = crate::test_utils::test_config();
+        let mut starting = test_utils::test_config();
         starting.tls_cert = Some("existing-cert".to_string());
         starting.tls_key = Some(SecretString::from("existing-key".to_string()));
         let arcswap = Arc::new(ArcSwap::from_pointee(starting));
@@ -1772,14 +1772,14 @@ p3HeUzp466+syZz4uujFaFZUPW4t8nZUSdXHuxxzhLovxtFNGqAybYFZ\n\
 -----END PRIVATE KEY-----\n";
 
     /// Build an initial mTLS config swap from the fixture cert/key.
-    fn fixture_mtls_swap() -> super::super::mtls_listener::MtlsConfigSwap {
-        let (certs, key) = crate::infra::tls::parse_cert_and_key_pem(
+    fn fixture_mtls_swap() -> MtlsConfigSwap {
+        let (certs, key) = tls::parse_cert_and_key_pem(
             TEST_CERT_PEM,
             &SecretString::from(TEST_KEY_PEM.to_string()),
         )
         .expect("parse fixture PEM");
-        let config = super::super::mtls_listener::build_mtls_server_config(certs, key)
-            .expect("build mTLS config");
+        let config =
+            mtls_listener::build_mtls_server_config(certs, key).expect("build mTLS config");
         Arc::new(arc_swap::ArcSwap::from(config))
     }
 
@@ -1787,7 +1787,7 @@ p3HeUzp466+syZz4uujFaFZUPW4t8nZUSdXHuxxzhLovxtFNGqAybYFZ\n\
     /// config so the mTLS port serves rotated certificates (#710).
     #[tokio::test]
     async fn apply_config_update_reloads_mtls_swap() {
-        let mut starting = crate::test_utils::test_config();
+        let mut starting = test_utils::test_config();
         starting.tls_cert = None;
         starting.tls_key = None;
         let arcswap = Arc::new(ArcSwap::from_pointee(starting));
@@ -1816,7 +1816,7 @@ p3HeUzp466+syZz4uujFaFZUPW4t8nZUSdXHuxxzhLovxtFNGqAybYFZ\n\
     /// A failing mTLS reload must not fail the config update itself.
     #[tokio::test]
     async fn apply_config_update_mtls_reload_failure_is_isolated() {
-        let mut starting = crate::test_utils::test_config();
+        let mut starting = test_utils::test_config();
         starting.tls_cert = None;
         starting.tls_key = None;
         let arcswap = Arc::new(ArcSwap::from_pointee(starting));

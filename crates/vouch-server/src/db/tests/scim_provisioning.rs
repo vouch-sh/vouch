@@ -9,6 +9,11 @@
 )]
 
 use super::*;
+use crate::crypto::document_crypto::{DocumentCrypto, PlaintextDocumentCrypto};
+use crate::db::documents::organization::OrganizationDoc;
+use crate::db::documents::user::{self, UserDoc};
+use crate::db::store::DocumentStore;
+use crate::email::Email;
 
 // ========================================================================
 // SCIM — application-level uniqueness check
@@ -100,7 +105,7 @@ async fn test_create_scim_user_rejects_when_org_does_not_exist() {
 
     // No user row was inserted.
     let count = store
-        .count::<crate::db::documents::user::UserDoc>("email", "alice@example.com")
+        .count::<UserDoc>("email", "alice@example.com")
         .await
         .expect("count");
     assert_eq!(count, 0, "no user should be inserted when org is missing");
@@ -130,7 +135,7 @@ async fn test_create_scim_user_rejects_unowned_domain_in_transaction() {
     );
 
     let count = store
-        .count::<crate::db::documents::user::UserDoc>("email", "alice@not-owned.example.com")
+        .count::<UserDoc>("email", "alice@not-owned.example.com")
         .await
         .expect("count");
     assert_eq!(count, 0, "no user should be inserted for an unowned domain");
@@ -308,7 +313,7 @@ async fn test_create_scim_user_no_org_does_not_touch_org_doc() {
     // No org doc should be touched when org_id is None. Read the org version
     // before and after; it must not change.
     let before = store
-        .get::<crate::db::documents::organization::OrganizationDoc>(TEST_ORG_ID)
+        .get::<OrganizationDoc>(TEST_ORG_ID)
         .await
         .expect("get org")
         .expect("org exists");
@@ -318,7 +323,7 @@ async fn test_create_scim_user_no_org_does_not_touch_org_doc() {
         .expect("orgless user creation should succeed");
 
     let after = store
-        .get::<crate::db::documents::organization::OrganizationDoc>(TEST_ORG_ID)
+        .get::<OrganizationDoc>(TEST_ORG_ID)
         .await
         .expect("get org")
         .expect("org exists");
@@ -420,7 +425,7 @@ async fn test_create_scim_user_toctou_domain_removal_during_creation() {
             // The TOCTOU guard worked: domain was removed, user creation
             // rejected. Verify no user row exists.
             let count = store
-                .count::<crate::db::documents::user::UserDoc>("email", "racer@toctou.example.com")
+                .count::<UserDoc>("email", "racer@toctou.example.com")
                 .await
                 .expect("count");
             assert_eq!(
@@ -453,7 +458,7 @@ async fn test_create_scim_user_toctou_domain_removal_during_creation() {
             // re-added concurrently, or the retry kept losing. This is
             // acceptable: the user was NOT created on the removed domain.
             let count = store
-                .count::<crate::db::documents::user::UserDoc>("email", "racer@toctou.example.com")
+                .count::<UserDoc>("email", "racer@toctou.example.com")
                 .await
                 .expect("count");
             assert_eq!(count, 0, "no user should exist after OccConflict");
@@ -624,9 +629,7 @@ async fn test_create_scim_user_concurrent_mixed_case_same_email_produces_one_use
         "exactly one user row must exist across all casings; got {}",
         all_for_email.len()
     );
-    let expected_id = crate::db::documents::user::deterministic_user_id(&crate::email::Email::new(
-        "case.race@example.com",
-    ));
+    let expected_id = user::deterministic_user_id(&Email::new("case.race@example.com"));
     let winner = all_for_email.first().expect("one row exists");
     assert_eq!(
         winner.id, expected_id,
@@ -687,7 +690,7 @@ async fn test_create_scim_user_blocked_by_preexisting_random_id_user() {
 
     // Seed a user with a random UUID v7 ID, as `enroll_user_with_org` does.
     let seeded = UserDoc {
-        email: crate::email::Email::new(email),
+        email: Email::new(email),
         name: Some("Seeded".to_string()),
         org_id: Some(TEST_ORG_ID.to_string()),
         org_domain: None,
@@ -763,7 +766,7 @@ async fn test_create_scim_user_concurrent_same_email_produces_one_user_postgres(
     let pool = Pool::connect(&url, &PoolConfig::default())
         .await
         .expect("connect to Postgres test DB");
-    let crate::db::pool::Pool::Postgres(p) = &pool else {
+    let Pool::Postgres(p) = &pool else {
         panic!("VOUCH_TEST_POSTGRES_URL must point to a Postgres database");
     };
 
@@ -790,9 +793,8 @@ async fn test_create_scim_user_concurrent_same_email_produces_one_user_postgres(
             .unwrap_or_else(|e| panic!("apply Postgres migration {}: {e}", file.display()));
     }
 
-    let crypto: std::sync::Arc<dyn crate::crypto::document_crypto::DocumentCrypto> =
-        std::sync::Arc::new(crate::crypto::document_crypto::PlaintextDocumentCrypto);
-    let store = crate::db::store::DocumentStore::new(pool.clone(), crypto.clone());
+    let crypto: std::sync::Arc<dyn DocumentCrypto> = std::sync::Arc::new(PlaintextDocumentCrypto);
+    let store = DocumentStore::new(pool.clone(), crypto.clone());
 
     // Seed the org doc that `create_scim_user`'s in-transaction
     // domain-ownership check reads. `pg-test-org` owns `example.com`.

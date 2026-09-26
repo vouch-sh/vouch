@@ -37,6 +37,7 @@
 
 use std::time::Duration;
 
+use crate::config;
 use anyhow::{Context, Result, bail};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
@@ -230,9 +231,7 @@ impl Pool {
         // override: the token generator presigns locally from credentials and
         // never dispatches an SDK operation, so FIPS endpoint resolution is
         // never exercised on this path.
-        let sdk_config = crate::config::aws_config_loader(Some(&region), None)?
-            .load()
-            .await;
+        let sdk_config = config::aws_config_loader(Some(&region), None)?.load().await;
 
         // Generate initial authentication token (against the token hostname)
         let token =
@@ -730,7 +729,7 @@ fn spawn_token_refresh(pool: sqlx::PgPool, dsql: DsqlEndpoint, user: String, is_
                 }
                 _ = interval.tick() => {
                     // Reload AWS credentials (in case they've been rotated)
-                    let sdk_config = match crate::config::aws_config_loader(Some(&region), None) {
+                    let sdk_config = match config::aws_config_loader(Some(&region), None) {
                         Ok(loader) => loader.load().await,
                         Err(e) => {
                             tracing::warn!(

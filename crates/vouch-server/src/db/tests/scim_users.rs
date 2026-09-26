@@ -8,6 +8,7 @@
 )]
 
 use super::*;
+use crate::db::ScimAuditData;
 
 // ========================================================================
 // SCIM User Tests (RFC 7643/7644)
@@ -479,7 +480,7 @@ async fn test_scim_audit_logging() {
 
     record_scim_audit(
         &audit,
-        &crate::db::ScimAuditData {
+        &ScimAuditData {
             operation: "CREATE",
             resource_type: "User",
             resource_id: "user-123",
@@ -494,7 +495,7 @@ async fn test_scim_audit_logging() {
     // Record another audit log without token or org domain (None is valid)
     record_scim_audit(
         &audit,
-        &crate::db::ScimAuditData {
+        &ScimAuditData {
             operation: "DELETE",
             resource_type: "User",
             resource_id: "user-789",

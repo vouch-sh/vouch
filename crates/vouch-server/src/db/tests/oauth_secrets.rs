@@ -8,6 +8,9 @@
 )]
 
 use super::*;
+use crate::db::{FapiProfile, TokenEndpointAuthMethod};
+use crate::error::ServiceError;
+use crate::test_utils::TestJwks;
 
 // ============================================================================
 // OAuth secret cap (≤2) / floor (≥1) OCC invariant tests (#551)
@@ -54,9 +57,7 @@ async fn test_concurrent_secret_add_never_exceeds_two() {
     for h in handles {
         match h.await.expect("task must not panic") {
             Ok(_) => ok_count = ok_count.saturating_add(1),
-            Err(crate::error::ServiceError::Api { ref code, .. })
-                if code == "max_secrets_reached" =>
-            {
+            Err(ServiceError::Api { ref code, .. }) if code == "max_secrets_reached" => {
                 max_reached_count = max_reached_count.saturating_add(1);
             }
             Err(e) => panic!("unexpected error: {e}"),
@@ -121,9 +122,7 @@ async fn test_concurrent_scim_token_create_never_exceeds_two() {
     for h in handles {
         match h.await.expect("task must not panic") {
             Ok(_) => ok_count = ok_count.saturating_add(1),
-            Err(crate::error::ServiceError::Api { ref code, .. })
-                if code == "token_limit_reached" =>
-            {
+            Err(ServiceError::Api { ref code, .. }) if code == "token_limit_reached" => {
                 limit_count = limit_count.saturating_add(1);
             }
             Err(e) => panic!("unexpected error: {e}"),
@@ -187,9 +186,9 @@ async fn test_concurrent_secret_revoke_never_drops_below_one() {
         // ServiceError::Api { code: "not_found" }, so there is no Api "not_found" arm.
         match result {
             Ok(()) => {}
-            Err(crate::error::ServiceError::Api { ref code, .. })
+            Err(ServiceError::Api { ref code, .. })
                 if code == "last_secret" || code == "conflict" => {}
-            Err(crate::error::ServiceError::NotFound(_)) => {}
+            Err(ServiceError::NotFound(_)) => {}
             Err(e) => panic!("unexpected error from concurrent revoke: {e}"),
         }
     }
@@ -245,7 +244,7 @@ async fn test_revoke_then_add_back_to_two() {
     assert!(
         matches!(
             cap_result,
-            Err(crate::error::ServiceError::Api { ref code, .. }) if code == "max_secrets_reached"
+            Err(ServiceError::Api { ref code, .. }) if code == "max_secrets_reached"
         ),
         "third add must fail with max_secrets_reached; got: {cap_result:?}"
     );
@@ -290,7 +289,7 @@ async fn test_revoke_last_secret_rejected() {
     assert!(
         matches!(
             result,
-            Err(crate::error::ServiceError::Api { ref code, .. }) if code == "last_secret"
+            Err(ServiceError::Api { ref code, .. }) if code == "last_secret"
         ),
         "revoking the last secret must fail with last_secret; got: {result:?}"
     );
@@ -305,8 +304,8 @@ async fn test_revoke_last_secret_allowed_for_private_key_jwt_client() {
         &store,
         "occ-test-user",
         TestClientSpec {
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
-            jwks: crate::test_utils::TestJwks::Shared,
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
+            jwks: TestJwks::Shared,
             with_secret: false,
             ..Default::default()
         },
@@ -336,8 +335,8 @@ async fn test_revoke_last_secret_allowed_for_fapi_client() {
         &store,
         "occ-test-user",
         TestClientSpec {
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::ClientSecretBasic),
-            fapi_profile: Some(crate::db::FapiProfile::Fapi2Security),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::ClientSecretBasic),
+            fapi_profile: Some(FapiProfile::Fapi2Security),
             with_secret: false,
             ..Default::default()
         },

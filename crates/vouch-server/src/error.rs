@@ -6,6 +6,11 @@
 //! - Standard HTTP error responses
 //! - OAuth 2.0 error responses (RFC 6749 Section 5.2)
 
+// Own-crate items are imported with `use`; see `absolute-paths-allowed-crates` in `.clippy.toml`.
+#![deny(clippy::absolute_paths)]
+
+use crate::db::pool::{self, RetryableError};
+use crate::http;
 use axum::{
     Json,
     http::StatusCode,
@@ -115,7 +120,7 @@ impl From<anyhow::Error> for ServiceError {
     }
 }
 
-impl crate::db::pool::RetryableError for ServiceError {
+impl RetryableError for ServiceError {
     /// Only `OccConflict` triggers a retry.
     ///
     /// Business-logic errors (max_secrets_reached, last_secret, last_key, …)
@@ -345,7 +350,7 @@ impl ServiceError {
     /// becomes [`Self::Internal`] and propagates as a 500.
     pub(crate) fn from_db_contention(err: anyhow::Error, msg: &'static str) -> Self {
         tracing::error!("{msg}: {err}");
-        if crate::db::pool::is_retryable_db_error(&err) {
+        if pool::is_retryable_db_error(&err) {
             Self::OccConflict
         } else {
             Self::Internal(msg.to_string())
@@ -469,7 +474,7 @@ impl ServiceError {
             params.push(("max_age", age.to_string()));
         }
         let params: Vec<(&str, &str)> = params.iter().map(|(n, v)| (*n, v.as_str())).collect();
-        crate::http::bearer_challenge(&params)
+        http::bearer_challenge(&params)
     }
 
     /// Convert to a standard API error response.

@@ -485,6 +485,8 @@ async fn recheck_one(store: &DocumentStore, audit: &AuditStore, rec: db::Verifie
 )]
 mod tests {
     use super::*;
+    use crate::crypto::document_crypto::DocumentCrypto;
+    use crate::test_utils;
 
     /// Regression test for the NULL-`email_domain` bug: `gc_stale_additional_domains`
     /// writes `org_domain_expired` with no user/email of its own, so without
@@ -498,9 +500,8 @@ mod tests {
         };
         use std::sync::Arc;
 
-        let pool = crate::test_utils::test_db().await;
-        let crypto: Arc<dyn crate::crypto::document_crypto::DocumentCrypto> =
-            Arc::new(PlaintextDocumentCrypto);
+        let pool = test_utils::test_db().await;
+        let crypto: Arc<dyn DocumentCrypto> = Arc::new(PlaintextDocumentCrypto);
         let store = DocumentStore::new(pool.clone(), crypto.clone());
         let audit = AuditStore::new(pool, crypto);
 
@@ -568,9 +569,8 @@ mod tests {
         use crate::crypto::document_crypto::PlaintextDocumentCrypto;
         use std::sync::Arc;
 
-        let pool = crate::test_utils::test_db().await;
-        let crypto: Arc<dyn crate::crypto::document_crypto::DocumentCrypto> =
-            Arc::new(PlaintextDocumentCrypto);
+        let pool = test_utils::test_db().await;
+        let crypto: Arc<dyn DocumentCrypto> = Arc::new(PlaintextDocumentCrypto);
         let store = DocumentStore::new(pool.clone(), crypto.clone());
         let audit = AuditStore::new(pool, crypto);
 

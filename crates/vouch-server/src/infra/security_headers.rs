@@ -14,6 +14,7 @@ use tower_http::cors::CorsLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
 use vouch_common::protocol;
 
+use crate::infra::csp::CspOrigin;
 use crate::{AppState, config, services::idp};
 
 /// Build permissive CORS layer for API endpoints (OIDC, SCIM, v1, api).
@@ -164,7 +165,7 @@ pub fn apply_security_layers(
 /// Extends `form-action 'self'` with origins from every configured IdP
 /// (OIDC + SAML). The remaining directives are static.
 fn build_csp_header(idps: &[idp::ConfiguredIdp]) -> anyhow::Result<HeaderValue> {
-    let mut origins: Vec<crate::infra::csp::CspOrigin> = Vec::new();
+    let mut origins: Vec<CspOrigin> = Vec::new();
     for idp in idps {
         for origin in idp.form_action_origins() {
             if !origins.contains(&origin) {
@@ -195,6 +196,10 @@ fn build_csp_header(idps: &[idp::ConfiguredIdp]) -> anyhow::Result<HeaderValue> 
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
+    use crate::config::ServerConfig;
+    use crate::services::idp::oidc::OidcProvider;
+    use crate::services::idp::saml::{IdpMetadata, SamlProvider};
+    use crate::services::idp::{ConfiguredIdp, ConfiguredOidcProvider};
     use crate::test_utils::*;
 
     #[tokio::test]
@@ -272,42 +277,34 @@ mod tests {
         );
     }
 
-    fn make_oidc_idps(auth_endpoint: &str) -> Vec<crate::services::idp::ConfiguredIdp> {
-        vec![crate::services::idp::ConfiguredIdp::Oidc(
-            crate::services::idp::ConfiguredOidcProvider {
-                id: "google".to_string(),
-                client_id: "test-client-id".to_string(),
-                client_secret: secrecy::SecretString::from("test-secret"),
-                provider: crate::services::idp::oidc::OidcProvider {
-                    issuer: "https://accounts.google.com".to_string(),
-                    authorization_endpoint: url::Url::parse(auth_endpoint).unwrap(),
-                    token_endpoint: url::Url::parse("https://oauth2.googleapis.com/token").unwrap(),
-                    jwks_uri: url::Url::parse("https://www.googleapis.com/oauth2/v3/certs")
-                        .unwrap(),
-                },
+    fn make_oidc_idps(auth_endpoint: &str) -> Vec<ConfiguredIdp> {
+        vec![ConfiguredIdp::Oidc(ConfiguredOidcProvider {
+            id: "google".to_string(),
+            client_id: "test-client-id".to_string(),
+            client_secret: secrecy::SecretString::from("test-secret"),
+            provider: OidcProvider {
+                issuer: "https://accounts.google.com".to_string(),
+                authorization_endpoint: url::Url::parse(auth_endpoint).unwrap(),
+                token_endpoint: url::Url::parse("https://oauth2.googleapis.com/token").unwrap(),
+                jwks_uri: url::Url::parse("https://www.googleapis.com/oauth2/v3/certs").unwrap(),
             },
-        )]
+        })]
     }
 
-    fn make_saml_idps(
-        sso_post: Option<&str>,
-        sso_redirect: Option<&str>,
-    ) -> Vec<crate::services::idp::ConfiguredIdp> {
-        vec![crate::services::idp::ConfiguredIdp::Saml(
-            crate::services::idp::saml::SamlProvider {
-                id: "corp-saml".to_string(),
-                idp_metadata: crate::services::idp::saml::IdpMetadata {
-                    entity_id: "https://idp.example.com/saml".to_string(),
-                    sso_post_url: sso_post.map(str::to_string),
-                    sso_redirect_url: sso_redirect.map(str::to_string),
-                    signing_certificates: vec![],
-                },
-                sp_entity_id: "https://vouch.example.com".to_string(),
-                acs_url: "https://vouch.example.com/saml/acs".to_string(),
-                email_attribute: None,
-                domain_attribute: None,
+    fn make_saml_idps(sso_post: Option<&str>, sso_redirect: Option<&str>) -> Vec<ConfiguredIdp> {
+        vec![ConfiguredIdp::Saml(SamlProvider {
+            id: "corp-saml".to_string(),
+            idp_metadata: IdpMetadata {
+                entity_id: "https://idp.example.com/saml".to_string(),
+                sso_post_url: sso_post.map(str::to_string),
+                sso_redirect_url: sso_redirect.map(str::to_string),
+                signing_certificates: vec![],
             },
-        )]
+            sp_entity_id: "https://vouch.example.com".to_string(),
+            acs_url: "https://vouch.example.com/saml/acs".to_string(),
+            email_attribute: None,
+            domain_attribute: None,
+        })]
     }
 
     /// Extract the `form-action` directive's full value from a CSP string.
@@ -457,8 +454,8 @@ mod tests {
     /// Build a minimal router with security headers for testing.
     fn apply_security_layers_to_test_router(
         state: std::sync::Arc<crate::AppState>,
-        config: &crate::config::ServerConfig,
-        idps: &[crate::services::idp::ConfiguredIdp],
+        config: &ServerConfig,
+        idps: &[ConfiguredIdp],
     ) -> axum::Router {
         use axum::routing::get;
 

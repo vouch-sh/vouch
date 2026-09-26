@@ -38,9 +38,12 @@
 use std::sync::Arc;
 
 use super::*;
-use crate::crypto::document_crypto::PlaintextDocumentCrypto;
+use crate::crypto::document_crypto::{DocumentCrypto, PlaintextDocumentCrypto};
 use crate::db::audit::AuditStore;
+use crate::db::documents::organization::OrganizationDoc;
 use crate::db::store::DocumentStore;
+use crate::db::{GroupListFilter, UserListFilter};
+use crate::scim_filter;
 use crate::test_utils::{TestClientSpec, create_test_client};
 
 /// Create an in-memory SQLite database for testing.
@@ -64,8 +67,7 @@ async fn test_db() -> (DocumentStore, AuditStore) {
             .expect("Failed to run migrations"),
     }
 
-    let crypto: Arc<dyn crate::crypto::document_crypto::DocumentCrypto> =
-        Arc::new(PlaintextDocumentCrypto);
+    let crypto: Arc<dyn DocumentCrypto> = Arc::new(PlaintextDocumentCrypto);
     let store = DocumentStore::new(pool.clone(), crypto.clone());
     let audit = AuditStore::new(pool, crypto);
     (store, audit)
@@ -110,16 +112,16 @@ fn add_group_member(
 }
 
 /// A Users list filter, parsed the way the SCIM handler parses `filter`.
-fn user_filter(filter: &str) -> crate::db::UserListFilter {
-    crate::scim_filter::parse(filter, "urn:ietf:params:scim:schemas:core:2.0:User")
-        .and_then(crate::db::UserListFilter::try_from)
+fn user_filter(filter: &str) -> UserListFilter {
+    scim_filter::parse(filter, "urn:ietf:params:scim:schemas:core:2.0:User")
+        .and_then(UserListFilter::try_from)
         .expect("valid Users filter")
 }
 
 /// A Groups list filter, parsed the way the SCIM handler parses `filter`.
-fn group_filter(filter: &str) -> crate::db::GroupListFilter {
-    crate::scim_filter::parse(filter, "urn:ietf:params:scim:schemas:core:2.0:Group")
-        .and_then(crate::db::GroupListFilter::try_from)
+fn group_filter(filter: &str) -> GroupListFilter {
+    scim_filter::parse(filter, "urn:ietf:params:scim:schemas:core:2.0:Group")
+        .and_then(GroupListFilter::try_from)
         .expect("valid Groups filter")
 }
 
@@ -144,8 +146,8 @@ async fn seed_test_org(store: &DocumentStore) {
 /// A minimal org document owning `domain` — no name, creator, additional
 /// domains, or subdomain. The shape every org fixture in this file needs;
 /// construct through here instead of inlining the literal.
-fn test_org_doc(domain: &str) -> crate::db::documents::organization::OrganizationDoc {
-    crate::db::documents::organization::OrganizationDoc {
+fn test_org_doc(domain: &str) -> OrganizationDoc {
+    OrganizationDoc {
         domain: domain.to_string(),
         name: None,
         created_by_user_id: None,

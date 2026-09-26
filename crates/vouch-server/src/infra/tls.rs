@@ -15,6 +15,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::config::ServerConfig;
+use crate::crypto::pem;
 
 /// Build TLS configuration from ServerConfig.
 pub fn build_tls_config(config: &ServerConfig) -> Result<RustlsConfig> {
@@ -29,12 +30,12 @@ pub fn build_tls_config(config: &ServerConfig) -> Result<RustlsConfig> {
         .ok_or_else(|| anyhow::anyhow!("TLS private key not configured"))?;
 
     let cert_was_base64 = !cert_pem.trim().starts_with("-----BEGIN");
-    let cert_bytes = crate::crypto::pem::decode_base64_pem(cert_pem)
+    let cert_bytes = pem::decode_base64_pem(cert_pem)
         .context("Failed to decode TLS certificate")?
         .into_bytes();
 
     let key_was_base64 = !key_secret.expose_secret().trim().starts_with("-----BEGIN");
-    let key_bytes = crate::crypto::pem::decode_base64_pem(key_secret.expose_secret())
+    let key_bytes = pem::decode_base64_pem(key_secret.expose_secret())
         .context("Failed to decode TLS private key")?
         .into_bytes();
 
@@ -71,10 +72,10 @@ pub fn reload_tls_from_config(
     cert: &str,
     key: &SecretString,
 ) -> Result<()> {
-    let cert_bytes = crate::crypto::pem::decode_base64_pem(cert)
+    let cert_bytes = pem::decode_base64_pem(cert)
         .context("Failed to decode TLS certificate")?
         .into_bytes();
-    let key_bytes = crate::crypto::pem::decode_base64_pem(key.expose_secret())
+    let key_bytes = pem::decode_base64_pem(key.expose_secret())
         .context("Failed to decode TLS private key")?
         .into_bytes();
 
@@ -183,10 +184,10 @@ pub(crate) fn parse_cert_and_key_pem(
     Vec<rustls::pki_types::CertificateDer<'static>>,
     rustls::pki_types::PrivateKeyDer<'static>,
 )> {
-    let cert_bytes = crate::crypto::pem::decode_base64_pem(cert_pem)
+    let cert_bytes = pem::decode_base64_pem(cert_pem)
         .context("Failed to decode TLS certificate")?
         .into_bytes();
-    let key_bytes = crate::crypto::pem::decode_base64_pem(key_secret.expose_secret())
+    let key_bytes = pem::decode_base64_pem(key_secret.expose_secret())
         .context("Failed to decode TLS private key")?
         .into_bytes();
 

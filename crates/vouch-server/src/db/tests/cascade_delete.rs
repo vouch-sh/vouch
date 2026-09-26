@@ -7,7 +7,9 @@
 )]
 
 use super::*;
+use crate::crypto;
 use crate::crypto::alg::JwsAlgorithm;
+use crate::db::{ClientInfo, FapiProfile, TokenEndpointAuthMethod, credentials};
 use crate::test_utils::test_arrival;
 
 // ========================================================================
@@ -166,7 +168,7 @@ async fn test_user_delete_preserves_ssh_revocations() {
     .await
     .expect("Failed to record issued SSH certificate");
 
-    crate::db::credentials::revoke_all_ssh_certificates_for_user(
+    credentials::revoke_all_ssh_certificates_for_user(
         &store,
         &user_id,
         Some("User deleted by admin"),
@@ -257,7 +259,7 @@ async fn test_oauth_client_cascade_delete() {
             oauth_client_id: &client.id,
             event_type: OAuthEventType::TokenIssued,
             user_id: None,
-            client: &crate::db::ClientInfo::default(),
+            client: &ClientInfo::default(),
             details: None,
             org_domain: RecordedOrgDomain::Unresolved,
         },
@@ -950,9 +952,9 @@ async fn test_delete_user_client_reassignment_writes_against_latest_version() {
                 access_scope: None,
                 org_id: None,
                 resource_uris: &[],
-                token_endpoint_auth_method: crate::db::TokenEndpointAuthMethod::default(),
+                token_endpoint_auth_method: TokenEndpointAuthMethod::default(),
                 keys: None,
-                fapi_profile: crate::db::FapiProfile::None,
+                fapi_profile: FapiProfile::None,
                 dpop_bound_access_tokens: false,
                 post_logout_redirect_uris: None,
             },
@@ -1396,7 +1398,7 @@ async fn test_offboarding_revokes_registration_tokens_on_every_scope() {
             AccessScope::Organization,
         ] {
             let (store, _audit) = test_db().await;
-            let reg_hash = crate::crypto::hash_token("vouch_reg_offboard");
+            let reg_hash = crypto::hash_token("vouch_reg_offboard");
             let (owner_id, app) = owner_with_registered_client(&store, scope, &reg_hash).await;
 
             offboard.run(&store, &owner_id).await;
@@ -1443,7 +1445,7 @@ fn offboard_during_transition(
 async fn test_rfc7592_put_racing_owner_offboarding_is_rejected() {
     for offboard in Offboard::ALL {
         let (store, _audit) = test_db().await;
-        let reg_hash = crate::crypto::hash_token("vouch_reg_put_race");
+        let reg_hash = crypto::hash_token("vouch_reg_put_race");
         let (owner_id, app) =
             owner_with_registered_client(&store, AccessScope::Personal, &reg_hash).await;
         let before = get_oauth_client_by_id(&store, &app)
@@ -1454,7 +1456,7 @@ async fn test_rfc7592_put_racing_owner_offboarding_is_rejected() {
         let hooked = offboard_during_transition(&store, offboard, &owner_id, &app);
 
         let attacker_uris = vec!["https://attacker.example.com/cb".to_string()];
-        let rotated = crate::crypto::hash_token("vouch_reg_rotated_must_not_land");
+        let rotated = crypto::hash_token("vouch_reg_rotated_must_not_land");
         let outcome = update_oauth_client_registration(
             &hooked,
             &app,
@@ -1510,7 +1512,7 @@ async fn test_rfc7592_put_racing_owner_offboarding_is_rejected() {
 async fn test_rfc7592_delete_racing_owner_offboarding_is_rejected() {
     for offboard in Offboard::ALL {
         let (store, _audit) = test_db().await;
-        let reg_hash = crate::crypto::hash_token("vouch_reg_delete_race");
+        let reg_hash = crypto::hash_token("vouch_reg_delete_race");
         let (owner_id, app) =
             owner_with_registered_client(&store, AccessScope::Personal, &reg_hash).await;
         let hooked = offboard_during_transition(&store, offboard, &owner_id, &app);
@@ -1532,7 +1534,7 @@ async fn test_rfc7592_delete_racing_owner_offboarding_is_rejected() {
 #[tokio::test]
 async fn test_restore_registration_token_after_failed_delete() {
     let (store, _audit) = test_db().await;
-    let reg_hash = crate::crypto::hash_token("vouch_reg_restore");
+    let reg_hash = crypto::hash_token("vouch_reg_restore");
     let (_owner_id, app) =
         owner_with_registered_client(&store, AccessScope::Personal, &reg_hash).await;
 
@@ -1559,7 +1561,7 @@ async fn test_restore_registration_token_after_failed_delete() {
 async fn test_restore_does_not_reinstate_token_revoked_by_offboarding() {
     for offboard in Offboard::ALL {
         let (store, _audit) = test_db().await;
-        let reg_hash = crate::crypto::hash_token("vouch_reg_restore_race");
+        let reg_hash = crypto::hash_token("vouch_reg_restore_race");
         let (owner_id, app) =
             owner_with_registered_client(&store, AccessScope::Personal, &reg_hash).await;
 
