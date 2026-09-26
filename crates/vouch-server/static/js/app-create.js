@@ -1,5 +1,5 @@
 // Application creation form: redirect URI validation, resource URI validation,
-// app type toggling, FAPI 2.0 security profile.
+// app type toggling, FAPI 2.0 security profile, client authentication method.
 
 (function() {
     document.addEventListener('DOMContentLoaded', function() {
@@ -14,6 +14,9 @@
         var form = document.querySelector('form');
         var securityProfileSection = document.getElementById('security-profile-section');
         var fapiJwksSection = document.getElementById('fapi-jwks-section');
+        var authMethodSection = document.getElementById('auth-method-section');
+        var fapiJwksInfo = document.getElementById('fapi-jwks-info');
+        var keyJwksInfo = document.getElementById('key-jwks-info');
         var jwksTextarea = document.getElementById('jwks');
         var jwksError = document.getElementById('jwks-error');
         var jwksUriInput = document.getElementById('jwks_uri');
@@ -166,6 +169,18 @@
             return fapiRadio && fapiRadio.value === 'fapi2_security';
         }
 
+        // Whether private key authentication (private_key_jwt) is chosen under
+        // the Standard profile. FAPI always authenticates with a key.
+        function isKeyAuthSelected() {
+            var authRadio = document.querySelector('input[name="token_endpoint_auth_method"]:checked');
+            return authRadio && authRadio.value === 'private_key_jwt';
+        }
+
+        // Whether the application will authenticate with a key and so needs a JWKS
+        function needsKeys() {
+            return isFapiSelected() || isKeyAuthSelected();
+        }
+
         // Update security profile section visibility based on app type
         function updateSecurityProfileVisibility() {
             if (isConfidentialType()) {
@@ -177,17 +192,24 @@
                 if (standardRadio) {
                     standardRadio.checked = true;
                 }
-                fapiJwksSection.classList.add('hidden');
+                // Public clients have no authentication method to choose
+                var secretRadio = document.querySelector('input[name="token_endpoint_auth_method"][value=""]');
+                if (secretRadio) {
+                    secretRadio.checked = true;
+                }
             }
+            updateFapiJwksVisibility();
         }
 
-        // Update JWKS section visibility based on FAPI selection
+        // Update the client authentication choice and JWKS section visibility.
+        // The choice applies to the Standard profile only; the JWKS fields are
+        // shown whenever the application authenticates with a key.
         function updateFapiJwksVisibility() {
-            if (isFapiSelected()) {
-                fapiJwksSection.classList.remove('hidden');
-            } else {
-                fapiJwksSection.classList.add('hidden');
-            }
+            var confidential = isConfidentialType();
+            authMethodSection.classList.toggle('hidden', !confidential || isFapiSelected());
+            fapiJwksSection.classList.toggle('hidden', !confidential || !needsKeys());
+            fapiJwksInfo.classList.toggle('hidden', !isFapiSelected());
+            keyJwksInfo.classList.toggle('hidden', isFapiSelected());
         }
 
         // Validate JWKS JSON
@@ -251,6 +273,12 @@
         var fapiRadios = document.querySelectorAll('input[name="fapi_profile"]');
         for (var i = 0; i < fapiRadios.length; i++) {
             fapiRadios[i].addEventListener('change', updateFapiJwksVisibility);
+        }
+
+        // Toggle JWKS fields when the client authentication method changes
+        var authRadios = document.querySelectorAll('input[name="token_endpoint_auth_method"]');
+        for (var i = 0; i < authRadios.length; i++) {
+            authRadios[i].addEventListener('change', updateFapiJwksVisibility);
         }
 
         // Initial visibility
@@ -365,8 +393,8 @@
                 hasError = true;
             }
 
-            // FAPI JWKS validation
-            if (isFapiSelected()) {
+            // JWKS validation for key authentication (FAPI or private_key_jwt)
+            if (isConfidentialType() && needsKeys()) {
                 var jwksErr = validateJwks();
                 if (jwksErr) {
                     e.preventDefault();
@@ -390,7 +418,9 @@
                 // At least one of JWKS or JWKS URI must be provided
                 if (!jwksTextarea.value.trim() && !jwksUriInput.value.trim()) {
                     e.preventDefault();
-                    var msg = t('appcreate-js-fapi-required');
+                    var msg = isFapiSelected()
+                        ? t('appcreate-js-fapi-required')
+                        : t('appcreate-js-keyauth-required');
                     showFieldError(jwksError, jwksTextarea, msg);
                     if (!hasError) {
                         scrollToField(jwksTextarea);

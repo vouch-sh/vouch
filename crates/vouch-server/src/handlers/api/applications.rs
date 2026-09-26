@@ -153,6 +153,7 @@ pub(crate) async fn create_application_api(
         post_logout_redirect_uris: post_logout_redirect_uris_raw,
         access_scope: req.access_scope.as_deref(),
         fapi_profile: req.fapi_profile.as_deref(),
+        token_endpoint_auth_method: req.token_endpoint_auth_method.as_deref(),
         jwks: req.jwks.as_deref(),
         jwks_uri: req.jwks_uri.as_deref(),
     })?;

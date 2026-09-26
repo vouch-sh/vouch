@@ -304,8 +304,8 @@
                 </div>
                 </fieldset>
 
-                <!-- FAPI JWKS fields -->
-                <div id="edit-fapi-jwks-section" class="{% if app.fapi_profile != "fapi2_security" %}hidden{% endif %} mt-4 space-y-4 pl-4 border-l-2 border-vouch-accent/30">
+                <!-- JWKS fields: FAPI, or a Standard-profile application that authenticates with private_key_jwt -->
+                <div id="edit-fapi-jwks-section" data-key-auth="{% if app.token_endpoint_auth_method == "private_key_jwt" %}true{% else %}false{% endif %}" class="{% if app.fapi_profile != "fapi2_security" && app.token_endpoint_auth_method != "private_key_jwt" %}hidden{% endif %} mt-4 space-y-4 pl-4 border-l-2 border-vouch-accent/30">
                     <div>
                         <label for="edit-jwks" class="block text-sm font-medium text-gray-300">{{ self.tr("apps-create-jwks-label") }}</label>
                         <textarea name="jwks" id="edit-jwks" rows="4" aria-describedby="edit-jwks-error"

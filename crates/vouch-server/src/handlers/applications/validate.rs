@@ -43,6 +43,21 @@ pub(crate) enum AppValidationError {
     FapiRequiresConfidentialClient,
     FapiMissingJwks,
     AuthMethodMissingJwks,
+    /// `token_endpoint_auth_method` is not one a console application may
+    /// choose: `client_secret_basic` or `private_key_jwt`.
+    InvalidAuthMethod(String),
+    /// Only web and service applications choose how they authenticate;
+    /// native and SPA applications are public clients.
+    AuthMethodRequiresConfidentialClient,
+    /// FAPI 2.0 applications authenticate with `private_key_jwt`, never a
+    /// shared secret.
+    FapiSecretAuthUnsupported,
+    /// A standard-profile application chose `private_key_jwt` without a
+    /// `jwks` or `jwks_uri`.
+    PrivateKeyJwtMissingJwks,
+    /// A standard-profile `private_key_jwt` application's inline JWKS has no
+    /// key usable for any client-assertion algorithm.
+    PrivateKeyJwtNoUsableKey,
     FapiDowngradeUnsupported,
     FapiJwksNoAllowedAlgorithm,
     /// RFC 9101 §4: the submitted JWKS holds no key the Request Object
@@ -71,7 +86,13 @@ impl AppValidationError {
             Self::InvalidPostLogoutRedirectUris(_) => "invalid_post_logout_redirect_uris",
             Self::InvalidResourceUri { .. } => "invalid_resource_uri",
             Self::FapiRequiresConfidentialClient => "invalid_fapi_profile",
-            Self::FapiMissingJwks | Self::AuthMethodMissingJwks => "missing_jwks",
+            Self::FapiMissingJwks
+            | Self::AuthMethodMissingJwks
+            | Self::PrivateKeyJwtMissingJwks => "missing_jwks",
+            Self::InvalidAuthMethod(_)
+            | Self::AuthMethodRequiresConfidentialClient
+            | Self::FapiSecretAuthUnsupported => "invalid_token_endpoint_auth_method",
+            Self::PrivateKeyJwtNoUsableKey => "jwks_algorithm_unsupported",
             Self::FapiDowngradeUnsupported => "fapi_downgrade_unsupported",
             Self::FapiJwksNoAllowedAlgorithm => "fapi_jwks_algorithm_unsupported",
             Self::RequestObjectJwksNoKeyForAlg { .. } => {
@@ -126,6 +147,31 @@ impl AppValidationError {
                 "This application authenticates with a method that requires key material \
                  (private_key_jwt or self_signed_tls_client_auth), so it must keep a jwks or \
                  jwks_uri. Provide one, or change its authentication method first."
+                    .to_string()
+            }
+            Self::InvalidAuthMethod(m) => format!(
+                "Invalid token_endpoint_auth_method '{m}'. \
+                 Valid values: client_secret_basic, private_key_jwt"
+            ),
+            Self::AuthMethodRequiresConfidentialClient => {
+                "Only web and service applications choose a token_endpoint_auth_method; \
+                 native and SPA applications are public clients"
+                    .to_string()
+            }
+            Self::FapiSecretAuthUnsupported => {
+                "FAPI 2.0 applications authenticate with private_key_jwt; \
+                 client_secret_basic is not allowed"
+                    .to_string()
+            }
+            Self::PrivateKeyJwtMissingJwks => {
+                "private_key_jwt authentication requires jwks or jwks_uri".to_string()
+            }
+            Self::PrivateKeyJwtNoUsableKey => {
+                "private_key_jwt requires a JWKS key usable with ES256, RS256, PS256, or EdDSA \
+                 (RFC 7523 client-assertion signing). None of the configured keys are usable: \
+                 each either declares an alg outside that set, has a kty the signing-key \
+                 matcher can't select for those algorithms, or is marked for a non-signing \
+                 use. Add a compatible key, or adjust an existing one's alg/kty/use."
                     .to_string()
             }
             Self::FapiDowngradeUnsupported => {
@@ -204,6 +250,15 @@ impl AppValidationError {
             }
             Self::FapiMissingJwks => Tr::new("apps-invalid-fapi-missing-jwks"),
             Self::AuthMethodMissingJwks => Tr::new("apps-invalid-auth-method-missing-jwks"),
+            Self::InvalidAuthMethod(m) => {
+                Tr::new("apps-invalid-auth-method").arg("method", m.clone())
+            }
+            Self::AuthMethodRequiresConfidentialClient => {
+                Tr::new("apps-invalid-auth-method-confidential-required")
+            }
+            Self::FapiSecretAuthUnsupported => Tr::new("apps-invalid-fapi-secret-auth"),
+            Self::PrivateKeyJwtMissingJwks => Tr::new("apps-invalid-pkjwt-missing-jwks"),
+            Self::PrivateKeyJwtNoUsableKey => Tr::new("apps-invalid-pkjwt-jwks-algorithm"),
             Self::FapiDowngradeUnsupported => Tr::new("apps-invalid-fapi-downgrade"),
             Self::FapiJwksNoAllowedAlgorithm => Tr::new("apps-invalid-fapi-jwks-algorithm"),
             Self::RequestObjectJwksNoKeyForAlg { alg, kty } => {
@@ -236,6 +291,10 @@ pub(crate) struct CreateAppInput<'a> {
     pub post_logout_redirect_uris: Option<&'a [String]>,
     pub access_scope: Option<&'a str>,
     pub fapi_profile: Option<&'a str>,
+    /// `client_secret_basic` or `private_key_jwt`; absent or empty takes the
+    /// default for the application type and profile (see
+    /// [`create_auth_method`]).
+    pub token_endpoint_auth_method: Option<&'a str>,
     pub jwks: Option<&'a str>,
     pub jwks_uri: Option<&'a str>,
 }
@@ -248,8 +307,15 @@ pub(crate) struct ValidatedCreateApp<'a> {
     pub app_type: OAuthClientType,
     pub access_scope: AccessScope,
     pub is_fapi: bool,
+    /// How the application authenticates at the token endpoint. Decided here,
+    /// independently of [`Self::is_fapi`]: a standard-profile web or service
+    /// application may authenticate with a key without taking on the FAPI
+    /// profile's DPoP/mTLS-bound tokens.
+    pub token_endpoint_auth_method: TokenEndpointAuthMethod,
     /// RFC 7591 §2 key material: a parsed inline JWKS with a non-empty `keys`
-    /// array, or a trimmed https JWKS URI. Never both.
+    /// array, or a trimmed https JWKS URI. Never both. Present only when
+    /// [`Self::token_endpoint_auth_method`] is `private_key_jwt`; key material
+    /// submitted with any other method is not kept.
     pub keys: Option<ClientKeys>,
     /// Grants this application may use, derived from [`Self::app_type`] — the
     /// creation form has no grant-types input, so the type is the operator's
@@ -313,12 +379,21 @@ pub(crate) fn validate_create_application<'a>(
         return Err(AppValidationError::FapiRequiresConfidentialClient);
     }
 
+    let token_endpoint_auth_method =
+        create_auth_method(input.token_endpoint_auth_method, app_type, is_fapi)?;
+    let uses_keys = token_endpoint_auth_method == TokenEndpointAuthMethod::PrivateKeyJwt;
+
     let jwks_trimmed = trim_nonempty(input.jwks);
     let jwks_uri = trim_nonempty(input.jwks_uri);
 
-    // FAPI validation: require JWKS or JWKS URI
-    if is_fapi && jwks_trimmed.is_none() && jwks_uri.is_none() {
-        return Err(AppValidationError::FapiMissingJwks);
+    // private_key_jwt authenticates with the client's key and has no secret to
+    // fall back on: require JWKS or JWKS URI.
+    if uses_keys && jwks_trimmed.is_none() && jwks_uri.is_none() {
+        return Err(if is_fapi {
+            AppValidationError::FapiMissingJwks
+        } else {
+            AppValidationError::PrivateKeyJwtMissingJwks
+        });
     }
 
     let jwks = jwks_trimmed.map(parse_jwks).transpose()?;
@@ -326,16 +401,30 @@ pub(crate) fn validate_create_application<'a>(
 
     let keys = client_keys(jwks, jwks_uri)?;
 
-    // FAPI validation: an inline JWKS must have at least one key the
-    // FAPI_ALLOWED validator can actually select (see JwkSet::has_fapi_allowed_key).
-    // A jwks_uri can't be inspected synchronously, so this only guards the
+    // An inline JWKS must have at least one key the client-assertion validator
+    // for this profile can actually select (see JwkSet::has_key_for): the
+    // FAPI_ALLOWED set for FAPI, CLIENT_ASSERTION_ALLOWED otherwise. A
+    // jwks_uri can't be inspected synchronously, so this only guards the
     // inline case; the same is true of validate_update_fapi.
-    if is_fapi
-        && let Some(set) = keys.as_ref().and_then(ClientKeys::inline)
-        && !set.has_fapi_allowed_key()
-    {
-        return Err(AppValidationError::FapiJwksNoAllowedAlgorithm);
+    if uses_keys && let Some(set) = keys.as_ref().and_then(ClientKeys::inline) {
+        let profile = if is_fapi {
+            FapiProfile::Fapi2Security
+        } else {
+            FapiProfile::None
+        };
+        let usable = profile
+            .client_assertion_algorithms()
+            .iter()
+            .any(|alg| set.has_key_for(*alg));
+        if !usable {
+            return Err(if is_fapi {
+                AppValidationError::FapiJwksNoAllowedAlgorithm
+            } else {
+                AppValidationError::PrivateKeyJwtNoUsableKey
+            });
+        }
     }
+    let keys = if uses_keys { keys } else { None };
 
     let grant_types: Vec<String> = app_type
         .default_grant_types()
@@ -356,10 +445,56 @@ pub(crate) fn validate_create_application<'a>(
         app_type,
         access_scope,
         is_fapi,
+        token_endpoint_auth_method,
         keys,
         grant_types,
         response_types,
     })
+}
+
+/// The token endpoint auth method a new application is created with.
+///
+/// A console application may ask for `client_secret_basic` or
+/// `private_key_jwt`; absent or empty takes the default. The FAPI profile
+/// fixes the method to `private_key_jwt`, and only web and service
+/// applications (confidential clients) choose at all. The method is decided
+/// here rather than derived from the profile so that a standard-profile
+/// application can authenticate with a key without the profile's
+/// sender-constrained tokens, which a relying party that forwards tokens to a
+/// bearer-only API cannot use.
+fn create_auth_method(
+    requested: Option<&str>,
+    app_type: OAuthClientType,
+    is_fapi: bool,
+) -> Result<TokenEndpointAuthMethod, AppValidationError> {
+    let requested = match trim_nonempty(requested) {
+        None => None,
+        Some(value) => match value.parse::<TokenEndpointAuthMethod>() {
+            Ok(
+                method @ (TokenEndpointAuthMethod::ClientSecretBasic
+                | TokenEndpointAuthMethod::PrivateKeyJwt),
+            ) => Some(method),
+            _ => return Err(AppValidationError::InvalidAuthMethod(value.to_string())),
+        },
+    };
+    if is_fapi {
+        return match requested {
+            None | Some(TokenEndpointAuthMethod::PrivateKeyJwt) => {
+                Ok(TokenEndpointAuthMethod::PrivateKeyJwt)
+            }
+            Some(_) => Err(AppValidationError::FapiSecretAuthUnsupported),
+        };
+    }
+    if !app_type.requires_secret() {
+        // RFC 7591 §2 (https://www.rfc-editor.org/rfc/rfc7591#section-2):
+        // > "none": The client is a public client as defined in OAuth 2.0,
+        // > Section 2.1, and does not have a client secret.
+        return match requested {
+            None => Ok(TokenEndpointAuthMethod::None),
+            Some(_) => Err(AppValidationError::AuthMethodRequiresConfidentialClient),
+        };
+    }
+    Ok(requested.unwrap_or(TokenEndpointAuthMethod::ClientSecretBasic))
 }
 
 /// Pair the two key parameters into the one value the rest of the code takes.
@@ -627,8 +762,9 @@ pub(crate) struct CreateAppContext<'a> {
 /// Build the [`CreateOAuthClientParams`] for a manually registered
 /// application (API or web form).
 ///
-/// FAPI 2.0 clients get `private_key_jwt` authentication, their validated
-/// JWKS, and DPoP-bound access tokens wired at creation time. All fields not
+/// The auth method and key material come from validation (FAPI 2.0 clients
+/// always get `private_key_jwt`; a standard-profile client may choose it), and
+/// FAPI 2.0 clients also get DPoP-bound access tokens wired at creation time. All fields not
 /// derived from the validated input or the caller context are fixed for
 /// manual registration (RFC 7591 dynamic registration is a separate
 /// subsystem with its own defaults).
@@ -646,21 +782,8 @@ pub(crate) fn build_create_params<'a>(
         access_scope: ctx.access_scope,
         org_id: ctx.org_id,
         resource_uris: ctx.resource_uris,
-        // RFC 7591 §2 (https://www.rfc-editor.org/rfc/rfc7591#section-2):
-        // > "none": The client is a public client as defined in OAuth 2.0,
-        // > Section 2.1, and does not have a client secret.
-        token_endpoint_auth_method: if is_fapi {
-            TokenEndpointAuthMethod::PrivateKeyJwt
-        } else if validated.app_type.requires_secret() {
-            TokenEndpointAuthMethod::ClientSecretBasic
-        } else {
-            TokenEndpointAuthMethod::None
-        },
-        keys: if is_fapi {
-            validated.keys.as_ref()
-        } else {
-            None
-        },
+        token_endpoint_auth_method: validated.token_endpoint_auth_method,
+        keys: validated.keys.as_ref(),
         fapi_profile: if is_fapi {
             Some(FapiProfile::Fapi2Security)
         } else {
@@ -871,6 +994,7 @@ mod tests {
             post_logout_redirect_uris: None,
             access_scope: None,
             fapi_profile: Some("fapi2_security"),
+            token_endpoint_auth_method: None,
             jwks: Some(&jwks),
             jwks_uri: None,
         })
@@ -913,6 +1037,7 @@ mod tests {
             post_logout_redirect_uris: None,
             access_scope: None,
             fapi_profile: None,
+            token_endpoint_auth_method: None,
             jwks: Some(&jwks),
             jwks_uri: None,
         })
@@ -941,6 +1066,250 @@ mod tests {
         assert!(params.keys.and_then(ClientKeys::uri).is_none());
     }
 
+    fn ctx<'a>(redirect_uris: &'a [String]) -> CreateAppContext<'a> {
+        CreateAppContext {
+            user_id: "user-1",
+            description: None,
+            redirect_uris,
+            resource_uris: &[],
+            post_logout_redirect_uris: None,
+            access_scope: AccessScope::Personal,
+            org_id: None,
+        }
+    }
+
+    fn auth_input<'a>(
+        application_type: &'a str,
+        redirect_uris: &'a [String],
+        fapi_profile: Option<&'a str>,
+        token_endpoint_auth_method: Option<&'a str>,
+        jwks: Option<&'a str>,
+    ) -> CreateAppInput<'a> {
+        CreateAppInput {
+            name: "App",
+            application_type,
+            redirect_uris,
+            resource_uris: &[],
+            post_logout_redirect_uris: None,
+            access_scope: None,
+            fapi_profile,
+            token_endpoint_auth_method,
+            jwks,
+            jwks_uri: None,
+        }
+    }
+
+    // A standard-profile web application may authenticate with a key without
+    // taking on the FAPI profile: private_key_jwt with its keys, no FAPI
+    // profile, and no DPoP binding, so its tokens stay bearer tokens.
+    #[test]
+    fn create_params_standard_private_key_jwt() {
+        let redirect_uris = vec!["https://example.com/cb".to_string()];
+        let jwks = fapi_jwks_json();
+        let validated = validate_create_application(auth_input(
+            "web",
+            &redirect_uris,
+            None,
+            Some("private_key_jwt"),
+            Some(&jwks),
+        ))
+        .expect("valid standard private_key_jwt input");
+
+        let params = build_create_params(&validated, ctx(&redirect_uris));
+
+        assert_eq!(
+            params.token_endpoint_auth_method,
+            TokenEndpointAuthMethod::PrivateKeyJwt
+        );
+        assert!(params.keys.is_some(), "the key set must be stored");
+        assert_eq!(params.fapi_profile, None, "no FAPI profile");
+        assert_eq!(params.dpop_bound_access_tokens, None, "no DPoP binding");
+        assert_eq!(params.tls_client_certificate_bound_access_tokens, None);
+    }
+
+    // The same for a service application, with the key set given by URI.
+    #[test]
+    fn create_params_standard_private_key_jwt_service_with_jwks_uri() {
+        let validated = validate_create_application(CreateAppInput {
+            jwks_uri: Some("https://client.example/jwks.json"),
+            ..auth_input("service", &[], Some(""), Some("private_key_jwt"), None)
+        })
+        .expect("valid service private_key_jwt input");
+
+        let params = build_create_params(&validated, ctx(&[]));
+
+        assert_eq!(
+            params.token_endpoint_auth_method,
+            TokenEndpointAuthMethod::PrivateKeyJwt
+        );
+        assert_eq!(
+            params.keys.and_then(ClientKeys::uri),
+            Some("https://client.example/jwks.json")
+        );
+        assert_eq!(params.fapi_profile, None);
+    }
+
+    #[test]
+    fn create_explicit_client_secret_basic_matches_the_default() {
+        let redirect_uris = vec!["https://example.com/cb".to_string()];
+        for method in [None, Some(""), Some("client_secret_basic")] {
+            let validated =
+                validate_create_application(auth_input("web", &redirect_uris, None, method, None))
+                    .expect("valid secret input");
+            assert_eq!(
+                validated.token_endpoint_auth_method,
+                TokenEndpointAuthMethod::ClientSecretBasic,
+                "method {method:?}"
+            );
+            assert!(validated.keys.is_none());
+        }
+    }
+
+    #[test]
+    fn create_standard_private_key_jwt_requires_keys() {
+        let redirect_uris = vec!["https://example.com/cb".to_string()];
+        let err = validate_create_application(auth_input(
+            "web",
+            &redirect_uris,
+            None,
+            Some("private_key_jwt"),
+            None,
+        ))
+        .expect_err("private_key_jwt without keys must be rejected");
+        assert!(matches!(err, AppValidationError::PrivateKeyJwtMissingJwks));
+        assert_eq!(err.code(), "missing_jwks");
+    }
+
+    // The standard profile verifies client assertions with
+    // CLIENT_ASSERTION_ALLOWED, which includes RS256; FAPI does not.
+    #[test]
+    fn create_standard_private_key_jwt_accepts_rs256_only_key() {
+        let redirect_uris = vec!["https://example.com/cb".to_string()];
+        let jwks =
+            serde_json::json!({"keys": [{"kty": "RSA", "alg": "RS256", "n": "n", "e": "AQAB"}]})
+                .to_string();
+
+        let validated = validate_create_application(auth_input(
+            "web",
+            &redirect_uris,
+            None,
+            Some("private_key_jwt"),
+            Some(&jwks),
+        ))
+        .expect("an RS256 key is usable for a standard client");
+        assert!(validated.keys.is_some());
+
+        let err = validate_create_application(auth_input(
+            "web",
+            &redirect_uris,
+            Some("fapi2_security"),
+            Some("private_key_jwt"),
+            Some(&jwks),
+        ))
+        .expect_err("FAPI excludes RS256");
+        assert!(matches!(
+            err,
+            AppValidationError::FapiJwksNoAllowedAlgorithm
+        ));
+    }
+
+    #[test]
+    fn create_standard_private_key_jwt_rejects_jwks_with_no_signing_key() {
+        let redirect_uris = vec!["https://example.com/cb".to_string()];
+        let jwks =
+            serde_json::json!({"keys": [{"kty": "EC", "crv": "P-256", "use": "enc"}]}).to_string();
+        let err = validate_create_application(auth_input(
+            "web",
+            &redirect_uris,
+            None,
+            Some("private_key_jwt"),
+            Some(&jwks),
+        ))
+        .expect_err("a key set with no signing key cannot authenticate");
+        assert!(matches!(err, AppValidationError::PrivateKeyJwtNoUsableKey));
+    }
+
+    #[test]
+    fn create_fapi_refuses_client_secret_basic() {
+        let redirect_uris = vec!["https://example.com/cb".to_string()];
+        let jwks = fapi_jwks_json();
+        let err = validate_create_application(auth_input(
+            "web",
+            &redirect_uris,
+            Some("fapi2_security"),
+            Some("client_secret_basic"),
+            Some(&jwks),
+        ))
+        .expect_err("FAPI never authenticates with a secret");
+        assert!(matches!(err, AppValidationError::FapiSecretAuthUnsupported));
+
+        // Naming the method FAPI uses anyway is accepted.
+        let validated = validate_create_application(auth_input(
+            "web",
+            &redirect_uris,
+            Some("fapi2_security"),
+            Some("private_key_jwt"),
+            Some(&jwks),
+        ))
+        .expect("FAPI with private_key_jwt");
+        assert_eq!(
+            validated.token_endpoint_auth_method,
+            TokenEndpointAuthMethod::PrivateKeyJwt
+        );
+    }
+
+    #[test]
+    fn create_public_clients_cannot_choose_an_auth_method() {
+        let redirect_uris = vec!["https://example.com/cb".to_string()];
+        let jwks = fapi_jwks_json();
+        for app_type in ["spa", "native"] {
+            for method in ["private_key_jwt", "client_secret_basic"] {
+                let err = validate_create_application(auth_input(
+                    app_type,
+                    &redirect_uris,
+                    None,
+                    Some(method),
+                    Some(&jwks),
+                ))
+                .expect_err("public clients have no authentication method to choose");
+                assert!(
+                    matches!(
+                        err,
+                        AppValidationError::AuthMethodRequiresConfidentialClient
+                    ),
+                    "{app_type} {method}"
+                );
+            }
+            let validated =
+                validate_create_application(auth_input(app_type, &redirect_uris, None, None, None))
+                    .expect("public client default");
+            assert_eq!(
+                validated.token_endpoint_auth_method,
+                TokenEndpointAuthMethod::None
+            );
+        }
+    }
+
+    #[test]
+    fn create_rejects_auth_methods_the_console_does_not_offer() {
+        let redirect_uris = vec!["https://example.com/cb".to_string()];
+        for method in ["none", "client_secret_post", "tls_client_auth", "bogus"] {
+            let err = validate_create_application(auth_input(
+                "web",
+                &redirect_uris,
+                None,
+                Some(method),
+                None,
+            ))
+            .expect_err("method must be rejected");
+            assert!(
+                matches!(&err, AppValidationError::InvalidAuthMethod(m) if m == method),
+                "{method}"
+            );
+            assert_eq!(err.code(), "invalid_token_endpoint_auth_method");
+        }
+    }
+
     #[test]
     fn create_params_public_types_get_auth_method_none() {
         let redirect_uris = vec!["https://app.example.com/cb".to_string()];
@@ -953,6 +1322,7 @@ mod tests {
                 post_logout_redirect_uris: None,
                 access_scope: None,
                 fapi_profile: None,
+                token_endpoint_auth_method: None,
                 jwks: None,
                 jwks_uri: None,
             })
@@ -991,6 +1361,7 @@ mod tests {
             post_logout_redirect_uris: Some(&post_logout),
             access_scope: None,
             fapi_profile: None,
+            token_endpoint_auth_method: None,
             jwks: None,
             jwks_uri: None,
         })
@@ -1715,6 +2086,7 @@ mod tests {
             post_logout_redirect_uris: None,
             access_scope: None,
             fapi_profile: Some("fapi2_security"),
+            token_endpoint_auth_method: None,
             jwks: Some(&jwks),
             jwks_uri: None,
         })
@@ -1734,6 +2106,7 @@ mod tests {
             post_logout_redirect_uris: None,
             access_scope: None,
             fapi_profile: Some("fapi2_security"),
+            token_endpoint_auth_method: None,
             jwks: Some(&jwks),
             jwks_uri: None,
         })
@@ -1752,6 +2125,7 @@ mod tests {
             post_logout_redirect_uris: None,
             access_scope: None,
             fapi_profile: Some("fapi2_security"),
+            token_endpoint_auth_method: None,
             jwks: Some(&jwks),
             jwks_uri: None,
         })
@@ -2135,6 +2509,7 @@ mod tests {
             post_logout_redirect_uris: None,
             access_scope,
             fapi_profile,
+            token_endpoint_auth_method: None,
             jwks: None,
             jwks_uri: None,
         }
@@ -2217,6 +2592,7 @@ mod tests {
             post_logout_redirect_uris: None,
             access_scope: None,
             fapi_profile: None,
+            token_endpoint_auth_method: None,
             jwks: Some(&jwks),
             jwks_uri: None,
         })

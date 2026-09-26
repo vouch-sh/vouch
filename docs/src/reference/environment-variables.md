@@ -163,7 +163,9 @@ Vouch supports loading configuration from an S3 object for centralized managemen
 The signing algorithm allowed for a client's assertion depends on its FAPI 2.0 profile, not
 just this lifetime bound. Applications with `fapi_profile = fapi2_security` may only sign
 assertions with ES256, PS256, or EdDSA (FAPI 2.0 Section 5.4.1); other applications may
-additionally use RS256. Discovery's `token_endpoint_auth_signing_alg_values_supported`
+additionally use RS256. That includes standard-profile applications created in the console with
+private key authentication (`token_endpoint_auth_method = private_key_jwt` without the FAPI
+profile), whose access tokens stay bearer tokens. Discovery's `token_endpoint_auth_signing_alg_values_supported`
 advertises the full four-algorithm union — an application's own profile determines which of
 those it may actually use. Setting `fapi_profile = fapi2_security` on an application whose
 JWKS keys are all pinned to an algorithm outside that set (e.g. every key declares
