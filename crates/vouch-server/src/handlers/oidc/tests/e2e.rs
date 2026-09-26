@@ -2,6 +2,7 @@
 //! End-to-end flows, regression tests, and scope conformance tests.
 
 use super::helpers::*;
+use crate::{db, handlers};
 
 // ========================================================================
 // Regression Tests
@@ -20,8 +21,8 @@ async fn test_client_secret_hash_roundtrip() {
     // The test helper uses hash_token() (base64url). Validate that
     // db::validate_oauth_client_credentials finds the secret when we
     // hash the plaintext secret with the same function.
-    let secret_hash = crate::handlers::hash_token(&client.client_secret);
-    let result = crate::db::validate_oauth_client_credentials(
+    let secret_hash = handlers::hash_token(&client.client_secret);
+    let result = db::validate_oauth_client_credentials(
         &state.store,
         &client.client_id,
         &secret_hash,

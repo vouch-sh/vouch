@@ -8,6 +8,9 @@
 )]
 
 use super::*;
+use crate::db::{CreateScimUserError, InvalidIndexValue};
+use crate::handlers::scim::urn::RESOURCE_SCHEMAS;
+use crate::handlers::scim::{groups, users};
 
 // ========================================================================
 // RFC 7644 Section 4 - Service Provider Configuration Tests
@@ -219,10 +222,10 @@ async fn error_body(resp: axum::response::Response) -> serde_json::Value {
 
 #[tokio::test]
 async fn create_error_domain_not_owned_maps_to_400_invalid_value() {
-    let resp = crate::handlers::scim::users::create_scim_user_error_response(
+    let resp = users::create_scim_user_error_response(
         "org-1",
         "a@b.example",
-        crate::db::CreateScimUserError::DomainNotOwned,
+        CreateScimUserError::DomainNotOwned,
     );
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let body = error_body(resp).await;
@@ -231,10 +234,10 @@ async fn create_error_domain_not_owned_maps_to_400_invalid_value() {
 
 #[tokio::test]
 async fn create_error_duplicate_email_maps_to_409_uniqueness() {
-    let resp = crate::handlers::scim::users::create_scim_user_error_response(
+    let resp = users::create_scim_user_error_response(
         "org-1",
         "a@b.example",
-        crate::db::CreateScimUserError::DuplicateEmail,
+        CreateScimUserError::DuplicateEmail,
     );
     assert_eq!(resp.status(), StatusCode::CONFLICT);
     let body = error_body(resp).await;
@@ -246,10 +249,10 @@ async fn create_error_duplicate_email_maps_to_409_uniqueness() {
 /// client must see 503 + Retry-After so IdP provisioners retry, not 500.
 #[tokio::test]
 async fn create_error_occ_conflict_maps_to_503_with_retry_after() {
-    let resp = crate::handlers::scim::users::create_scim_user_error_response(
+    let resp = users::create_scim_user_error_response(
         "org-1",
         "a@b.example",
-        crate::db::CreateScimUserError::OccConflict,
+        CreateScimUserError::OccConflict,
     );
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(
@@ -265,10 +268,10 @@ async fn create_error_occ_conflict_maps_to_503_with_retry_after() {
 
 #[tokio::test]
 async fn create_error_other_maps_to_500() {
-    let resp = crate::handlers::scim::users::create_scim_user_error_response(
+    let resp = users::create_scim_user_error_response(
         "org-1",
         "a@b.example",
-        crate::db::CreateScimUserError::Other(anyhow::anyhow!("db down")),
+        CreateScimUserError::Other(anyhow::anyhow!("db down")),
     );
     assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
 }
@@ -287,7 +290,7 @@ async fn create_error_other_maps_to_500() {
 async fn create_group_error_infrastructure_maps_to_500() {
     // A generic infrastructure error (e.g. DB connection refused) must surface
     // as 500, not 409 CONFLICT, and must not carry a `uniqueness` scimType.
-    let resp = crate::handlers::scim::groups::create_scim_group_error_response(anyhow::anyhow!(
+    let resp = groups::create_scim_group_error_response(anyhow::anyhow!(
         "sqlx::Error::PoolTimedOut: queue limit reached"
     ));
     assert_eq!(
@@ -310,10 +313,10 @@ async fn create_group_error_infrastructure_maps_to_500() {
 #[tokio::test]
 async fn create_group_error_invalid_index_value_maps_to_400() {
     // A NUL-byte index value is a client error (400 invalidValue), not a 500.
-    let err = anyhow::Error::from(crate::db::InvalidIndexValue {
+    let err = anyhow::Error::from(InvalidIndexValue {
         field: "display_name",
     });
-    let resp = crate::handlers::scim::groups::create_scim_group_error_response(err);
+    let resp = groups::create_scim_group_error_response(err);
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let body = error_body(resp).await;
     assert_eq!(body["status"], "400");
@@ -334,7 +337,7 @@ async fn create_group_error_invalid_index_value_maps_to_400() {
 /// an infrastructure failure — never a duplicate group.
 #[tokio::test]
 async fn create_group_error_unique_string_still_maps_to_500() {
-    let resp = crate::handlers::scim::groups::create_scim_group_error_response(anyhow::anyhow!(
+    let resp = groups::create_scim_group_error_response(anyhow::anyhow!(
         "UNIQUE constraint failed: document_indexes.index_value"
     ));
     assert_eq!(
@@ -409,7 +412,7 @@ async fn advertised_resource_type_endpoints_are_routed() {
 
     // Unauthenticated: a 401 proves the route exists just as well as a 200,
     // and avoids minting a token to answer a routing question.
-    for resource in crate::handlers::scim::urn::RESOURCE_SCHEMAS {
+    for resource in RESOURCE_SCHEMAS {
         let path = format!("/scim/v2{}", resource.endpoint);
         let (status, _) = http_get(&app, &path, &[]).await;
         assert_ne!(
@@ -437,7 +440,7 @@ async fn schemas_endpoint_lists_every_emitted_resource_schema() {
         .filter_map(|r| r["id"].as_str())
         .collect();
 
-    for resource in crate::handlers::scim::urn::RESOURCE_SCHEMAS {
+    for resource in RESOURCE_SCHEMAS {
         assert!(
             ids.contains(&resource.id),
             "/Schemas does not list {}, which the handlers emit; listed: {ids:?}",
@@ -477,7 +480,7 @@ async fn schemas_endpoint_total_results_matches_resources_length() {
         .as_u64()
         .expect("startIndex is a number");
 
-    let expected = crate::handlers::scim::urn::RESOURCE_SCHEMAS.len() as u64;
+    let expected = RESOURCE_SCHEMAS.len() as u64;
     assert_eq!(
         total_results, expected,
         "/Schemas totalResults must equal RESOURCE_SCHEMAS.len()"
@@ -511,7 +514,7 @@ async fn resource_types_endpoint_total_results_matches_resources_length() {
         .as_u64()
         .expect("startIndex is a number");
 
-    let expected = crate::handlers::scim::urn::RESOURCE_SCHEMAS.len() as u64;
+    let expected = RESOURCE_SCHEMAS.len() as u64;
     assert_eq!(
         total_results, expected,
         "/ResourceTypes totalResults must equal RESOURCE_SCHEMAS.len()"
@@ -529,7 +532,7 @@ async fn resource_types_endpoint_total_results_matches_resources_length() {
     // rooted at this server's base_url, and carry the schema its handler
     // emits — the two fields `/ResourceTypes` exists to advertise.
     let base_url = &state.config().base_url;
-    for resource in crate::handlers::scim::urn::RESOURCE_SCHEMAS {
+    for resource in RESOURCE_SCHEMAS {
         let entry = resources
             .iter()
             .find(|r| r["schema"] == resource.id)

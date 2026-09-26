@@ -7,12 +7,18 @@
 )]
 
 use super::*;
+use crate::crypto::jwk::Jwk;
+use crate::crypto::keys::OidcSigningKey;
 use crate::db::store::GetUserByIdTestHook;
-use crate::test_utils::test_arrival;
+use crate::db::{
+    self, AuditEvent, AuditEventFilter, DeviceAuthState, OidcState, OidcStateClaim, User,
+};
+use crate::services::idp::oidc::OidcProvider;
+use crate::services::idp::{ConfiguredIdp, ConfiguredOidcProvider};
 use crate::test_utils::{
-    TestSessionSpec, build_test_app_state, create_test_authenticator, create_test_session_with,
-    create_test_user, http_delete_full, http_get_full, http_post_json, test_app, test_app_state,
-    test_app_with_modify_hook, test_config, test_domain,
+    self, TestSessionSpec, build_test_app_state, create_test_authenticator,
+    create_test_session_with, create_test_user, http_delete_full, http_get_full, http_post_json,
+    test_app, test_app_state, test_app_with_modify_hook, test_arrival, test_config, test_domain,
 };
 use axum::http::StatusCode;
 use base64::Engine;
@@ -263,7 +269,7 @@ async fn test_browser_register_complete_rejects_replayed_state() {
 
     // Pre-consume the state token to simulate prior use.
     let expires_at = jiff::Timestamp::from_second(exp).expect("valid exp");
-    let _claim = crate::db::consume_challenge_state_for_test(&state.store, &state_jwt, expires_at)
+    let _claim = db::consume_challenge_state_for_test(&state.store, &state_jwt, expires_at)
         .await
         .expect("pre-consume must succeed");
 
@@ -385,7 +391,7 @@ async fn test_oidc_callback_rejects_replayed_state() {
 
     // Seed a fresh OIDC state row + the device-auth row it FKs to.
     let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().expect("valid timestamp");
-    let device_auth_id = crate::db::create_device_auth_request(
+    let device_auth_id = db::create_device_auth_request(
         &state.store,
         "callback-replay-device-hash",
         "CBRP-CODE",
@@ -397,7 +403,7 @@ async fn test_oidc_callback_rejects_replayed_state() {
     .expect("create_device_auth_request");
 
     let oidc_state_value = "callback-replay-state-12345";
-    crate::db::create_oidc_state(
+    db::create_oidc_state(
         &state.store,
         oidc_state_value,
         Some(&device_auth_id),
@@ -410,10 +416,9 @@ async fn test_oidc_callback_rejects_replayed_state() {
     .expect("create_oidc_state");
 
     // Pre-consume to simulate a successful prior callback.
-    let _claim =
-        crate::db::try_consume_oidc_state(&state.store, oidc_state_value, jiff::Timestamp::now())
-            .await
-            .expect("pre-consume must succeed");
+    let _claim = db::try_consume_oidc_state(&state.store, oidc_state_value, jiff::Timestamp::now())
+        .await
+        .expect("pre-consume must succeed");
 
     // Submit the callback with the now-consumed state. The handler
     // calls `try_consume_oidc_state` first, which returns
@@ -453,7 +458,7 @@ async fn test_oidc_callback_rejects_replayed_state() {
 // happens.
 
 /// Build a `ConfiguredOidcProvider` whose endpoints point at `issuer`.
-fn mock_oidc_provider(issuer: &str) -> crate::services::idp::ConfiguredIdp {
+fn mock_oidc_provider(issuer: &str) -> ConfiguredIdp {
     use crate::services::idp::ConfiguredIdp;
     use crate::services::idp::oidc::{ConfiguredOidcProvider, OidcProvider};
     use secrecy::SecretString;
@@ -478,7 +483,7 @@ fn mock_oidc_provider(issuer: &str) -> crate::services::idp::ConfiguredIdp {
 /// endpoint returns).
 async fn mount_mock_oidc_idp(
     server: &wiremock::MockServer,
-    key: &crate::crypto::keys::OidcSigningKey,
+    key: &OidcSigningKey,
     id_token: String,
 ) {
     use wiremock::matchers::{method, path};
@@ -486,7 +491,7 @@ async fn mount_mock_oidc_idp(
 
     // JWKS endpoint (mirrors the helper in services/idp/oidc/tests.rs).
     let jwk = key.public_key_jwk().expect("public_key_jwk should succeed");
-    let jwks_json = serde_json::json!({ "keys": [crate::crypto::jwk::Jwk::Ec(jwk)] }).to_string();
+    let jwks_json = serde_json::json!({ "keys": [Jwk::Ec(jwk)] }).to_string();
     Mock::given(method("GET"))
         .and(path("/jwks"))
         .respond_with(ResponseTemplate::new(200).set_body_string(jwks_json))
@@ -528,7 +533,7 @@ async fn test_oidc_callback_rejects_whitespace_domain_email_e2e() {
     // localhost is allowed by the discovery/JWKS fetcher.
     let server = wiremock::MockServer::start().await;
     let issuer = server.uri();
-    let key = crate::crypto::keys::OidcSigningKey::generate().expect("generate signing key");
+    let key = OidcSigningKey::generate().expect("generate signing key");
     let nonce = "e2e-ws-domain-nonce";
     let id_token = key
         .sign_jwt(&id_token_claims(
@@ -553,7 +558,7 @@ async fn test_oidc_callback_rejects_whitespace_domain_email_e2e() {
     // match the mock IdP slug; nonce must match the ID token's.
     let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().expect("valid timestamp");
     let state_value = "e2e-ws-domain-state";
-    crate::db::create_oidc_state(
+    db::create_oidc_state(
         &state.store,
         state_value,
         None,
@@ -582,7 +587,7 @@ async fn test_oidc_callback_rejects_whitespace_domain_email_e2e() {
         StatusCode::OK,
         "E2E: whitespace-domain email rejected on the OIDC callback path; got {status}: {body}"
     );
-    let user = crate::db::get_user_by_email(&state.store, "foo@bar .com")
+    let user = db::get_user_by_email(&state.store, "foo@bar .com")
         .await
         .expect("db query ok");
     assert!(
@@ -597,7 +602,7 @@ async fn test_oidc_callback_accepts_well_formed_email_e2e() {
 
     let server = wiremock::MockServer::start().await;
     let issuer = server.uri();
-    let key = crate::crypto::keys::OidcSigningKey::generate().expect("generate signing key");
+    let key = OidcSigningKey::generate().expect("generate signing key");
     let nonce = "e2e-good-email-nonce";
     let id_token = key
         .sign_jwt(&id_token_claims(
@@ -619,7 +624,7 @@ async fn test_oidc_callback_accepts_well_formed_email_e2e() {
 
     let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().expect("valid timestamp");
     let state_value = "e2e-good-email-state";
-    crate::db::create_oidc_state(
+    db::create_oidc_state(
         &state.store,
         state_value,
         None,
@@ -645,7 +650,7 @@ async fn test_oidc_callback_accepts_well_formed_email_e2e() {
         StatusCode::SEE_OTHER,
         "E2E: a well-formed email must proceed through the OIDC callback; got {status}: {body}"
     );
-    let user = crate::db::get_user_by_email(&state.store, "alice@example.com")
+    let user = db::get_user_by_email(&state.store, "alice@example.com")
         .await
         .expect("db query ok")
         .expect("E2E: well-formed email must be persisted");
@@ -696,10 +701,7 @@ async fn test_saml_acs_rejects_whitespace_domain_email_e2e() {
     );
     let saml_response = B64.encode(xml.as_bytes());
 
-    let (app, state) = test_app_with_idps(vec![crate::services::idp::ConfiguredIdp::Saml(
-        saml_provider,
-    )])
-    .await;
+    let (app, state) = test_app_with_idps(vec![ConfiguredIdp::Saml(saml_provider)]).await;
     // Open-enrollment mode (the default): no allowlist.
     {
         let mut config = state.config().as_ref().clone();
@@ -711,7 +713,7 @@ async fn test_saml_acs_rejects_whitespace_domain_email_e2e() {
     // is the AuthnRequest ID the validator checks InResponseTo against.
     let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().expect("valid timestamp");
     let relay_state = "saml-ws-domain-relay";
-    crate::db::create_oidc_state(
+    db::create_oidc_state(
         &state.store,
         relay_state,
         None,
@@ -736,7 +738,7 @@ async fn test_saml_acs_rejects_whitespace_domain_email_e2e() {
         StatusCode::OK,
         "E2E SAML: whitespace-domain email rejected on the ACS path; got {status}: {body}"
     );
-    let user = crate::db::get_user_by_email(&state.store, "foo@bar .com")
+    let user = db::get_user_by_email(&state.store, "foo@bar .com")
         .await
         .expect("db query ok");
     assert!(
@@ -891,9 +893,9 @@ async fn seed_and_consume_oidc_state(
     state: &AppState,
     state_value: &str,
     device_auth_id: Option<&str>,
-) -> (crate::db::OidcState, crate::db::OidcStateClaim) {
+) -> (OidcState, OidcStateClaim) {
     let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().expect("valid timestamp");
-    crate::db::create_oidc_state(
+    db::create_oidc_state(
         &state.store,
         state_value,
         device_auth_id,
@@ -904,7 +906,7 @@ async fn seed_and_consume_oidc_state(
     )
     .await
     .expect("create_oidc_state");
-    crate::db::try_consume_oidc_state(&state.store, state_value, jiff::Timestamp::now())
+    db::try_consume_oidc_state(&state.store, state_value, jiff::Timestamp::now())
         .await
         .expect("consume oidc state")
 }
@@ -912,14 +914,10 @@ async fn seed_and_consume_oidc_state(
 /// Query the audit store for events of `event_type` for the user. Audit
 /// writes are awaited before the handler responds, so the rows are
 /// visible immediately.
-async fn audit_events_for(
-    state: &AppState,
-    event_type: &str,
-    user_id: &str,
-) -> Vec<crate::db::AuditEvent> {
+async fn audit_events_for(state: &AppState, event_type: &str, user_id: &str) -> Vec<AuditEvent> {
     state
         .audit
-        .query_events(&crate::db::AuditEventFilter {
+        .query_events(&AuditEventFilter {
             event_types: Some(vec![event_type.to_string()]),
             user_id: Some(user_id.to_string()),
             ..Default::default()
@@ -973,7 +971,7 @@ async fn test_direct_web_signin_returning_user_logs_login_success_with_ip() {
 
     let approvals = state
         .audit
-        .query_events(&crate::db::AuditEventFilter {
+        .query_events(&AuditEventFilter {
             event_types: Some(vec!["device_auth_approved".to_string()]),
             ..Default::default()
         })
@@ -1142,7 +1140,7 @@ async fn test_cli_enroll_returning_user_requires_assertion_before_approval() {
 
     let device_code_hash = "cli-returning-device-code-hash";
     let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().expect("valid timestamp");
-    let device_auth_id = crate::db::create_device_auth_request(
+    let device_auth_id = db::create_device_auth_request(
         &state.store,
         device_code_hash,
         "CLI-RTRN",
@@ -1183,18 +1181,18 @@ async fn test_cli_enroll_returning_user_requires_assertion_before_approval() {
         "a returning user must be sent to assert with their key"
     );
 
-    let request = crate::db::get_device_auth_by_code_hash(&state.store, device_code_hash)
+    let request = db::get_device_auth_by_code_hash(&state.store, device_code_hash)
         .await
         .expect("device auth lookup")
         .expect("device auth exists");
     assert!(
-        matches!(request.state, crate::db::DeviceAuthState::Pending),
+        matches!(request.state, DeviceAuthState::Pending),
         "IdP sign-in alone must not release the waiting CLI"
     );
 
     let approvals = state
         .audit
-        .query_events(&crate::db::AuditEventFilter {
+        .query_events(&AuditEventFilter {
             event_types: Some(vec!["device_auth_approved".to_string()]),
             ..Default::default()
         })
@@ -1207,7 +1205,7 @@ async fn test_cli_enroll_returning_user_requires_assertion_before_approval() {
 
     let logins = state
         .audit
-        .query_events(&crate::db::AuditEventFilter {
+        .query_events(&AuditEventFilter {
             event_types: Some(vec!["login_success".to_string()]),
             ..Default::default()
         })
@@ -1249,7 +1247,7 @@ async fn test_cli_enroll_returning_user_fails_closed_on_authenticator_read_error
 
     let device_code_hash = "cli-returning-dberr-code-hash";
     let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().expect("valid timestamp");
-    let device_auth_id = crate::db::create_device_auth_request(
+    let device_auth_id = db::create_device_auth_request(
         &state.store,
         device_code_hash,
         "CLI-DBERR",
@@ -1300,12 +1298,12 @@ async fn test_cli_enroll_returning_user_fails_closed_on_authenticator_read_error
     // The waiting device authorization is untouched: the IdP sign-in alone
     // never releases the CLI, and a fail-closed read must not advance the
     // row either.
-    let request = crate::db::get_device_auth_by_code_hash(&state.store, device_code_hash)
+    let request = db::get_device_auth_by_code_hash(&state.store, device_code_hash)
         .await
         .expect("device auth lookup")
         .expect("device auth exists");
     assert!(
-        matches!(request.state, crate::db::DeviceAuthState::Pending),
+        matches!(request.state, DeviceAuthState::Pending),
         "device auth must remain Pending when the callback fails closed"
     );
 
@@ -1314,7 +1312,7 @@ async fn test_cli_enroll_returning_user_fails_closed_on_authenticator_read_error
     // the CLI flow nothing should be recorded at all from the failed read.
     let approvals = state
         .audit
-        .query_events(&crate::db::AuditEventFilter {
+        .query_events(&AuditEventFilter {
             event_types: Some(vec!["device_auth_approved".to_string()]),
             ..Default::default()
         })
@@ -1326,7 +1324,7 @@ async fn test_cli_enroll_returning_user_fails_closed_on_authenticator_read_error
     );
     let logins = state
         .audit
-        .query_events(&crate::db::AuditEventFilter {
+        .query_events(&AuditEventFilter {
             event_types: Some(vec!["login_success".to_string()]),
             ..Default::default()
         })
@@ -1608,7 +1606,7 @@ async fn test_cli_device_auth_failure_renders_error_instead_of_redirect() {
     // The device auth stays unapproved rather than being silently skipped.
     let approvals = state
         .audit
-        .query_events(&crate::db::AuditEventFilter {
+        .query_events(&AuditEventFilter {
             event_types: Some(vec!["device_auth_approved".to_string()]),
             ..Default::default()
         })
@@ -1661,7 +1659,7 @@ async fn test_direct_web_enrollment_new_user_emits_no_login_event() {
     // here is conclusive.
     let events = state
         .audit
-        .query_events(&crate::db::AuditEventFilter::default())
+        .query_events(&AuditEventFilter::default())
         .await
         .expect("query audit events");
     assert!(
@@ -1675,13 +1673,13 @@ async fn test_direct_web_enrollment_new_user_emits_no_login_event() {
 
 /// Build a [`ConfiguredIdp::Oidc`] for tests against the given issuer
 /// (the issuer drives the chooser button's brand/display name).
-fn make_test_oidc_idp(id: &str, issuer: &str) -> crate::services::idp::ConfiguredIdp {
+fn make_test_oidc_idp(id: &str, issuer: &str) -> ConfiguredIdp {
     use secrecy::SecretString;
-    crate::services::idp::ConfiguredIdp::Oidc(crate::services::idp::ConfiguredOidcProvider {
+    ConfiguredIdp::Oidc(ConfiguredOidcProvider {
         id: id.to_string(),
         client_id: format!("{id}-client-id"),
         client_secret: SecretString::from(format!("{id}-secret")),
-        provider: crate::services::idp::oidc::OidcProvider {
+        provider: OidcProvider {
             issuer: issuer.to_string(),
             authorization_endpoint: url::Url::parse(&format!("{issuer}/authorize"))
                 .expect("auth endpoint url"),
@@ -1695,7 +1693,7 @@ fn make_test_oidc_idp(id: &str, issuer: &str) -> crate::services::idp::Configure
 /// Seed a pending device-auth row with a valid user code, return the code.
 async fn seed_pending_device_auth(state: &AppState, user_code: &str) {
     let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().expect("valid timestamp");
-    crate::db::create_device_auth_request(
+    db::create_device_auth_request(
         &state.store,
         &format!("hash-{user_code}"),
         user_code,
@@ -1707,7 +1705,7 @@ async fn seed_pending_device_auth(state: &AppState, user_code: &str) {
     .expect("seed device_auth_request");
 }
 
-fn two_idps() -> Vec<crate::services::idp::ConfiguredIdp> {
+fn two_idps() -> Vec<ConfiguredIdp> {
     vec![
         make_test_oidc_idp("google", "https://accounts.google.com"),
         make_test_oidc_idp("entra", "https://login.microsoftonline.com/common/v2.0"),
@@ -1716,10 +1714,10 @@ fn two_idps() -> Vec<crate::services::idp::ConfiguredIdp> {
 
 #[tokio::test]
 async fn device_chooser_rendered_when_multiple_idps_and_no_provider() {
-    let (app, state) = crate::test_utils::test_app_with_idps(two_idps()).await;
+    let (app, state) = test_utils::test_app_with_idps(two_idps()).await;
     seed_pending_device_auth(&state, "BCDF-GHJK").await;
 
-    let (status, body) = crate::test_utils::http_post_form(
+    let (status, body) = test_utils::http_post_form(
         &app,
         "/device",
         "user_code=BCDF-GHJK",
@@ -1756,10 +1754,10 @@ async fn device_chooser_rendered_when_multiple_idps_and_no_provider() {
 
 #[tokio::test]
 async fn device_redirects_when_provider_selected() {
-    let (app, state) = crate::test_utils::test_app_with_idps(two_idps()).await;
+    let (app, state) = test_utils::test_app_with_idps(two_idps()).await;
     seed_pending_device_auth(&state, "BCDF-GHJK").await;
 
-    let resp = crate::test_utils::http_post_form_full(
+    let resp = test_utils::http_post_form_full(
         &app,
         "/device",
         "user_code=BCDF-GHJK&provider=entra",
@@ -1787,10 +1785,10 @@ async fn device_redirects_when_provider_selected() {
 
 #[tokio::test]
 async fn device_rejects_unknown_provider_slug() {
-    let (app, state) = crate::test_utils::test_app_with_idps(two_idps()).await;
+    let (app, state) = test_utils::test_app_with_idps(two_idps()).await;
     seed_pending_device_auth(&state, "BCDF-GHJK").await;
 
-    let (status, body) = crate::test_utils::http_post_form(
+    let (status, body) = test_utils::http_post_form(
         &app,
         "/device",
         "user_code=BCDF-GHJK&provider=evil",
@@ -1819,10 +1817,10 @@ async fn device_rejects_unknown_provider_slug() {
 #[tokio::test]
 async fn device_single_idp_auto_selects_without_chooser() {
     let idps = vec![make_test_oidc_idp("google", "https://accounts.google.com")];
-    let (app, state) = crate::test_utils::test_app_with_idps(idps).await;
+    let (app, state) = test_utils::test_app_with_idps(idps).await;
     seed_pending_device_auth(&state, "BCDF-GHJK").await;
 
-    let resp = crate::test_utils::http_post_form_full(
+    let resp = test_utils::http_post_form_full(
         &app,
         "/device",
         "user_code=BCDF-GHJK",
@@ -1857,7 +1855,7 @@ async fn device_zero_idps_renders_not_configured_error() {
     let (app, state) = test_app().await;
     seed_pending_device_auth(&state, "BCDF-GHJK").await;
 
-    let (status, body) = crate::test_utils::http_post_form(
+    let (status, body) = test_utils::http_post_form(
         &app,
         "/device",
         "user_code=BCDF-GHJK",
@@ -1882,9 +1880,9 @@ async fn device_zero_idps_renders_not_configured_error() {
 
 #[tokio::test]
 async fn enroll_start_chooser_rendered_when_multiple_idps_and_no_provider() {
-    let (app, _state) = crate::test_utils::test_app_with_idps(two_idps()).await;
+    let (app, _state) = test_utils::test_app_with_idps(two_idps()).await;
 
-    let (status, body) = crate::test_utils::http_get(&app, "/enroll/start", &[]).await;
+    let (status, body) = test_utils::http_get(&app, "/enroll/start", &[]).await;
 
     assert_eq!(
         status,
@@ -1907,9 +1905,9 @@ async fn enroll_start_chooser_rendered_when_multiple_idps_and_no_provider() {
 
 #[tokio::test]
 async fn enroll_start_redirects_when_provider_selected() {
-    let (app, _state) = crate::test_utils::test_app_with_idps(two_idps()).await;
+    let (app, _state) = test_utils::test_app_with_idps(two_idps()).await;
 
-    let resp = crate::test_utils::http_get_full(&app, "/enroll/start?provider=entra", &[]).await;
+    let resp = test_utils::http_get_full(&app, "/enroll/start?provider=entra", &[]).await;
 
     assert_eq!(
         resp.status,
@@ -1932,9 +1930,9 @@ async fn enroll_start_redirects_when_provider_selected() {
 #[tokio::test]
 async fn enroll_start_single_idp_auto_selects_without_chooser() {
     let idps = vec![make_test_oidc_idp("google", "https://accounts.google.com")];
-    let (app, _state) = crate::test_utils::test_app_with_idps(idps).await;
+    let (app, _state) = test_utils::test_app_with_idps(idps).await;
 
-    let resp = crate::test_utils::http_get_full(&app, "/enroll/start", &[]).await;
+    let resp = test_utils::http_get_full(&app, "/enroll/start", &[]).await;
 
     assert_eq!(
         resp.status,
@@ -1961,8 +1959,7 @@ async fn device_verify_page_prefills_valid_user_code() {
     // GET /device?user_code=<valid> pre-fills the input via
     // verification_uri_complete (RFC 8628 §3.3.1).
     let (app, _state) = test_app().await;
-    let (status, body) =
-        crate::test_utils::http_get(&app, "/device?user_code=QHJT-ZLFH", &[]).await;
+    let (status, body) = test_utils::http_get(&app, "/device?user_code=QHJT-ZLFH", &[]).await;
 
     assert_eq!(status, StatusCode::OK);
     assert!(
@@ -1975,7 +1972,7 @@ async fn device_verify_page_prefills_valid_user_code() {
 async fn device_verify_page_ignores_invalid_user_code() {
     // A malformed user_code must not be reflected into the page.
     let (app, _state) = test_app().await;
-    let (status, body) = crate::test_utils::http_get(&app, "/device?user_code=garbage", &[]).await;
+    let (status, body) = test_utils::http_get(&app, "/device?user_code=garbage", &[]).await;
 
     assert_eq!(status, StatusCode::OK);
     assert!(
@@ -2173,7 +2170,7 @@ async fn test_browser_register_complete_rejects_self_attestation() {
     })
     .to_string();
 
-    let resp = crate::test_utils::http_request_full(
+    let resp = test_utils::http_request_full(
         &app,
         "POST",
         "/enroll/webauthn/complete",
@@ -2221,7 +2218,7 @@ async fn test_browser_register_start_refuses_deactivated_user() {
     )
     .await;
 
-    crate::db::update_user_active_status(&state.store, &user.id, false)
+    db::update_user_active_status(&state.store, &user.id, false)
         .await
         .expect("deactivate user");
 
@@ -2301,7 +2298,7 @@ async fn test_browser_register_complete_refuses_deactivated_user() {
         },
     )
     .await;
-    crate::db::update_user_active_status(&state.store, &user.id, false)
+    db::update_user_active_status(&state.store, &user.id, false)
         .await
         .expect("deactivate user");
     let user_uuid = Uuid::parse_str(&user.id).expect("user id is a uuid");
@@ -2517,7 +2514,7 @@ async fn test_browser_register_complete_refuses_vanished_user() {
 /// Build a user + a session cookie the way `browser_register_start` would
 /// establish one (so the caller is genuinely a logged-in account) and
 /// return both the user row and the raw `Cookie` header value.
-async fn browser_user_session(state: &AppState, email: &str) -> (crate::db::User, String) {
+async fn browser_user_session(state: &AppState, email: &str) -> (User, String) {
     let user = create_test_user(&state.store, email).await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let token = create_test_session_with(
@@ -2535,7 +2532,7 @@ async fn browser_user_session(state: &AppState, email: &str) -> (crate::db::User
 
 /// Mint a `BrowserRegistrationState` JWT bound to `user.id`, returning the
 /// token and the expiry timestamp the consume test helper needs.
-async fn browser_register_state(state: &AppState, user: &crate::db::User) -> (String, i64) {
+async fn browser_register_state(state: &AppState, user: &User) -> (String, i64) {
     let user_id = Uuid::parse_str(&user.id).expect("user id is a uuid");
     let (_ccr, webauthn_state) = state
         .webauthn
@@ -2608,8 +2605,7 @@ async fn test_browser_register_complete_rejects_state_user_mismatch() {
     // a side-effect — that's why the legitimate retry below uses a
     // *fresh* state JWT.
     let expires_at = jiff::Timestamp::from_second(exp).expect("valid exp");
-    let consume =
-        crate::db::consume_challenge_state_for_test(&state.store, &state_jwt, expires_at).await;
+    let consume = db::consume_challenge_state_for_test(&state.store, &state_jwt, expires_at).await;
     assert!(
         consume.is_ok(),
         "a rejected mismatch consumed the victim's registration state: {consume:?}"
@@ -2720,8 +2716,7 @@ async fn make_state_token_with_exp(state: &AppState, email: &str) -> (String, i6
 /// Assert the state token is still unconsumed by spending it directly.
 async fn assert_state_unconsumed(state: &AppState, state_jwt: &str, exp: i64) {
     let expires_at = jiff::Timestamp::from_second(exp).expect("valid exp");
-    let consume =
-        crate::db::consume_challenge_state_for_test(&state.store, state_jwt, expires_at).await;
+    let consume = db::consume_challenge_state_for_test(&state.store, state_jwt, expires_at).await;
     assert!(
         consume.is_ok(),
         "a rejected request consumed the registration state: {consume:?}"
@@ -2898,7 +2893,7 @@ async fn finalize_enrollment_audit_records_enrollment_when_device_auth_release_f
     // The DeviceAuthApproved event must NOT be recorded — the release failed.
     let approval_events = state
         .audit
-        .query_events(&crate::db::AuditEventFilter {
+        .query_events(&AuditEventFilter {
             event_types: Some(vec!["device_auth_approved".to_string()]),
             user_id: Some(user.id.clone()),
             ..Default::default()
@@ -2923,7 +2918,7 @@ async fn finalize_enrollment_audit_records_both_events_when_cli_release_succeeds
     let authenticator_id = create_test_authenticator(&state.store, &user.id).await;
 
     let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().expect("valid timestamp");
-    let device_auth_id = crate::db::create_device_auth_request(
+    let device_auth_id = db::create_device_auth_request(
         &state.store,
         "hash-da-ok",
         "DA-OK-CODE",
@@ -2967,7 +2962,7 @@ async fn finalize_enrollment_audit_records_both_events_when_cli_release_succeeds
     );
     let approval_events = state
         .audit
-        .query_events(&crate::db::AuditEventFilter {
+        .query_events(&AuditEventFilter {
             event_types: Some(vec!["device_auth_approved".to_string()]),
             user_id: Some(user.id.clone()),
             ..Default::default()
@@ -2981,12 +2976,12 @@ async fn finalize_enrollment_audit_records_both_events_when_cli_release_succeeds
     );
 
     // The row transitioned to Authorized and carries the enrolling authenticator.
-    let approved = crate::db::get_device_auth_by_id(&state.store, &reg_state.device_auth_id)
+    let approved = db::get_device_auth_by_id(&state.store, &reg_state.device_auth_id)
         .await
         .expect("read device auth")
         .expect("device auth row present");
     let approval_auth_id = match approved.state {
-        crate::db::DeviceAuthState::Authorized(ref ap) => Some(ap.authenticator_id.as_str()),
+        DeviceAuthState::Authorized(ref ap) => Some(ap.authenticator_id.as_str()),
         _ => None,
     };
     assert_eq!(
@@ -3041,7 +3036,7 @@ async fn finalize_enrollment_audit_records_only_enrollment_for_direct_browser_fl
     );
     let approval_events = state
         .audit
-        .query_events(&crate::db::AuditEventFilter {
+        .query_events(&AuditEventFilter {
             event_types: Some(vec!["device_auth_approved".to_string()]),
             user_id: Some(user.id.clone()),
             ..Default::default()
@@ -3087,7 +3082,7 @@ async fn test_enrollment_rejects_display_name_wrapped_email() {
     .await;
     assert_eq!(resp.status(), StatusCode::OK, "error page renders as 200");
 
-    let user = crate::db::get_user_by_email(&state.store, "alice example <alice@example.com>")
+    let user = db::get_user_by_email(&state.store, "alice example <alice@example.com>")
         .await
         .expect("db query ok");
     assert!(
@@ -3118,7 +3113,7 @@ async fn test_enrollment_rejects_empty_local_part_email() {
     .await;
     assert_eq!(resp.status(), StatusCode::OK, "error page renders as 200");
 
-    let user = crate::db::get_user_by_email(&state.store, "@example.com")
+    let user = db::get_user_by_email(&state.store, "@example.com")
         .await
         .expect("db query ok");
     assert!(
@@ -3156,7 +3151,7 @@ async fn test_enrollment_open_mode_rejects_empty_domain_email() {
     .await;
     assert_eq!(resp.status(), StatusCode::OK, "error page renders as 200");
 
-    let user = crate::db::get_user_by_email(&state.store, "foo@")
+    let user = db::get_user_by_email(&state.store, "foo@")
         .await
         .expect("db query ok");
     assert!(
@@ -3209,7 +3204,7 @@ async fn test_enrollment_open_mode_rejects_whitespace_domain_email() {
 
     // The rejection happens before `enroll_user_with_org`, so neither the
     // user nor the synthetic organization is persisted.
-    let user = crate::db::get_user_by_email(&state.store, "foo@bar .com")
+    let user = db::get_user_by_email(&state.store, "foo@bar .com")
         .await
         .expect("db query ok");
     assert!(
@@ -3248,7 +3243,7 @@ async fn test_enrollment_open_mode_rejects_tab_in_domain_email() {
         "a tab-bearing domain email is rejected at the enrollment chokepoint"
     );
 
-    let user = crate::db::get_user_by_email(&state.store, "foo@bar\t.com")
+    let user = db::get_user_by_email(&state.store, "foo@bar\t.com")
         .await
         .expect("db query ok");
     assert!(
@@ -3376,7 +3371,7 @@ async fn test_enrollment_open_mode_accepts_divergent_identity_domain() {
         "a clean divergent identity.domain must enroll in open-enrollment mode"
     );
 
-    let enrolled = crate::db::get_user_by_email(&state.store, "saml-div@example.com")
+    let enrolled = db::get_user_by_email(&state.store, "saml-div@example.com")
         .await
         .expect("db query ok")
         .expect("a clean divergent identity.domain must persist a user");
@@ -3384,7 +3379,7 @@ async fn test_enrollment_open_mode_accepts_divergent_identity_domain() {
         .org_id
         .as_deref()
         .expect("a clean divergent identity.domain must synthesize an org");
-    let org_domain = crate::db::get_organization_domain(&state.store, org_id)
+    let org_domain = db::get_organization_domain(&state.store, org_id)
         .await
         .expect("db query ok");
     assert_eq!(
@@ -3450,7 +3445,7 @@ async fn test_enrollment_open_mode_gates_email_domain_without_asserted_domain() 
         StatusCode::OK,
         "a whitespace-domain email is rejected whether or not a domain is asserted"
     );
-    let user = crate::db::get_user_by_email(&state.store, "foo@bar .com")
+    let user = db::get_user_by_email(&state.store, "foo@bar .com")
         .await
         .expect("db query ok");
     assert!(user.is_none(), "a whitespace-domain email must not enroll");

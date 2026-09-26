@@ -10,6 +10,7 @@
 //! persisted in plaintext).
 
 use crate::AppState;
+use crate::crypto::alg::JwsAlgorithm;
 use crate::db;
 use crate::db::SigningKeyState;
 use crate::db::documents::audit::{OrgSubdomainClaimData, OrgSubdomainReleaseData};
@@ -575,7 +576,7 @@ pub(crate) async fn admin_emergency_rotate_keys(
     match db::get_org_signing_key(
         &state.store,
         &org_id,
-        crate::crypto::alg::JwsAlgorithm::Es256,
+        JwsAlgorithm::Es256,
         SigningKeyState::Current,
     )
     .await

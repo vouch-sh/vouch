@@ -8,6 +8,7 @@
 use crate::AppState;
 use crate::db;
 use crate::infra::org_host;
+use crate::services::oidc;
 use crate::services::oidc::discovery as svc;
 use axum::Json;
 use axum::extract::{OriginalUri, State};
@@ -107,7 +108,7 @@ pub(crate) async fn jwks(
 /// Serve the JWK Set for a claimed org issuer-subdomain host.
 async fn org_jwks(state: &Arc<AppState>, label: &str) -> Response {
     match db::find_org_by_subdomain(&state.store, label).await {
-        Ok(Some(org)) => match crate::services::oidc::org_jwks(state, &org).await {
+        Ok(Some(org)) => match oidc::org_jwks(state, &org).await {
             Ok(jwks) => ([OIDC_CACHE_CONTROL, OIDC_VARY_HOST], Json(jwks)).into_response(),
             Err(e) => {
                 tracing::error!("org JWKS generation failed for '{label}': {e}");

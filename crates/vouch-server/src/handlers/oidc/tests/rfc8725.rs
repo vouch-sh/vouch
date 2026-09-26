@@ -2,6 +2,7 @@
 //! RFC 8725 — JWT Best Current Practices tests.
 
 use super::helpers::*;
+use crate::crypto::jwt::JwtType;
 
 #[tokio::test]
 async fn test_rfc8725_cross_type_token_substitution() {
@@ -15,7 +16,7 @@ async fn test_rfc8725_cross_type_token_substitution() {
         .state_signer
         .encode_state_token(
             &serde_json::json!({"sub": "user-1", "exp": 9_999_999_999i64, "iat": 1_000_000_000i64}),
-            crate::crypto::jwt::JwtType::RegistrationState,
+            JwtType::RegistrationState,
         )
         .await
         .expect("encode state token");
@@ -118,12 +119,12 @@ async fn test_rfc8725_hs256_state_tokens_all_rejected_at_resource_endpoints() {
     let (app, state) = test_app().await;
 
     let hs256_types = [
-        crate::crypto::jwt::JwtType::AuthorizationCode,
-        crate::crypto::jwt::JwtType::RegistrationState,
-        crate::crypto::jwt::JwtType::BrowserRegistrationState,
-        crate::crypto::jwt::JwtType::BrowserAuthenticationState,
-        crate::crypto::jwt::JwtType::GitHubState,
-        crate::crypto::jwt::JwtType::Fido2ChallengeState,
+        JwtType::AuthorizationCode,
+        JwtType::RegistrationState,
+        JwtType::BrowserRegistrationState,
+        JwtType::BrowserAuthenticationState,
+        JwtType::GitHubState,
+        JwtType::Fido2ChallengeState,
     ];
 
     for jwt_type in hs256_types {

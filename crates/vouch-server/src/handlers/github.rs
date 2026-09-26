@@ -10,15 +10,18 @@
 //! - GET /github/success - Success page after connection
 
 use crate::arrival::ArrivalTime;
+use crate::config::ServerConfig;
+use crate::crypto::jwt::{JwtType, StateTokenError, StateTokenSigner};
 use crate::error::ServiceError;
 use crate::handlers::session::{
     AuthContext, extract_session_from_cookie, get_auth_context, load_active_user,
 };
+use crate::services::auth::ValidatedResourceToken;
 use crate::services::integrations::github::{
     GitHubError, GitHubService, InstallationLinkFlow, LinkAccountParams, LinkInstallationParams,
     installations::validate_org_admin, webhooks::WebhookEvent,
 };
-use crate::{AppState, impl_template_response};
+use crate::{AppState, crypto, impl_template_response};
 use askama::Template;
 use axum::Form;
 use axum::body::Bytes;
@@ -168,7 +171,7 @@ impl GitHubStateToken {
         flow_type: GitHubStateFlowType,
     ) -> Result<Self, aws_lc_rs::error::Unspecified> {
         let now = Timestamp::now().as_second();
-        let nonce = URL_SAFE_NO_PAD.encode(crate::crypto::generate_random_bytes(16)?);
+        let nonce = URL_SAFE_NO_PAD.encode(crypto::generate_random_bytes(16)?);
         Ok(Self {
             org_id: org_id.to_string(),
             user_id: user_id.to_string(),
@@ -181,27 +184,18 @@ impl GitHubStateToken {
     }
 
     /// Encode as JWT (RFC 8725 §3.11: explicit typ).
-    async fn encode(
-        &self,
-        signer: &crate::crypto::jwt::StateTokenSigner,
-    ) -> Result<String, crate::crypto::jwt::StateTokenError> {
-        signer
-            .encode_state_token(self, crate::crypto::jwt::JwtType::GitHubState)
-            .await
+    async fn encode(&self, signer: &StateTokenSigner) -> Result<String, StateTokenError> {
+        signer.encode_state_token(self, JwtType::GitHubState).await
     }
 
     /// Decode from JWT.
     async fn decode(
         token: &str,
-        signer: &crate::crypto::jwt::StateTokenSigner,
+        signer: &StateTokenSigner,
         arrival: ArrivalTime,
-    ) -> Result<Self, crate::crypto::jwt::StateTokenError> {
+    ) -> Result<Self, StateTokenError> {
         signer
-            .decode_state_token(
-                token,
-                crate::crypto::jwt::JwtType::GitHubState,
-                arrival.as_second(),
-            )
+            .decode_state_token(token, JwtType::GitHubState, arrival.as_second())
             .await
     }
 }
@@ -270,10 +264,7 @@ fn error_response(error: GitHubError) -> Response {
 }
 
 /// Create a GitHubService from AppState components.
-fn github_service<'a>(
-    state: &'a AppState,
-    config: &'a crate::config::ServerConfig,
-) -> GitHubService<'a> {
+fn github_service<'a>(state: &'a AppState, config: &'a ServerConfig) -> GitHubService<'a> {
     GitHubService::new(
         &state.store,
         &state.audit,
@@ -497,7 +488,7 @@ async fn validate_callback_session(
     token: &GitHubStateToken,
     flow_label: &'static str,
     arrival: ArrivalTime,
-) -> Result<crate::services::auth::ValidatedResourceToken, Response> {
+) -> Result<ValidatedResourceToken, Response> {
     let session = match extract_session_from_cookie(state, jar, arrival).await {
         Ok(s) => s,
         Err(_) => {
@@ -840,8 +831,11 @@ pub(crate) async fn github_success_page(
 )]
 mod tests {
     use super::*;
+    use crate::config::NonEmptySecret;
     use crate::crypto::jwt::{JwtType, StateTokenSigner};
+    use crate::infra::router;
     use crate::test_utils::*;
+    use crate::{crypto, db};
     use axum::http::StatusCode;
 
     #[tokio::test]
@@ -967,7 +961,7 @@ mod tests {
         // a payload with HMAC-SHA256("", body) and have it accepted.
         let (app, state) = test_app().await;
         let mut config = (**state.config()).clone();
-        config.github_webhook_secret = crate::config::NonEmptySecret::from_arg(Some(String::new()));
+        config.github_webhook_secret = NonEmptySecret::from_arg(Some(String::new()));
         assert!(config.github_webhook_secret.is_none());
         state.config.store(Arc::new(config));
 
@@ -1122,7 +1116,7 @@ mod tests {
             },
         )
         .await;
-        let token_hash = crate::crypto::hash_token(&session_token);
+        let token_hash = crypto::hash_token(&session_token);
         (user.id, org.id, session_token, token_hash)
     }
 
@@ -1350,13 +1344,13 @@ mod tests {
 
         // Simulate a deactivation that ran on a DIFFERENT instance: apply the
         // production DB effects without invalidating this process's cache.
-        crate::db::delete_sessions_for_user(&state.store, &user_id)
+        db::delete_sessions_for_user(&state.store, &user_id)
             .await
             .expect("delete sessions");
-        crate::db::revoke_user_credentials(&state.store, &user_id, Some("deactivation"), None)
+        db::revoke_user_credentials(&state.store, &user_id, Some("deactivation"), None)
             .await
             .expect("revoke credentials");
-        crate::db::update_user_active_status(&state.store, &user_id, false)
+        db::update_user_active_status(&state.store, &user_id, false)
             .await
             .expect("deactivate user");
 
@@ -1409,13 +1403,13 @@ mod tests {
             .expect("seed lookup succeeds");
         assert!(seeded.is_some(), "session row must exist before seeding");
 
-        crate::db::delete_sessions_for_user(&state.store, &user_id)
+        db::delete_sessions_for_user(&state.store, &user_id)
             .await
             .expect("delete sessions");
-        crate::db::revoke_user_credentials(&state.store, &user_id, Some("deactivation"), None)
+        db::revoke_user_credentials(&state.store, &user_id, Some("deactivation"), None)
             .await
             .expect("revoke credentials");
-        crate::db::update_user_active_status(&state.store, &user_id, false)
+        db::update_user_active_status(&state.store, &user_id, false)
             .await
             .expect("deactivate user");
 
@@ -1479,7 +1473,7 @@ mod tests {
         )
         .await;
         assert!(
-            crate::db::update_user_admin_status(&state.store, &user_id, false)
+            db::update_user_admin_status(&state.store, &user_id, false)
                 .await
                 .expect("demote")
         );
@@ -1509,11 +1503,11 @@ mod tests {
             state.config.store(Arc::new(config));
         }
         let config = state.config();
-        let app = crate::infra::router::build_app(state.clone(), &config).expect("build app");
+        let app = router::build_app(state.clone(), &config).expect("build app");
         let (user_id, _, session_token, _) =
             setup_user_with_session(&state, "admin@example.com", "example.com").await;
         if linked {
-            crate::db::update_user_github_identity(
+            db::update_user_github_identity(
                 &state.store,
                 &user_id,
                 77,

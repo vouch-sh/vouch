@@ -9,6 +9,7 @@
 //! audience-agnostic per their RFCs.
 
 use super::helpers::*;
+use crate::handlers;
 
 /// Narrowed token accepted at exactly the resource its audience names,
 /// including sub-paths at segment boundaries.
@@ -450,7 +451,7 @@ async fn test_cookie_only_path_rejects_narrowed_token() {
     )
     .await;
     let jar = CookieJar::new().add(Cookie::new(vouch_common::SESSION_COOKIE_NAME, narrowed));
-    let result = crate::handlers::extract_session_from_cookie(&state, &jar, test_arrival()).await;
+    let result = handlers::extract_session_from_cookie(&state, &jar, test_arrival()).await;
     assert!(
         result.is_err(),
         "narrowed token must be rejected on cookie-only paths"
@@ -469,7 +470,7 @@ async fn test_cookie_only_path_rejects_narrowed_token() {
     )
     .await;
     let jar = CookieJar::new().add(Cookie::new(vouch_common::SESSION_COOKIE_NAME, root_scoped));
-    let result = crate::handlers::extract_session_from_cookie(&state, &jar, test_arrival()).await;
+    let result = handlers::extract_session_from_cookie(&state, &jar, test_arrival()).await;
     assert!(
         result.is_ok(),
         "deployment-root audience must be accepted on cookie-only paths: {result:?}"

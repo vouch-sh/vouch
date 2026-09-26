@@ -3,7 +3,13 @@
 
 use super::helpers::*;
 use crate::crypto::webauthn_verify::AuthTime;
-use crate::db::DeviceApproval;
+use crate::db::documents::device_auth::DeviceAuthRequestDoc;
+use crate::db::{
+    self, AuthorizeDeviceAuthParams, DeviceApproval, DeviceAuthState, DeviceAuthStatus, User,
+};
+use vouch_common::protocol::{
+    CLIENT_ASSERTION_TYPE_JWT_BEARER, GRANT_TYPE_AUTHORIZATION_CODE, GRANT_TYPE_DEVICE_CODE,
+};
 
 #[tokio::test]
 async fn test_rfc8628_device_authorization_response_format() {
@@ -109,7 +115,7 @@ async fn test_rfc8628_pending_token_request() {
 /// distinguishes concurrent device authorizations within one test.
 async fn setup_authorized_device(
     state: &std::sync::Arc<crate::AppState>,
-    user: &crate::db::User,
+    user: &User,
     authenticator_id: &str,
     label: &str,
     client_id: &str,
@@ -118,7 +124,7 @@ async fn setup_authorized_device(
     let expires_at = jiff::Timestamp::now()
         .checked_add(jiff::Span::new().hours(1))
         .expect("device code expiry");
-    let id = crate::db::create_device_auth_request(
+    let id = db::create_device_auth_request(
         &state.store,
         &sha256_base64url(&device_code),
         &format!("DC{label}"),
@@ -128,9 +134,9 @@ async fn setup_authorized_device(
     )
     .await
     .expect("create device authorization request");
-    crate::db::authorize_device_auth(
+    db::authorize_device_auth(
         &state.store,
-        crate::db::AuthorizeDeviceAuthParams {
+        AuthorizeDeviceAuthParams {
             id: &id,
             user_id: &user.id,
             user_email: &user.email,
@@ -173,7 +179,7 @@ async fn poll_device_token(
         &format!(
             "grant_type={}\
              &device_code={device_code}",
-            vouch_common::protocol::GRANT_TYPE_DEVICE_CODE
+            GRANT_TYPE_DEVICE_CODE
         ),
         &[("Authorization", client.basic_auth_header().as_str())],
     )
@@ -197,7 +203,7 @@ async fn test_device_grant_auth_time_is_ceremony_instant_not_poll_instant() {
     let expires_at = jiff::Timestamp::now()
         .checked_add(jiff::Span::new().hours(1))
         .expect("device code expiry");
-    let id = crate::db::create_device_auth_request(
+    let id = db::create_device_auth_request(
         &state.store,
         &sha256_base64url(device_code),
         "AUTH-TIME",
@@ -210,9 +216,9 @@ async fn test_device_grant_auth_time_is_ceremony_instant_not_poll_instant() {
 
     // A ceremony that happened well before the poll.
     let ceremony_time = jiff::Timestamp::now().as_second().saturating_sub(300);
-    crate::db::authorize_device_auth(
+    db::authorize_device_auth(
         &state.store,
-        crate::db::AuthorizeDeviceAuthParams {
+        AuthorizeDeviceAuthParams {
             id: &id,
             user_id: &user.id,
             user_email: &user.email,
@@ -253,10 +259,10 @@ async fn test_device_grant_preserves_absent_auth_time_on_legacy_approval() {
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let device_code = "legacy_auth_time_dev";
-    let doc = crate::db::documents::device_auth::DeviceAuthRequestDoc {
+    let doc = DeviceAuthRequestDoc {
         device_code_hash: sha256_base64url(device_code),
         user_code: "LGCY-AUTH".to_string(),
-        status: crate::db::DeviceAuthStatus::Authorized,
+        status: DeviceAuthStatus::Authorized,
         client_id: Some(client.client_id.clone()),
         user_id: Some(user.id.clone()),
         user_email: Some(user.email.clone()),
@@ -499,7 +505,7 @@ async fn test_device_grant_gate_runs_before_consume_retry_after_re_authorize() {
     set_grant_types(
         &state.store,
         &client.client_id,
-        Some(&[vouch_common::protocol::GRANT_TYPE_DEVICE_CODE]),
+        Some(&[GRANT_TYPE_DEVICE_CODE]),
     )
     .await;
 
@@ -617,9 +623,9 @@ async fn test_device_grant_end_to_end_registered_client_flow() {
         .await
         .expect("lookup device auth")
         .expect("device auth exists");
-    crate::db::authorize_device_auth(
+    db::authorize_device_auth(
         &state.store,
-        crate::db::AuthorizeDeviceAuthParams {
+        AuthorizeDeviceAuthParams {
             id: &request.id,
             user_id: &user.id,
             user_email: &user.email,
@@ -703,7 +709,7 @@ fn device_request_with_assertion(client_id: &str, audience: &str, pkcs8: &[u8]) 
     let assertion = build_client_assertion(client_id, audience, pkcs8, None);
     format!(
         "client_id={client_id}&client_assertion={assertion}&client_assertion_type={}",
-        vouch_common::protocol::CLIENT_ASSERTION_TYPE_JWT_BEARER
+        CLIENT_ASSERTION_TYPE_JWT_BEARER
     )
 }
 
@@ -880,7 +886,7 @@ async fn test_device_code_assertion_audience_may_be_device_endpoint() {
 /// refused; the code is not consumed, so the authenticated retry redeems it.
 #[tokio::test]
 async fn test_device_grant_requires_client_authentication() {
-    let grant = vouch_common::protocol::GRANT_TYPE_DEVICE_CODE;
+    let grant = GRANT_TYPE_DEVICE_CODE;
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "device-grant-auth-req@example.com").await;
     let auth = create_test_authenticator(&state.store, &user.id).await;
@@ -912,7 +918,7 @@ async fn test_device_grant_requires_client_authentication() {
 /// interval is untouched.
 #[tokio::test]
 async fn test_device_grant_bound_to_issuing_client() {
-    let grant = vouch_common::protocol::GRANT_TYPE_DEVICE_CODE;
+    let grant = GRANT_TYPE_DEVICE_CODE;
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "device-grant-bound@example.com").await;
     let auth = create_test_authenticator(&state.store, &user.id).await;
@@ -942,16 +948,13 @@ async fn test_device_grant_bound_to_issuing_client() {
         .expect("lookup")
         .expect("row exists");
     assert!(
-        matches!(row.state, crate::db::DeviceAuthState::Authorized(_)),
+        matches!(row.state, DeviceAuthState::Authorized(_)),
         "another client's poll must not consume the code: {:?}",
         row.state
     );
     let doc = state
         .store
-        .find_one::<crate::db::documents::device_auth::DeviceAuthRequestDoc>(
-            "device_code_hash",
-            &hash,
-        )
+        .find_one::<DeviceAuthRequestDoc>("device_code_hash", &hash)
         .await
         .expect("lookup doc")
         .expect("doc exists");
@@ -1009,7 +1012,7 @@ async fn test_device_grant_other_client_sees_only_invalid_grant() {
     let expires_at = jiff::Timestamp::now()
         .checked_sub(jiff::Span::new().hours(1))
         .expect("past expiry");
-    crate::db::create_device_auth_request(
+    db::create_device_auth_request(
         &state.store,
         &sha256_base64url(expired),
         "EXPIRED",
@@ -1029,7 +1032,7 @@ async fn test_device_grant_other_client_sees_only_invalid_grant() {
 /// response: the caller learns nothing about the code.
 #[tokio::test]
 async fn test_device_grant_unauthenticated_poll_of_pending_code() {
-    let grant = vouch_common::protocol::GRANT_TYPE_DEVICE_CODE;
+    let grant = GRANT_TYPE_DEVICE_CODE;
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "device-grant-pending-anon@example.com").await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
@@ -1068,7 +1071,7 @@ async fn test_device_grant_unauthenticated_poll_of_pending_code() {
 /// revocation is reserved for the code's own client.
 #[tokio::test]
 async fn test_device_grant_unauthenticated_replay_revokes_nothing() {
-    let grant = vouch_common::protocol::GRANT_TYPE_DEVICE_CODE;
+    let grant = GRANT_TYPE_DEVICE_CODE;
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "device-grant-replay-anon@example.com").await;
     let auth = create_test_authenticator(&state.store, &user.id).await;
@@ -1114,7 +1117,7 @@ fn device_poll_body_with_assertion(device_code: &str, assertion: &str) -> String
     format!(
         "{}&client_assertion={assertion}&client_assertion_type={}",
         device_token_body(device_code),
-        vouch_common::protocol::CLIENT_ASSERTION_TYPE_JWT_BEARER
+        CLIENT_ASSERTION_TYPE_JWT_BEARER
     )
 }
 
@@ -1124,7 +1127,7 @@ fn device_poll_body_with_assertion(device_code: &str, assertion: &str) -> String
 async fn assert_replay_rejected_at_device(app: &axum::Router, client_a: &str, assertion: &str) {
     let body = format!(
         "client_id={client_a}&client_assertion={assertion}&client_assertion_type={}",
-        vouch_common::protocol::CLIENT_ASSERTION_TYPE_JWT_BEARER
+        CLIENT_ASSERTION_TYPE_JWT_BEARER
     );
     let (status, resp) = http_post_form(app, "/oauth/device", &body, &[]).await;
     assert_eq!(
@@ -1293,7 +1296,7 @@ fn par_body_with_assertion(client_id: &str, redirect_uri: &str, assertion: &str)
          &client_assertion_type={}\
          &client_assertion={assertion}",
         sha256_base64url(PAR_PKCE_VERIFIER),
-        vouch_common::protocol::CLIENT_ASSERTION_TYPE_JWT_BEARER,
+        CLIENT_ASSERTION_TYPE_JWT_BEARER,
     )
 }
 
@@ -1311,7 +1314,7 @@ async fn test_device_for_grant_rejection_commits_jti_replay_rejected_at_par() {
     let (pkcs8, jwk) = generate_es256_signing_key();
     let grants_without_device: Vec<String> = all_supported_grant_types()
         .into_iter()
-        .filter(|g| g != vouch_common::protocol::GRANT_TYPE_DEVICE_CODE)
+        .filter(|g| g != GRANT_TYPE_DEVICE_CODE)
         .collect();
     let client = create_test_client(
         &state.store,
@@ -1334,8 +1337,7 @@ async fn test_device_for_grant_rejection_commits_jti_replay_rejected_at_par() {
     // is not registered for device_code, so for_grant rejects unauthorized_client.
     let device_body = format!(
         "client_id={}&client_assertion={assertion}&client_assertion_type={}",
-        client.client_id,
-        vouch_common::protocol::CLIENT_ASSERTION_TYPE_JWT_BEARER,
+        client.client_id, CLIENT_ASSERTION_TYPE_JWT_BEARER,
     );
     let (status, resp) = http_post_form(&app, "/oauth/device", &device_body, &[]).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "device rejection: {resp}");
@@ -1415,8 +1417,7 @@ async fn test_par_redirect_uri_rejection_commits_jti_replay_rejected_at_device()
     // call already committed the JTI, so the replay MUST be invalid_client.
     let device_body = format!(
         "client_id={}&client_assertion={assertion}&client_assertion_type={}",
-        client.client_id,
-        vouch_common::protocol::CLIENT_ASSERTION_TYPE_JWT_BEARER,
+        client.client_id, CLIENT_ASSERTION_TYPE_JWT_BEARER,
     );
     let (status, resp) = http_post_form(&app, "/oauth/device", &device_body, &[]).await;
     assert_eq!(
@@ -1437,8 +1438,7 @@ async fn test_par_redirect_uri_rejection_commits_jti_replay_rejected_at_device()
     let fresh = build_client_assertion(&client.client_id, &base_url, &pkcs8, None);
     let device_body = format!(
         "client_id={}&client_assertion={fresh}&client_assertion_type={}",
-        client.client_id,
-        vouch_common::protocol::CLIENT_ASSERTION_TYPE_JWT_BEARER,
+        client.client_id, CLIENT_ASSERTION_TYPE_JWT_BEARER,
     );
     let (status, resp) = http_post_form(&app, "/oauth/device", &device_body, &[]).await;
     assert_eq!(status, StatusCode::OK, "fresh assertion control: {resp}");
@@ -1461,9 +1461,7 @@ async fn test_token_grant_rejection_commits_jti_replay_rejected_at_introspect() 
             jwks: TestJwks::Custom(serde_json::json!({ "keys": [jwk] })),
             token_endpoint_auth_method: Some(db::TokenEndpointAuthMethod::PrivateKeyJwt),
             with_secret: false,
-            grant_types: Some(vec![
-                vouch_common::protocol::GRANT_TYPE_AUTHORIZATION_CODE.to_string(),
-            ]),
+            grant_types: Some(vec![GRANT_TYPE_AUTHORIZATION_CODE.to_string()]),
             ..Default::default()
         },
     )
@@ -1472,8 +1470,7 @@ async fn test_token_grant_rejection_commits_jti_replay_rejected_at_introspect() 
     let assertion_body = |assertion: &str| {
         format!(
             "client_id={}&client_assertion={assertion}&client_assertion_type={}",
-            client.client_id,
-            vouch_common::protocol::CLIENT_ASSERTION_TYPE_JWT_BEARER,
+            client.client_id, CLIENT_ASSERTION_TYPE_JWT_BEARER,
         )
     };
     let assertion = build_client_assertion(

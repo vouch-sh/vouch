@@ -36,6 +36,8 @@ use vouch_common::protocol;
 pub(crate) use types::*;
 
 // Re-export handlers
+use crate::http;
+use crate::scim_filter::{self, AttrExp, FilterError};
 pub(crate) use discovery::{resource_types, schemas, service_provider_config};
 pub(crate) use groups::{
     create_group, delete_group, get_group, list_groups, patch_group, put_group,
@@ -70,7 +72,7 @@ fn validate_list_params<F>(
     schema_urn: &str,
 ) -> Result<Option<F>, (StatusCode, Json<ScimError>)>
 where
-    F: for<'f> TryFrom<crate::scim_filter::AttrExp<'f>, Error = crate::scim_filter::FilterError>,
+    F: for<'f> TryFrom<AttrExp<'f>, Error = FilterError>,
 {
     if let Some(f) = filter
         && f.len() > MAX_FILTER_LEN
@@ -87,7 +89,7 @@ where
         ));
     }
     filter
-        .map(|f| crate::scim_filter::parse(f, schema_urn).and_then(F::try_from))
+        .map(|f| scim_filter::parse(f, schema_urn).and_then(F::try_from))
         .transpose()
         .map_err(|e| {
             (
@@ -177,8 +179,8 @@ pub(crate) async fn authenticate_scim(
             )
         })?;
 
-    let token = crate::http::strip_auth_scheme(auth_header, protocol::AUTH_SCHEME_BEARER)
-        .ok_or_else(|| {
+    let token =
+        http::strip_auth_scheme(auth_header, protocol::AUTH_SCHEME_BEARER).ok_or_else(|| {
             (
                 StatusCode::UNAUTHORIZED,
                 Json(ScimError::new(401, "Invalid Authorization header format")),

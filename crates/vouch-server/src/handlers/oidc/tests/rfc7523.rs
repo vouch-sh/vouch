@@ -2,6 +2,9 @@
 //! RFC 7523 §2.2 / 7521 — JWT client authentication assertion tests.
 
 use super::helpers::*;
+use crate::db::TokenEndpointAuthMethod;
+use crate::db::documents::oauth::OAuthClientDoc;
+use crate::db::documents::session::SessionDoc;
 use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair};
 
 // ========================================================================
@@ -70,7 +73,7 @@ async fn create_test_jwt_client(
         user_id,
         TestClientSpec {
             jwks: TestJwks::Custom(jwks_value),
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
             ..Default::default()
         },
     )
@@ -266,7 +269,7 @@ async fn create_test_jwt_client_malformed_first(
         user_id,
         TestClientSpec {
             jwks: TestJwks::Custom(jwks_value),
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
             ..Default::default()
         },
     )
@@ -367,7 +370,7 @@ async fn test_rfc7523_private_key_jwt_only_unbuildable_fails() {
         &user.id,
         TestClientSpec {
             jwks: TestJwks::Custom(jwks_value),
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
             ..Default::default()
         },
     )
@@ -746,7 +749,7 @@ async fn create_test_fapi_jwt_client(
         user_id,
         TestClientSpec {
             jwks: TestJwks::Custom(jwks_value),
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
             fapi_profile: Some(db::FapiProfile::Fapi2Security),
             dpop_bound_access_tokens: true,
             ..Default::default()
@@ -872,7 +875,7 @@ async fn test_fapi_client_rejects_rs256_assertion() {
         &user.id,
         TestClientSpec {
             jwks: TestJwks::Custom(jwks_value),
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
             fapi_profile: Some(db::FapiProfile::Fapi2Security),
             dpop_bound_access_tokens: true,
             ..Default::default()
@@ -917,7 +920,7 @@ async fn test_non_fapi_client_accepts_rs256_assertion() {
         &user.id,
         TestClientSpec {
             jwks: TestJwks::Custom(jwks_value),
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
             ..Default::default()
         },
     )
@@ -1110,7 +1113,7 @@ async fn enable_grant_types(store: &db::store::DocumentStore, client_id: &str, g
         .expect("Client not found");
     let grants: Vec<String> = grants.iter().map(|s| (*s).to_string()).collect();
     store
-        .modify::<crate::db::documents::oauth::OAuthClientDoc, _>(&oauth_client.id, |data| {
+        .modify::<OAuthClientDoc, _>(&oauth_client.id, |data| {
             data.grant_types = Some(grants.clone());
         })
         .await
@@ -1122,7 +1125,7 @@ async fn enable_grant_types(store: &db::store::DocumentStore, client_id: &str, g
 /// is the actual user's id.
 async fn count_sessions_for_user(store: &db::store::DocumentStore, user_id: &str) -> i64 {
     store
-        .count::<crate::db::documents::session::SessionDoc>("user_id", user_id)
+        .count::<SessionDoc>("user_id", user_id)
         .await
         .expect("count must not error")
 }
@@ -1882,7 +1885,7 @@ async fn test_rfc7523_token_fapi_client_invalid_request_no_dpop_or_mtls() {
         &user.id,
         TestClientSpec {
             jwks: TestJwks::Custom(jwks_value),
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
             fapi_profile: Some(db::FapiProfile::Fapi2Security),
             ..Default::default()
         },
@@ -2356,7 +2359,7 @@ async fn test_authorization_code_allowed_when_grant_types_absent() {
     // Clear the stored list entirely, the shape a manually-managed row has.
     state
         .store
-        .modify::<crate::db::documents::oauth::OAuthClientDoc, _>(&client.client_id, |d| {
+        .modify::<OAuthClientDoc, _>(&client.client_id, |d| {
             d.grant_types = None;
         })
         .await

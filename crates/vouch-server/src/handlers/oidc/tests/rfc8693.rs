@@ -2,6 +2,11 @@
 //! RFC 8693 — Token Exchange tests.
 
 use super::helpers::*;
+use crate::crypto;
+use crate::db::documents::oauth::TokenExchangeDoc;
+use crate::db::{self, AuditEventFilter, CreateAuthenticatorParams};
+use crate::services::policy::events;
+use crate::test_utils::{self, TestSessionSpec};
 
 #[tokio::test]
 async fn test_token_exchange_requires_grant_type() {
@@ -155,7 +160,7 @@ async fn test_token_exchange_successful() {
     // The exchange writes a token_exchange audit event for the subject user.
     let events = state
         .audit
-        .query_events(&crate::db::AuditEventFilter {
+        .query_events(&AuditEventFilter {
             event_types: Some(vec!["token_exchange".to_string()]),
             ..Default::default()
         })
@@ -212,7 +217,7 @@ async fn test_token_exchange_policy_history_carries_client_ip() {
 
     let events = state
         .audit
-        .query_events(&crate::db::AuditEventFilter {
+        .query_events(&AuditEventFilter {
             event_types: Some(vec!["token_exchange".to_string()]),
             ..Default::default()
         })
@@ -224,8 +229,8 @@ async fn test_token_exchange_policy_history_carries_client_ip() {
     assert_eq!(data["client_ip"], "127.0.0.1", "{data}");
     assert_eq!(data["user_agent"], "exchange-test-agent", "{data}");
 
-    let event = crate::services::policy::events::history_event(row, "org-1", 0)
-        .expect("an exchange row maps to a history event");
+    let event =
+        events::history_event(row, "org-1", 0).expect("an exchange row maps to a history event");
     assert_eq!(
         event.field("input", "ip"),
         Some(&dogwood_language::Value::String("127.0.0.1".to_string())),
@@ -878,7 +883,7 @@ async fn test_rfc8693_delegated_exchange_records_actor_user_id() {
 
     let row = state
         .store
-        .find_one::<crate::db::documents::oauth::TokenExchangeDoc>("actor_user_id", &grantee.id)
+        .find_one::<TokenExchangeDoc>("actor_user_id", &grantee.id)
         .await
         .expect("query token_exchange by actor_user_id")
         .expect("delegated exchange row must record actor_user_id");
@@ -1042,7 +1047,7 @@ async fn test_rfc8693_access_token_exp_not_capped_by_subject_ttl() {
 
     // (4) The `sessions` row's `expires_at` must match the issued token's
     //     `exp` claim — the two records must not disagree for the same token.
-    let issued_hash = crate::crypto::hash_token(issued_token);
+    let issued_hash = crypto::hash_token(issued_token);
     let session = state
         .session_cache
         .get_session_by_token_hash(&state.store, &issued_hash, test_arrival())
@@ -1242,7 +1247,7 @@ async fn test_rfc8693_deactivated_subject_user_rejected() {
     let auth_header = client.basic_auth_header();
 
     // Deactivate the user after creating the session
-    crate::db::update_user_active_status(&state.store, &user.id, false)
+    db::update_user_active_status(&state.store, &user.id, false)
         .await
         .expect("deactivate user");
 
@@ -1353,7 +1358,7 @@ async fn test_rfc8693_id_token_request_returns_clean_id_token() {
     // The ID-token exchange writes a token_exchange audit event too.
     let events = state
         .audit
-        .query_events(&crate::db::AuditEventFilter {
+        .query_events(&AuditEventFilter {
             event_types: Some(vec!["token_exchange".to_string()]),
             ..Default::default()
         })
@@ -1736,7 +1741,7 @@ async fn test_rfc8693_id_token_not_persisted_as_session() {
         .as_str()
         .expect("access_token present");
 
-    let hash = crate::crypto::hash_token(id_token);
+    let hash = crypto::hash_token(id_token);
     let session = state
         .session_cache
         .get_session_by_token_hash(&state.store, &hash, test_arrival())
@@ -1806,7 +1811,7 @@ async fn test_rfc8693_id_token_exp_matches_audit_expires_at() {
 
     // The audit row's `expires_at` (a `jiff::Timestamp`) must equal the
     // signed JWT's `exp` — both stamped from the same arrival instant.
-    let issued_hash = crate::crypto::hash_token(id_token);
+    let issued_hash = crypto::hash_token(id_token);
     let audit_rows = state
         .store
         .find_all::<TokenExchangeDoc>("subject_user_id", &user.id)
@@ -1834,9 +1839,9 @@ async fn test_rfc8693_id_token_carries_hardware_aaguid() {
 
     let user = create_test_user(&state.store, "wif-aaguid@example.com").await;
     let aaguid = "ee882879-721c-4913-9775-3dfcce97072a";
-    let auth_id = crate::db::create_authenticator(
+    let auth_id = db::create_authenticator(
         &state.store,
-        &crate::db::CreateAuthenticatorParams {
+        &CreateAuthenticatorParams {
             user_id: &user.id,
             name: "YubiKey 5",
             credential_id: format!("cred-{}", uuid::Uuid::now_v7()).as_bytes(),
@@ -1901,9 +1906,9 @@ async fn test_rfc8693_id_token_uses_session_aaguid_after_rotation() {
 
     let user = create_test_user(&state.store, "wif-rotation@example.com").await;
     let original_aaguid = "ee882879-721c-4913-9775-3dfcce97072a";
-    let auth_id = crate::db::create_authenticator(
+    let auth_id = db::create_authenticator(
         &state.store,
-        &crate::db::CreateAuthenticatorParams {
+        &CreateAuthenticatorParams {
             user_id: &user.id,
             name: "YubiKey 5 (original)",
             credential_id: format!("cred-{}", uuid::Uuid::now_v7()).as_bytes(),
@@ -2067,7 +2072,7 @@ async fn test_rfc8693_access_token_request_unaffected_by_id_token_branch() {
     let access_token = response["access_token"]
         .as_str()
         .expect("access_token present");
-    let hash = crate::crypto::hash_token(access_token);
+    let hash = crypto::hash_token(access_token);
     let session = state
         .session_cache
         .get_session_by_token_hash(&state.store, &hash, test_arrival())
@@ -2100,7 +2105,7 @@ async fn test_rfc8693_id_token_deactivated_user_rejected() {
     let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
-    crate::db::update_user_active_status(&state.store, &user.id, false)
+    db::update_user_active_status(&state.store, &user.id, false)
         .await
         .expect("deactivate user");
 
@@ -2135,9 +2140,9 @@ async fn test_rfc8693_id_token_rejects_non_hardware_verified_subject() {
     let (app, state) = test_app().await;
 
     let user = create_test_user(&state.store, "wif-bootstrap@example.com").await;
-    let token = crate::test_utils::create_test_session_with(
+    let token = test_utils::create_test_session_with(
         &state,
-        crate::test_utils::TestSessionSpec {
+        TestSessionSpec {
             user_id: &user.id,
             email: &user.email,
             verification: TestVerification::NotVerified,
@@ -2260,7 +2265,7 @@ async fn test_rfc8693_deactivated_actor_user_rejected() {
         issue_oauth_access_token(&app, &state, &actor, &actor_auth, &client).await;
 
     // Deactivate the actor user.
-    crate::db::update_user_active_status(&state.store, &actor.id, false)
+    db::update_user_active_status(&state.store, &actor.id, false)
         .await
         .expect("deactivate actor user");
 
@@ -2447,7 +2452,7 @@ async fn test_rfc8693_actor_session_not_found_returns_invalid_request() {
     let (grantee_token, _) =
         issue_oauth_access_token(&app, &state, &grantee, &grantee_auth, &client).await;
 
-    let grantee_hash = crate::crypto::hash_token(&grantee_token);
+    let grantee_hash = crypto::hash_token(&grantee_token);
     state.session_cache.invalidate(&grantee_hash);
     db::delete_session_by_token_hash(&state.store, &grantee_hash)
         .await
@@ -2518,7 +2523,7 @@ async fn test_rfc8693_actor_session_store_error_returns_internal() {
 
     // Fault only the actor session lookup; the subject path keeps using the
     // open pool and succeeds.
-    let grantee_hash = crate::crypto::hash_token(&grantee_token);
+    let grantee_hash = crypto::hash_token(&grantee_token);
     state.session_cache.inject_fault(grantee_hash);
 
     let auth_header = client.basic_auth_header();

@@ -27,6 +27,7 @@ use std::sync::Arc;
 use vouch_common::{DeleteKeyResponse, ListKeysResponse, ResourceLabel, ResourceLabelError};
 
 use super::session::{SteppedUpToken, extract_session_from_cookie};
+use crate::handlers::admin::flash::{self, KEYS_PATH};
 
 /// List all registered keys for the user (during enrollment).
 /// GET /enroll/keys/api
@@ -90,11 +91,7 @@ pub(crate) async fn rename_key_form(
                     .arg("max", ResourceLabel::MAX_CHARS.to_string())
                     .to_string(),
             };
-            let jar = crate::handlers::admin::flash::set_err_at(
-                jar,
-                &message,
-                crate::handlers::admin::flash::KEYS_PATH,
-            );
+            let jar = flash::set_err_at(jar, &message, KEYS_PATH);
             return (jar, Redirect::to("/enroll/keys")).into_response();
         }
     };
@@ -120,11 +117,7 @@ pub(crate) async fn rename_key_form(
             // remaining errors get a generic message that surfaces no internal
             // detail.
             let message = Tr::new("keys-error-rename-failed").to_string();
-            let jar = crate::handlers::admin::flash::set_err_at(
-                jar,
-                &message,
-                crate::handlers::admin::flash::KEYS_PATH,
-            );
+            let jar = flash::set_err_at(jar, &message, KEYS_PATH);
             (jar, Redirect::to("/enroll/keys")).into_response()
         }
     }

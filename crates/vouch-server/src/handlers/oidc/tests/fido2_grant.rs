@@ -7,6 +7,10 @@
 //! coverage; it is exercised by running `vouch login` against a real device.
 
 use super::helpers::*;
+use crate::db::documents::user::UserDoc;
+use crate::db::{self, TokenEndpointAuthMethod};
+use vouch_common::encoding::Raw;
+use vouch_common::fido2_types::Challenge;
 
 // ========================================================================
 // Challenge endpoint — POST /oauth/fido2/challenge
@@ -396,8 +400,7 @@ async fn assert_challenge_unspent(state: &crate::AppState, state_jwt: &str) {
     let expires_at = jiff::Timestamp::now()
         .checked_add(jiff::SignedDuration::from_secs(300))
         .expect("expiry in range");
-    let consume =
-        crate::db::consume_challenge_state_for_test(&state.store, state_jwt, expires_at).await;
+    let consume = db::consume_challenge_state_for_test(&state.store, state_jwt, expires_at).await;
     assert!(
         consume.is_ok(),
         "a rejected assertion consumed the challenge state: {consume:?}"
@@ -585,7 +588,7 @@ async fn test_fido2_token_deactivated_owner_is_audited_in_org_feed() {
     let credential_id = owner_credential_id(&state, &owner.id).await;
     state
         .store
-        .modify::<crate::db::documents::user::UserDoc, _>(&owner.id, |d| d.active = false)
+        .modify::<UserDoc, _>(&owner.id, |d| d.active = false)
         .await
         .expect("deactivate user");
 
@@ -1115,7 +1118,7 @@ async fn test_fido2_challenge_state_decodes_without_client_id_field() {
     /// at all, as a server running before this change would have minted.
     #[derive(serde::Serialize)]
     struct LegacyFido2ChallengeState {
-        challenge: vouch_common::fido2_types::Challenge<vouch_common::encoding::Raw>,
+        challenge: Challenge<Raw>,
         rp_id: String,
         iat: i64,
         exp: i64,
@@ -1161,7 +1164,7 @@ async fn test_fido2_challenge_requires_private_key_jwt() {
         &state.store,
         &user.id,
         TestClientSpec {
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::ClientSecretBasic),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::ClientSecretBasic),
             with_secret: true,
             ..Default::default()
         },
@@ -1423,7 +1426,7 @@ async fn create_jwt_client_with_grants(
         user_id,
         TestClientSpec {
             jwks: TestJwks::Custom(jwks_value),
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
             grant_types: Some(grants.iter().map(|g| (*g).to_string()).collect()),
             ..Default::default()
         },

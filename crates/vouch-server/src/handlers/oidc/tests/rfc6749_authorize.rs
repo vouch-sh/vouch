@@ -2,6 +2,10 @@
 //! RFC 6749 Section 4.1.2 — Authorization endpoint redirect tests.
 
 use super::helpers::*;
+use crate::crypto;
+use crate::db::{self, AccessScope};
+use crate::test_utils::HttpResponse;
+use vouch_common::protocol::GRANT_TYPE_AUTHORIZATION_CODE;
 
 // ========================================================================
 // RFC 6749 Section 4.1.2 — Authorization Endpoint Redirect Tests
@@ -399,7 +403,7 @@ async fn test_rfc6749_authorize_access_denied_personal_scope() {
         &state.store,
         &owner.id,
         TestClientSpec {
-            access_scope: crate::db::AccessScope::Personal,
+            access_scope: AccessScope::Personal,
             org_id: None,
             resource_uris: vec![],
             ..Default::default()
@@ -476,7 +480,7 @@ async fn test_rfc8707_authorize_invalid_resource_redirects_with_error() {
         &state.store,
         &user.id,
         TestClientSpec {
-            access_scope: crate::db::AccessScope::Public,
+            access_scope: AccessScope::Public,
             org_id: None,
             resource_uris: vec!["https://api.example.com".to_string()],
             ..Default::default()
@@ -1180,7 +1184,7 @@ async fn test_rfc6749_authorize_empty_parameter_is_treated_as_omitted() {
     let empty = http_get_full(&app, &format!("{base}&prompt="), &[]).await;
     let omitted = http_get_full(&app, &base, &[]).await;
 
-    let location = |r: &crate::test_utils::HttpResponse| {
+    let location = |r: &HttpResponse| {
         r.headers
             .get("location")
             .and_then(|v| v.to_str().ok())
@@ -1190,7 +1194,7 @@ async fn test_rfc6749_authorize_empty_parameter_is_treated_as_omitted() {
 
     // Each answer carries a fresh `pending_auth` id, so compare the target
     // rather than the whole URL.
-    let target = |r: &crate::test_utils::HttpResponse| {
+    let target = |r: &HttpResponse| {
         location(r)
             .split('?')
             .next()
@@ -1367,7 +1371,7 @@ async fn test_rfc6749_authorize_session_store_error_returns_server_error() {
     .await;
     state
         .session_cache
-        .inject_fault(crate::crypto::hash_token(&session_token));
+        .inject_fault(crypto::hash_token(&session_token));
 
     let challenge = sha256_base64url("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk");
     let state_param = "store-fault-state";
@@ -1434,7 +1438,7 @@ async fn test_rfc6749_authorize_session_store_error_does_not_redirect_to_login()
     .await;
     state
         .session_cache
-        .inject_fault(crate::crypto::hash_token(&session_token));
+        .inject_fault(crypto::hash_token(&session_token));
 
     let challenge = sha256_base64url("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk");
 
@@ -1519,7 +1523,7 @@ async fn test_rfc6749_authorize_pending_auth_store_error_is_not_auth_failure() {
     .await;
     state
         .session_cache
-        .inject_fault(crate::crypto::hash_token(&session_token));
+        .inject_fault(crypto::hash_token(&session_token));
 
     let (status, body) = http_get(
         &app,
@@ -1705,14 +1709,10 @@ async fn test_pending_auth_with_bootstrap_session_returns_to_login_and_preserves
         "must return to /login carrying the same pending id, got: {location}"
     );
     assert!(
-        crate::db::get_pending_oauth_authorization(
-            &state.store,
-            &pending_id,
-            jiff::Timestamp::now()
-        )
-        .await
-        .expect("pending lookup")
-        .is_some(),
+        db::get_pending_oauth_authorization(&state.store, &pending_id, jiff::Timestamp::now())
+            .await
+            .expect("pending lookup")
+            .is_some(),
         "the refused session must not spend the single-use pending id"
     );
 
@@ -1774,14 +1774,10 @@ async fn test_pending_auth_without_session_returns_to_login_and_preserves_pendin
         "must return to /login carrying the same pending id, got: {location}"
     );
     assert!(
-        crate::db::get_pending_oauth_authorization(
-            &state.store,
-            &pending_id,
-            jiff::Timestamp::now()
-        )
-        .await
-        .expect("pending lookup")
-        .is_some(),
+        db::get_pending_oauth_authorization(&state.store, &pending_id, jiff::Timestamp::now())
+            .await
+            .expect("pending lookup")
+            .is_some(),
         "the sessionless return must not spend the single-use pending id"
     );
 }
@@ -1835,7 +1831,7 @@ async fn test_authorize_rejects_code_for_client_not_registered_for_code_response
         .expect("DB lookup")
         .expect("Client must exist in DB");
     assert!(
-        !db_client.is_authorized_for_grant(vouch_common::protocol::GRANT_TYPE_AUTHORIZATION_CODE),
+        !db_client.is_authorized_for_grant(GRANT_TYPE_AUTHORIZATION_CODE),
         "client_credentials-only client must not be authorized for the auth-code grant"
     );
 

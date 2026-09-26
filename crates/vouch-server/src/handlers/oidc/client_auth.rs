@@ -6,7 +6,7 @@
 
 use crate::AppState;
 use crate::arrival::ArrivalTime;
-use crate::db::JwtAssertionJtiClaim;
+use crate::db::{JwtAssertionJtiClaim, OAuthClient, TokenEndpointAuthMethod};
 use crate::error::{OAuthErrorCode, OAuthErrorResponse, ServiceError};
 use crate::handlers::extractors::OptionalClientCert;
 use crate::services::auth::{ClientAuthProof, JwtClientAuthProof, NoClientAuth};
@@ -284,7 +284,7 @@ pub(crate) fn extract_client_auth<T: ClientAuthFields>(
 
 /// Result of a successful `complete_client_auth` dispatch.
 pub(crate) struct ClientAuthOutcome {
-    pub(crate) client: crate::db::OAuthClient,
+    pub(crate) client: OAuthClient,
     pub(crate) client_id: String,
     pub(crate) witnesses: ClientAuthWitnesses,
 }
@@ -416,7 +416,7 @@ pub(crate) async fn complete_client_auth(
 )]
 pub(crate) fn client_auth_proof(
     witnesses: ClientAuthWitnesses,
-    client: &crate::db::OAuthClient,
+    client: &OAuthClient,
 ) -> Result<ClientAuthProof, Response> {
     // RFC 7523 §3: `jti` is OPTIONAL. Gate on the auth-succeeded witness, not
     // on the claim — a non-FAPI client may omit `jti` and still have
@@ -472,11 +472,11 @@ fn oauth_error_response(code: OAuthErrorCode, description: &str) -> Response {
 /// not distinguishable from the witness, and both are equally rejected for
 /// FAPI clients.
 pub(crate) fn actual_auth_method(
-    registered: crate::db::TokenEndpointAuthMethod,
+    registered: TokenEndpointAuthMethod,
     jwt_auth: bool,
     secret_auth: bool,
     mtls_auth: bool,
-) -> crate::db::TokenEndpointAuthMethod {
+) -> TokenEndpointAuthMethod {
     use crate::db::TokenEndpointAuthMethod;
     if jwt_auth {
         TokenEndpointAuthMethod::PrivateKeyJwt

@@ -5,19 +5,26 @@ pub(super) use crate::db;
 pub(super) use crate::services::oidc::ScopeSet;
 pub(super) use crate::services::oidc::authorization::CodeChallengeMethod;
 // Only `issue_code` below builds these directly; test modules go through it.
+use crate::crypto::kms_signer;
+use crate::db::{ParConsumptionProof, TokenEndpointAuthMethod, User};
 use crate::services::oidc::authorization::{AuthorizationCodeParams, issue_authorization_code};
+use crate::services::oidc::fapi::{
+    FAPI_AUTH_CODE_LIFETIME_SECONDS, STANDARD_AUTH_CODE_LIFETIME_SECONDS,
+};
+use crate::services::oidc::mtls::{self, CertThumbprint};
 pub(super) use crate::test_utils::*;
 pub(super) use aws_lc_rs::digest::SHA256;
 pub(super) use axum::http::StatusCode;
 pub(super) use base64::Engine;
 pub(super) use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use vouch_common::jwk::JwkThumbprintKey;
 
 /// Create an authorization code and exchange it at `/oauth/token` to get an access token.
 /// Returns `(access_token, id_token)`.
 pub(super) async fn issue_oauth_access_token(
     app: &axum::Router,
     state: &std::sync::Arc<crate::AppState>,
-    user: &crate::db::User,
+    user: &User,
     auth_id: &str,
     client: &TestOAuthClient,
 ) -> (String, String) {
@@ -31,7 +38,7 @@ pub(super) async fn issue_oauth_access_token(
 pub(super) async fn issue_oauth_access_token_with_scope(
     app: &axum::Router,
     state: &std::sync::Arc<crate::AppState>,
-    user: &crate::db::User,
+    user: &User,
     auth_id: &str,
     client: &TestOAuthClient,
     scope: &str,
@@ -142,7 +149,7 @@ impl Default for TestCodeSpec<'_> {
 /// of the token request.
 pub(super) async fn issue_code(
     state: &std::sync::Arc<crate::AppState>,
-    user: &crate::db::User,
+    user: &User,
     authenticator_id: &str,
     client_id: &str,
     spec: TestCodeSpec<'_>,
@@ -165,13 +172,13 @@ pub(super) async fn issue_code(
             acr_values: spec.acr_values,
             dpop_jkt: spec.dpop_jkt,
             auth_code_lifetime_seconds: if spec.fapi_lifetime {
-                crate::services::oidc::fapi::FAPI_AUTH_CODE_LIFETIME_SECONDS
+                FAPI_AUTH_CODE_LIFETIME_SECONDS
             } else {
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS
+                STANDARD_AUTH_CODE_LIFETIME_SECONDS
             },
             authorization_details: spec.authorization_details,
             authenticated_at: spec.auth_time,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+            par: ParConsumptionProof::not_pushed(),
         },
     )
     .await
@@ -262,7 +269,7 @@ pub(super) async fn create_test_jwt_client(
         user_id,
         TestClientSpec {
             jwks: TestJwks::Custom(jwks_value),
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
             ..Default::default()
         },
     )
@@ -282,8 +289,8 @@ pub(super) fn generate_rs256_signing_key() -> (aws_lc_rs::rsa::KeyPair, serde_js
 
     let key_pair = RsaKeyPair::generate(KeySize::Rsa2048).expect("RSA-2048 keygen");
     let spki_der = key_pair.public_key().as_der().expect("SPKI DER");
-    let (n_bytes, e_bytes) = crate::crypto::kms_signer::parse_spki_rsa(spki_der.as_ref())
-        .expect("parse RSA SPKI components");
+    let (n_bytes, e_bytes) =
+        kms_signer::parse_spki_rsa(spki_der.as_ref()).expect("parse RSA SPKI components");
 
     let jwk = serde_json::json!({
         "kty": "RSA",
@@ -383,8 +390,8 @@ pub(super) fn sha256_base64url(input: &str) -> String {
 pub(super) use crate::test_utils::make_test_cert_der;
 
 /// Compute the base64url SHA-256 thumbprint of DER bytes.
-pub(super) fn cert_thumbprint(der: &[u8]) -> crate::services::oidc::mtls::CertThumbprint {
-    crate::services::oidc::mtls::compute_cert_thumbprint(der)
+pub(super) fn cert_thumbprint(der: &[u8]) -> CertThumbprint {
+    mtls::compute_cert_thumbprint(der)
 }
 
 // ========================================================================
@@ -418,7 +425,7 @@ pub(super) fn generate_dpop_key_pair() -> (EcdsaKeyPair, serde_json::Value) {
 /// Compute the RFC 7638 JWK thumbprint for a DPoP JWK (lexicographic JSON
 /// of the required members: crv, kty, x, y).
 pub(super) fn dpop_jkt(jwk: &serde_json::Value) -> String {
-    vouch_common::jwk::JwkThumbprintKey::from_json(jwk)
+    JwkThumbprintKey::from_json(jwk)
         .expect("test JWK carries the required members")
         .thumbprint()
 }

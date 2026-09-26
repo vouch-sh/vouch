@@ -8,7 +8,15 @@
 
 use axum::http::StatusCode;
 
-use crate::test_utils::*;
+use crate::arrival::ArrivalTime;
+use crate::db::documents::session::SessionDoc;
+use crate::db::store::DocumentStore;
+use crate::db::{
+    self, AccessScope, AuditEventFilter, ClientType, FapiProfile, OAuthClientType,
+    TokenEndpointAuthMethod,
+};
+use crate::services::auth::NoClientAuth;
+use crate::test_utils::{TestJwks, *};
 
 // ========================================================================
 // Helper: create a test app owned by a user, returning (app_id, token)
@@ -682,7 +690,7 @@ async fn test_delete_secret_wrong_owner() {
     let auth = bearer(&token2);
 
     // Get secret ID from app (via db directly, since API would 404)
-    let secrets = crate::db::get_oauth_client_secrets(&state.store, &client.app_id)
+    let secrets = db::get_oauth_client_secrets(&state.store, &client.app_id)
         .await
         .unwrap();
     let secret_id = &secrets[0].id;
@@ -790,7 +798,7 @@ async fn test_delete_sole_expired_secret_allowed() {
 
     // The client's only secret, already expired (but not revoked).
     let past: jiff::Timestamp = "2020-01-01T00:00:00Z".parse().unwrap();
-    let expired = crate::db::create_oauth_client_secret(
+    let expired = db::create_oauth_client_secret(
         &state.store,
         &app_id,
         "hash_sole_expired_api",
@@ -817,7 +825,7 @@ async fn test_delete_sole_expired_secret_allowed() {
 
     // The row is soft-deleted and the client remains at zero active secrets.
     let now = jiff::Timestamp::now();
-    let secrets = crate::db::get_oauth_client_secrets(&state.store, &app_id)
+    let secrets = db::get_oauth_client_secrets(&state.store, &app_id)
         .await
         .expect("db query ok");
     let revoked = secrets
@@ -1096,17 +1104,17 @@ async fn test_create_spa_application_is_public_client() {
     );
 
     let client_id = json["client_id"].as_str().unwrap();
-    let client = crate::db::get_oauth_client_by_client_id(&state.store, client_id)
+    let client = db::get_oauth_client_by_client_id(&state.store, client_id)
         .await
         .expect("lookup")
         .expect("client exists");
     assert_eq!(
         client.token_endpoint_auth_method,
-        crate::db::TokenEndpointAuthMethod::None,
+        TokenEndpointAuthMethod::None,
         "secretless client types must be stored as public clients"
     );
     assert!(
-        crate::services::auth::NoClientAuth::for_public_client(&client).is_ok(),
+        NoClientAuth::for_public_client(&client).is_ok(),
         "token endpoint must accept the SPA client as public"
     );
 }
@@ -1143,15 +1151,15 @@ async fn test_create_native_application_is_public_client() {
     assert!(json["client_secret"].is_null());
 
     let client_id = json["client_id"].as_str().unwrap();
-    let client = crate::db::get_oauth_client_by_client_id(&state.store, client_id)
+    let client = db::get_oauth_client_by_client_id(&state.store, client_id)
         .await
         .expect("lookup")
         .expect("client exists");
     assert_eq!(
         client.token_endpoint_auth_method,
-        crate::db::TokenEndpointAuthMethod::None,
+        TokenEndpointAuthMethod::None,
     );
-    assert!(crate::services::auth::NoClientAuth::for_public_client(&client).is_ok());
+    assert!(NoClientAuth::for_public_client(&client).is_ok());
 }
 
 /// Confidential (`web`) clients keep the RFC 7591 §2 default:
@@ -1189,13 +1197,13 @@ async fn test_create_web_application_is_confidential_client() {
     assert!(json["client_secret"].as_str().is_some());
 
     let client_id = json["client_id"].as_str().unwrap();
-    let client = crate::db::get_oauth_client_by_client_id(&state.store, client_id)
+    let client = db::get_oauth_client_by_client_id(&state.store, client_id)
         .await
         .expect("lookup")
         .expect("client exists");
     assert_eq!(
         client.token_endpoint_auth_method,
-        crate::db::TokenEndpointAuthMethod::ClientSecretBasic,
+        TokenEndpointAuthMethod::ClientSecretBasic,
     );
 }
 
@@ -1231,7 +1239,7 @@ async fn test_create_application_rejects_deactivated_user() {
     .await;
     let auth = bearer(&token);
 
-    crate::db::update_user_active_status(&state.store, &user.id, false)
+    db::update_user_active_status(&state.store, &user.id, false)
         .await
         .expect("deactivate user");
 
@@ -1446,7 +1454,7 @@ async fn test_update_application_rejects_deactivated_user() {
     let auth = bearer(&token);
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
-    crate::db::update_user_active_status(&state.store, &user.id, false)
+    db::update_user_active_status(&state.store, &user.id, false)
         .await
         .expect("deactivate user");
 
@@ -1484,7 +1492,7 @@ async fn test_update_non_owned_application_rejects_deactivated_user() {
     // A second, active user owns the target application.
     let owner = create_test_user(&state.store, "non-owner-active@example.com").await;
     let owners_client = create_test_oauth_client(&state.store, &owner.id).await;
-    let original = crate::db::get_oauth_client_by_id(&state.store, &owners_client.app_id)
+    let original = db::get_oauth_client_by_id(&state.store, &owners_client.app_id)
         .await
         .expect("db read")
         .expect("owner's application exists");
@@ -1513,7 +1521,7 @@ async fn test_update_non_owned_application_rejects_deactivated_user() {
     assert_deactivated_rejection(status, &body);
 
     // The target application must survive the rejected update unchanged.
-    let survivor = crate::db::get_oauth_client_by_id(&state.store, &owners_client.app_id)
+    let survivor = db::get_oauth_client_by_id(&state.store, &owners_client.app_id)
         .await
         .expect("db read")
         .expect("application must still exist");
@@ -1803,7 +1811,7 @@ async fn test_delete_application_partial_failure_revokes_m2m_token_from_cache() 
             // the Bearer token's `client_id` claim). Without this the
             // M2M token's `/v1/keys` probe is rejected by the httpsig
             // middleware before reaching the handler.
-            jwks: crate::test_utils::TestJwks::Shared,
+            jwks: TestJwks::Shared,
             with_secret: false,
             ..Default::default()
         },
@@ -1832,7 +1840,7 @@ async fn test_delete_application_partial_failure_revokes_m2m_token_from_cache() 
         &user.id,
         TestClientSpec {
             name: "Partial E2E Sibling".to_string(),
-            jwks: crate::test_utils::TestJwks::Shared,
+            jwks: TestJwks::Shared,
             with_secret: false,
             ..Default::default()
         },
@@ -1960,9 +1968,9 @@ async fn test_revoke_tokens_not_found() {
 
 // Count SessionDoc rows indexed under a given user_id.
 // For client_credentials grants the session's user_id is the client_id.
-async fn count_sessions_for_user(store: &crate::db::store::DocumentStore, user_id: &str) -> i64 {
+async fn count_sessions_for_user(store: &DocumentStore, user_id: &str) -> i64 {
     store
-        .count::<crate::db::documents::session::SessionDoc>("user_id", user_id)
+        .count::<SessionDoc>("user_id", user_id)
         .await
         .expect("count must not error")
 }
@@ -2033,12 +2041,9 @@ async fn test_revoke_tokens_clears_m2m_sessions() {
 // ========================================================================
 
 // Count SessionDoc rows indexed under a given client_id.
-async fn count_sessions_for_client(
-    store: &crate::db::store::DocumentStore,
-    client_id: &str,
-) -> i64 {
+async fn count_sessions_for_client(store: &DocumentStore, client_id: &str) -> i64 {
     store
-        .count::<crate::db::documents::session::SessionDoc>("client_id", client_id)
+        .count::<SessionDoc>("client_id", client_id)
         .await
         .expect("count must not error")
 }
@@ -2258,8 +2263,8 @@ async fn test_update_application_rejects_fapi_downgrade() {
         &state.store,
         &user.id,
         TestClientSpec {
-            fapi_profile: Some(crate::db::FapiProfile::Fapi2Security),
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            fapi_profile: Some(FapiProfile::Fapi2Security),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
             jwks: TestJwks::Shared,
             dpop_bound_access_tokens: true,
             with_secret: false,
@@ -2286,14 +2291,14 @@ async fn test_update_application_rejects_fapi_downgrade() {
 
     // The rejection must leave the client untouched — in particular it must
     // not be left on client_secret_basic with no secret.
-    let persisted = crate::db::get_oauth_client_by_id(&state.store, &client.app_id)
+    let persisted = db::get_oauth_client_by_id(&state.store, &client.app_id)
         .await
         .expect("db lookup")
         .expect("client still exists");
     assert!(persisted.is_fapi(), "client must remain FAPI");
     assert_eq!(
         persisted.token_endpoint_auth_method,
-        crate::db::TokenEndpointAuthMethod::PrivateKeyJwt,
+        TokenEndpointAuthMethod::PrivateKeyJwt,
         "auth method must be unchanged"
     );
 }
@@ -2324,7 +2329,7 @@ async fn test_update_application_preserves_jwks_when_fapi_profile_absent() {
         &state.store,
         &user.id,
         TestClientSpec {
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
             jwks: TestJwks::Shared,
             fapi_profile: None,
             with_secret: false,
@@ -2347,7 +2352,7 @@ async fn test_update_application_preserves_jwks_when_fapi_profile_absent() {
 
     assert_eq!(status, StatusCode::OK, "body: {body}");
 
-    let persisted = crate::db::get_oauth_client_by_id(&state.store, &client.app_id)
+    let persisted = db::get_oauth_client_by_id(&state.store, &client.app_id)
         .await
         .expect("db lookup")
         .expect("client still exists");
@@ -2360,7 +2365,7 @@ async fn test_update_application_preserves_jwks_when_fapi_profile_absent() {
     );
     assert_eq!(
         persisted.token_endpoint_auth_method,
-        crate::db::TokenEndpointAuthMethod::PrivateKeyJwt,
+        TokenEndpointAuthMethod::PrivateKeyJwt,
         "auth method must be unchanged"
     );
 }
@@ -2389,7 +2394,7 @@ async fn test_update_application_rejects_clearing_jwks_for_pkjwt_client() {
         &state.store,
         &user.id,
         TestClientSpec {
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
             jwks: TestJwks::Shared,
             fapi_profile: None,
             with_secret: false,
@@ -2416,7 +2421,7 @@ async fn test_update_application_rejects_clearing_jwks_for_pkjwt_client() {
         "error code should identify the missing keys: {body}"
     );
 
-    let persisted = crate::db::get_oauth_client_by_id(&state.store, &client.app_id)
+    let persisted = db::get_oauth_client_by_id(&state.store, &client.app_id)
         .await
         .expect("db lookup")
         .expect("client still exists");
@@ -3035,7 +3040,7 @@ async fn test_update_application_absent_access_scope_preserves_existing() {
         &state.store,
         &user.id,
         TestClientSpec {
-            access_scope: crate::db::AccessScope::Public,
+            access_scope: AccessScope::Public,
             ..Default::default()
         },
     )
@@ -3088,11 +3093,11 @@ async fn test_add_secret_rejects_mtls_fapi_client() {
         &state.store,
         &user.id,
         TestClientSpec {
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::TlsClientAuth),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::TlsClientAuth),
             tls_client_auth_subject_dn: Some("CN=test.example.com".to_string()),
             jwks: TestJwks::Shared,
             dpop_bound_access_tokens: true,
-            fapi_profile: Some(crate::db::FapiProfile::Fapi2Security),
+            fapi_profile: Some(FapiProfile::Fapi2Security),
             with_secret: false,
             ..Default::default()
         },
@@ -3113,7 +3118,7 @@ async fn test_add_secret_rejects_mtls_fapi_client() {
     let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
     assert_eq!(json["code"], "no_secret", "body: {body}");
 
-    let secrets = crate::db::get_oauth_client_secrets(&state.store, &app_id)
+    let secrets = db::get_oauth_client_secrets(&state.store, &app_id)
         .await
         .expect("db query ok");
     assert!(
@@ -3141,13 +3146,11 @@ async fn test_add_secret_rejects_self_signed_mtls_fapi_client() {
         &state.store,
         &user.id,
         TestClientSpec {
-            token_endpoint_auth_method: Some(
-                crate::db::TokenEndpointAuthMethod::SelfSignedTlsClientAuth,
-            ),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::SelfSignedTlsClientAuth),
             tls_client_auth_subject_dn: Some("CN=test.example.com".to_string()),
             jwks: TestJwks::Shared,
             dpop_bound_access_tokens: true,
-            fapi_profile: Some(crate::db::FapiProfile::Fapi2Security),
+            fapi_profile: Some(FapiProfile::Fapi2Security),
             with_secret: false,
             ..Default::default()
         },
@@ -3168,7 +3171,7 @@ async fn test_add_secret_rejects_self_signed_mtls_fapi_client() {
     let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
     assert_eq!(json["code"], "no_secret", "body: {body}");
 
-    let secrets = crate::db::get_oauth_client_secrets(&state.store, &app_id)
+    let secrets = db::get_oauth_client_secrets(&state.store, &app_id)
         .await
         .expect("db query ok");
     assert!(
@@ -3197,10 +3200,10 @@ async fn test_add_secret_rejects_private_key_jwt_fapi_client() {
         &state.store,
         &user.id,
         TestClientSpec {
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
             jwks: TestJwks::Shared,
             dpop_bound_access_tokens: true,
-            fapi_profile: Some(crate::db::FapiProfile::Fapi2Security),
+            fapi_profile: Some(FapiProfile::Fapi2Security),
             with_secret: false,
             ..Default::default()
         },
@@ -3219,7 +3222,7 @@ async fn test_add_secret_rejects_private_key_jwt_fapi_client() {
     let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
     assert_eq!(json["code"], "no_secret", "body: {body}");
 
-    let secrets = crate::db::get_oauth_client_secrets(&state.store, &client.app_id)
+    let secrets = db::get_oauth_client_secrets(&state.store, &client.app_id)
         .await
         .expect("db query ok");
     assert!(
@@ -3251,9 +3254,9 @@ async fn test_add_secret_rejects_non_fapi_private_key_jwt_service_client() {
         &state.store,
         &user.id,
         TestClientSpec {
-            application_type: crate::db::OAuthClientType::Service,
+            application_type: OAuthClientType::Service,
             grant_types: Some(vec!["client_credentials".to_string()]),
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
             jwks: TestJwks::Shared,
             fapi_profile: None,
             with_secret: false,
@@ -3276,7 +3279,7 @@ async fn test_add_secret_rejects_non_fapi_private_key_jwt_service_client() {
     let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
     assert_eq!(json["code"], "no_secret", "body: {body}");
 
-    let secrets = crate::db::get_oauth_client_secrets(&state.store, &app_id)
+    let secrets = db::get_oauth_client_secrets(&state.store, &app_id)
         .await
         .expect("db query ok");
     assert!(
@@ -3306,10 +3309,10 @@ async fn test_add_secret_rejects_non_fapi_private_key_jwt_native_client() {
         &state.store,
         &user.id,
         TestClientSpec {
-            application_type: crate::db::OAuthClientType::Native,
+            application_type: OAuthClientType::Native,
             redirect_uris: vec!["http://127.0.0.1:8400/cb".to_string()],
             grant_types: Some(vec!["authorization_code".to_string()]),
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
             jwks: TestJwks::Shared,
             fapi_profile: None,
             with_secret: false,
@@ -3332,7 +3335,7 @@ async fn test_add_secret_rejects_non_fapi_private_key_jwt_native_client() {
     let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
     assert_eq!(json["code"], "no_secret", "body: {body}");
 
-    let secrets = crate::db::get_oauth_client_secrets(&state.store, &app_id)
+    let secrets = db::get_oauth_client_secrets(&state.store, &app_id)
         .await
         .expect("db query ok");
     assert!(
@@ -3364,7 +3367,7 @@ async fn test_add_secret_rejects_non_fapi_mtls_client() {
         &user.id,
         TestClientSpec {
             grant_types: Some(vec!["client_credentials".to_string()]),
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::TlsClientAuth),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::TlsClientAuth),
             tls_client_auth_subject_dn: Some("CN=test.example.com".to_string()),
             fapi_profile: None,
             with_secret: false,
@@ -3387,7 +3390,7 @@ async fn test_add_secret_rejects_non_fapi_mtls_client() {
     let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
     assert_eq!(json["code"], "no_secret", "body: {body}");
 
-    let secrets = crate::db::get_oauth_client_secrets(&state.store, &app_id)
+    let secrets = db::get_oauth_client_secrets(&state.store, &app_id)
         .await
         .expect("db query ok");
     assert!(
@@ -3424,9 +3427,9 @@ async fn test_pkjwt_secret_downgrade_blocked_e2e() {
         &state.store,
         &user.id,
         TestClientSpec {
-            application_type: crate::db::OAuthClientType::Service,
+            application_type: OAuthClientType::Service,
             grant_types: Some(vec!["client_credentials".to_string()]),
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
             jwks: TestJwks::Shared,
             fapi_profile: None,
             with_secret: false,
@@ -3450,9 +3453,9 @@ async fn test_pkjwt_secret_downgrade_blocked_e2e() {
         &state.store,
         &user.id,
         TestClientSpec {
-            application_type: crate::db::OAuthClientType::Service,
+            application_type: OAuthClientType::Service,
             grant_types: Some(vec!["client_credentials".to_string()]),
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
             jwks: TestJwks::Shared,
             fapi_profile: None,
             with_secret: true, // a secret row the registered method never uses
@@ -3514,9 +3517,9 @@ async fn test_add_secret_succeeds_for_native_client_with_registered_secret() {
         &state.store,
         &user.id,
         TestClientSpec {
-            application_type: crate::db::OAuthClientType::Native,
+            application_type: OAuthClientType::Native,
             redirect_uris: vec!["http://127.0.0.1:8400/cb".to_string()],
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::ClientSecretPost),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::ClientSecretPost),
             with_secret: true,
             ..Default::default()
         },
@@ -3545,7 +3548,7 @@ async fn test_add_secret_succeeds_for_native_client_with_registered_secret() {
     );
 
     // The rotated secret row must be persisted alongside the seeded one.
-    let secrets = crate::db::get_oauth_client_secrets(&state.store, &app_id)
+    let secrets = db::get_oauth_client_secrets(&state.store, &app_id)
         .await
         .expect("db query ok");
     assert_eq!(
@@ -3555,7 +3558,7 @@ async fn test_add_secret_succeeds_for_native_client_with_registered_secret() {
     );
 
     // The new secret must authenticate the client.
-    let arrival = crate::arrival::ArrivalTime::for_test(jiff::Timestamp::now());
+    let arrival = ArrivalTime::for_test(jiff::Timestamp::now());
     let creds = ClientCredentials {
         client_id: client.client_id.clone(),
         client_secret: Some(SecretString::from(new_secret.to_string())),
@@ -3565,7 +3568,7 @@ async fn test_add_secret_succeeds_for_native_client_with_registered_secret() {
         .expect("the rotated secret must authenticate the native+secret client");
     assert_eq!(
         authed.client_type(),
-        crate::db::ClientType::Confidential,
+        ClientType::Confidential,
         "a native client registered with a secret is confidential"
     );
     assert!(
@@ -3596,9 +3599,9 @@ async fn test_add_secret_rejects_public_native_client_with_no_secret() {
         &state.store,
         &user.id,
         TestClientSpec {
-            application_type: crate::db::OAuthClientType::Native,
+            application_type: OAuthClientType::Native,
             redirect_uris: vec!["http://127.0.0.1:8400/cb".to_string()],
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::None),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::None),
             with_secret: false,
             ..Default::default()
         },
@@ -3619,7 +3622,7 @@ async fn test_add_secret_rejects_public_native_client_with_no_secret() {
     let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
     assert_eq!(json["code"], "no_secret", "body: {body}");
 
-    let secrets = crate::db::get_oauth_client_secrets(&state.store, &app_id)
+    let secrets = db::get_oauth_client_secrets(&state.store, &app_id)
         .await
         .expect("db query ok");
     assert!(
@@ -3657,11 +3660,11 @@ async fn test_delete_last_secret_allowed_for_fapi_client() {
         &state.store,
         &user.id,
         TestClientSpec {
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::TlsClientAuth),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::TlsClientAuth),
             tls_client_auth_subject_dn: Some("CN=test.example.com".to_string()),
             jwks: TestJwks::Shared,
             dpop_bound_access_tokens: true,
-            fapi_profile: Some(crate::db::FapiProfile::Fapi2Security),
+            fapi_profile: Some(FapiProfile::Fapi2Security),
             with_secret: true, // a pre-guard mTLS-FAPI client with a dead secret row
             ..Default::default()
         },
@@ -3692,7 +3695,7 @@ async fn test_delete_last_secret_allowed_for_fapi_client() {
     );
 
     let now = jiff::Timestamp::now();
-    let secrets = crate::db::get_oauth_client_secrets(&state.store, &app_id)
+    let secrets = db::get_oauth_client_secrets(&state.store, &app_id)
         .await
         .expect("db query ok");
     assert!(
@@ -3755,10 +3758,10 @@ async fn test_delete_last_secret_allowed_for_private_key_jwt_fapi_client() {
         &state.store,
         &user.id,
         TestClientSpec {
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
             jwks: TestJwks::Shared,
             dpop_bound_access_tokens: true,
-            fapi_profile: Some(crate::db::FapiProfile::Fapi2Security),
+            fapi_profile: Some(FapiProfile::Fapi2Security),
             with_secret: true, // pre-guard row; refused by authenticate_client
             ..Default::default()
         },
@@ -3787,7 +3790,7 @@ async fn test_delete_last_secret_allowed_for_private_key_jwt_fapi_client() {
         "a private_key_jwt FAPI client's last dead secret must be deletable, body: {body}"
     );
     let now = jiff::Timestamp::now();
-    let secrets = crate::db::get_oauth_client_secrets(&state.store, &app_id)
+    let secrets = db::get_oauth_client_secrets(&state.store, &app_id)
         .await
         .expect("db query ok");
     assert!(
@@ -3819,7 +3822,7 @@ async fn test_delete_last_secret_allowed_for_non_fapi_mtls_client() {
         &user.id,
         TestClientSpec {
             grant_types: Some(vec!["client_credentials".to_string()]),
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::TlsClientAuth),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::TlsClientAuth),
             tls_client_auth_subject_dn: Some("CN=test.example.com".to_string()),
             fapi_profile: None,
             with_secret: true,
@@ -3881,7 +3884,7 @@ async fn setup_deactivated_owner_with_app(
     )
     .await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
-    crate::db::update_user_active_status(&state.store, &user.id, false)
+    db::update_user_active_status(&state.store, &user.id, false)
         .await
         .expect("deactivate user");
     (client.app_id, token)
@@ -3913,7 +3916,7 @@ async fn test_delete_application_rejects_deactivated_user() {
 
     assert_deactivated_rejection(status, &body);
     // The application must survive the rejected deletion.
-    let survivor = crate::db::get_oauth_client_by_id(&state.store, &app_id)
+    let survivor = db::get_oauth_client_by_id(&state.store, &app_id)
         .await
         .expect("db read")
         .expect("application must still exist");
@@ -3926,7 +3929,7 @@ async fn test_add_secret_rejects_deactivated_user() {
     let (app_id, token) =
         setup_deactivated_owner_with_app(&state, "deactivated-add-secret@example.com").await;
 
-    let before = crate::db::get_oauth_client_secrets(&state.store, &app_id)
+    let before = db::get_oauth_client_secrets(&state.store, &app_id)
         .await
         .expect("db read")
         .len();
@@ -3940,7 +3943,7 @@ async fn test_add_secret_rejects_deactivated_user() {
     .await;
 
     assert_deactivated_rejection(status, &body);
-    let after = crate::db::get_oauth_client_secrets(&state.store, &app_id)
+    let after = db::get_oauth_client_secrets(&state.store, &app_id)
         .await
         .expect("db read")
         .len();
@@ -3953,7 +3956,7 @@ async fn test_delete_secret_rejects_deactivated_user() {
     let (app_id, token) =
         setup_deactivated_owner_with_app(&state, "deactivated-del-secret@example.com").await;
 
-    let secrets = crate::db::get_oauth_client_secrets(&state.store, &app_id)
+    let secrets = db::get_oauth_client_secrets(&state.store, &app_id)
         .await
         .expect("db read");
     let secret_id = &secrets.first().expect("fixture secret").id;
@@ -3967,7 +3970,7 @@ async fn test_delete_secret_rejects_deactivated_user() {
 
     assert_deactivated_rejection(status, &body);
     let now = jiff::Timestamp::now();
-    let survivors = crate::db::get_oauth_client_secrets(&state.store, &app_id)
+    let survivors = db::get_oauth_client_secrets(&state.store, &app_id)
         .await
         .expect("db read");
     assert!(
@@ -3994,7 +3997,7 @@ async fn test_revoke_tokens_rejects_deactivated_user() {
 
     assert_deactivated_rejection(status, &body);
     let now = jiff::Timestamp::now();
-    let survivors = crate::db::get_oauth_client_secrets(&state.store, &app_id)
+    let survivors = db::get_oauth_client_secrets(&state.store, &app_id)
         .await
         .expect("db read");
     assert!(
@@ -4040,7 +4043,7 @@ async fn delete_application_api_records_client_deleted_audit_event() {
 
     let events = state
         .audit
-        .query_events(&crate::db::AuditEventFilter {
+        .query_events(&AuditEventFilter {
             event_types: Some(vec!["oauth_client_deleted".to_string()]),
             user_id: Some(user.id.clone()),
             ..Default::default()
@@ -4102,7 +4105,7 @@ async fn delete_application_api_attributes_org_domain_for_org_owned_client() {
 
     let events = state
         .audit
-        .query_events(&crate::db::AuditEventFilter {
+        .query_events(&AuditEventFilter {
             event_types: Some(vec!["oauth_client_deleted".to_string()]),
             user_id: Some(owner.id.clone()),
             ..Default::default()
@@ -4166,7 +4169,7 @@ async fn delete_application_api_attributes_user_org_domain_for_personal_app() {
 
     let events = state
         .audit
-        .query_events(&crate::db::AuditEventFilter {
+        .query_events(&AuditEventFilter {
             event_types: Some(vec!["oauth_client_deleted".to_string()]),
             user_id: Some(owner.id.clone()),
             ..Default::default()
@@ -4214,7 +4217,7 @@ async fn delete_application_api_no_org_when_personal_app_and_solo_owner() {
 
     let events = state
         .audit
-        .query_events(&crate::db::AuditEventFilter {
+        .query_events(&AuditEventFilter {
             event_types: Some(vec!["oauth_client_deleted".to_string()]),
             user_id: Some(owner.id.clone()),
             ..Default::default()
@@ -4263,7 +4266,7 @@ async fn delete_application_api_non_owner_writes_no_audit_event() {
 
     let events = state
         .audit
-        .query_events(&crate::db::AuditEventFilter {
+        .query_events(&AuditEventFilter {
             event_types: Some(vec!["oauth_client_deleted".to_string()]),
             ..Default::default()
         })
@@ -4277,7 +4280,7 @@ async fn delete_application_api_non_owner_writes_no_audit_event() {
     );
     // The client must survive a rejected delete.
     assert!(
-        crate::db::get_oauth_client_by_id(&state.store, &client.app_id)
+        db::get_oauth_client_by_id(&state.store, &client.app_id)
             .await
             .expect("db read")
             .is_some(),
@@ -4304,7 +4307,7 @@ async fn delete_application_api_deactivated_owner_writes_no_audit_event() {
 
     let events = state
         .audit
-        .query_events(&crate::db::AuditEventFilter {
+        .query_events(&AuditEventFilter {
             event_types: Some(vec!["oauth_client_deleted".to_string()]),
             ..Default::default()
         })
@@ -4361,7 +4364,7 @@ async fn delete_application_api_failed_delete_writes_no_audit_event() {
 
     let events = state
         .audit
-        .query_events(&crate::db::AuditEventFilter {
+        .query_events(&AuditEventFilter {
             event_types: Some(vec!["oauth_client_deleted".to_string()]),
             ..Default::default()
         })
@@ -4375,7 +4378,7 @@ async fn delete_application_api_failed_delete_writes_no_audit_event() {
     // The client document must survive the failed delete (the cascade faults
     // before `delete_oauth_client`).
     assert!(
-        crate::db::get_oauth_client_by_id(&state.store, &client.app_id)
+        db::get_oauth_client_by_id(&state.store, &client.app_id)
             .await
             .expect("db read")
             .is_some(),

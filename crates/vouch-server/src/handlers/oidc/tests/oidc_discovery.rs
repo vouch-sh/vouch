@@ -3,6 +3,12 @@
 
 use super::helpers::*;
 use crate::assurance::AuthMethod;
+use crate::db::ResponseMode;
+use crate::services::oidc::authorization::CodeChallengeMethod;
+use crate::services::oidc::claims::CnfClaim;
+use crate::services::oidc::grant_type::OAuthGrantType;
+use crate::services::oidc::token::{ADVERTISED_ID_TOKEN_CLAIMS, IdTokenClaims};
+use crate::services::oidc::{OAuthScope, SUPPORTED_RESPONSE_TYPES};
 use std::collections::BTreeSet;
 
 #[tokio::test]
@@ -185,11 +191,10 @@ async fn test_oidc_discovery_grant_types_match_token_parser() {
         .map(|v| v.as_str().expect("grant type should be string").to_string())
         .collect();
 
-    let parser_supported =
-        crate::services::oidc::grant_type::OAuthGrantType::supported_wire_values()
-            .into_iter()
-            .map(String::from)
-            .collect::<BTreeSet<_>>();
+    let parser_supported = OAuthGrantType::supported_wire_values()
+        .into_iter()
+        .map(String::from)
+        .collect::<BTreeSet<_>>();
 
     assert_eq!(
         discovered, parser_supported,
@@ -197,7 +202,7 @@ async fn test_oidc_discovery_grant_types_match_token_parser() {
     );
 
     for grant in &discovered {
-        let parsed = grant.parse::<crate::services::oidc::grant_type::OAuthGrantType>();
+        let parsed = grant.parse::<OAuthGrantType>();
         assert!(
             parsed.is_ok(),
             "discovery advertises unsupported grant type in parser: {grant}"
@@ -443,7 +448,7 @@ async fn test_oidc_discovery_response_modes_match_parser() {
         .map(|v| v.as_str().expect("mode is a string").to_string())
         .collect();
 
-    let source: BTreeSet<String> = crate::db::ResponseMode::supported_wire_values()
+    let source: BTreeSet<String> = ResponseMode::supported_wire_values()
         .into_iter()
         .map(String::from)
         .collect();
@@ -454,7 +459,7 @@ async fn test_oidc_discovery_response_modes_match_parser() {
     );
     for mode in &discovered {
         assert!(
-            crate::db::ResponseMode::parse(mode).is_some(),
+            ResponseMode::parse(mode).is_some(),
             "discovery advertises a response_mode the parser rejects: {mode}"
         );
     }
@@ -474,7 +479,7 @@ async fn test_oidc_discovery_response_types_match_validator() {
         .map(|v| v.as_str().expect("type is a string").to_string())
         .collect();
 
-    let source: BTreeSet<String> = crate::services::oidc::SUPPORTED_RESPONSE_TYPES
+    let source: BTreeSet<String> = SUPPORTED_RESPONSE_TYPES
         .iter()
         .map(ToString::to_string)
         .collect();
@@ -499,11 +504,10 @@ async fn test_oidc_discovery_code_challenge_methods_match_parser() {
         .map(|v| v.as_str().expect("method is a string").to_string())
         .collect();
 
-    let source: BTreeSet<String> =
-        crate::services::oidc::authorization::CodeChallengeMethod::SUPPORTED
-            .iter()
-            .map(|m| m.as_str().to_string())
-            .collect();
+    let source: BTreeSet<String> = CodeChallengeMethod::SUPPORTED
+        .iter()
+        .map(|m| m.as_str().to_string())
+        .collect();
 
     assert_eq!(
         discovered, source,
@@ -511,7 +515,7 @@ async fn test_oidc_discovery_code_challenge_methods_match_parser() {
     );
     for method in &discovered {
         assert!(
-            crate::services::oidc::authorization::CodeChallengeMethod::parse(method).is_some(),
+            CodeChallengeMethod::parse(method).is_some(),
             "discovery advertises a code_challenge_method the parser rejects: {method}"
         );
     }
@@ -531,7 +535,7 @@ async fn test_oidc_discovery_scopes_match_parser() {
         .map(|v| v.as_str().expect("scope is a string").to_string())
         .collect();
 
-    let source: BTreeSet<String> = crate::services::oidc::OAuthScope::all()
+    let source: BTreeSet<String> = OAuthScope::all()
         .iter()
         .map(|s| s.as_str().to_string())
         .collect();
@@ -542,7 +546,7 @@ async fn test_oidc_discovery_scopes_match_parser() {
     );
     for scope in &discovered {
         assert!(
-            crate::services::oidc::OAuthScope::parse(scope).is_some(),
+            OAuthScope::parse(scope).is_some(),
             "discovery advertises a scope the parser rejects: {scope}"
         );
     }
@@ -566,7 +570,7 @@ async fn test_oidc_discovery_claims_match_id_token_struct() {
         .map(|v| v.as_str().expect("claim is a string").to_string())
         .collect();
 
-    let source: BTreeSet<String> = crate::services::oidc::token::ADVERTISED_ID_TOKEN_CLAIMS
+    let source: BTreeSet<String> = ADVERTISED_ID_TOKEN_CLAIMS
         .iter()
         .map(ToString::to_string)
         .collect();
@@ -575,7 +579,7 @@ async fn test_oidc_discovery_claims_match_id_token_struct() {
         "discovery claims_supported must exactly match ADVERTISED_ID_TOKEN_CLAIMS"
     );
 
-    let claims = crate::services::oidc::token::IdTokenClaims {
+    let claims = IdTokenClaims {
         iss: "https://issuer.example".to_string(),
         sub: "user".to_string(),
         aud: "client".to_string(),
@@ -587,7 +591,7 @@ async fn test_oidc_discovery_claims_match_id_token_struct() {
         email_verified: Some(true),
         hardware_verified: Some(true),
         hardware_aaguid: Some("aaguid".to_string()),
-        cnf: Some(crate::services::oidc::claims::CnfClaim {
+        cnf: Some(CnfClaim {
             jkt: Some("thumbprint".to_string()),
             x5t_s256: None,
         }),

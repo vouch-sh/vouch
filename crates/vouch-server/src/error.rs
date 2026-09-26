@@ -6,9 +6,6 @@
 //! - Standard HTTP error responses
 //! - OAuth 2.0 error responses (RFC 6749 Section 5.2)
 
-// Own-crate items are imported with `use`; see `absolute-paths-allowed-crates` in `.clippy.toml`.
-#![deny(clippy::absolute_paths)]
-
 use crate::db::pool::{self, RetryableError};
 use crate::http;
 use axum::{

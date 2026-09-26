@@ -7,6 +7,7 @@ use crate::services::policy as posture;
 use axum::Json;
 use axum::http::StatusCode;
 use serde::Deserialize;
+use vouch_common::posture::DevicePosture;
 
 /// Response for the policy editor's validate call.
 #[derive(Debug, serde::Serialize)]
@@ -47,7 +48,7 @@ pub(crate) struct ValidateRequest {
     /// Device the dry run evaluates; the built-in sample device when
     /// absent.
     #[serde(default)]
-    pub test_posture: Option<vouch_common::posture::DevicePosture>,
+    pub test_posture: Option<DevicePosture>,
 }
 
 fn invalid(text: Option<String>, error: String) -> Json<ValidateResponse> {

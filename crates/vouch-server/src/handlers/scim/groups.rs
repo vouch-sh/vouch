@@ -23,6 +23,7 @@ use super::{ScimAuth, authenticate_scim, urn};
 use crate::AppState;
 use crate::arrival::ArrivalTime;
 use crate::db;
+use crate::db::store::DocumentStore;
 use crate::db::{ScimFilterError, ScimScope};
 use crate::error::ServiceError;
 use crate::scim_filter::{self, unqualified};
@@ -783,7 +784,7 @@ pub(crate) async fn delete_group(
 ///
 /// Returns [`ServiceError`] if the membership read fails.
 pub(crate) async fn get_group_members_scim(
-    db: &crate::db::store::DocumentStore,
+    db: &DocumentStore,
     base_url: &str,
     group_id: &str,
     org_id: &str,

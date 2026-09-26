@@ -15,10 +15,11 @@ use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::filters;
+use crate::db::audit::AuditEvent;
 use crate::handlers::extractors::AdminPage;
 use crate::handlers::session::AuthContext;
 use crate::infra::i18n::Tr;
+use crate::{filters, geo};
 
 /// Page size for the audit log.
 const AUDIT_PAGE_SIZE: u64 = 50;
@@ -200,7 +201,7 @@ pub(crate) async fn admin_audit_page(
         ..AuditEventFilter::default()
     };
 
-    let (audit_events, has_more): (Vec<crate::db::audit::AuditEvent>, bool) = match state
+    let (audit_events, has_more): (Vec<AuditEvent>, bool) = match state
         .audit
         .query_events_paginated(&filter, AUDIT_PAGE_SIZE)
         .await
@@ -310,7 +311,7 @@ impl TargetFields {
 /// removal the floor did not refuse.
 fn resolve_target_email(
     target_users: &HashMap<String, db::User>,
-    event: &crate::db::audit::AuditEvent,
+    event: &AuditEvent,
 ) -> Option<String> {
     if !MEMBER_EVENT_TYPES.contains(&event.event_type.as_str()) {
         return None;
@@ -360,7 +361,7 @@ impl GeoFields {
         let flag = self
             .country_code
             .as_deref()
-            .and_then(crate::geo::country_flag)
+            .and_then(geo::country_flag)
             .unwrap_or_default();
         let ip = self.client_ip.as_deref().unwrap_or("-");
 
@@ -391,6 +392,9 @@ impl GeoFields {
 )]
 mod tests {
     use super::*;
+    use crate::db::audit::{AuditEvent, AuditEventKind};
+    use crate::db::documents::audit::AdminMemberActionData;
+    use crate::services::oidc::mtls;
     use crate::test_utils::*;
     use axum::http::StatusCode;
 
@@ -398,7 +402,7 @@ mod tests {
     /// admin handlers write.
     #[test]
     fn test_target_fields_parse_the_typed_member_payload() {
-        let typed = serde_json::to_string(&crate::db::documents::audit::AdminMemberActionData {
+        let typed = serde_json::to_string(&AdminMemberActionData {
             action: "promote",
             target_user_id: "u-target",
             admin_user_id: "u-admin",
@@ -711,7 +715,7 @@ mod tests {
         state
             .audit
             .insert_json_event_for_test(
-                crate::db::audit::AuditEventKind::LoginSuccess,
+                AuditEventKind::LoginSuccess,
                 Some(&admin.id),
                 Some("Alice@CORP.Example.COM"),
                 r#"{"success":true}"#,
@@ -756,7 +760,7 @@ mod tests {
         state
             .audit
             .insert_event_for_test(
-                crate::db::audit::AuditEventKind::OrgDomainAdded,
+                AuditEventKind::OrgDomainAdded,
                 Some(domain),
                 "2026-01-01T12:00:00Z".parse().unwrap(),
                 &format!(r#"{{"marker":"{MARKER}"}}"#),
@@ -775,7 +779,7 @@ mod tests {
         state
             .audit
             .insert_json_event_for_test(
-                crate::db::audit::AuditEventKind::OrgDomainAdded,
+                AuditEventKind::OrgDomainAdded,
                 Some(&admin_id),
                 Some("admin@audit-blank.example"),
                 &format!(r#"{{"marker":"{MARKER}"}}"#),
@@ -896,7 +900,7 @@ mod tests {
         state
             .audit
             .insert_json_event_for_test(
-                crate::db::audit::AuditEventKind::AdminPromote,
+                AuditEventKind::AdminPromote,
                 Some(&admin.id),
                 Some(&admin.email),
                 &data,
@@ -906,7 +910,7 @@ mod tests {
         state
             .audit
             .insert_json_event_for_test(
-                crate::db::audit::AuditEventKind::AdminDemote,
+                AuditEventKind::AdminDemote,
                 Some(&admin.id),
                 Some(&admin.email),
                 &data,
@@ -976,9 +980,7 @@ mod tests {
                 user_id: &admin.id,
                 email: &admin.email,
                 auth_id: Some(&auth_id),
-                binding: TestBinding::Mtls(&crate::services::oidc::mtls::compute_cert_thumbprint(
-                    b"missing-cert-der",
-                )),
+                binding: TestBinding::Mtls(&mtls::compute_cert_thumbprint(b"missing-cert-der")),
                 ..Default::default()
             },
         )
@@ -1012,7 +1014,7 @@ mod tests {
 
         let data =
             serde_json::json!({ "action": "promote", "target_user_id": target.id }).to_string();
-        let event = crate::db::audit::AuditEvent {
+        let event = AuditEvent {
             id: "evt-1".to_string(),
             event_type: "admin_promote".to_string(),
             user_id: None,
@@ -1036,7 +1038,7 @@ mod tests {
         let data =
             serde_json::json!({ "action": "remove_user", "target_user_id": "nonexistent-id" })
                 .to_string();
-        let event = crate::db::audit::AuditEvent {
+        let event = AuditEvent {
             id: "evt-2".to_string(),
             event_type: "admin_remove_user".to_string(),
             user_id: None,
@@ -1061,7 +1063,7 @@ mod tests {
     #[test]
     fn resolve_target_email_is_none_for_non_member_event_types() {
         let target_users = HashMap::new();
-        let event = crate::db::audit::AuditEvent {
+        let event = AuditEvent {
             id: "evt-3".to_string(),
             event_type: "login_success".to_string(),
             user_id: None,

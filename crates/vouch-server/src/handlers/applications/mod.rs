@@ -134,7 +134,8 @@ fn validate_redirect_uris(
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
-    use crate::test_utils::*;
+    use crate::db;
+    use crate::test_utils::{self, *};
 
     /// A deactivated user whose session has not yet been swept must be turned
     /// away by the web UI, matching `get_resource_auth_context` on the API path.
@@ -162,7 +163,7 @@ mod tests {
             "active user with a valid cookie must reach the portal"
         );
 
-        crate::db::update_user_active_status(&state.store, &user.id, false)
+        db::update_user_active_status(&state.store, &user.id, false)
             .await
             .expect("deactivate user");
 
@@ -211,7 +212,7 @@ mod tests {
             "a signed-in session reads the portal without a key ceremony"
         );
 
-        let resp = crate::test_utils::http_post_form_full(
+        let resp = test_utils::http_post_form_full(
             &app,
             "/applications/new",
             "name=portal-app&application_type=web&access_scope=personal&redirect_uris=https://app.example.com/cb",

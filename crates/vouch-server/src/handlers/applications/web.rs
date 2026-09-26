@@ -25,6 +25,7 @@ use super::validate::{
     validate_update_format,
 };
 use super::{generate_client_secret, parse_redirect_uris, parse_resource_uris};
+use crate::error::ServiceError;
 use crate::handlers::extractors::SignedInSession;
 use crate::handlers::hash_token;
 use crate::infra::i18n::Tr;
@@ -651,9 +652,7 @@ pub(crate) async fn add_secret_form(
         match db::create_oauth_client_secret(&state.store, &app_id, &secret_hash, None, None).await
         {
             Ok(r) => r,
-            Err(crate::error::ServiceError::Api { ref code, .. })
-                if code == "max_secrets_reached" =>
-            {
+            Err(ServiceError::Api { ref code, .. }) if code == "max_secrets_reached" => {
                 return error_page(
                     Tr::new("apps-error-title-error"),
                     Tr::new("apps-error-secret-max"),
@@ -775,7 +774,7 @@ pub(crate) async fn delete_secret_form(
     // specific message rather than the generic delete-failed page.
     if let Err(e) = db::revoke_oauth_client_secret(&state.store, &secret_id, &app_id).await {
         let msg = match &e {
-            crate::error::ServiceError::Api { code, .. } if code == "last_secret" => {
+            ServiceError::Api { code, .. } if code == "last_secret" => {
                 Tr::new("apps-error-secret-last-active")
             }
             _ => {
@@ -824,8 +823,13 @@ mod tests {
 
     use axum::http::StatusCode;
 
+    use crate::db::documents::session::SessionDoc;
     use crate::db::store::GetUserByIdTestHook;
-    use crate::test_utils::*;
+    use crate::db::{
+        self, AccessScope, AuditEventFilter, FapiProfile, OAuthClientType, TokenEndpointAuthMethod,
+    };
+    use crate::test_utils::{TestClientSpec, *};
+    use vouch_httpsig::algorithm::ecdsa_p256::EcdsaP256Signer;
 
     // Web handlers use Path<String> (not ValidPath<ValidUuid>) so that invalid
     // UUIDs flow through to the db lookup and produce HTML error pages, not
@@ -863,7 +867,7 @@ mod tests {
         };
 
         let web = create_test_client(&state.store, &user.id, TestClientSpec::default()).await;
-        crate::db::create_oauth_client_secret(
+        db::create_oauth_client_secret(
             &state.store,
             &web.app_id,
             &super::hash_token("second-web-secret"),
@@ -873,7 +877,7 @@ mod tests {
         .await
         .expect("mint second secret");
         let body = page(web.app_id.clone()).await;
-        for secret in crate::db::get_oauth_client_secrets(&state.store, &web.app_id)
+        for secret in db::get_oauth_client_secrets(&state.store, &web.app_id)
             .await
             .expect("db query ok")
         {
@@ -890,21 +894,21 @@ mod tests {
             &state.store,
             &user.id,
             TestClientSpec {
-                token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+                token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
                 jwks: TestJwks::Shared,
                 with_secret: true,
                 ..Default::default()
             },
         )
         .await;
-        let first_id = crate::db::get_oauth_client_secrets(&state.store, &stray.app_id)
+        let first_id = db::get_oauth_client_secrets(&state.store, &stray.app_id)
             .await
             .expect("db query ok")
             .first()
             .expect("one secret")
             .id
             .clone();
-        crate::db::create_oauth_client_secret(
+        db::create_oauth_client_secret(
             &state.store,
             &stray.app_id,
             &super::hash_token("second-stray-secret"),
@@ -913,7 +917,7 @@ mod tests {
         )
         .await
         .expect("mint second secret");
-        crate::db::revoke_oauth_client_secret(&state.store, &first_id, &stray.app_id)
+        db::revoke_oauth_client_secret(&state.store, &first_id, &stray.app_id)
             .await
             .expect("revoke the first secret");
         let body = page(stray.app_id.clone()).await;
@@ -967,11 +971,9 @@ mod tests {
             &state.store,
             &user.id,
             TestClientSpec {
-                application_type: crate::db::OAuthClientType::Native,
+                application_type: OAuthClientType::Native,
                 redirect_uris: vec!["http://127.0.0.1:8400/cb".to_string()],
-                token_endpoint_auth_method: Some(
-                    crate::db::TokenEndpointAuthMethod::ClientSecretPost,
-                ),
+                token_endpoint_auth_method: Some(TokenEndpointAuthMethod::ClientSecretPost),
                 with_secret: true,
                 ..Default::default()
             },
@@ -982,10 +984,9 @@ mod tests {
             body.contains("Add Secret"),
             "native client_secret_post: {body}"
         );
-        let native_secrets =
-            crate::db::get_oauth_client_secrets(&state.store, &native_secret.app_id)
-                .await
-                .expect("db query ok");
+        let native_secrets = db::get_oauth_client_secrets(&state.store, &native_secret.app_id)
+            .await
+            .expect("db query ok");
         let native_secret_id = native_secrets.first().expect("one secret").id.clone();
         assert!(
             !body.contains(&format!(
@@ -999,8 +1000,8 @@ mod tests {
             &state.store,
             &user.id,
             TestClientSpec {
-                application_type: crate::db::OAuthClientType::Web,
-                token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+                application_type: OAuthClientType::Web,
+                token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
                 jwks: TestJwks::Shared,
                 with_secret: true,
                 ..Default::default()
@@ -1016,10 +1017,9 @@ mod tests {
             !body.contains("Add Secret"),
             "no add for private_key_jwt: {body}"
         );
-        let pkjwt_secrets =
-            crate::db::get_oauth_client_secrets(&state.store, &pkjwt_with_secret.app_id)
-                .await
-                .expect("db query ok");
+        let pkjwt_secrets = db::get_oauth_client_secrets(&state.store, &pkjwt_with_secret.app_id)
+            .await
+            .expect("db query ok");
         let pkjwt_secret_id = pkjwt_secrets.first().expect("one secret").id.clone();
         assert!(
             body.contains(&format!(
@@ -1033,8 +1033,8 @@ mod tests {
             &state.store,
             &user.id,
             TestClientSpec {
-                application_type: crate::db::OAuthClientType::Web,
-                token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+                application_type: OAuthClientType::Web,
+                token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
                 jwks: TestJwks::Shared,
                 with_secret: false,
                 ..Default::default()
@@ -1249,7 +1249,7 @@ mod tests {
             let store = state.store.clone();
             async move {
                 store
-                    .count::<crate::db::documents::session::SessionDoc>("client_id", &client_id)
+                    .count::<SessionDoc>("client_id", &client_id)
                     .await
                     .expect("count must not error")
             }
@@ -1279,7 +1279,7 @@ mod tests {
         assert_eq!(
             state
                 .store
-                .count::<crate::db::documents::session::SessionDoc>("user_id", &client.client_id)
+                .count::<SessionDoc>("user_id", &client.client_id)
                 .await
                 .expect("count must not error"),
             0,
@@ -1343,7 +1343,7 @@ mod tests {
         );
 
         // Verify the DB record was not mutated: name must still be "Test App".
-        let record = crate::db::get_oauth_client_by_id(&state.store, &client.app_id)
+        let record = db::get_oauth_client_by_id(&state.store, &client.app_id)
             .await
             .expect("db query ok")
             .expect("client must still exist");
@@ -1402,7 +1402,7 @@ mod tests {
         );
 
         // Verify the DB record was not mutated: redirect_uris must be unchanged.
-        let record = crate::db::get_oauth_client_by_id(&state.store, &client.app_id)
+        let record = db::get_oauth_client_by_id(&state.store, &client.app_id)
             .await
             .expect("db query ok")
             .expect("client must still exist");
@@ -1436,10 +1436,10 @@ mod tests {
             &state.store,
             &user.id,
             TestClientSpec {
-                token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+                token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
                 jwks: TestJwks::Shared,
                 dpop_bound_access_tokens: true,
-                fapi_profile: Some(crate::db::FapiProfile::Fapi2Security),
+                fapi_profile: Some(FapiProfile::Fapi2Security),
                 with_secret: false,
                 ..Default::default()
             },
@@ -1469,14 +1469,14 @@ mod tests {
         );
 
         // Every FAPI-sensitive field must survive the rejected update.
-        let record = crate::db::get_oauth_client_by_id(&state.store, &client.app_id)
+        let record = db::get_oauth_client_by_id(&state.store, &client.app_id)
             .await
             .expect("db query ok")
             .expect("client must still exist");
-        assert_eq!(record.fapi_profile, crate::db::FapiProfile::Fapi2Security);
+        assert_eq!(record.fapi_profile, FapiProfile::Fapi2Security);
         assert_eq!(
             record.token_endpoint_auth_method,
-            crate::db::TokenEndpointAuthMethod::PrivateKeyJwt
+            TokenEndpointAuthMethod::PrivateKeyJwt
         );
         assert!(
             record.dpop_bound_access_tokens,
@@ -1522,11 +1522,11 @@ mod tests {
             &state.store,
             &user.id,
             TestClientSpec {
-                token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::TlsClientAuth),
+                token_endpoint_auth_method: Some(TokenEndpointAuthMethod::TlsClientAuth),
                 tls_client_auth_subject_dn: Some("CN=test.example.com".to_string()),
                 jwks: TestJwks::Shared,
                 dpop_bound_access_tokens: true,
-                fapi_profile: Some(crate::db::FapiProfile::Fapi2Security),
+                fapi_profile: Some(FapiProfile::Fapi2Security),
                 with_secret: false,
                 ..Default::default()
             },
@@ -1551,7 +1551,7 @@ mod tests {
             "the error page must explain that FAPI clients do not use secrets: {body}"
         );
 
-        let secrets = crate::db::get_oauth_client_secrets(&state.store, &client.app_id)
+        let secrets = db::get_oauth_client_secrets(&state.store, &client.app_id)
             .await
             .expect("db query ok");
         assert!(
@@ -1581,13 +1581,11 @@ mod tests {
             &state.store,
             &user.id,
             TestClientSpec {
-                token_endpoint_auth_method: Some(
-                    crate::db::TokenEndpointAuthMethod::SelfSignedTlsClientAuth,
-                ),
+                token_endpoint_auth_method: Some(TokenEndpointAuthMethod::SelfSignedTlsClientAuth),
                 tls_client_auth_subject_dn: Some("CN=test.example.com".to_string()),
                 jwks: TestJwks::Shared,
                 dpop_bound_access_tokens: true,
-                fapi_profile: Some(crate::db::FapiProfile::Fapi2Security),
+                fapi_profile: Some(FapiProfile::Fapi2Security),
                 with_secret: false,
                 ..Default::default()
             },
@@ -1612,7 +1610,7 @@ mod tests {
             "the error page must explain that FAPI clients do not use secrets: {body}"
         );
 
-        let secrets = crate::db::get_oauth_client_secrets(&state.store, &client.app_id)
+        let secrets = db::get_oauth_client_secrets(&state.store, &client.app_id)
             .await
             .expect("db query ok");
         assert!(
@@ -1643,10 +1641,10 @@ mod tests {
             &state.store,
             &user.id,
             TestClientSpec {
-                token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+                token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
                 jwks: TestJwks::Shared,
                 dpop_bound_access_tokens: true,
-                fapi_profile: Some(crate::db::FapiProfile::Fapi2Security),
+                fapi_profile: Some(FapiProfile::Fapi2Security),
                 with_secret: false,
                 ..Default::default()
             },
@@ -1671,7 +1669,7 @@ mod tests {
             "the error page must explain that FAPI clients do not use secrets: {body}"
         );
 
-        let secrets = crate::db::get_oauth_client_secrets(&state.store, &client.app_id)
+        let secrets = db::get_oauth_client_secrets(&state.store, &client.app_id)
             .await
             .expect("db query ok");
         assert!(
@@ -1701,9 +1699,9 @@ mod tests {
             &state.store,
             &user.id,
             TestClientSpec {
-                application_type: crate::db::OAuthClientType::Service,
+                application_type: OAuthClientType::Service,
                 grant_types: Some(vec!["client_credentials".to_string()]),
-                token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+                token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
                 jwks: TestJwks::Shared,
                 fapi_profile: None,
                 with_secret: false,
@@ -1730,7 +1728,7 @@ mod tests {
             "the error page must explain the client does not use secrets: {body}"
         );
 
-        let secrets = crate::db::get_oauth_client_secrets(&state.store, &client.app_id)
+        let secrets = db::get_oauth_client_secrets(&state.store, &client.app_id)
             .await
             .expect("db query ok");
         assert!(
@@ -1777,7 +1775,7 @@ mod tests {
             "the response must render the freshly minted plaintext secret: {body}"
         );
 
-        let secrets = crate::db::get_oauth_client_secrets(&state.store, &client.app_id)
+        let secrets = db::get_oauth_client_secrets(&state.store, &client.app_id)
             .await
             .expect("db query ok");
         assert_eq!(
@@ -1810,11 +1808,9 @@ mod tests {
             &state.store,
             &user.id,
             TestClientSpec {
-                application_type: crate::db::OAuthClientType::Native,
+                application_type: OAuthClientType::Native,
                 redirect_uris: vec!["http://127.0.0.1:8400/cb".to_string()],
-                token_endpoint_auth_method: Some(
-                    crate::db::TokenEndpointAuthMethod::ClientSecretPost,
-                ),
+                token_endpoint_auth_method: Some(TokenEndpointAuthMethod::ClientSecretPost),
                 with_secret: true,
                 ..Default::default()
             },
@@ -1843,7 +1839,7 @@ mod tests {
             "must not render the no-secrets error page for a native+secret client: {body}"
         );
 
-        let secrets = crate::db::get_oauth_client_secrets(&state.store, &client.app_id)
+        let secrets = db::get_oauth_client_secrets(&state.store, &client.app_id)
             .await
             .expect("db query ok");
         assert_eq!(
@@ -1875,9 +1871,9 @@ mod tests {
             &state.store,
             &user.id,
             TestClientSpec {
-                application_type: crate::db::OAuthClientType::Native,
+                application_type: OAuthClientType::Native,
                 redirect_uris: vec!["http://127.0.0.1:8400/cb".to_string()],
-                token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::None),
+                token_endpoint_auth_method: Some(TokenEndpointAuthMethod::None),
                 with_secret: false,
                 ..Default::default()
             },
@@ -1905,7 +1901,7 @@ mod tests {
             "the error page must explain the client does not use secrets: {body}"
         );
 
-        let secrets = crate::db::get_oauth_client_secrets(&state.store, &client.app_id)
+        let secrets = db::get_oauth_client_secrets(&state.store, &client.app_id)
             .await
             .expect("db query ok");
         assert!(
@@ -2013,7 +2009,7 @@ mod tests {
             "expected exactly two get_user_by_id calls (extractor + handler); \
              the forced Ok(None) must land on the handler's read, got {status} {body}"
         );
-        let clients = crate::db::get_oauth_clients_for_user(&state.store, &user.id)
+        let clients = db::get_oauth_clients_for_user(&state.store, &user.id)
             .await
             .expect("db query ok");
         assert!(
@@ -2062,7 +2058,7 @@ mod tests {
             "the freshly minted secret should render on success: {body}"
         );
 
-        let clients = crate::db::get_oauth_clients_for_user(&state.store, &user.id)
+        let clients = db::get_oauth_clients_for_user(&state.store, &user.id)
             .await
             .expect("db query ok");
         assert_eq!(
@@ -2071,7 +2067,7 @@ mod tests {
             "exactly one client should be persisted: {clients:?}"
         );
         let client = clients.first().expect("exactly one client asserted above");
-        assert_eq!(client.access_scope, crate::db::AccessScope::Organization);
+        assert_eq!(client.access_scope, AccessScope::Organization);
         assert_eq!(
             client.org_id.as_deref(),
             Some(org.id.as_str()),
@@ -2114,9 +2110,9 @@ mod tests {
         let client = create_test_client(
             &state.store,
             &user.id,
-            crate::test_utils::TestClientSpec {
+            TestClientSpec {
                 name: "Tethered".to_string(),
-                access_scope: crate::db::AccessScope::Organization,
+                access_scope: AccessScope::Organization,
                 org_id: Some(org.id.clone()),
                 ..Default::default()
             },
@@ -2147,7 +2143,7 @@ mod tests {
 
         // The client must be untouched: name unchanged and still attached
         // to the org (the bug wiped `org_id` to NULL here).
-        let record = crate::db::get_oauth_client_by_id(&state.store, &client.app_id)
+        let record = db::get_oauth_client_by_id(&state.store, &client.app_id)
             .await
             .expect("db query ok")
             .expect("client must still exist");
@@ -2155,7 +2151,7 @@ mod tests {
             record.name, "Tethered",
             "a rejected update must not rename the client"
         );
-        assert_eq!(record.access_scope, crate::db::AccessScope::Organization);
+        assert_eq!(record.access_scope, AccessScope::Organization);
         assert_eq!(
             record.org_id.as_deref(),
             Some(org.id.as_str()),
@@ -2187,9 +2183,9 @@ mod tests {
         let client = create_test_client(
             &state.store,
             &user.id,
-            crate::test_utils::TestClientSpec {
+            TestClientSpec {
                 name: "Tethered".to_string(),
-                access_scope: crate::db::AccessScope::Organization,
+                access_scope: AccessScope::Organization,
                 org_id: Some(org.id.clone()),
                 ..Default::default()
             },
@@ -2210,12 +2206,12 @@ mod tests {
             "happy-path org update should redirect: {status}"
         );
 
-        let record = crate::db::get_oauth_client_by_id(&state.store, &client.app_id)
+        let record = db::get_oauth_client_by_id(&state.store, &client.app_id)
             .await
             .expect("db query ok")
             .expect("client must still exist");
         assert_eq!(record.name, "Tethered Renamed", "the rename must apply");
-        assert_eq!(record.access_scope, crate::db::AccessScope::Organization);
+        assert_eq!(record.access_scope, AccessScope::Organization);
         assert_eq!(
             record.org_id.as_deref(),
             Some(org.id.as_str()),
@@ -2283,7 +2279,7 @@ mod tests {
             "personal create must not trigger the handler's second get_user_by_id: {body}"
         );
 
-        let clients = crate::db::get_oauth_clients_for_user(&state.store, &user.id)
+        let clients = db::get_oauth_clients_for_user(&state.store, &user.id)
             .await
             .expect("db query ok");
         assert_eq!(
@@ -2292,7 +2288,7 @@ mod tests {
             "the personal client must be persisted: {clients:?}"
         );
         let client = clients.first().expect("one personal client asserted above");
-        assert_eq!(client.access_scope, crate::db::AccessScope::Personal);
+        assert_eq!(client.access_scope, AccessScope::Personal);
         assert!(
             client.org_id.is_none(),
             "a personal client has no org_id, not a NULL-by-race org_id: {client:?}"
@@ -2337,7 +2333,7 @@ mod tests {
 
         let events = state
             .audit
-            .query_events(&crate::db::AuditEventFilter {
+            .query_events(&AuditEventFilter {
                 event_types: Some(vec!["oauth_client_deleted".to_string()]),
                 user_id: Some(user.id.clone()),
                 ..Default::default()
@@ -2396,7 +2392,7 @@ mod tests {
 
         let events = state
             .audit
-            .query_events(&crate::db::AuditEventFilter {
+            .query_events(&AuditEventFilter {
                 event_types: Some(vec!["oauth_client_deleted".to_string()]),
                 user_id: Some(owner.id.clone()),
                 ..Default::default()
@@ -2432,7 +2428,7 @@ mod tests {
         let cookie = format!("__Host-vouch_session={session_token}");
 
         let client = create_test_client(&state.store, &user.id, TestClientSpec::default()).await;
-        let seeded = crate::db::get_oauth_client_secrets(&state.store, &client.app_id)
+        let seeded = db::get_oauth_client_secrets(&state.store, &client.app_id)
             .await
             .expect("db query ok");
         assert_eq!(
@@ -2442,9 +2438,7 @@ mod tests {
         );
         let stranded_secret_id = seeded.first().expect("one secret").id.clone();
 
-        let signer =
-            vouch_httpsig::algorithm::ecdsa_p256::EcdsaP256Signer::generate("test-upgrade-key")
-                .expect("generate test key");
+        let signer = EcdsaP256Signer::generate("test-upgrade-key").expect("generate test key");
         let pk = signer.public_key_bytes();
         let coordinate = |range| {
             use base64::Engine;
@@ -2473,16 +2467,16 @@ mod tests {
             "upgrade to FAPI must succeed and redirect, got {status}: {body}"
         );
 
-        let record = crate::db::get_oauth_client_by_id(&state.store, &client.app_id)
+        let record = db::get_oauth_client_by_id(&state.store, &client.app_id)
             .await
             .expect("db query ok")
             .expect("client must still exist");
-        assert_eq!(record.fapi_profile, crate::db::FapiProfile::Fapi2Security);
+        assert_eq!(record.fapi_profile, FapiProfile::Fapi2Security);
         assert_eq!(
             record.token_endpoint_auth_method,
-            crate::db::TokenEndpointAuthMethod::PrivateKeyJwt,
+            TokenEndpointAuthMethod::PrivateKeyJwt,
         );
-        let after = crate::db::get_oauth_client_secrets(&state.store, &client.app_id)
+        let after = db::get_oauth_client_secrets(&state.store, &client.app_id)
             .await
             .expect("db query ok");
         assert_eq!(after.len(), 1, "upgrade must not drop or add secret rows");
@@ -2529,7 +2523,7 @@ mod tests {
             revoke_status.is_redirection(),
             "the handler must accept the revoke of the stranded secret, got {revoke_status}: {revoke_body}"
         );
-        let revoked = crate::db::get_oauth_client_secrets(&state.store, &client.app_id)
+        let revoked = db::get_oauth_client_secrets(&state.store, &client.app_id)
             .await
             .expect("db query ok");
         assert!(
@@ -2577,7 +2571,7 @@ mod tests {
         let past: jiff::Timestamp = "2020-01-01T00:00:00Z"
             .parse()
             .expect("static past timestamp parses");
-        let expired = crate::db::create_oauth_client_secret(
+        let expired = db::create_oauth_client_secret(
             &state.store,
             &app_id,
             &super::hash_token("web-sole-expired-secret"),
@@ -2605,7 +2599,7 @@ mod tests {
 
         // The row is soft-deleted and the client remains at zero active secrets.
         let now = jiff::Timestamp::now();
-        let secrets = crate::db::get_oauth_client_secrets(&state.store, &app_id)
+        let secrets = db::get_oauth_client_secrets(&state.store, &app_id)
             .await
             .expect("db query ok");
         let revoked = secrets
@@ -2663,7 +2657,7 @@ mod tests {
         .await;
         assert!(status.is_success(), "add secret: {status} {body}");
 
-        let secrets = crate::db::get_oauth_client_secrets(&state.store, &client.app_id)
+        let secrets = db::get_oauth_client_secrets(&state.store, &client.app_id)
             .await
             .expect("db query ok");
         assert_eq!(secrets.len(), 2, "the form added a second secret");

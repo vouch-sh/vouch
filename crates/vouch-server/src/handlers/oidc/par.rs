@@ -12,7 +12,7 @@ use crate::error::OAuthErrorCode;
 use crate::error::OAuthErrorResponse;
 use crate::error::ServiceError;
 use crate::handlers::extractors::{OAuthForm, OptionalClientCert};
-use crate::services::auth::{ClientAuthProof, ParCreationProof};
+use crate::services::auth::{ClientAuthProof, JwtClientAuthProof, NoClientAuth, ParCreationProof};
 use crate::services::oidc::DpopError;
 use crate::services::oidc::authorization::{
     AuthorizeRequestParams, parse_response_mode, require_pkce_for_client,
@@ -518,19 +518,16 @@ pub(crate) async fn par(
     // `jti_claim`, to avoid silently rejecting a non-FAPI client that
     // legitimately omitted `jti`.
     let par_client_auth = if let Some(auth) = jwt_auth {
-        ClientAuthProof::PrivateKeyJwt(crate::services::auth::JwtClientAuthProof::new(
-            auth, jti_claim,
-        ))
+        ClientAuthProof::PrivateKeyJwt(JwtClientAuthProof::new(auth, jti_claim))
     } else if let Some(s) = secret_verification {
         ClientAuthProof::ClientSecret(s)
     } else if let Some(v) = mtls_verification {
         ClientAuthProof::MutualTls(v)
     } else {
-        let witness =
-            match crate::services::auth::NoClientAuth::for_public_client(&authenticated_client) {
-                Ok(w) => w,
-                Err(svc) => return svc.into_oauth_response().into_response(),
-            };
+        let witness = match NoClientAuth::for_public_client(&authenticated_client) {
+            Ok(w) => w,
+            Err(svc) => return svc.into_oauth_response().into_response(),
+        };
         ClientAuthProof::NoAuth(witness)
     };
     let proof = ParCreationProof {

@@ -6,6 +6,13 @@
 //! Reference: <https://www.rfc-editor.org/rfc/rfc7592>
 
 use super::helpers::*;
+use crate::crypto::alg::JwsAlgorithm;
+use crate::db::documents::oauth::OAuthClientDoc;
+use crate::db::documents::session::SessionDoc;
+use crate::db::store::DocumentStore;
+use crate::db::{self, UpdateClientRegistrationParams, User};
+use crate::infra::router;
+use crate::{crypto, test_utils};
 
 /// Register a client via POST /oauth/register, return (client_id, registration_access_token).
 async fn register_dynamic_client(app: &axum::Router) -> (String, String) {
@@ -1135,10 +1142,9 @@ async fn test_rfc7592_put_omitting_id_token_alg_keeps_the_registered_one() {
     // omitted value keeps what the client registered instead. RFC 7592 §2.2:
     // "The authorization server MAY ignore any null or empty value in the
     // request just as any other value."
-    let state = crate::test_utils::test_app_state_with_rsa_key().await;
+    let state = test_utils::test_app_state_with_rsa_key().await;
     let config = state.config();
-    let app = crate::infra::router::build_app(state.clone(), &config)
-        .expect("Failed to build test app router");
+    let app = router::build_app(state.clone(), &config).expect("Failed to build test app router");
 
     let body = serde_json::json!({
         "redirect_uris": ["https://example.com/callback"],
@@ -1279,7 +1285,7 @@ async fn test_rfc7592_put_updates_mtls_client_auth_fields() {
 
     // These five are not echoed in the client information response, so the
     // stored record is the only place the update is observable.
-    let stored = crate::db::get_oauth_client_by_client_id(&state.store, &client_id)
+    let stored = db::get_oauth_client_by_client_id(&state.store, &client_id)
         .await
         .expect("lookup ok")
         .expect("client exists");
@@ -1318,7 +1324,7 @@ async fn test_rfc7592_put_omitting_mtls_client_auth_fields_clears_them() {
     let (status, body) = put_client_config(&app, &client_id, &token, &update_body).await;
     assert_eq!(status, StatusCode::OK, "PUT failed: {body}");
 
-    let stored = crate::db::get_oauth_client_by_client_id(&state.store, &client_id)
+    let stored = db::get_oauth_client_by_client_id(&state.store, &client_id)
         .await
         .expect("lookup ok")
         .expect("client exists");
@@ -1350,7 +1356,7 @@ async fn test_rfc7592_put_empty_optional_strings_are_not_stored() {
     let (status, body) = put_client_config(&app, &client_id, &token, &update_body).await;
     assert_eq!(status, StatusCode::OK, "PUT failed: {body}");
 
-    let stored = crate::db::get_oauth_client_by_client_id(&state.store, &client_id)
+    let stored = db::get_oauth_client_by_client_id(&state.store, &client_id)
         .await
         .expect("lookup ok")
         .expect("client exists");
@@ -1424,7 +1430,7 @@ async fn test_rfc7592_put_refuses_to_clear_mtls_identity_of_tls_client_auth_clie
     assert_eq!(json["error"].as_str(), Some("invalid_client_metadata"));
 
     // A refused update must not have written anything.
-    let stored = crate::db::get_oauth_client_by_client_id(&state.store, &client_id)
+    let stored = db::get_oauth_client_by_client_id(&state.store, &client_id)
         .await
         .expect("lookup ok")
         .expect("client exists");
@@ -1451,7 +1457,7 @@ async fn test_rfc7592_put_replaces_the_single_mtls_identity_of_tls_client_auth_c
     let (status, body) = put_client_config(&app, &client_id, &token, &update_body).await;
     assert_eq!(status, StatusCode::OK, "PUT failed: {body}");
 
-    let stored = crate::db::get_oauth_client_by_client_id(&state.store, &client_id)
+    let stored = db::get_oauth_client_by_client_id(&state.store, &client_id)
         .await
         .expect("lookup ok")
         .expect("client exists");
@@ -1485,7 +1491,7 @@ async fn test_rfc7592_put_refuses_empty_mtls_identity_for_tls_client_auth_client
     let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
     assert_eq!(json["error"].as_str(), Some("invalid_client_metadata"));
 
-    let stored = crate::db::get_oauth_client_by_client_id(&state.store, &client_id)
+    let stored = db::get_oauth_client_by_client_id(&state.store, &client_id)
         .await
         .expect("lookup ok")
         .expect("client exists");
@@ -2052,7 +2058,7 @@ async fn test_rfc7592_deleted_owner_transferred_client_revokes_token() {
             name: "Org App (transfer probe)".to_string(),
             access_scope: db::AccessScope::Organization,
             org_id: Some(org.id.clone()),
-            registration_access_token_hash: Some(crate::crypto::hash_token(plaintext_token)),
+            registration_access_token_hash: Some(crypto::hash_token(plaintext_token)),
             ..Default::default()
         },
     )
@@ -2140,9 +2146,7 @@ async fn owner_register_client(app: &axum::Router, bearer: &str, name: &str) -> 
 
 /// Provision an org, an admin (with cookie-bearing session), and a member
 /// (with a bearer session so the member can self-register an OAuth client).
-async fn org_admin_member(
-    state: &crate::AppState,
-) -> (crate::db::User, String, crate::db::User, String) {
+async fn org_admin_member(state: &crate::AppState) -> (User, String, User, String) {
     let org = create_test_org(&state.store, "rfc7592-e2e.example").await;
     let admin =
         create_test_user_in_org(&state.store, "rfc7592-admin@example.com", &org.id, true).await;
@@ -2410,7 +2414,7 @@ async fn offboarding_revokes_registration_token(
             },
             org_id: Some(org.id.clone()),
             with_secret: false,
-            registration_access_token_hash: Some(crate::crypto::hash_token(reg_token)),
+            registration_access_token_hash: Some(crypto::hash_token(reg_token)),
             ..Default::default()
         },
     )
@@ -2561,7 +2565,7 @@ async fn test_rfc7592_unlinked_non_public_client_token_is_invalid() {
         TestClientSpec {
             access_scope: db::AccessScope::Personal,
             with_secret: false,
-            registration_access_token_hash: Some(crate::crypto::hash_token(reg_token)),
+            registration_access_token_hash: Some(crypto::hash_token(reg_token)),
             ..Default::default()
         },
     )
@@ -2570,7 +2574,7 @@ async fn test_rfc7592_unlinked_non_public_client_token_is_invalid() {
     // `reassign_client_owner`: the hash survives.
     state
         .store
-        .modify::<crate::db::documents::oauth::OAuthClientDoc, _>(&client.app_id, |d| {
+        .modify::<OAuthClientDoc, _>(&client.app_id, |d| {
             d.user_id = None;
         })
         .await
@@ -2725,7 +2729,7 @@ async fn test_rfc7592_delete_client_revokes_minted_sessions() {
     assert_eq!(
         state
             .store
-            .count::<crate::db::documents::session::SessionDoc>("client_id", &client_id)
+            .count::<SessionDoc>("client_id", &client_id)
             .await
             .expect("count must not error"),
         0,
@@ -2734,7 +2738,7 @@ async fn test_rfc7592_delete_client_revokes_minted_sessions() {
     assert_eq!(
         state
             .store
-            .count::<crate::db::documents::session::SessionDoc>("user_id", &client_id)
+            .count::<SessionDoc>("user_id", &client_id)
             .await
             .expect("count must not error"),
         0,
@@ -2861,7 +2865,7 @@ async fn test_rfc7592_delete_client_attributes_org_domain_when_owner_has_no_org(
         &owner.id,
         TestClientSpec {
             org_id: Some(org.id.clone()),
-            registration_access_token_hash: Some(crate::crypto::hash_token(plaintext_token)),
+            registration_access_token_hash: Some(crypto::hash_token(plaintext_token)),
             ..Default::default()
         },
     )
@@ -4112,7 +4116,7 @@ async fn test_rfc7592_misdirected_revoke_does_not_lock_out_concurrent_rotation_e
     // captured by the attacker) to T_new (chosen by the test, known only to the
     // legitimate owner after the PUT returns it).
     let t_new = "vouch_reg_NEW_TOKEN_rotated_e2e".to_string();
-    let new_hash = crate::crypto::hash_token(&t_new);
+    let new_hash = crypto::hash_token(&t_new);
     let redirect_uris = vec!["https://example.com/callback".to_string()];
 
     // The victim's internal doc id is only known after registration, which
@@ -4152,11 +4156,11 @@ async fn test_rfc7592_misdirected_revoke_does_not_lock_out_concurrent_rotation_e
                 // PUT commits version V+1 (hash T_new), so the revoke's first
                 // CAS loses the version race and the modify loop retries
                 // against the freshly rotated document.
-                crate::db::update_oauth_client_registration(
+                db::update_oauth_client_registration(
                     &writer,
                     &doc_id,
                     &current_hash,
-                    &crate::db::UpdateClientRegistrationParams {
+                    &UpdateClientRegistrationParams {
                         redirect_uris: &redirect_uris,
                         grant_types: None,
                         response_types: None,
@@ -4169,7 +4173,7 @@ async fn test_rfc7592_misdirected_revoke_does_not_lock_out_concurrent_rotation_e
                         client_name: None,
                         software_id: None,
                         software_version: None,
-                        id_token_signed_response_alg: crate::crypto::alg::JwsAlgorithm::Es256,
+                        id_token_signed_response_alg: JwsAlgorithm::Es256,
                         authorization_signed_response_alg: None,
                         introspection_signed_response_alg: None,
                         request_object_signing_alg: None,
@@ -4199,7 +4203,7 @@ async fn test_rfc7592_misdirected_revoke_does_not_lock_out_concurrent_rotation_e
         .expect("lookup")
         .expect("client must exist");
     let victim_id = victim.id.clone();
-    *slot.lock().expect("slot lock") = Some((victim_id.clone(), crate::crypto::hash_token(&t_old)));
+    *slot.lock().expect("slot lock") = Some((victim_id.clone(), crypto::hash_token(&t_old)));
 
     // The attacker replays the leaked T_old against a non-existent client_id;
     // the misdirected-token path revokes whichever client holds hash(T_old),
@@ -4294,7 +4298,7 @@ async fn make_legacy_dynamic_client(
             redirect_uris: owned(redirect_uris),
             grant_types: Some(owned(grant_types)),
             response_types: Some(owned(response_types)),
-            registration_access_token_hash: Some(crate::crypto::hash_token(plaintext_token)),
+            registration_access_token_hash: Some(crypto::hash_token(plaintext_token)),
             ..Default::default()
         },
     )
@@ -4702,7 +4706,7 @@ async fn test_rfc7592_put_rejects_token_rotated_before_write() {
     assert_eq!(status, StatusCode::OK, "control PUT: {response}");
 
     let (client_id, token) = register_dynamic_client(&app).await;
-    let concurrent = crate::crypto::hash_token("concurrent-rotation");
+    let concurrent = crypto::hash_token("concurrent-rotation");
     arm(&state, &armed, &client_id, Some(concurrent.clone())).await;
 
     let (status, response) = put_client_config(&app, &client_id, &token, &body).await;
@@ -4731,7 +4735,7 @@ async fn test_rfc7592_delete_rejects_token_rotated_before_write() {
         &state,
         &armed,
         &client_id,
-        Some(crate::crypto::hash_token("concurrent-rotation")),
+        Some(crypto::hash_token("concurrent-rotation")),
     )
     .await;
 
@@ -4795,7 +4799,7 @@ async fn test_rfc7592_delete_partial_failure_restores_token_for_retry() {
     })
     .await;
     let (client_id, token) = register_dynamic_client(&app).await;
-    let presented_hash = crate::crypto::hash_token(&token);
+    let presented_hash = crypto::hash_token(&token);
     let bearer = format!("Bearer {token}");
     let path = format!("/oauth/register/{client_id}");
 
@@ -4851,7 +4855,7 @@ async fn test_rfc7592_delete_partial_failure_restores_token_for_retry() {
 async fn test_rfc7592_failed_delete_does_not_restore_token_revoked_by_owner_deletion() {
     use std::sync::{Arc, OnceLock};
 
-    let store_cell: Arc<OnceLock<crate::db::store::DocumentStore>> = Arc::new(OnceLock::new());
+    let store_cell: Arc<OnceLock<DocumentStore>> = Arc::new(OnceLock::new());
     let owner_cell: Arc<OnceLock<String>> = Arc::new(OnceLock::new());
     let (hook_store, hook_owner) = (store_cell.clone(), owner_cell.clone());
     let (app, state) = test_app_with_modify_hook(move |store| {
@@ -4880,7 +4884,7 @@ async fn test_rfc7592_failed_delete_does_not_restore_token_revoked_by_owner_dele
         TestClientSpec {
             access_scope: db::AccessScope::Personal,
             with_secret: false,
-            registration_access_token_hash: Some(crate::crypto::hash_token(reg_token)),
+            registration_access_token_hash: Some(crypto::hash_token(reg_token)),
             ..Default::default()
         },
     )

@@ -6,7 +6,6 @@
 //! - RFC 9449 Section 7.1 - DPoP-bound access tokens at resource endpoints
 //! - RFC 8705 Section 3 - mTLS certificate-bound access tokens at resource endpoints
 
-use crate::AppState;
 use crate::arrival::ArrivalTime;
 use crate::crypto::alg::JwsAlgorithm;
 use crate::crypto::keys::OidcSigningKey;
@@ -18,6 +17,7 @@ use crate::services::auth::decode_token;
 use crate::services::oidc::dpop;
 use crate::services::oidc::token::validate_session_token;
 use crate::services::oidc::{DpopError, OAuthScope};
+use crate::{AppState, http};
 use axum::{
     Json,
     body::Bytes,
@@ -98,10 +98,9 @@ pub(crate) async fn userinfo(
     };
 
     let (token, is_dpop_scheme) = if let Some(ref auth_header) = auth_header_value {
-        if let Some(tok) = crate::http::strip_auth_scheme(auth_header, protocol::AUTH_SCHEME_DPOP) {
+        if let Some(tok) = http::strip_auth_scheme(auth_header, protocol::AUTH_SCHEME_DPOP) {
             (tok.to_string(), true)
-        } else if let Some(tok) =
-            crate::http::strip_auth_scheme(auth_header, protocol::AUTH_SCHEME_BEARER)
+        } else if let Some(tok) = http::strip_auth_scheme(auth_header, protocol::AUTH_SCHEME_BEARER)
         {
             (tok.to_string(), false)
         } else {
@@ -120,7 +119,7 @@ pub(crate) async fn userinfo(
         // an error code or other error information.
         return (
             StatusCode::UNAUTHORIZED,
-            [(header::WWW_AUTHENTICATE, crate::http::bearer_challenge(&[]))],
+            [(header::WWW_AUTHENTICATE, http::bearer_challenge(&[]))],
         )
             .into_response();
     };
@@ -475,7 +474,7 @@ fn oauth_error(status: StatusCode, error: OAuthErrorCode, description: &str) -> 
     if status == StatusCode::UNAUTHORIZED {
         // RFC 6750 Section 3: Include WWW-Authenticate header on 401 responses
         let www_auth =
-            crate::http::bearer_challenge(&[("error", error), ("error_description", description)]);
+            http::bearer_challenge(&[("error", error), ("error_description", description)]);
         (status, [("WWW-Authenticate", www_auth.as_str())], body).into_response()
     } else {
         (status, body).into_response()

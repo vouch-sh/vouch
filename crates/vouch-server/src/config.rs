@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Server configuration.
 
-// Own-crate items are imported with `use`; see `absolute-paths-allowed-crates` in `.clippy.toml`.
-#![deny(clippy::absolute_paths)]
-
 use crate::crypto::webauthn_verify::OriginPolicy;
 use crate::db::pool::PoolConfig;
 use crate::infra::bootstrap::Bootstrap;

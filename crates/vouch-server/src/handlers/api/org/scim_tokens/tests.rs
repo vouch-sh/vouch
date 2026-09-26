@@ -8,6 +8,7 @@
 use crate::handlers::admin::MAX_SCIM_TOKEN_DESCRIPTION_CHARS;
 use axum::http::StatusCode;
 
+use crate::services::oidc::mtls;
 use crate::test_utils::*;
 
 // ValidPath<ValidUuid> is extracted before the handler body runs auth checks,
@@ -215,7 +216,7 @@ async fn test_create_scim_token_cert_bound_token_with_matching_cert_succeeds() {
     let auth_id = create_test_authenticator(&state.store, &admin.id).await;
 
     let cert_der = make_test_cert_der("scim-admin");
-    let thumbprint = crate::services::oidc::mtls::compute_cert_thumbprint(&cert_der);
+    let thumbprint = mtls::compute_cert_thumbprint(&cert_der);
     let token = create_test_session_with(
         &state,
         TestSessionSpec {
@@ -254,7 +255,7 @@ async fn test_create_scim_token_cert_bound_token_without_cert_returns_401() {
     let auth_id = create_test_authenticator(&state.store, &admin.id).await;
 
     let cert_der = make_test_cert_der("scim-admin");
-    let thumbprint = crate::services::oidc::mtls::compute_cert_thumbprint(&cert_der);
+    let thumbprint = mtls::compute_cert_thumbprint(&cert_der);
     let token = create_test_session_with(
         &state,
         TestSessionSpec {
@@ -292,7 +293,7 @@ async fn test_create_scim_token_cert_bound_token_with_wrong_cert_returns_401() {
     let auth_id = create_test_authenticator(&state.store, &admin.id).await;
 
     let bound_cert_der = make_test_cert_der("scim-admin");
-    let thumbprint = crate::services::oidc::mtls::compute_cert_thumbprint(&bound_cert_der);
+    let thumbprint = mtls::compute_cert_thumbprint(&bound_cert_der);
     let token = create_test_session_with(
         &state,
         TestSessionSpec {

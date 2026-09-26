@@ -19,6 +19,8 @@ use vouch_common::{SessionStatus, protocol};
 
 use super::{clear_session_cookie, hash_token};
 use crate::db::ClientInfo;
+use crate::http;
+use crate::services::auth::{self, DecodedToken};
 
 /// Get current session status.
 ///
@@ -41,8 +43,8 @@ pub(crate) async fn status(
     // `starts_with`. An unrecognized scheme (or no header at all) yields
     // `authenticated: false` — this endpoint never 401s.
     let token = match auth_header.and_then(|h| {
-        crate::http::strip_auth_scheme(h, protocol::AUTH_SCHEME_BEARER)
-            .or_else(|| crate::http::strip_auth_scheme(h, protocol::AUTH_SCHEME_DPOP))
+        http::strip_auth_scheme(h, protocol::AUTH_SCHEME_BEARER)
+            .or_else(|| http::strip_auth_scheme(h, protocol::AUTH_SCHEME_DPOP))
     }) {
         Some(tok) => tok,
         None => {
@@ -66,20 +68,19 @@ pub(crate) async fn status(
 
     // Validate as OAuth access token (ES256, at+jwt)
     let config = state.config();
-    let decoded =
-        match crate::services::auth::decode_token(token, &state.oidc_key, &config.base_url) {
-            Some(d) => d,
-            None => {
-                return Ok(Json(SessionStatus {
-                    authenticated: false,
-                    email: None,
-                    expires_in_seconds: None,
-                    device_name: None,
-                }));
-            }
-        };
+    let decoded = match auth::decode_token(token, &state.oidc_key, &config.base_url) {
+        Some(d) => d,
+        None => {
+            return Ok(Json(SessionStatus {
+                authenticated: false,
+                email: None,
+                expires_in_seconds: None,
+                device_name: None,
+            }));
+        }
+    };
 
-    let crate::services::auth::DecodedToken::AccessToken(access_claims) = decoded;
+    let DecodedToken::AccessToken(access_claims) = decoded;
 
     // Check session exists in database
     let token_hash = hash_token(token);
@@ -205,6 +206,9 @@ pub(crate) async fn logout(
 )]
 mod tests {
     use crate::arrival::ArrivalTime;
+    use crate::crypto;
+    use crate::db::{self, AuditEvent, AuditEventFilter, AuditEventKind, SessionPurpose};
+    use crate::services::auth::AccessTokenClaims;
     use crate::test_utils::*;
     use axum::http::StatusCode;
 
@@ -306,9 +310,9 @@ mod tests {
         assert!(json["email"].is_null());
     }
 
-    fn claims_with_exp(exp: i64, email: Option<&str>) -> crate::services::auth::AccessTokenClaims {
+    fn claims_with_exp(exp: i64, email: Option<&str>) -> AccessTokenClaims {
         use crate::services::oidc::ScopeSet;
-        crate::services::auth::AccessTokenClaims {
+        AccessTokenClaims {
             iss: "test-issuer".to_string(),
             sub: "user-123".to_string(),
             aud: "client-abc".to_string(),
@@ -427,7 +431,7 @@ mod tests {
 
         // Persist a *valid* session row (expires_at 1h out) keyed by the forged
         // hash so the cache-miss DB lookup returns the row.
-        let forged_hash = crate::crypto::hash_token(&forged);
+        let forged_hash = crypto::hash_token(&forged);
         let expires_at =
             Timestamp::from_second(now.saturating_add(3600)).expect("valid expires_at");
         create_session(
@@ -470,16 +474,13 @@ mod tests {
     /// Query the audit store for `Logout` events for `user_id`, the way the
     /// `logout_invalidates_exchange` policy and any audit-analytics consumer
     /// would.
-    async fn logout_audit_events(
-        state: &crate::AppState,
-        user_id: &str,
-    ) -> Vec<crate::db::AuditEvent> {
+    async fn logout_audit_events(state: &crate::AppState, user_id: &str) -> Vec<AuditEvent> {
         state
             .audit
-            .query_events(&crate::db::AuditEventFilter {
-                event_types: Some(vec![crate::db::AuditEventKind::Logout.as_str().to_string()]),
+            .query_events(&AuditEventFilter {
+                event_types: Some(vec![AuditEventKind::Logout.as_str().to_string()]),
                 user_id: Some(user_id.to_string()),
-                ..crate::db::AuditEventFilter::default()
+                ..AuditEventFilter::default()
             })
             .await
             .expect("query audit events")
@@ -502,7 +503,7 @@ mod tests {
             &user.id,
             &user.email,
             None,
-            crate::db::SessionPurpose::OAuthAccessToken,
+            SessionPurpose::OAuthAccessToken,
         )
         .await;
 
@@ -510,7 +511,7 @@ mod tests {
         // a fix that still gated the audit on that lookup would skip the
         // event. This is the precondition the bug report describes.
         let filtered =
-            crate::db::get_session_by_token_hash(&state.store, &token_hash, jiff::Timestamp::now())
+            db::get_session_by_token_hash(&state.store, &token_hash, jiff::Timestamp::now())
                 .await
                 .expect("filtered lookup");
         assert!(filtered.is_none(), "expired row must be filtered out");
@@ -535,7 +536,7 @@ mod tests {
         );
 
         // The row must be gone after logout.
-        let after = crate::db::find_session_by_token_hash(&state.store, &token_hash)
+        let after = db::find_session_by_token_hash(&state.store, &token_hash)
             .await
             .expect("post-logout lookup");
         assert!(after.is_none(), "session row must be deleted by logout");
@@ -567,7 +568,7 @@ mod tests {
             },
         )
         .await;
-        let token_hash = crate::crypto::hash_token(&token);
+        let token_hash = crypto::hash_token(&token);
 
         let cookie = format!("{}={token}", vouch_common::SESSION_COOKIE_NAME);
         let (status, _body) = http_post_form(
@@ -586,7 +587,7 @@ mod tests {
             "same-origin POST must reach the handler"
         );
 
-        let after = crate::db::find_session_by_token_hash(&state.store, &token_hash)
+        let after = db::find_session_by_token_hash(&state.store, &token_hash)
             .await
             .expect("post-logout lookup");
         assert!(

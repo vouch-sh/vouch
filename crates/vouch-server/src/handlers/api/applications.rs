@@ -24,7 +24,7 @@ use crate::handlers::applications::validate::{
     validate_update_format,
 };
 use crate::handlers::hash_token;
-use crate::handlers::session::AuthenticatedToken;
+use crate::handlers::session::{self, AuthenticatedToken};
 use crate::handlers::{ValidPath, ValidUuid};
 
 /// List user's applications (API).
@@ -60,7 +60,7 @@ async fn load_active_user_for_scope(
     user_id: &str,
     wants_org_scope: bool,
 ) -> Result<db::User, ServiceError> {
-    let user = crate::handlers::session::load_active_user(state, user_id).await?;
+    let user = session::load_active_user(state, user_id).await?;
     validate_org_scope_membership(&user, wants_org_scope)?;
     Ok(user)
 }
@@ -106,7 +106,7 @@ async fn load_active_owned_client(
 ) -> Result<db::OAuthClient, ServiceError> {
     // Active-user gate first: a deactivated account is rejected before we
     // disclose whether the application exists.
-    crate::handlers::session::load_active_user(state, user_id).await?;
+    session::load_active_user(state, user_id).await?;
 
     let client = db::get_oauth_client_by_id(&state.store, app_id)
         .await
@@ -331,7 +331,7 @@ pub(crate) async fn update_application_api(
     // apps).
     let access_scope = validated.access_scope;
     let wants_org_scope = access_scope == Some(AccessScope::Organization);
-    let user = crate::handlers::session::load_active_user(&state, &token.sub).await?;
+    let user = session::load_active_user(&state, &token.sub).await?;
 
     // Get existing application
     let client = db::get_oauth_client_by_id(&state.store, &app_id)

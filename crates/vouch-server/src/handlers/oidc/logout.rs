@@ -512,6 +512,8 @@ async fn clear_user_session(
 )]
 mod tests {
     use super::*;
+    use crate::crypto;
+    use crate::db::{self, AuditEvent, AuditEventFilter, AuditEventKind, SessionPurpose};
     use crate::services::oidc::token::IdTokenClaims;
     use crate::test_utils::{
         TestClientSpec, TestSessionSpec, create_test_authenticator, create_test_client,
@@ -777,7 +779,7 @@ mod tests {
         let client_id = client.client_id;
 
         // Deactivate the client after creation.
-        crate::db::set_oauth_client_active(&state.store, &client.app_id, false)
+        db::set_oauth_client_active(&state.store, &client.app_id, false)
             .await
             .unwrap();
 
@@ -921,16 +923,13 @@ mod tests {
     // the fix: the audit fires for both expired and live rows, and only when
     // a row was actually deleted.
 
-    async fn logout_audit_events(
-        state: &crate::AppState,
-        user_id: &str,
-    ) -> Vec<crate::db::AuditEvent> {
+    async fn logout_audit_events(state: &crate::AppState, user_id: &str) -> Vec<AuditEvent> {
         state
             .audit
-            .query_events(&crate::db::AuditEventFilter {
-                event_types: Some(vec![crate::db::AuditEventKind::Logout.as_str().to_string()]),
+            .query_events(&AuditEventFilter {
+                event_types: Some(vec![AuditEventKind::Logout.as_str().to_string()]),
                 user_id: Some(user_id.to_string()),
-                ..crate::db::AuditEventFilter::default()
+                ..AuditEventFilter::default()
             })
             .await
             .unwrap()
@@ -948,14 +947,14 @@ mod tests {
             &user.id,
             &user.email,
             None,
-            crate::db::SessionPurpose::OAuthAccessToken,
+            SessionPurpose::OAuthAccessToken,
         )
         .await;
 
         // Sanity: the expiry-filtering lookup returns `None` — the
         // precondition the bug report describes.
         let filtered =
-            crate::db::get_session_by_token_hash(&state.store, &token_hash, jiff::Timestamp::now())
+            db::get_session_by_token_hash(&state.store, &token_hash, jiff::Timestamp::now())
                 .await
                 .unwrap();
         assert!(filtered.is_none(), "expired row must be filtered out");
@@ -969,7 +968,7 @@ mod tests {
         );
 
         // The row must be gone.
-        let after = crate::db::find_session_by_token_hash(&state.store, &token_hash)
+        let after = db::find_session_by_token_hash(&state.store, &token_hash)
             .await
             .unwrap();
         assert!(after.is_none(), "expired session row must be deleted");
@@ -1001,7 +1000,7 @@ mod tests {
             },
         )
         .await;
-        let token_hash = crate::crypto::hash_token(&token);
+        let token_hash = crypto::hash_token(&token);
 
         let cookie = format!("{}={token}", vouch_common::SESSION_COOKIE_NAME);
         let (status, _body) =
@@ -1011,7 +1010,7 @@ mod tests {
             "RP-initiated logout must succeed; got {status}"
         );
 
-        let after = crate::db::find_session_by_token_hash(&state.store, &token_hash)
+        let after = db::find_session_by_token_hash(&state.store, &token_hash)
             .await
             .unwrap();
         assert!(after.is_none(), "live session row must be deleted");

@@ -12,10 +12,19 @@
 //! Reference: <https://openid.net/specs/fapi-security-profile-2_0-final.html>
 
 use super::helpers::*;
+use crate::crypto::document_crypto::{DocumentCrypto, PlaintextDocumentCrypto};
+use crate::crypto::jwt::StateTokenSigner;
+use crate::crypto::keys::OidcSigningKey;
 use crate::crypto::webauthn_verify::AuthTime;
-use crate::db::DeviceApproval;
-use crate::db::TokenEndpointAuthMethod;
+use crate::db::audit::AuditStore;
+use crate::db::store::DocumentStore;
+use crate::db::{
+    self, AuthorizeDeviceAuthParams, DeviceApproval, SessionCache, TokenEndpointAuthMethod, User,
+};
+use crate::services::oidc::mtls::ClientCertTrust;
 use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair};
+use vouch_common::jwk::JwkThumbprintKey;
+use vouch_common::protocol::{CLIENT_ASSERTION_TYPE_JWT_BEARER, GRANT_TYPE_DEVICE_CODE};
 
 // ========================================================================
 // FAPI Helper Functions
@@ -211,7 +220,7 @@ async fn acquire_dpop_nonce(
 ///
 /// The canonical form for EC keys is `{"crv":"...","kty":"...","x":"...","y":"..."}`.
 fn compute_jwk_thumbprint(jwk: &serde_json::Value) -> String {
-    vouch_common::jwk::JwkThumbprintKey::from_json(jwk)
+    JwkThumbprintKey::from_json(jwk)
         .expect("test JWK carries the required members")
         .thumbprint()
 }
@@ -237,7 +246,7 @@ async fn create_fapi_test_client(
         user_id,
         TestClientSpec {
             jwks: TestJwks::Custom(jwks_value),
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
             fapi_profile: Some(db::FapiProfile::Fapi2Security),
             dpop_bound_access_tokens: true,
             ..Default::default()
@@ -985,7 +994,7 @@ async fn test_discovery_mtls_absent_with_partial_tls_config() {
 /// An `AppState` with TLS fully configured (placeholder cert and key —
 /// `test_app()` has none) and `client_cert_trust` as given.
 async fn tls_configured_state(
-    client_cert_trust: Option<crate::services::oidc::mtls::ClientCertTrust>,
+    client_cert_trust: Option<ClientCertTrust>,
 ) -> std::sync::Arc<crate::AppState> {
     use crate::test_utils::{test_config, test_db};
     use arc_swap::ArcSwap;
@@ -1003,12 +1012,11 @@ async fn tls_configured_state(
         .build()
         .expect("Webauthn");
 
-    let oidc_key = crate::crypto::keys::OidcSigningKey::generate().expect("oidc key");
+    let oidc_key = OidcSigningKey::generate().expect("oidc key");
 
-    let crypto: Arc<dyn crate::crypto::document_crypto::DocumentCrypto> =
-        Arc::new(crate::crypto::document_crypto::PlaintextDocumentCrypto);
-    let store = crate::db::store::DocumentStore::new(pool.clone(), crypto.clone());
-    let audit = crate::db::audit::AuditStore::new(pool.clone(), crypto);
+    let crypto: Arc<dyn DocumentCrypto> = Arc::new(PlaintextDocumentCrypto);
+    let store = DocumentStore::new(pool.clone(), crypto.clone());
+    let audit = AuditStore::new(pool.clone(), crypto);
 
     Arc::new(crate::AppState {
         db: pool,
@@ -1019,12 +1027,12 @@ async fn tls_configured_state(
         ssh_ca: None,
         oidc_key,
         oidc_rsa_key: None,
-        state_signer: crate::crypto::jwt::StateTokenSigner::local(
+        state_signer: StateTokenSigner::local(
             b"test_jwt_secret_must_be_at_least_32_characters_long".to_vec(),
         ),
         github_app: None,
         http_client: reqwest::Client::new(),
-        session_cache: crate::db::SessionCache::new(10_000, 30),
+        session_cache: SessionCache::new(10_000, 30),
         org_keys_cache: Default::default(),
         policy: Default::default(),
         idps: Vec::new(),
@@ -1099,7 +1107,7 @@ async fn test_discovery_omits_tls_client_auth_without_client_ca() {
 async fn setup_authorized_device(
     state: &std::sync::Arc<crate::AppState>,
     client_id: &str,
-    user: &crate::db::User,
+    user: &User,
     auth_id: &str,
     label: &str,
 ) -> String {
@@ -1110,7 +1118,7 @@ async fn setup_authorized_device(
     let now = jiff::Timestamp::now();
     let expires_at = now.checked_add(jiff::Span::new().hours(1)).unwrap();
 
-    let id = crate::db::create_device_auth_request(
+    let id = db::create_device_auth_request(
         &state.store,
         &device_code_hash,
         &user_code,
@@ -1121,9 +1129,9 @@ async fn setup_authorized_device(
     .await
     .expect("create device auth");
 
-    crate::db::authorize_device_auth(
+    db::authorize_device_auth(
         &state.store,
-        crate::db::AuthorizeDeviceAuthParams {
+        AuthorizeDeviceAuthParams {
             id: &id,
             user_id: &user.id,
             user_email: &user.email,
@@ -1152,7 +1160,7 @@ fn fapi_device_token_body(
     format!(
         "{}&client_assertion={assertion}&client_assertion_type={}",
         device_token_body(device_code),
-        vouch_common::protocol::CLIENT_ASSERTION_TYPE_JWT_BEARER
+        CLIENT_ASSERTION_TYPE_JWT_BEARER
     )
 }
 
@@ -1281,15 +1289,13 @@ async fn test_fapi2_device_flow_accepts_client_assertion_parameters() {
             token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
             fapi_profile: Some(db::FapiProfile::Fapi2Security),
             dpop_bound_access_tokens: true,
-            grant_types: Some(vec![
-                vouch_common::protocol::GRANT_TYPE_DEVICE_CODE.to_string(),
-            ]),
+            grant_types: Some(vec![GRANT_TYPE_DEVICE_CODE.to_string()]),
             ..Default::default()
         },
     )
     .await;
     let issuer = state.config().base_url.clone();
-    let assertion_type = vouch_common::protocol::CLIENT_ASSERTION_TYPE_JWT_BEARER;
+    let assertion_type = CLIENT_ASSERTION_TYPE_JWT_BEARER;
 
     let assertion = build_client_assertion(&client.client_id, &issuer, &pkcs8_bytes, None);
     let (status, body) = http_post_form(
@@ -1711,7 +1717,7 @@ async fn create_fapi_client_credentials_client(
         user_id,
         TestClientSpec {
             jwks: TestJwks::Custom(jwks_value),
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
             fapi_profile: Some(db::FapiProfile::Fapi2Security),
             grant_types: Some(vec!["client_credentials".to_string()]),
             ..Default::default()
@@ -1823,7 +1829,7 @@ async fn test_client_credentials_rejects_dpop_bound_client_without_proof() {
         &user.id,
         TestClientSpec {
             jwks: TestJwks::Custom(serde_json::json!({ "keys": [jwk] })),
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
             // Not a FAPI client: the binding flag alone must be enforced.
             dpop_bound_access_tokens: true,
             grant_types: Some(vec!["client_credentials".to_string()]),
@@ -1924,7 +1930,7 @@ async fn test_fapi2_device_flow_pending_polls_reuse_one_nonce() {
     let expires_at = jiff::Timestamp::now()
         .checked_add(jiff::Span::new().hours(1))
         .expect("device code expiry");
-    crate::db::create_device_auth_request(
+    db::create_device_auth_request(
         &state.store,
         &sha256_base64url(device_code),
         "PENDNONCE",

@@ -8,11 +8,18 @@ use super::client_auth::{
 };
 use crate::AppState;
 use crate::arrival::ArrivalTime;
+use crate::db::{
+    self, ClientInfo, ClientType, OAuthClient, OAuthEventType, RecordOAuthEventParams,
+    RecordedOrgDomain,
+};
 use crate::error::OAuthErrorResponse;
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
+use crate::handlers::device;
 use crate::handlers::extractors::{OAuthForm, OptionalClientCert};
+use crate::infra::metrics;
 use crate::services::auth::{
-    ClientAuthProof, GrantProof, SenderConstraintProof, TokenBinding, TokenIssuanceProof,
+    ClientAuthProof, GrantProof, JwtClientAuthProof, NoClientAuth, SenderConstraintProof,
+    TokenBinding, TokenIssuanceProof,
 };
 use crate::services::oidc::mtls::CertThumbprint;
 use crate::services::oidc::validated_client::ValidatedOAuthClient;
@@ -393,7 +400,7 @@ const MAX_ASSERTION_LEN: usize = 8192;
 pub(crate) async fn token(
     arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
-    client_info: crate::db::ClientInfo,
+    client_info: ClientInfo,
     client_cert: OptionalClientCert,
     headers: HeaderMap,
     OAuthForm(params): OAuthForm<TokenRequestForm>,
@@ -565,7 +572,7 @@ async fn resolve_non_jwt_auth(
     auth: &ClientAuthParams,
     client_cert: &OptionalClientCert,
     arrival: ArrivalTime,
-) -> Result<(crate::db::OAuthClient, ClientAuthProof), Response> {
+) -> Result<(OAuthClient, ClientAuthProof), Response> {
     let creds = extract_client_credentials(headers, auth);
     let Some((c, _presentation)) = creds else {
         return Err(ServiceError::oauth(
@@ -604,7 +611,7 @@ async fn resolve_non_jwt_auth(
             // Fail closed: a DB error is a transient failure (→ 500), not a
             // missing client (→ invalid_client). Collapsing DB-Err + None +
             // inactive into one `invalid_client` masked connectivity problems.
-            let db_result = crate::db::get_oauth_client_by_client_id(&state.store, &c.client_id)
+            let db_result = db::get_oauth_client_by_client_id(&state.store, &c.client_id)
                 .await
                 .map_err(|e| {
                     tracing::error!(
@@ -639,7 +646,7 @@ async fn resolve_non_jwt_auth(
     // Not mTLS-registered, no secret presented — must be a public client.
     // `for_public_client` errors if the client is confidential, closing
     // the "developer forgot to authenticate" hole at the type system level.
-    let witness = match crate::services::auth::NoClientAuth::for_public_client(&client) {
+    let witness = match NoClientAuth::for_public_client(&client) {
         Ok(w) => w,
         Err(svc) => return Err(svc.into_oauth_response().into_response()),
     };
@@ -650,7 +657,7 @@ async fn resolve_non_jwt_auth(
 async fn handle_authorization_code_grant(
     arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
-    client_info: crate::db::ClientInfo,
+    client_info: ClientInfo,
     client_cert: OptionalClientCert,
     headers: HeaderMap,
     auth: ClientAuthParams,
@@ -747,9 +754,7 @@ async fn handle_authorization_code_grant(
     let (authenticated_client, client_auth) = match (jwt_authenticated, jwt_auth, non_jwt_auth) {
         (Some(client), Some(auth), _) => (
             client,
-            ClientAuthProof::PrivateKeyJwt(crate::services::auth::JwtClientAuthProof::new(
-                auth, jti_claim,
-            )),
+            ClientAuthProof::PrivateKeyJwt(JwtClientAuthProof::new(auth, jti_claim)),
         ),
         (_, _, Some(pair)) => pair,
         _ => {
@@ -822,7 +827,7 @@ async fn handle_authorization_code_grant(
     .await
     {
         Ok(result) => {
-            crate::infra::metrics::record_auth_event("authorization_code_success");
+            metrics::record_auth_event("authorization_code_success");
             token_success_response(TokenResponse {
                 access_token: result.access_token,
                 token_type: result.token_type,
@@ -847,7 +852,7 @@ async fn handle_authorization_code_grant(
 async fn handle_client_credentials_grant(
     arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
-    client_info: crate::db::ClientInfo,
+    client_info: ClientInfo,
     client_cert: OptionalClientCert,
     headers: HeaderMap,
     auth: ClientAuthParams,
@@ -916,7 +921,7 @@ async fn handle_client_credentials_grant(
     let witnesses = any_auth.witnesses;
 
     // RFC 6749 Section 4.4: client_credentials requires a confidential client
-    if authenticated_client.client_type() == crate::db::ClientType::Public {
+    if authenticated_client.client_type() == ClientType::Public {
         return ServiceError::oauth(
             OAuthErrorCode::UnauthorizedClient,
             "Public clients are not allowed to use client_credentials grant",
@@ -973,23 +978,23 @@ async fn handle_client_credentials_grant(
             // default resolution would fall straight through to the
             // client-org branch — the client is already in scope here, so
             // skip that redundant re-lookup.
-            let audit_org_domain = crate::db::resolve_event_org_domain(
+            let audit_org_domain = db::resolve_event_org_domain(
                 &state.store,
                 None,
                 authenticated_client.org_id.as_deref(),
             )
             .await;
             // Record audit event
-            crate::db::record_oauth_event(
+            db::record_oauth_event(
                 &state.audit,
                 &state.store,
-                &crate::db::RecordOAuthEventParams {
+                &RecordOAuthEventParams {
                     oauth_client_id: &authenticated_client.id,
-                    event_type: crate::db::OAuthEventType::TokenIssued,
+                    event_type: OAuthEventType::TokenIssued,
                     user_id: None,
                     client: &client_info,
                     details: Some("grant_type=client_credentials"),
-                    org_domain: crate::db::RecordedOrgDomain::Known(audit_org_domain.as_deref()),
+                    org_domain: RecordedOrgDomain::Known(audit_org_domain.as_deref()),
                 },
             )
             .await;
@@ -1012,7 +1017,7 @@ async fn handle_client_credentials_grant(
 async fn handle_device_code_grant(
     arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
-    client_info: crate::db::ClientInfo,
+    client_info: ClientInfo,
     client_cert: OptionalClientCert,
     headers: HeaderMap,
     auth: ClientAuthParams,
@@ -1054,19 +1059,14 @@ async fn handle_device_code_grant(
     // assigned other authentication requirements), the client MUST
     // authenticate with the authorization server as described in Section
     // 3.2.1 of [RFC6749]."
-    let device_client = match super::super::device::authenticate_device_client(
-        &state,
-        &headers,
-        &auth,
-        &client_cert,
-        arrival,
-    )
-    .await
-    {
-        Ok(client) => client,
-        Err(resp) => return resp,
-    };
-    match super::super::device::device_token(
+    let device_client =
+        match device::authenticate_device_client(&state, &headers, &auth, &client_cert, arrival)
+            .await
+        {
+            Ok(client) => client,
+            Err(resp) => return resp,
+        };
+    match device::device_token(
         State(state),
         client_info,
         client_cert,
@@ -1137,7 +1137,7 @@ impl<'a> ExchangeTokens<'a> {
 fn resolve_exchange_audience(
     audience: Option<&str>,
     resource: Option<&str>,
-    client: &crate::db::OAuthClient,
+    client: &OAuthClient,
 ) -> Result<Option<String>, ServiceError> {
     if let Some(res) = resource
         && ResourceUri::parse(res).is_err()
@@ -1180,7 +1180,7 @@ fn resolve_exchange_audience(
 async fn handle_token_exchange_grant(
     arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
-    client_info: crate::db::ClientInfo,
+    client_info: ClientInfo,
     client_cert: OptionalClientCert,
     headers: HeaderMap,
     auth: ClientAuthParams,
@@ -1392,7 +1392,7 @@ impl ClientAuthFields for ClientAuthParams {
 async fn handle_fido2_assertion_grant(
     arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
-    client_info: crate::db::ClientInfo,
+    client_info: ClientInfo,
     client_cert: OptionalClientCert,
     headers: HeaderMap,
     auth: ClientAuthParams,
@@ -1510,9 +1510,7 @@ async fn handle_fido2_assertion_grant(
     // `Some` — but the proof construction does not depend on it:
     // `jwt_auth` is the structural witness for "RFC 7523 §3 validation
     // passed", and `jti` is an additive replay-prevention witness.
-    let client_auth = ClientAuthProof::PrivateKeyJwt(
-        crate::services::auth::JwtClientAuthProof::new(jwt_auth, jti_claim),
-    );
+    let client_auth = ClientAuthProof::PrivateKeyJwt(JwtClientAuthProof::new(jwt_auth, jti_claim));
 
     match fido2_grant::exchange_fido2_assertion(
         &state,
@@ -1524,7 +1522,7 @@ async fn handle_fido2_assertion_grant(
     .await
     {
         Ok(result) => {
-            crate::infra::metrics::record_auth_event("fido2_login_success");
+            metrics::record_auth_event("fido2_login_success");
             token_success_response(TokenResponse {
                 access_token: result.access_token,
                 token_type: result.token_type,
@@ -1536,7 +1534,7 @@ async fn handle_fido2_assertion_grant(
             })
         }
         Err(e) => {
-            crate::infra::metrics::record_auth_event("fido2_login_failure");
+            metrics::record_auth_event("fido2_login_failure");
             e.into_oauth_response().into_response()
         }
     }
@@ -1548,7 +1546,7 @@ async fn handle_fido2_assertion_grant(
 /// Returns `Some(thumbprint)` only when the client has opted in via
 /// `tls_client_certificate_bound_access_tokens` **and** a cert is present.
 fn extract_mtls_thumbprint(
-    client: &crate::db::OAuthClient,
+    client: &OAuthClient,
     client_cert: &OptionalClientCert,
 ) -> Option<CertThumbprint> {
     if client.tls_client_certificate_bound_access_tokens {

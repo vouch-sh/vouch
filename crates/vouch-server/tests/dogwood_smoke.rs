@@ -12,6 +12,8 @@
     clippy::panic_in_result_fn,
     reason = "tests assert with assert!/assert_eq! for expressive failures; Result carries setup errors"
 )]
+// Own-crate items are imported with `use`; see `absolute-paths-allowed-crates` in `.clippy.toml`.
+#![deny(clippy::absolute_paths)]
 
 use dogwood_language::{
     Authorizer, Decision, Event, LoweredPolicySet, PolicySchema, ServiceSchema, Validator, Value,

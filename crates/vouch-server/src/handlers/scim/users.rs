@@ -26,6 +26,7 @@ use crate::db::{ScimFilterError, ScimScope};
 use crate::email::Email;
 use crate::redact_email;
 use crate::scim_filter::{self, unqualified};
+use crate::services::auth::{self, DeactivationError};
 
 /// The 400 returned when a SCIM write would leave the organization with no
 /// active admin.
@@ -269,7 +270,7 @@ pub(crate) async fn create_user(
     // part) is rejected here; a NUL in the local part is still left to the
     // store's `validate_index_entry` guard, and an empty domain (`foo@`)
     // to the in-transaction ownership check.
-    if !crate::email::Email::is_valid_address(&email) {
+    if !Email::is_valid_address(&email) {
         tracing::warn!(
             org_id = %auth.org_id,
             "rejected SCIM user creation: userName is not an email address"
@@ -850,18 +851,9 @@ async fn persist_user_update(
             "User {} deactivated via SCIM: revoking sessions and SSH certificates before persisting",
             id
         );
-        crate::services::auth::revoke_then_persist(
-            state,
-            id,
-            "User deactivated via SCIM",
-            "scim",
-            persist,
-        )
-        .await
+        auth::revoke_then_persist(state, id, "User deactivated via SCIM", "scim", persist).await
     } else {
-        persist()
-            .await
-            .map_err(crate::services::auth::DeactivationError::Persist)
+        persist().await.map_err(DeactivationError::Persist)
     };
     match result {
         Ok(true) => {}
@@ -872,7 +864,7 @@ async fn persist_user_update(
             )
                 .into_response();
         }
-        Err(crate::services::auth::DeactivationError::Revoke(_)) => {
+        Err(DeactivationError::Revoke(_)) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ScimError::new(500, "Failed to revoke user access")),
@@ -883,7 +875,7 @@ async fn persist_user_update(
         // and the in-transaction count. `revoke_then_persist` has already
         // committed the revocation, so it is audited; `refusal: "last_admin"`
         // separates a floor refusal from a failed write.
-        Err(crate::services::auth::DeactivationError::Persist(db::ScimUpdateError::LastAdmin)) => {
+        Err(DeactivationError::Persist(db::ScimUpdateError::LastAdmin)) => {
             if deactivated {
                 db::record_scim_audit(
                     &state.audit,
@@ -909,7 +901,7 @@ async fn persist_user_update(
             }
             return last_admin_scim_error();
         }
-        Err(crate::services::auth::DeactivationError::Persist(e)) => {
+        Err(DeactivationError::Persist(e)) => {
             if deactivated {
                 // `revoke_then_persist` already withdrew the user's sessions
                 // and SSH certificates; that committed change gets its audit
@@ -1076,7 +1068,7 @@ pub(crate) async fn delete_user(
     // Revoke access before deleting. If revocation fails, abort — delete_user
     // would destroy the issued cert records, making the certs permanently
     // unrevocable.
-    if crate::services::auth::revoke_user_access(&state, &id, "User deleted via SCIM", "scim")
+    if auth::revoke_user_access(&state, &id, "User deleted via SCIM", "scim")
         .await
         .is_err()
     {

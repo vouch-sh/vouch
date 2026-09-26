@@ -25,19 +25,23 @@ use crate::assurance::HardwareVerification;
 use crate::config::NonEmptySecret;
 use crate::crypto::generate_challenge;
 use crate::crypto::hash_token;
+use crate::crypto::jwt::{JwtType, StateTokenError, StateTokenSigner};
 use crate::crypto::webauthn_verify::AuthTime;
 use crate::db::ClientInfo;
 use crate::db::{self, AuthEventParams, AuthEventType};
 use crate::error::ServiceError;
 use crate::handlers::extractors::ValidJson;
-use crate::handlers::session::{create_session_cookie, get_auth_context, session_cookie_max_age};
+use crate::handlers::session::{
+    AuthContext, create_session_cookie, get_auth_context, session_cookie_max_age,
+};
 use crate::handlers::{ClientDataError, ClientDataProof};
 use crate::impl_template_response;
 use crate::infra::i18n::Tr;
+use crate::infra::metrics;
 use crate::redact_email;
 use crate::services::auth::{
-    ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenBinding,
-    TokenIssuanceProof, create_oauth_access_token,
+    self, ClientAuthProof, CreateOAuthTokenParams, GrantProof, LookupError, NoClientAuth,
+    SenderConstraintProof, TokenBinding, TokenIssuanceProof, create_oauth_access_token,
 };
 use crate::services::oidc::ScopeSet;
 use crate::services::oidc::authorization::{
@@ -94,7 +98,7 @@ pub(crate) struct LoginTemplate {
     /// Relying Party ID for WebAuthn.
     pub rp_id: String,
     /// Authentication context for header.
-    pub auth: crate::handlers::session::AuthContext,
+    pub auth: AuthContext,
     /// URL for the certification test-mode login link.
     /// `Some` only when `VOUCH_CERTIFICATION_TEST_TOKEN` is set and there is a pending auth.
     pub cert_login_url: Option<String>,
@@ -130,27 +134,21 @@ struct BrowserAuthenticationState {
 }
 
 impl BrowserAuthenticationState {
-    async fn encode(
-        &self,
-        signer: &crate::crypto::jwt::StateTokenSigner,
-    ) -> Result<String, crate::crypto::jwt::StateTokenError> {
+    async fn encode(&self, signer: &StateTokenSigner) -> Result<String, StateTokenError> {
         signer
-            .encode_state_token(
-                self,
-                crate::crypto::jwt::JwtType::BrowserAuthenticationState,
-            )
+            .encode_state_token(self, JwtType::BrowserAuthenticationState)
             .await
     }
 
     async fn decode(
         token: &str,
-        signer: &crate::crypto::jwt::StateTokenSigner,
+        signer: &StateTokenSigner,
         arrival: ArrivalTime,
-    ) -> Result<Self, crate::crypto::jwt::StateTokenError> {
+    ) -> Result<Self, StateTokenError> {
         signer
             .decode_state_token(
                 token,
-                crate::crypto::jwt::JwtType::BrowserAuthenticationState,
+                JwtType::BrowserAuthenticationState,
                 arrival.as_second(),
             )
             .await
@@ -628,23 +626,17 @@ pub(crate) async fn browser_login_complete(
     {
         Ok(result) => result,
         Err(e) => {
-            crate::services::auth::record_lookup_failure(
-                &state.audit,
-                client_info.clone(),
-                user_id,
-                &e,
-            )
-            .await;
+            auth::record_lookup_failure(&state.audit, client_info.clone(), user_id, &e).await;
             return Err(match e {
                 // Return generic error to prevent credential enumeration
-                crate::services::auth::LookupError::NotFound(_)
-                | crate::services::auth::LookupError::UserMismatch { .. }
-                | crate::services::auth::LookupError::Deactivated { .. } => ServiceError::api(
+                LookupError::NotFound(_)
+                | LookupError::UserMismatch { .. }
+                | LookupError::Deactivated { .. } => ServiceError::api(
                     StatusCode::UNAUTHORIZED,
                     "auth_failed",
                     Tr::new("login-error-auth-failed").to_string(),
                 ),
-                crate::services::auth::LookupError::Service(e) => {
+                LookupError::Service(e) => {
                     tracing::error!("Browser login authenticator lookup failed: {e}");
                     e
                 }
@@ -916,9 +908,7 @@ async fn finalize_login_session_inner(
         },
         TokenIssuanceProof {
             grant: GrantProof::BrowserLogin(challenge_claim),
-            client_auth: ClientAuthProof::NoAuth(
-                crate::services::auth::NoClientAuth::internal_endpoint(),
-            ),
+            client_auth: ClientAuthProof::NoAuth(NoClientAuth::internal_endpoint()),
             sender_constraint: SenderConstraintProof::no_registered_client(),
         },
         arrival,
@@ -946,7 +936,7 @@ async fn finalize_login_session_inner(
     };
     db::record_auth_event(&state.audit, auth_event_params, Some(user.email.clone())).await;
 
-    crate::infra::metrics::record_auth_event("browser_login_success");
+    metrics::record_auth_event("browser_login_success");
 
     tracing::info!(
         "Browser login successful for user: {}",
@@ -993,11 +983,17 @@ mod tests {
         reason = "test code: panic on assertion failure is acceptable"
     )]
     use super::*;
-    use crate::test_utils::test_arrival;
+    use crate::crypto;
+    use crate::crypto::jwt::StateTokenSigner;
+    use crate::crypto::webauthn_verify::AuthTime;
+    use crate::db::{self, AuditEventFilter, CreatePendingOAuthParams};
+    use crate::test_utils::{
+        self, TestPendingAuthSpec, TestSessionSpec, TestVerification, test_arrival,
+    };
 
     #[tokio::test]
     async fn test_browser_auth_state_encode_decode() {
-        let signer = crate::crypto::jwt::StateTokenSigner::local(b"test-secret".to_vec());
+        let signer = StateTokenSigner::local(b"test-secret".to_vec());
         let now = jiff::Timestamp::now().as_second();
         let state = BrowserAuthenticationState {
             challenge: vec![1, 2, 3, 4],
@@ -1024,10 +1020,9 @@ mod tests {
     #[tokio::test]
     async fn test_login_page_rejects_non_uuid_pending_auth() {
         // Non-UUID pending_auth should redirect to /login (stripping the bad param)
-        let (app, _state) = crate::test_utils::test_app().await;
+        let (app, _state) = test_utils::test_app().await;
 
-        let resp =
-            crate::test_utils::http_get_full(&app, "/login?pending_auth=not-a-uuid", &[]).await;
+        let resp = test_utils::http_get_full(&app, "/login?pending_auth=not-a-uuid", &[]).await;
 
         assert_eq!(resp.status, axum::http::StatusCode::SEE_OTHER);
         let location = resp
@@ -1042,9 +1037,9 @@ mod tests {
     #[tokio::test]
     async fn test_login_page_accepts_valid_uuid_pending_auth() {
         // Valid UUID pending_auth should not redirect to /login
-        let (app, _state) = crate::test_utils::test_app().await;
+        let (app, _state) = test_utils::test_app().await;
 
-        let resp = crate::test_utils::http_get_full(
+        let resp = test_utils::http_get_full(
             &app,
             "/login?pending_auth=aaaaaaaa-bbbb-7ccc-dddd-eeeeeeeeeeee",
             &[],
@@ -1058,9 +1053,9 @@ mod tests {
     #[tokio::test]
     async fn test_login_page_no_pending_auth_renders_ok() {
         // No pending_auth at all should render the login page
-        let (app, _state) = crate::test_utils::test_app().await;
+        let (app, _state) = test_utils::test_app().await;
 
-        let resp = crate::test_utils::http_get_full(&app, "/login", &[]).await;
+        let resp = test_utils::http_get_full(&app, "/login", &[]).await;
 
         assert_eq!(resp.status, axum::http::StatusCode::OK);
     }
@@ -1073,14 +1068,14 @@ mod tests {
     async fn test_login_page_prompt_login_forces_reauth() {
         // OIDC Core Section 3.1.2.1: prompt=login must show the login page
         // even when the user already has a valid session.
-        let (app, state) = crate::test_utils::test_app().await;
+        let (app, state) = test_utils::test_app().await;
 
-        let user = crate::test_utils::create_test_user(&state.store, "reauth@example.com").await;
-        let auth_id = crate::test_utils::create_test_authenticator(&state.store, &user.id).await;
-        let client = crate::test_utils::create_test_oauth_client(&state.store, &user.id).await;
-        let session_token = crate::test_utils::create_test_session_with(
+        let user = test_utils::create_test_user(&state.store, "reauth@example.com").await;
+        let auth_id = test_utils::create_test_authenticator(&state.store, &user.id).await;
+        let client = test_utils::create_test_oauth_client(&state.store, &user.id).await;
+        let session_token = test_utils::create_test_session_with(
             &state,
-            crate::test_utils::TestSessionSpec {
+            TestSessionSpec {
                 user_id: &user.id,
                 email: &user.email,
                 auth_id: Some(&auth_id),
@@ -1090,9 +1085,9 @@ mod tests {
         .await;
 
         // Create a pending auth with prompt=login
-        let pending_id = crate::db::create_pending_oauth_authorization(
+        let pending_id = db::create_pending_oauth_authorization(
             &state.store,
-            crate::db::CreatePendingOAuthParams {
+            CreatePendingOAuthParams {
                 client_id: &client.client_id,
                 redirect_uri: "https://example.com/callback",
                 response_type: "code",
@@ -1115,7 +1110,7 @@ mod tests {
         .expect("Failed to create pending auth");
 
         // Visit /login with session cookie and prompt=login pending auth
-        let resp = crate::test_utils::http_get_full(
+        let resp = test_utils::http_get_full(
             &app,
             &format!("/login?pending_auth={pending_id}"),
             &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
@@ -1137,27 +1132,26 @@ mod tests {
         // does. With an IdP-only (not hardware-verified) session the authorize
         // endpoint stores the combined prompt verbatim; /login must recognise
         // `login` inside the set and show the assertion form.
-        let (app, state) = crate::test_utils::test_app().await;
+        let (app, state) = test_utils::test_app().await;
 
-        let user =
-            crate::test_utils::create_test_user(&state.store, "idp-reauth@example.com").await;
-        let auth_id = crate::test_utils::create_test_authenticator(&state.store, &user.id).await;
-        let client = crate::test_utils::create_test_oauth_client(&state.store, &user.id).await;
-        let session_token = crate::test_utils::create_test_session_with(
+        let user = test_utils::create_test_user(&state.store, "idp-reauth@example.com").await;
+        let auth_id = test_utils::create_test_authenticator(&state.store, &user.id).await;
+        let client = test_utils::create_test_oauth_client(&state.store, &user.id).await;
+        let session_token = test_utils::create_test_session_with(
             &state,
-            crate::test_utils::TestSessionSpec {
+            TestSessionSpec {
                 user_id: &user.id,
                 email: &user.email,
                 auth_id: Some(&auth_id),
-                verification: crate::test_utils::TestVerification::NotVerified,
+                verification: TestVerification::NotVerified,
                 ..Default::default()
             },
         )
         .await;
 
-        let pending_id = crate::db::create_pending_oauth_authorization(
+        let pending_id = db::create_pending_oauth_authorization(
             &state.store,
-            crate::db::CreatePendingOAuthParams {
+            CreatePendingOAuthParams {
                 client_id: &client.client_id,
                 redirect_uri: "https://example.com/callback",
                 response_type: "code",
@@ -1179,7 +1173,7 @@ mod tests {
         .await
         .expect("Failed to create pending auth");
 
-        let resp = crate::test_utils::http_get_full(
+        let resp = test_utils::http_get_full(
             &app,
             &format!("/login?pending_auth={pending_id}"),
             &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
@@ -1204,34 +1198,33 @@ mod tests {
         // pending auth, /login must render the assertion form rather than
         // bounce the user to an endpoint that will turn them away — and it
         // must leave the single-use pending id unspent for the round trip.
-        let (app, state) = crate::test_utils::test_app().await;
+        let (app, state) = test_utils::test_app().await;
 
-        let user =
-            crate::test_utils::create_test_user(&state.store, "bootstrap-form@example.com").await;
-        let auth_id = crate::test_utils::create_test_authenticator(&state.store, &user.id).await;
-        let client = crate::test_utils::create_test_oauth_client(&state.store, &user.id).await;
-        let session_token = crate::test_utils::create_test_session_with(
+        let user = test_utils::create_test_user(&state.store, "bootstrap-form@example.com").await;
+        let auth_id = test_utils::create_test_authenticator(&state.store, &user.id).await;
+        let client = test_utils::create_test_oauth_client(&state.store, &user.id).await;
+        let session_token = test_utils::create_test_session_with(
             &state,
-            crate::test_utils::TestSessionSpec {
+            TestSessionSpec {
                 user_id: &user.id,
                 email: &user.email,
                 auth_id: Some(&auth_id),
-                verification: crate::test_utils::TestVerification::NotVerified,
+                verification: TestVerification::NotVerified,
                 ..Default::default()
             },
         )
         .await;
 
-        let pending_id = crate::test_utils::create_test_pending_auth(
+        let pending_id = test_utils::create_test_pending_auth(
             &state.store,
-            crate::test_utils::TestPendingAuthSpec {
+            TestPendingAuthSpec {
                 client_id: &client.client_id,
                 ..Default::default()
             },
         )
         .await;
 
-        let resp = crate::test_utils::http_get_full(
+        let resp = test_utils::http_get_full(
             &app,
             &format!("/login?pending_auth={pending_id}"),
             &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
@@ -1247,14 +1240,10 @@ mod tests {
             resp.headers.get("location")
         );
         assert!(
-            crate::db::get_pending_oauth_authorization(
-                &state.store,
-                &pending_id,
-                jiff::Timestamp::now(),
-            )
-            .await
-            .expect("pending lookup")
-            .is_some(),
+            db::get_pending_oauth_authorization(&state.store, &pending_id, jiff::Timestamp::now(),)
+                .await
+                .expect("pending lookup")
+                .is_some(),
             "rendering the form must not spend the single-use pending id"
         );
     }
@@ -1264,24 +1253,23 @@ mod tests {
         // Without a pending authorization a signed-in user has nothing to do
         // at /login: IdP sign-in is the whole bar for the browser UI, so a
         // bootstrap (NotVerified) session goes home like a verified one.
-        let (app, state) = crate::test_utils::test_app().await;
+        let (app, state) = test_utils::test_app().await;
 
-        let user =
-            crate::test_utils::create_test_user(&state.store, "bootstrap-home@example.com").await;
-        let auth_id = crate::test_utils::create_test_authenticator(&state.store, &user.id).await;
-        let session_token = crate::test_utils::create_test_session_with(
+        let user = test_utils::create_test_user(&state.store, "bootstrap-home@example.com").await;
+        let auth_id = test_utils::create_test_authenticator(&state.store, &user.id).await;
+        let session_token = test_utils::create_test_session_with(
             &state,
-            crate::test_utils::TestSessionSpec {
+            TestSessionSpec {
                 user_id: &user.id,
                 email: &user.email,
                 auth_id: Some(&auth_id),
-                verification: crate::test_utils::TestVerification::NotVerified,
+                verification: TestVerification::NotVerified,
                 ..Default::default()
             },
         )
         .await;
 
-        let resp = crate::test_utils::http_get_full(
+        let resp = test_utils::http_get_full(
             &app,
             "/login",
             &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
@@ -1305,14 +1293,13 @@ mod tests {
     #[tokio::test]
     async fn test_login_page_redirects_verified_session_home() {
         // A hardware-verified session has nothing left to prove at /login.
-        let (app, state) = crate::test_utils::test_app().await;
+        let (app, state) = test_utils::test_app().await;
 
-        let user =
-            crate::test_utils::create_test_user(&state.store, "verified-home@example.com").await;
-        let auth_id = crate::test_utils::create_test_authenticator(&state.store, &user.id).await;
-        let session_token = crate::test_utils::create_test_session_with(
+        let user = test_utils::create_test_user(&state.store, "verified-home@example.com").await;
+        let auth_id = test_utils::create_test_authenticator(&state.store, &user.id).await;
+        let session_token = test_utils::create_test_session_with(
             &state,
-            crate::test_utils::TestSessionSpec {
+            TestSessionSpec {
                 user_id: &user.id,
                 email: &user.email,
                 auth_id: Some(&auth_id),
@@ -1321,7 +1308,7 @@ mod tests {
         )
         .await;
 
-        let resp = crate::test_utils::http_get_full(
+        let resp = test_utils::http_get_full(
             &app,
             "/login",
             &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
@@ -1346,14 +1333,14 @@ mod tests {
     async fn test_login_page_no_prompt_redirects_with_session() {
         // Without prompt=login, an authenticated user with pending_auth
         // should be redirected back to /oauth/authorize.
-        let (app, state) = crate::test_utils::test_app().await;
+        let (app, state) = test_utils::test_app().await;
 
-        let user = crate::test_utils::create_test_user(&state.store, "no-reauth@example.com").await;
-        let auth_id = crate::test_utils::create_test_authenticator(&state.store, &user.id).await;
-        let client = crate::test_utils::create_test_oauth_client(&state.store, &user.id).await;
-        let session_token = crate::test_utils::create_test_session_with(
+        let user = test_utils::create_test_user(&state.store, "no-reauth@example.com").await;
+        let auth_id = test_utils::create_test_authenticator(&state.store, &user.id).await;
+        let client = test_utils::create_test_oauth_client(&state.store, &user.id).await;
+        let session_token = test_utils::create_test_session_with(
             &state,
-            crate::test_utils::TestSessionSpec {
+            TestSessionSpec {
                 user_id: &user.id,
                 email: &user.email,
                 auth_id: Some(&auth_id),
@@ -1363,9 +1350,9 @@ mod tests {
         .await;
 
         // Create a pending auth WITHOUT prompt=login
-        let pending_id = crate::db::create_pending_oauth_authorization(
+        let pending_id = db::create_pending_oauth_authorization(
             &state.store,
-            crate::db::CreatePendingOAuthParams {
+            CreatePendingOAuthParams {
                 client_id: &client.client_id,
                 redirect_uri: "https://example.com/callback",
                 response_type: "code",
@@ -1387,7 +1374,7 @@ mod tests {
         .await
         .expect("Failed to create pending auth");
 
-        let resp = crate::test_utils::http_get_full(
+        let resp = test_utils::http_get_full(
             &app,
             &format!("/login?pending_auth={pending_id}"),
             &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
@@ -1419,14 +1406,13 @@ mod tests {
         // carrying a session cookie. Redirecting them away because they look
         // authenticated would leave the CLI polling until it times out — the
         // assertion is what authorizes the waiting device request.
-        let (app, state) = crate::test_utils::test_app().await;
+        let (app, state) = test_utils::test_app().await;
 
-        let user =
-            crate::test_utils::create_test_user(&state.store, "cli-assert@example.com").await;
-        let auth_id = crate::test_utils::create_test_authenticator(&state.store, &user.id).await;
-        let session_token = crate::test_utils::create_test_session_with(
+        let user = test_utils::create_test_user(&state.store, "cli-assert@example.com").await;
+        let auth_id = test_utils::create_test_authenticator(&state.store, &user.id).await;
+        let session_token = test_utils::create_test_session_with(
             &state,
-            crate::test_utils::TestSessionSpec {
+            TestSessionSpec {
                 user_id: &user.id,
                 email: &user.email,
                 auth_id: Some(&auth_id),
@@ -1436,7 +1422,7 @@ mod tests {
         .await;
 
         let expires: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().expect("valid timestamp");
-        let device_auth_id = crate::db::create_device_auth_request(
+        let device_auth_id = db::create_device_auth_request(
             &state.store,
             "login-page-device-hash",
             "LGPG-CODE",
@@ -1447,18 +1433,18 @@ mod tests {
         .await
         .expect("create device auth");
 
-        crate::db::create_enrollment_session(
+        db::create_enrollment_session(
             &state.store,
             &user.id,
             &user.email,
-            &crate::crypto::hash_token(&session_token),
+            &crypto::hash_token(&session_token),
             Some(&device_auth_id),
             expires,
         )
         .await
         .expect("create enrollment session");
 
-        let resp = crate::test_utils::http_get_full(
+        let resp = test_utils::http_get_full(
             &app,
             "/login",
             &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
@@ -1482,7 +1468,7 @@ mod tests {
     /// envelope `login.js` reads out of `errResp.message`.
     #[tokio::test]
     async fn test_browser_login_complete_rejects_malformed_base64url() {
-        let (app, state) = crate::test_utils::test_app().await;
+        let (app, state) = test_utils::test_app().await;
 
         let dummy = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(vec![0u8; 32]);
         let body = serde_json::json!({
@@ -1495,7 +1481,7 @@ mod tests {
         })
         .to_string();
 
-        let (status, resp_body) = crate::test_utils::http_post_json(
+        let (status, resp_body) = test_utils::http_post_json(
             &app,
             "/login/webauthn/complete",
             &body,
@@ -1518,12 +1504,12 @@ mod tests {
     /// shows `errResp.message`. Axum's own rejection answers `text/plain`.
     #[tokio::test]
     async fn test_browser_login_complete_rejection_is_json() {
-        let (app, state) = crate::test_utils::test_app().await;
+        let (app, state) = test_utils::test_app().await;
 
         // Omit every field but `state`.
         let body = serde_json::json!({ "state": "state-token" }).to_string();
 
-        let (status, resp_body) = crate::test_utils::http_post_json(
+        let (status, resp_body) = test_utils::http_post_json(
             &app,
             "/login/webauthn/complete",
             &body,
@@ -1549,8 +1535,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_browser_auth_state_decode_wrong_secret() {
-        let signer = crate::crypto::jwt::StateTokenSigner::local(b"correct-secret".to_vec());
-        let wrong_signer = crate::crypto::jwt::StateTokenSigner::local(b"wrong-secret".to_vec());
+        let signer = StateTokenSigner::local(b"correct-secret".to_vec());
+        let wrong_signer = StateTokenSigner::local(b"wrong-secret".to_vec());
         let now = jiff::Timestamp::now().as_second();
         let state = BrowserAuthenticationState {
             challenge: vec![1, 2, 3, 4],
@@ -1575,7 +1561,7 @@ mod tests {
         // any base64 decoding, DB lookup, or WebAuthn verification work
         // happens. This guards against a regression where the consume
         // call is reordered or removed.
-        let (app, state) = crate::test_utils::test_app().await;
+        let (app, state) = test_utils::test_app().await;
 
         // Build a valid BrowserAuthenticationState JWT signed by the test
         // signer, with a far-future expiry.
@@ -1595,10 +1581,9 @@ mod tests {
 
         // Pre-consume the state JWT to simulate a prior successful login.
         let expires_at = jiff::Timestamp::from_second(exp).expect("valid exp");
-        let _claim =
-            crate::db::consume_challenge_state_for_test(&state.store, &state_jwt, expires_at)
-                .await
-                .expect("pre-consume must succeed");
+        let _claim = db::consume_challenge_state_for_test(&state.store, &state_jwt, expires_at)
+            .await
+            .expect("pre-consume must succeed");
 
         // POST to `/login/webauthn/complete` with the already-consumed state.
         // The body checks in Phases 2 and 3 precede the replay check, so the
@@ -1614,7 +1599,7 @@ mod tests {
         })
         .to_string();
 
-        let (status, resp_body) = crate::test_utils::http_post_json(
+        let (status, resp_body) = test_utils::http_post_json(
             &app,
             "/login/webauthn/complete",
             &body,
@@ -1648,7 +1633,7 @@ mod tests {
         client_data_json: &str,
         expected_code: &str,
     ) {
-        let (app, state) = crate::test_utils::test_app().await;
+        let (app, state) = test_utils::test_app().await;
 
         let now = jiff::Timestamp::now();
         let exp = now.as_second().saturating_add(300);
@@ -1675,7 +1660,7 @@ mod tests {
         })
         .to_string();
 
-        let (status, resp_body) = crate::test_utils::http_post_json(
+        let (status, resp_body) = test_utils::http_post_json(
             &app,
             "/login/webauthn/complete",
             &body,
@@ -1691,7 +1676,7 @@ mod tests {
 
         let expires_at = jiff::Timestamp::from_second(exp).expect("valid exp");
         let consume =
-            crate::db::consume_challenge_state_for_test(&state.store, &state_jwt, expires_at).await;
+            db::consume_challenge_state_for_test(&state.store, &state_jwt, expires_at).await;
         assert!(
             consume.is_ok(),
             "a rejected request consumed the challenge state: {consume:?}"
@@ -1740,8 +1725,8 @@ mod tests {
 
     /// Register an authenticator for `user_id` and return its credential ID.
     async fn register_credential(state: &crate::AppState, user_id: &str) -> Vec<u8> {
-        let auth_id = crate::test_utils::create_test_authenticator(&state.store, user_id).await;
-        crate::db::get_authenticator_by_id(&state.store, &auth_id)
+        let auth_id = test_utils::create_test_authenticator(&state.store, user_id).await;
+        db::get_authenticator_by_id(&state.store, &auth_id)
             .await
             .expect("load authenticator")
             .expect("authenticator exists")
@@ -1788,7 +1773,7 @@ mod tests {
         })
         .to_string();
 
-        crate::test_utils::http_post_json(
+        test_utils::http_post_json(
             app,
             "/login/webauthn/complete",
             &body,
@@ -1801,10 +1786,10 @@ mod tests {
     async fn login_failure_reasons(state: &crate::AppState, user_id: &str) -> Vec<String> {
         let events = state
             .audit
-            .query_events(&crate::db::AuditEventFilter {
+            .query_events(&AuditEventFilter {
                 event_types: Some(vec!["login_failed".to_string()]),
                 user_id: Some(user_id.to_string()),
-                ..crate::db::AuditEventFilter::default()
+                ..AuditEventFilter::default()
             })
             .await
             .expect("query audit events");
@@ -1831,9 +1816,9 @@ mod tests {
     async fn unattributed_failures(state: &crate::AppState) -> Vec<Unattributed> {
         let events = state
             .audit
-            .query_events(&crate::db::AuditEventFilter {
+            .query_events(&AuditEventFilter {
                 event_types: Some(vec!["login_failed".to_string()]),
-                ..crate::db::AuditEventFilter::default()
+                ..AuditEventFilter::default()
             })
             .await
             .expect("query audit events");
@@ -1865,10 +1850,9 @@ mod tests {
         // audit queries, whose domain `IN` filter never matches NULL. Drive a
         // real signature-verification failure through the endpoint and assert
         // the resulting login_failed row is found by a domain-scoped query.
-        let (app, state) = crate::test_utils::test_app().await;
+        let (app, state) = test_utils::test_app().await;
 
-        let user =
-            crate::test_utils::create_test_user(&state.store, "audit-event@example.com").await;
+        let user = test_utils::create_test_user(&state.store, "audit-event@example.com").await;
         let credential_id = register_credential(&state, &user.id).await;
 
         let (status, resp_body) = post_complete(&app, &state, &user.id, &credential_id).await;
@@ -1880,10 +1864,10 @@ mod tests {
 
         // The audit event is awaited before the response, so it is
         // visible immediately.
-        let filter = crate::db::AuditEventFilter {
+        let filter = AuditEventFilter {
             event_types: Some(vec!["login_failed".to_string()]),
             email_domains: Some(vec!["example.com".to_string()]),
-            ..crate::db::AuditEventFilter::default()
+            ..AuditEventFilter::default()
         };
         let events = state
             .audit
@@ -1909,11 +1893,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_browser_login_lookup_storage_fault_is_server_error() {
-        let (app, state) = crate::test_utils::test_app().await;
-        let user =
-            crate::test_utils::create_test_user(&state.store, "lookup-fault@example.com").await;
+        let (app, state) = test_utils::test_app().await;
+        let user = test_utils::create_test_user(&state.store, "lookup-fault@example.com").await;
         let credential_id = register_credential(&state, &user.id).await;
-        crate::test_utils::corrupt_document(&state.store, &user.id).await;
+        test_utils::corrupt_document(&state.store, &user.id).await;
 
         let (status, resp_body) = post_complete(&app, &state, &user.id, &credential_id).await;
 
@@ -1923,9 +1906,9 @@ mod tests {
         // writes no `login_failed` row, so it cannot feed `failed_login_burst`.
         let rows = state
             .audit
-            .query_events(&crate::db::AuditEventFilter {
+            .query_events(&AuditEventFilter {
                 event_types: Some(vec!["login_failed".to_string()]),
-                ..crate::db::AuditEventFilter::default()
+                ..AuditEventFilter::default()
             })
             .await
             .expect("query audit events");
@@ -1939,9 +1922,8 @@ mod tests {
     async fn test_browser_login_deactivated_user_is_audited_as_deactivated() {
         use crate::db::documents::user::UserDoc;
 
-        let (app, state) = crate::test_utils::test_app().await;
-        let user =
-            crate::test_utils::create_test_user(&state.store, "lookup-inactive@example.com").await;
+        let (app, state) = test_utils::test_app().await;
+        let user = test_utils::create_test_user(&state.store, "lookup-inactive@example.com").await;
         let credential_id = register_credential(&state, &user.id).await;
         state
             .store
@@ -1968,8 +1950,8 @@ mod tests {
         // query finds it. It is still not attributed to the owner.
         use crate::db::documents::user::UserDoc;
 
-        let (app, state) = crate::test_utils::test_app().await;
-        let user = crate::test_utils::create_test_user(&state.store, "deact-org@example.com").await;
+        let (app, state) = test_utils::test_app().await;
+        let user = test_utils::create_test_user(&state.store, "deact-org@example.com").await;
         let credential_id = register_credential(&state, &user.id).await;
         state
             .store
@@ -1984,10 +1966,10 @@ mod tests {
         // The org-scoped query that `/api/v1/org/audit-events` and `/admin/audit` run.
         let by_domain = state
             .audit
-            .query_events(&crate::db::AuditEventFilter {
+            .query_events(&AuditEventFilter {
                 event_types: Some(vec!["login_failed".to_string()]),
                 email_domains: Some(vec!["example.com".to_string()]),
-                ..crate::db::AuditEventFilter::default()
+                ..AuditEventFilter::default()
             })
             .await
             .expect("query audit events");
@@ -2019,10 +2001,9 @@ mod tests {
         // presenting one proves nothing about its owner: the row is
         // attributed to neither account and names no email, so it stays out
         // of the owner's org-scoped audit feed.
-        let (app, state) = crate::test_utils::test_app().await;
-        let owner = crate::test_utils::create_test_user(&state.store, "owner@example.com").await;
-        let attacker =
-            crate::test_utils::create_test_user(&state.store, "attacker@example.com").await;
+        let (app, state) = test_utils::test_app().await;
+        let owner = test_utils::create_test_user(&state.store, "owner@example.com").await;
+        let attacker = test_utils::create_test_user(&state.store, "attacker@example.com").await;
         let credential_id = register_credential(&state, &owner.id).await;
 
         // Attacker asserts the owner's credential with the attacker's own
@@ -2055,18 +2036,17 @@ mod tests {
     async fn finalize_login_session_records_login_success_on_happy_path() {
         // Positive: the tail succeeds — LoginSuccess is recorded, LoginFailed
         // is not, and a session cookie is issued.
-        let state = crate::test_utils::test_app_state().await;
-        let user =
-            crate::test_utils::create_test_user(&state.store, "finalize-ok@example.com").await;
-        let auth_id = crate::test_utils::create_test_authenticator(&state.store, &user.id).await;
-        let authenticator = crate::db::get_authenticator_by_id(&state.store, &auth_id)
+        let state = test_utils::test_app_state().await;
+        let user = test_utils::create_test_user(&state.store, "finalize-ok@example.com").await;
+        let auth_id = test_utils::create_test_authenticator(&state.store, &user.id).await;
+        let authenticator = db::get_authenticator_by_id(&state.store, &auth_id)
             .await
             .expect("read authenticator")
             .expect("authenticator present");
         let expires_at = Timestamp::now()
             .checked_add(Span::new().minutes(5))
             .expect("valid expiry");
-        let claim = crate::db::consume_challenge_state_for_test(
+        let claim = db::consume_challenge_state_for_test(
             &state.store,
             "test-state-jwt-finalize-ok@example.com",
             expires_at,
@@ -2081,9 +2061,7 @@ mod tests {
                 user: &user,
                 authenticator: &authenticator,
                 new_counter: 7,
-                auth_now: crate::crypto::webauthn_verify::AuthTime::for_test(
-                    Timestamp::now().as_second(),
-                ),
+                auth_now: AuthTime::for_test(Timestamp::now().as_second()),
                 challenge_claim: claim,
                 pending_auth: None,
                 client_info: ClientInfo::default(),
@@ -2096,7 +2074,7 @@ mod tests {
 
         let successes = state
             .audit
-            .query_events(&crate::db::AuditEventFilter {
+            .query_events(&AuditEventFilter {
                 event_types: Some(vec!["login_success".to_string()]),
                 user_id: Some(user.id.clone()),
                 ..Default::default()
@@ -2106,7 +2084,7 @@ mod tests {
         assert_eq!(successes.len(), 1, "LoginSuccess must be recorded");
         let failures = state
             .audit
-            .query_events(&crate::db::AuditEventFilter {
+            .query_events(&AuditEventFilter {
                 event_types: Some(vec!["login_failed".to_string()]),
                 user_id: Some(user.id.clone()),
                 ..Default::default()
@@ -2124,18 +2102,17 @@ mod tests {
         // enrollment session in the jar carries a device_auth_id whose row
         // does not exist, so `authorize_device_auth` fails after the counter
         // commit — the cleanup-swept-row trigger from production.
-        let state = crate::test_utils::test_app_state().await;
-        let user =
-            crate::test_utils::create_test_user(&state.store, "finalize-fail@example.com").await;
-        let auth_id = crate::test_utils::create_test_authenticator(&state.store, &user.id).await;
-        let authenticator = crate::db::get_authenticator_by_id(&state.store, &auth_id)
+        let state = test_utils::test_app_state().await;
+        let user = test_utils::create_test_user(&state.store, "finalize-fail@example.com").await;
+        let auth_id = test_utils::create_test_authenticator(&state.store, &user.id).await;
+        let authenticator = db::get_authenticator_by_id(&state.store, &auth_id)
             .await
             .expect("read authenticator")
             .expect("authenticator present");
         let expires_at = Timestamp::now()
             .checked_add(Span::new().minutes(5))
             .expect("valid expiry");
-        let claim = crate::db::consume_challenge_state_for_test(
+        let claim = db::consume_challenge_state_for_test(
             &state.store,
             "test-state-jwt-finalize-fail@example.com",
             expires_at,
@@ -2147,7 +2124,7 @@ mod tests {
         let expires_at = Timestamp::now()
             .checked_add(Span::new().minutes(10))
             .expect("valid expiry");
-        crate::db::create_enrollment_session(
+        db::create_enrollment_session(
             &state.store,
             &user.id,
             &user.email,
@@ -2169,9 +2146,7 @@ mod tests {
                 user: &user,
                 authenticator: &authenticator,
                 new_counter: 9,
-                auth_now: crate::crypto::webauthn_verify::AuthTime::for_test(
-                    Timestamp::now().as_second(),
-                ),
+                auth_now: AuthTime::for_test(Timestamp::now().as_second()),
                 challenge_claim: claim,
                 pending_auth: None,
                 client_info: ClientInfo::default(),
@@ -2188,7 +2163,7 @@ mod tests {
         // AuthEvents row at all.
         let failures = state
             .audit
-            .query_events(&crate::db::AuditEventFilter {
+            .query_events(&AuditEventFilter {
                 event_types: Some(vec!["login_failed".to_string()]),
                 email_domains: Some(vec!["example.com".to_string()]),
                 ..Default::default()
@@ -2219,7 +2194,7 @@ mod tests {
         );
         let successes = state
             .audit
-            .query_events(&crate::db::AuditEventFilter {
+            .query_events(&AuditEventFilter {
                 event_types: Some(vec!["login_success".to_string()]),
                 user_id: Some(user.id.clone()),
                 ..Default::default()

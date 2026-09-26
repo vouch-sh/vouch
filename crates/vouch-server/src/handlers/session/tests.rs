@@ -9,7 +9,12 @@
 
 use axum::http::StatusCode;
 
+use crate::db;
+use crate::error::ServiceError;
+use crate::handlers::session;
+use crate::services::oidc::mtls;
 use crate::test_utils::*;
+use vouch_common::jwk::JwkThumbprintKey;
 
 /// Normal (non-DPoP) token via cookie should succeed.
 #[tokio::test]
@@ -105,9 +110,7 @@ async fn test_mtls_bound_token_without_cert_rejected() {
             user_id: &user.id,
             email: &user.email,
             auth_id: Some(&auth_id),
-            binding: TestBinding::Mtls(&crate::services::oidc::mtls::compute_cert_thumbprint(
-                b"fake-cert-der",
-            )),
+            binding: TestBinding::Mtls(&mtls::compute_cert_thumbprint(b"fake-cert-der")),
             ..Default::default()
         },
     )
@@ -133,8 +136,7 @@ async fn test_mtls_bound_token_with_matching_cert_succeeds() {
 
     // Generate a self-signed client certificate for binding
     let cert_der = make_test_cert_der("test-mtls");
-    let cert =
-        crate::services::oidc::mtls::parse_client_certificate(&cert_der).expect("parse cert");
+    let cert = mtls::parse_client_certificate(&cert_der).expect("parse cert");
 
     // Issue a token bound to this cert's thumbprint
     let token = create_test_session_with(
@@ -156,7 +158,7 @@ async fn test_mtls_bound_token_with_matching_cert_succeeds() {
         format!("Bearer {token}").parse().expect("header value"),
     );
     let jar = axum_extra::extract::cookie::CookieJar::new();
-    let result = crate::handlers::session::extract_resource_token(
+    let result = session::extract_resource_token(
         &state,
         &headers,
         &jar,
@@ -186,10 +188,8 @@ async fn test_mtls_bound_token_with_wrong_cert_rejected() {
     // thumbprint but we present cert_b.
     let cert_a_der = make_test_cert_der("client-a");
     let cert_b_der = make_test_cert_der("client-b");
-    let cert_a =
-        crate::services::oidc::mtls::parse_client_certificate(&cert_a_der).expect("parse cert A");
-    let cert_b =
-        crate::services::oidc::mtls::parse_client_certificate(&cert_b_der).expect("parse cert B");
+    let cert_a = mtls::parse_client_certificate(&cert_a_der).expect("parse cert A");
+    let cert_b = mtls::parse_client_certificate(&cert_b_der).expect("parse cert B");
 
     // Token is bound to cert_a's thumbprint
     let token = create_test_session_with(
@@ -211,7 +211,7 @@ async fn test_mtls_bound_token_with_wrong_cert_rejected() {
         format!("Bearer {token}").parse().expect("header value"),
     );
     let jar = axum_extra::extract::cookie::CookieJar::new();
-    let result = crate::handlers::session::extract_resource_token(
+    let result = session::extract_resource_token(
         &state,
         &headers,
         &jar,
@@ -226,7 +226,7 @@ async fn test_mtls_bound_token_with_wrong_cert_rejected() {
     assert!(
         matches!(
             &err,
-            crate::error::ServiceError::Api { status, .. }
+            ServiceError::Api { status, .. }
             if *status == StatusCode::UNAUTHORIZED
         ),
         "Expected 401, got: {err:?}"
@@ -300,7 +300,7 @@ fn generate_dpop_key_pair() -> (aws_lc_rs::signature::EcdsaKeyPair, serde_json::
 /// RFC 7638 JWK thumbprint for a DPoP public JWK (canonical JSON of
 /// crv, kty, x, y → base64url SHA-256).
 fn dpop_jkt(jwk: &serde_json::Value) -> String {
-    vouch_common::jwk::JwkThumbprintKey::from_json(jwk)
+    JwkThumbprintKey::from_json(jwk)
         .expect("test JWK carries the required members")
         .thumbprint()
 }
@@ -391,10 +391,10 @@ async fn test_dpop_use_nonce_at_resource_returns_nonce_header() {
         setup_dpop_resource_token(&state, "dpop-usenonce@example.com").await;
 
     // Delete the nonce so the request presents one the server does not hold.
-    let nonce = crate::db::generate_dpop_nonce(&state.store, 300)
+    let nonce = db::generate_dpop_nonce(&state.store, 300)
         .await
         .expect("generate nonce");
-    crate::db::delete_dpop_nonce(&state.store, &nonce)
+    db::delete_dpop_nonce(&state.store, &nonce)
         .await
         .expect("delete nonce");
 
@@ -445,7 +445,7 @@ async fn test_dpop_nonce_serves_repeated_requests_until_it_expires() {
     let (app, state) = test_app().await;
     let (key, jwk, token, resource_uri) =
         setup_dpop_resource_token(&state, "dpop-nonce-window@example.com").await;
-    let nonce = crate::db::generate_dpop_nonce(&state.store, 300)
+    let nonce = db::generate_dpop_nonce(&state.store, 300)
         .await
         .expect("generate nonce");
     let auth = format!("DPoP {token}");
@@ -477,7 +477,7 @@ async fn test_dpop_unknown_nonce_retry_flow_succeeds() {
         setup_dpop_resource_token(&state, "dpop-retry@example.com").await;
 
     // 1. Valid request with a fresh nonce → 200 (consumes the nonce).
-    let nonce = crate::db::generate_dpop_nonce(&state.store, 300)
+    let nonce = db::generate_dpop_nonce(&state.store, 300)
         .await
         .expect("generate nonce");
     let proof1 = create_dpop_proof(&key, &jwk, "GET", &resource_uri, Some(&nonce), Some(&token));
