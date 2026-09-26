@@ -124,6 +124,7 @@ pub(crate) async fn create_application_form(
         post_logout_redirect_uris: post_logout_redirect_uris_input,
         access_scope: Some(&form.access_scope),
         fapi_profile: form.fapi_profile.as_deref(),
+        token_endpoint_auth_method: form.token_endpoint_auth_method.as_deref(),
         jwks: form.jwks.as_deref(),
         jwks_uri: form.jwks_uri.as_deref(),
     }) {
@@ -2072,6 +2073,82 @@ mod tests {
             client.org_id.as_deref(),
             Some(org.id.as_str()),
             "the client must be attached to the owner's org, not NULL: {client:?}"
+        );
+    }
+
+    /// The console can create a standard-profile application that
+    /// authenticates with a key: `private_key_jwt` with the submitted key set,
+    /// no FAPI profile, no DPoP binding, and no client secret minted.
+    #[tokio::test]
+    async fn test_web_create_standard_private_key_jwt_issues_no_secret() {
+        let (app, state) = test_app().await;
+        let org = create_test_org(&state.store, "pkjwt-create.example.com").await;
+        let user =
+            create_test_user_in_org(&state.store, "pkjwt-create@example.com", &org.id, false).await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let session_token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let cookie = format!("__Host-vouch_session={session_token}");
+
+        let jwks = serde_json::json!({"keys": [{"kty": "EC", "crv": "P-256", "x": "x", "y": "y"}]})
+            .to_string();
+        let form_body = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("name", "Key App")
+            .append_pair("application_type", "web")
+            .append_pair("redirect_uris", "https://example.com/callback")
+            .append_pair("access_scope", "organization")
+            .append_pair("fapi_profile", "")
+            .append_pair("token_endpoint_auth_method", "private_key_jwt")
+            .append_pair("jwks", &jwks)
+            .append_pair("jwks_uri", "")
+            .finish();
+        let (status, body) = http_post_form(
+            &app,
+            "/applications/new",
+            &form_body,
+            &[("Cookie", &cookie), ("Origin", "https://test.example.com")],
+        )
+        .await;
+        assert!(
+            status.is_success(),
+            "create should succeed: {status}: {body}"
+        );
+        assert!(
+            !body.contains("vouch_"),
+            "no client secret may be rendered for a key application: {body}"
+        );
+
+        let clients = db::get_oauth_clients_for_user(&state.store, &user.id)
+            .await
+            .expect("db query ok");
+        let client = clients.first().expect("one client persisted");
+        assert_eq!(
+            client.token_endpoint_auth_method,
+            TokenEndpointAuthMethod::PrivateKeyJwt
+        );
+        assert!(
+            client.keys.as_ref().is_some_and(|k| k.inline().is_some()),
+            "the key set must be stored: {client:?}"
+        );
+        assert!(!client.is_fapi(), "no FAPI profile");
+        assert!(
+            !client.dpop_bound_access_tokens,
+            "tokens stay bearer tokens"
+        );
+        assert!(
+            db::get_oauth_client_secrets(&state.store, &client.id)
+                .await
+                .expect("db query ok")
+                .is_empty(),
+            "no client secret may be minted"
         );
     }
 

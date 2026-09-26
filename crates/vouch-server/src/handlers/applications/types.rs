@@ -194,6 +194,12 @@ pub(crate) struct CreateApplicationForm {
     /// FAPI 2.0: Security profile ("fapi2_security" or absent/empty for standard).
     #[serde(default)]
     pub fapi_profile: Option<String>,
+    /// RFC 7591 §2 `token_endpoint_auth_method`: `client_secret_basic` or
+    /// `private_key_jwt`; absent or empty takes the default for the
+    /// application type. Chosen independently of `fapi_profile`, which fixes
+    /// it to `private_key_jwt`.
+    #[serde(default)]
+    pub token_endpoint_auth_method: Option<String>,
     /// RFC 7523: Inline JWKS JSON for private_key_jwt authentication.
     #[serde(default)]
     pub jwks: Option<String>,
@@ -243,6 +249,12 @@ pub(crate) struct CreateApplicationRequest {
     /// FAPI 2.0: Security profile ("fapi2_security" or absent/empty for standard).
     #[serde(default)]
     pub fapi_profile: Option<String>,
+    /// RFC 7591 §2 `token_endpoint_auth_method`: `client_secret_basic` or
+    /// `private_key_jwt`; absent or empty takes the default for the
+    /// application type. Chosen independently of `fapi_profile`, which fixes
+    /// it to `private_key_jwt`.
+    #[serde(default)]
+    pub token_endpoint_auth_method: Option<String>,
     /// RFC 7523: Inline JWKS JSON for private_key_jwt authentication.
     #[serde(default)]
     pub jwks: Option<String>,
