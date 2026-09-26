@@ -8,6 +8,7 @@
 )]
 
 use super::*;
+use crate::db::pool::Pool;
 
 // ========================================================================
 // SCIM groups — full lifecycle
@@ -457,7 +458,7 @@ async fn test_scim_filter_group_display_name_eq_is_indexed_not_rescanned() {
         .expect("Failed to create group");
 
     // Simulate a pre-normalization index row.
-    let crate::db::pool::Pool::Sqlite(pool) = store.pool() else {
+    let Pool::Sqlite(pool) = store.pool() else {
         panic!("in-memory test DB must be SQLite");
     };
     sqlx::query(
@@ -803,7 +804,7 @@ async fn test_scim_group_member_add_concurrent_different_users() {
 /// Read the raw `display_name` index value for a group directly from
 /// `document_indexes` (SQLite in-memory, plaintext crypto).
 async fn read_display_name_index(store: &DocumentStore, group_id: &str) -> String {
-    let crate::db::pool::Pool::Sqlite(p) = store.pool() else {
+    let Pool::Sqlite(p) = store.pool() else {
         panic!("expected SQLite pool");
     };
     let row: (String,) =

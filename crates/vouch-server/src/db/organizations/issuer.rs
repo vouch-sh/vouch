@@ -18,6 +18,7 @@ use crate::db::document_type::Document;
 use crate::db::documents::organization::{
     OrgSigningKeyDoc, OrganizationDoc, SigningKeyState, SubdomainClaimDoc,
 };
+use crate::db::pool::{self, RetryableError};
 use crate::db::store::{DocumentStore, StoreTransaction};
 use anyhow::Result;
 use jiff::Timestamp;
@@ -65,14 +66,14 @@ pub enum SubdomainClaimError {
     Other(#[from] anyhow::Error),
 }
 
-impl crate::db::pool::RetryableError for SubdomainClaimError {
+impl RetryableError for SubdomainClaimError {
     /// OCC version races and transient DB aborts (DSQL OC000/OC001, Postgres
     /// serialization failures, SQLite BUSY/LOCKED) re-run the transaction;
     /// business rejections are terminal.
     fn is_retryable(&self) -> bool {
         match self {
             Self::OccConflict => true,
-            Self::Other(e) => crate::db::pool::is_retryable_db_error(e),
+            Self::Other(e) => pool::is_retryable_db_error(e),
             Self::InvalidLabel(_)
             | Self::NotEligible
             | Self::AlreadyClaimed(_)
@@ -150,7 +151,7 @@ pub async fn try_insert_org_signing_key(
     let id = deterministic_org_key_id(&doc.org_id, doc.alg, doc.state);
     match store.insert_with_id(&id, doc).await {
         Ok(_) => Ok(true),
-        Err(e) if crate::db::pool::is_unique_violation(&e) => Ok(false),
+        Err(e) if pool::is_unique_violation(&e) => Ok(false),
         Err(e) => Err(e),
     }
 }
@@ -277,7 +278,7 @@ pub async fn claim_subdomain(
         match tx.get::<SubdomainClaimDoc>(&claim_id).await? {
             None => {
                 if let Err(e) = tx.insert_with_id(&claim_id, &slot).await {
-                    if crate::db::pool::is_unique_violation(&e) {
+                    if pool::is_unique_violation(&e) {
                         return Err(SubdomainClaimError::Conflict);
                     }
                     return Err(SubdomainClaimError::Other(e));
@@ -349,7 +350,7 @@ pub async fn claim_subdomain(
         }
 
         if let Err(e) = tx.commit().await {
-            if crate::db::pool::is_unique_violation(&e) {
+            if pool::is_unique_violation(&e) {
                 return Err(SubdomainClaimError::Conflict);
             }
             return Err(SubdomainClaimError::Other(e));
@@ -553,10 +554,10 @@ pub async fn any_subdomain_claimed(store: &DocumentStore) -> Result<bool> {
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
-    use super::super::{
+    use super::*;
+    use crate::db::organizations::{
         add_additional_domain, create_organization, fresh_store, mark_additional_domain_verified,
     };
-    use super::*;
 
     #[tokio::test]
     async fn claim_subdomain_happy_path_and_lookup() {

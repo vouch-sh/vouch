@@ -5,6 +5,9 @@
 //! These modules handle operational concerns for running the server binary.
 //! They are not part of the business logic or HTTP handler layers.
 
+// Own-crate items are imported with `use`; see `absolute-paths-allowed-crates` in `.clippy.toml`.
+#![deny(clippy::absolute_paths)]
+
 pub mod bootstrap;
 pub mod cleanup;
 pub mod csp;

@@ -8,6 +8,7 @@
 )]
 
 use super::*;
+use crate::db::documents::user::UserDoc;
 use crate::test_utils::test_domain;
 
 // ========================================================================
@@ -89,7 +90,7 @@ async fn test_enroll_finds_scim_user_with_different_email_casing() {
 
     // No duplicate user row exists in the store.
     let user_count = store
-        .count::<crate::db::documents::user::UserDoc>("email", "alice@case-example.com")
+        .count::<UserDoc>("email", "alice@case-example.com")
         .await
         .expect("count users by email");
     assert_eq!(
@@ -142,7 +143,7 @@ async fn test_scim_duplicate_email_rejected_across_case() {
 
     // And no second row was inserted.
     let count = store
-        .count::<crate::db::documents::user::UserDoc>("email", "dup@example.com")
+        .count::<UserDoc>("email", "dup@example.com")
         .await
         .expect("count");
     assert_eq!(count, 1, "only one user row should exist; got {count}");

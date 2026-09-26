@@ -7,6 +7,8 @@
 )]
 
 use super::*;
+use crate::db::organizations;
+use crate::db::store::DocumentStore;
 use crate::test_utils::test_arrival;
 
 #[tokio::test]
@@ -682,12 +684,7 @@ async fn test_delete_sessions_for_oauth_client_targets_only_that_client() {
         .await
         .expect("create user");
 
-    async fn mk(
-        store: &crate::db::store::DocumentStore,
-        user_id: &str,
-        client_id: Option<&str>,
-        hash: &str,
-    ) {
+    async fn mk(store: &DocumentStore, user_id: &str, client_id: Option<&str>, hash: &str) {
         create_session(
             store,
             &CreateSessionParams {
@@ -768,7 +765,7 @@ async fn test_delete_sessions_for_oauth_client_targets_only_that_client() {
 
 /// Create an org with `n` active admins; returns (org_id, admin_ids).
 async fn org_with_admins(store: &DocumentStore, domain: &str, n: usize) -> (String, Vec<String>) {
-    let org = crate::db::organizations::create_organization(store, domain, Some("Floor Org"), None)
+    let org = organizations::create_organization(store, domain, Some("Floor Org"), None)
         .await
         .expect("create org");
     let mut ids = Vec::new();

@@ -7,8 +7,11 @@
 )]
 
 use super::*;
+use crate::arrival::ArrivalTime;
 use crate::crypto::webauthn_verify::AuthTime;
-use crate::db::DeviceApproval;
+use crate::db::claim::ClaimError;
+use crate::db::documents::device_auth::DeviceAuthRequestDoc;
+use crate::db::{DeviceApproval, DeviceAuthStatus};
 
 // ========================================================================
 // RFC 8628 - Device Authorization Grant Tests
@@ -207,7 +210,7 @@ async fn test_device_auth_polling_rate_limit() {
     .await
     .expect("Failed to create device auth request");
 
-    let t0 = crate::arrival::ArrivalTime::for_test(jiff::Timestamp::now()).timestamp();
+    let t0 = ArrivalTime::for_test(jiff::Timestamp::now()).timestamp();
 
     // First poll should succeed
     let allowed = update_device_auth_poll_time(&store, &id, interval, t0)
@@ -248,7 +251,7 @@ async fn test_device_auth_poll_interval_boundary_at_full_precision() {
     .unwrap();
 
     // Mid-second, so whole-second flooring would move both ends.
-    let t0 = crate::arrival::ArrivalTime::for_test(
+    let t0 = ArrivalTime::for_test(
         jiff::Timestamp::from_second(1_900_000_000)
             .unwrap()
             .checked_add(jiff::SignedDuration::from_millis(700))
@@ -262,14 +265,14 @@ async fn test_device_auth_poll_interval_boundary_at_full_precision() {
             .await
             .unwrap()
     );
-    let just_under = crate::arrival::ArrivalTime::for_test(plus_nanos(t0, interval_nanos - 1));
+    let just_under = ArrivalTime::for_test(plus_nanos(t0, interval_nanos - 1));
     assert!(
         !update_device_auth_poll_time(&store, &id, interval, just_under.timestamp())
             .await
             .unwrap(),
         "a poll one nanosecond short of the interval must be told to slow down"
     );
-    let exactly = crate::arrival::ArrivalTime::for_test(plus_nanos(t0, interval_nanos));
+    let exactly = ArrivalTime::for_test(plus_nanos(t0, interval_nanos));
     assert!(
         update_device_auth_poll_time(&store, &id, interval, exactly.timestamp())
             .await
@@ -296,8 +299,8 @@ async fn test_device_auth_poll_straddling_a_second_boundary_is_slowed() {
     .unwrap();
 
     let second = jiff::Timestamp::from_second(1_900_000_000).unwrap();
-    let first = crate::arrival::ArrivalTime::for_test(plus_nanos(second, 900_000_000));
-    let next = crate::arrival::ArrivalTime::for_test(plus_nanos(second, 1_100_000_000));
+    let first = ArrivalTime::for_test(plus_nanos(second, 900_000_000));
+    let next = ArrivalTime::for_test(plus_nanos(second, 1_100_000_000));
     assert!(
         update_device_auth_poll_time(&store, &id, interval, first.timestamp())
             .await
@@ -455,7 +458,7 @@ async fn test_try_consume_device_auth_already_consumed_returns_false() {
 
     let second = try_consume_device_auth(&store, device_code_hash).await;
     assert!(
-        matches!(second, Err(crate::db::claim::ClaimError::AlreadyConsumed)),
+        matches!(second, Err(ClaimError::AlreadyConsumed)),
         "Second consumption must fail with AlreadyConsumed, got: {second:?}"
     );
 }
@@ -479,7 +482,7 @@ async fn test_try_consume_device_auth_pending_returns_false() {
     // Attempt to consume a Pending request (never authorized)
     let consumed = try_consume_device_auth(&store, device_code_hash).await;
     assert!(
-        matches!(consumed, Err(crate::db::claim::ClaimError::AlreadyConsumed)),
+        matches!(consumed, Err(ClaimError::AlreadyConsumed)),
         "Pending device code must not be consumable, got: {consumed:?}"
     );
 }
@@ -538,7 +541,7 @@ async fn test_try_consume_device_auth_expired_returns_false() {
 
     let consumed = try_consume_device_auth(&store, device_code_hash).await;
     assert!(
-        matches!(consumed, Err(crate::db::claim::ClaimError::AlreadyConsumed)),
+        matches!(consumed, Err(ClaimError::AlreadyConsumed)),
         "Expired device code must not be consumable, got: {consumed:?}"
     );
 }
@@ -549,7 +552,7 @@ async fn test_try_consume_device_auth_not_found_returns_false() {
 
     let consumed = try_consume_device_auth(&store, "nonexistent_hash").await;
     assert!(
-        matches!(consumed, Err(crate::db::claim::ClaimError::AlreadyConsumed)),
+        matches!(consumed, Err(ClaimError::AlreadyConsumed)),
         "Nonexistent hash must fail with AlreadyConsumed, got: {consumed:?}"
     );
 }
@@ -761,10 +764,10 @@ async fn test_row_without_client_id_is_unreadable() {
     let (store, _audit) = test_db().await;
     let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().unwrap();
     let inserted = store
-        .insert(&crate::db::documents::device_auth::DeviceAuthRequestDoc {
+        .insert(&DeviceAuthRequestDoc {
             device_code_hash: "legacy-hash".to_string(),
             user_code: "LGCY-CODE".to_string(),
-            status: crate::db::DeviceAuthStatus::Authorized,
+            status: DeviceAuthStatus::Authorized,
             client_id: None,
             user_id: Some("legacy-user".to_string()),
             user_email: Some("legacy@example.com".to_string()),

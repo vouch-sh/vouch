@@ -17,6 +17,11 @@ use vouch_httpsig::middleware::KeyResolver;
 
 use crate::AppState;
 use crate::crypto::alg::JwsAlgorithm;
+use crate::crypto::jwt::Jws;
+use crate::db::{self, ClaimError, ClientKeys};
+use crate::http::strip_auth_scheme;
+use crate::infra::jwks;
+use vouch_httpsig::middleware::NonceValidation;
 
 /// Key resolver that finds P-256 public keys from OAuth client JWKS.
 ///
@@ -59,11 +64,8 @@ impl KeyResolver for OAuthClientKeyResolver {
             // reject the request. Failing closed is right — an unresolvable
             // key cannot verify a signature — but the cause has to be visible,
             // or a database outage reads as a flood of signature failures.
-            let client = match crate::db::get_oauth_client_by_client_id(
-                &self.state.store,
-                &client_id,
-            )
-            .await
+            let client = match db::get_oauth_client_by_client_id(&self.state.store, &client_id)
+                .await
             {
                 Ok(client) => client?,
                 Err(e) => {
@@ -85,11 +87,11 @@ impl KeyResolver for OAuthClientKeyResolver {
             // + P-256 buildability, never `use`, so a key declared `use="enc"`
             // (encryption-only) could verify HTTP signatures.
             let jwks = match client.keys.as_ref()? {
-                crate::db::ClientKeys::Inline(jwks) => jwks.clone(),
-                crate::db::ClientKeys::Uri(uri) => {
+                ClientKeys::Inline(jwks) => jwks.clone(),
+                ClientKeys::Uri(uri) => {
                     // Only `jwks_uri` clients need the cached fetch — the inline
                     // case has the typed set already.
-                    let cached = crate::db::get_jwks_cache(&self.state.store, &client.id)
+                    let cached = db::get_jwks_cache(&self.state.store, &client.id)
                         .await
                         .map_err(|e| {
                             tracing::warn!(
@@ -105,7 +107,7 @@ impl KeyResolver for OAuthClientKeyResolver {
                     // happened to be replaced. This path doesn't act on whether
                     // the resolution fetched — that distinction only matters to
                     // the mTLS force-refetch retry gate (services/oidc/token.rs).
-                    let (value, _origin) = crate::infra::jwks::resolve_cached_jwks(
+                    let (value, _origin) = jwks::resolve_cached_jwks(
                         &self.state.store,
                         &client.id,
                         uri,
@@ -121,7 +123,7 @@ impl KeyResolver for OAuthClientKeyResolver {
                     })
                     .ok()?;
 
-                    match crate::db::parse_jwks_set(&value) {
+                    match db::parse_jwks_set(&value) {
                         Ok(set) => set,
                         Err(e) => {
                             tracing::warn!(
@@ -170,7 +172,7 @@ impl KeyResolver for OAuthClientKeyResolver {
     }
 
     async fn generate_nonce(&self) -> Option<String> {
-        crate::db::generate_signature_nonce(&self.state.store, NONCE_VALIDITY_SECONDS)
+        db::generate_signature_nonce(&self.state.store, NONCE_VALIDITY_SECONDS)
             .await
             .ok()
     }
@@ -191,8 +193,7 @@ impl KeyResolver for OAuthClientKeyResolver {
     fn validate_nonce(
         &self,
         nonce: &str,
-    ) -> impl std::future::Future<Output = vouch_httpsig::middleware::NonceValidation> + Send + '_
-    {
+    ) -> impl std::future::Future<Output = NonceValidation> + Send + '_ {
         use vouch_httpsig::middleware::NonceValidation;
 
         // Own the nonce: the returned future may only borrow `self`.
@@ -203,14 +204,12 @@ impl KeyResolver for OAuthClientKeyResolver {
         )]
         let now = jiff::Timestamp::now();
         async move {
-            match crate::db::validate_and_consume_signature_nonce(&self.state.store, &nonce, &now)
-                .await
-            {
+            match db::validate_and_consume_signature_nonce(&self.state.store, &nonce, &now).await {
                 Ok(()) => NonceValidation::Valid,
-                Err(
-                    crate::db::ClaimError::AlreadyConsumed | crate::db::ClaimError::InvalidInput(_),
-                ) => NonceValidation::Invalid,
-                Err(crate::db::ClaimError::Database(msg)) => {
+                Err(ClaimError::AlreadyConsumed | ClaimError::InvalidInput(_)) => {
+                    NonceValidation::Invalid
+                }
+                Err(ClaimError::Database(msg)) => {
                     tracing::error!("signature nonce validation DB failure: {msg}");
                     NonceValidation::Error
                 }
@@ -230,16 +229,14 @@ fn extract_client_id(headers: &http::HeaderMap, _state: &AppState) -> Option<Str
 
     // Accepts the same schemes as `extract_token_from_request` — both go
     // through the shared matcher, so they cannot drift.
-    let token = crate::http::strip_auth_scheme(auth_header, protocol::AUTH_SCHEME_DPOP)
-        .or_else(|| crate::http::strip_auth_scheme(auth_header, protocol::AUTH_SCHEME_BEARER))?;
+    let token = strip_auth_scheme(auth_header, protocol::AUTH_SCHEME_DPOP)
+        .or_else(|| strip_auth_scheme(auth_header, protocol::AUTH_SCHEME_BEARER))?;
 
     // Parse the JWT payload without verification. Going through `Jws` keeps
     // this pre-parse on the same splitting and decoding as every other JWS
     // path — including the RFC 7515 Section 4.1.11 `crit` refusal, so a token
     // the verifying paths would reject never resolves a signing key here.
-    let claims: serde_json::Value = crate::crypto::jwt::Jws::parse(token)
-        .and_then(|jws| jws.claims_as())
-        .ok()?;
+    let claims: serde_json::Value = Jws::parse(token).and_then(|jws| jws.claims_as()).ok()?;
     claims.get("client_id")?.as_str().map(String::from)
 }
 
@@ -269,6 +266,7 @@ fn jwk_to_p256_public_key(jwk: &serde_json::Value) -> Option<Vec<u8>> {
 )]
 mod tests {
     use super::*;
+    use crate::test_utils;
     use base64::Engine as _;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use vouch_httpsig::algorithm::SigningAlgorithm as _;
@@ -294,7 +292,7 @@ mod tests {
     /// signature key resolution on signature-required `/v1/*` routes.
     #[tokio::test]
     async fn extract_client_id_accepts_scheme_case_variants() {
-        let state = crate::test_utils::test_app_state().await;
+        let state = test_utils::test_app_state().await;
         let token = jwt_with_client_id("client-123");
 
         for scheme in ["Bearer", "BEARER", "bearer", "DPoP", "DPOP", "dpop"] {
@@ -309,7 +307,7 @@ mod tests {
 
     #[tokio::test]
     async fn extract_client_id_rejects_unrecognized_scheme() {
-        let state = crate::test_utils::test_app_state().await;
+        let state = test_utils::test_app_state().await;
         let token = jwt_with_client_id("client-123");
 
         for value in [format!("Basic {token}"), "Bearer".to_string()] {
@@ -405,7 +403,7 @@ mod tests {
     async fn test_validate_nonce_single_use() {
         use vouch_httpsig::middleware::{KeyResolver, NonceValidation};
 
-        let state = crate::test_utils::test_app_state().await;
+        let state = test_utils::test_app_state().await;
         let resolver = OAuthClientKeyResolver::new(state.clone());
 
         let nonce = resolver.generate_nonce().await.expect("issue nonce");
@@ -479,7 +477,7 @@ mod tests {
     ) -> (Arc<crate::AppState>, String) {
         use crate::test_utils::{TestClientSpec, TestJwks, create_test_client, create_test_user};
 
-        let state = crate::test_utils::test_app_state().await;
+        let state = test_utils::test_app_state().await;
         let user = create_test_user(&state.store, email).await;
         let client = create_test_client(
             &state.store,

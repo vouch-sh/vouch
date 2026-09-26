@@ -15,6 +15,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use crate::config;
 use anyhow::{Context, Result};
 use aws_config::imds::client::Client as ImdsClient;
 
@@ -118,9 +119,7 @@ pub async fn discover() -> Result<Option<Bootstrap>> {
     // No use_fips override for this SSM call: whether to use FIPS endpoints
     // is itself a value the parameter fetched here may carry, so it cannot
     // apply to the fetch that discovers it.
-    let sdk_config = crate::config::aws_config_loader(Some(&region), None)?
-        .load()
-        .await;
+    let sdk_config = config::aws_config_loader(Some(&region), None)?.load().await;
     let ssm_client = aws_sdk_ssm::Client::new(&sdk_config);
 
     let response = ssm_client

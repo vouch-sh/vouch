@@ -9,8 +9,10 @@
 use super::occ_modify::create_test_github_installation;
 use super::*;
 use crate::crypto::webauthn_verify::AuthTime;
-use crate::db::DeviceApproval;
-use crate::test_utils::test_domain;
+use crate::db::documents::user::UserDoc;
+use crate::db::{self, DeviceApproval};
+use crate::error::ServiceError;
+use crate::test_utils::{self, test_domain};
 
 // ========================================================================
 // Concurrent-replay regression coverage for single-use primitives:
@@ -590,10 +592,7 @@ async fn test_enroll_promotes_admin_for_org_without_one() {
     // The promotion must be persisted on the user doc, not just reported in
     // the return value — authorization reads `UserDoc.is_org_admin`.
     let persisted = store
-        .find_one::<crate::db::documents::user::UserDoc>(
-            "email",
-            "rescuer@orphaned-org.example.com",
-        )
+        .find_one::<UserDoc>("email", "rescuer@orphaned-org.example.com")
         .await
         .expect("find enrolled user")
         .expect("enrolled user exists");
@@ -1631,7 +1630,7 @@ async fn test_delete_authenticator_clears_device_auth_reference() {
     );
 
     // Delete the authenticator — this triggers the cascade.
-    crate::test_utils::remove_test_authenticator(&store, &auth_id).await;
+    test_utils::remove_test_authenticator(&store, &auth_id).await;
 
     // The approval's evidence is gone, so the request must read as denied
     // rather than stay redeemable (RFC 8628 §3.5 access_denied).
@@ -2236,7 +2235,7 @@ async fn test_delete_authenticator_preserves_consumed_device_auth_for_replay_rev
     );
 
     // Delete the authenticator — the cascade must NOT regress the row.
-    crate::test_utils::remove_test_authenticator(&store, &auth_id).await;
+    test_utils::remove_test_authenticator(&store, &auth_id).await;
 
     let after = get_device_auth_by_id(&store, &request_id)
         .await
@@ -2323,7 +2322,7 @@ async fn test_mutual_admin_demote_concurrent() {
     }
 
     // The invariant, stated directly: the org still has an admin.
-    let members = crate::db::get_users_by_org_paginated(&store, &org.id, None, 100)
+    let members = db::get_users_by_org_paginated(&store, &org.id, None, 100)
         .await
         .expect("list members")
         .0;
@@ -2437,9 +2436,7 @@ async fn test_create_custom_policy_requires_org() {
     assert!(
         matches!(
             result,
-            Err(CreateCustomPolicyError::Other(
-                crate::error::ServiceError::NotFound(_)
-            ))
+            Err(CreateCustomPolicyError::Other(ServiceError::NotFound(_)))
         ),
         "expected NotFound, got {result:?}"
     );

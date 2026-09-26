@@ -24,6 +24,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use clap::Args;
 
+use crate::config;
 use crate::infra::s3_config::DocumentKeyAlgorithm;
 
 /// Generate a document encryption key pair via KMS
@@ -53,7 +54,7 @@ pub async fn run(args: GenerateDocumentKeyArgs) -> Result<()> {
     // 1. Build AWS SDK config and create KMS client. This subcommand runs as
     // an operator CLI tool, not on EC2, so there is no resolved FIPS setting
     // to pass -- the SDK's own environment-based default applies.
-    let sdk_config = crate::config::aws_config_loader(args.region.as_deref(), None)?
+    let sdk_config = config::aws_config_loader(args.region.as_deref(), None)?
         .load()
         .await;
     let kms_client = aws_sdk_kms::Client::new(&sdk_config);

@@ -6,6 +6,8 @@
 )]
 
 use super::*;
+use crate::crypto::alg::JwsAlgorithm;
+use crate::db::documents::github::GitHubInstallationDoc;
 
 // ========================================================================
 // OCC read-modify-write conversions: blind get+update → store.modify()
@@ -394,7 +396,7 @@ async fn test_github_installation_deleted_between_resolve_and_modify() {
 
     // Step 1: resolve the doc_id (simulates what suspend_github_installation does).
     let doc = store
-        .find_one::<crate::db::documents::github::GitHubInstallationDoc>("installation_id", "30001")
+        .find_one::<GitHubInstallationDoc>("installation_id", "30001")
         .await
         .expect("find_one")
         .expect("must exist after create");
@@ -407,7 +409,7 @@ async fn test_github_installation_deleted_between_resolve_and_modify() {
 
     // Step 3: call modify directly on the now-deleted id — must return Ok(false).
     let found = store
-        .modify::<crate::db::documents::github::GitHubInstallationDoc, _>(&doc_id, |data| {
+        .modify::<GitHubInstallationDoc, _>(&doc_id, |data| {
             data.suspended_at = Some(jiff::Timestamp::now());
         })
         .await
@@ -423,7 +425,7 @@ async fn insert_random_id_github_installation(
     installation_id: i64,
     org_id: &str,
 ) -> String {
-    let doc = crate::db::documents::github::GitHubInstallationDoc {
+    let doc = GitHubInstallationDoc {
         org_id: org_id.to_owned(),
         installation_id,
         github_account_login: "acme".to_owned(),
@@ -1251,7 +1253,7 @@ async fn test_revoke_registration_access_token_does_not_clobber_concurrently_rot
                     client_name: None,
                     software_id: None,
                     software_version: None,
-                    id_token_signed_response_alg: crate::crypto::alg::JwsAlgorithm::Es256,
+                    id_token_signed_response_alg: JwsAlgorithm::Es256,
                     authorization_signed_response_alg: None,
                     introspection_signed_response_alg: None,
                     request_object_signing_alg: None,

@@ -8,6 +8,7 @@
 )]
 
 use super::*;
+use crate::test_utils;
 
 // ========================================================================
 // Authenticator Tests
@@ -82,7 +83,7 @@ async fn test_authenticator_crud() {
     assert_eq!(auth.counter, 42);
 
     // Delete authenticator
-    crate::test_utils::remove_test_authenticator(&store, &auth_id).await;
+    test_utils::remove_test_authenticator(&store, &auth_id).await;
 
     // Verify deleted
     let auth = get_authenticator_by_id(&store, &auth_id)
@@ -181,7 +182,7 @@ async fn test_create_authenticator_persists_nonzero_registration_counter() {
         "stored counter must initialize to the registration authData.signCount"
     );
 
-    crate::test_utils::remove_test_authenticator(&store, &auth_id).await;
+    test_utils::remove_test_authenticator(&store, &auth_id).await;
 }
 
 // `cast_signed` reinterprets the u32 registration counter bit-identically as
@@ -230,7 +231,7 @@ async fn test_create_authenticator_preserves_high_bit_counter_via_cast_signed() 
     );
     assert_eq!(auth.counter, i32::MIN.wrapping_add(1));
 
-    crate::test_utils::remove_test_authenticator(&store, &auth_id).await;
+    test_utils::remove_test_authenticator(&store, &auth_id).await;
 }
 
 // The monotonic max in `update_authenticator_counter` runs in u32 space.

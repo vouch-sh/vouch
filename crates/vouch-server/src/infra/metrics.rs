@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use crate::http;
 use axum::extract::MatchedPath;
 use axum::http::{HeaderMap, Method, Request, StatusCode};
 use axum::middleware::Next;
@@ -51,7 +52,7 @@ pub fn install_recorder()
 
 /// Extract the bearer token from an `Authorization` header value.
 fn extract_bearer_token(headers: &HeaderMap) -> Option<&str> {
-    let token = crate::http::bearer_token(headers)?;
+    let token = http::bearer_token(headers)?;
     if token.is_empty() {
         return None;
     }

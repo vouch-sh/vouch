@@ -8,6 +8,8 @@
     clippy::expect_used,
     reason = "test code: panic on assertion failure is acceptable"
 )]
+// Own-crate items are imported with `use`; see `absolute-paths-allowed-crates` in `.clippy.toml`.
+#![deny(clippy::absolute_paths)]
 
 use arc_swap::ArcSwap;
 use axum::{
@@ -28,14 +30,39 @@ use crate::db::store::DocumentStore;
 use crate::db::{CreateOAuthClientParams, Domain, Pool, RegistrationSource};
 use crate::infra::router::build_app;
 
-use crate::AppState;
 use crate::arrival::ArrivalTime;
-use crate::config::{IdpConfig, OidcProviderConfig, ServerConfig};
+use crate::config::{
+    BaseUrl, IdpConfig, LogFormat, NonEmptySecret, OidcProviderConfig, ServerConfig,
+};
+use crate::crypto::document_crypto::DocumentCrypto;
+use crate::crypto::jwt::StateTokenSigner;
 use crate::crypto::keys::OidcSigningKey;
+use crate::db::CreateAuthenticatorParams;
+use crate::db::CreatePendingOAuthParams;
+use crate::db::CreateScimTokenParams;
+use crate::db::CreateSessionParams;
+use crate::db::documents::oauth::ResponseMode;
+use crate::db::documents::organization::OrganizationDoc;
+use crate::db::pool::PoolConfig;
+use crate::db::{
+    self, AccessScope, AuditEventFilter, ClientKeys, FapiProfile, OAuthClientType, Organization,
+    ScimScope, ScimScopeSet, SessionCache, SessionPurpose, TokenEndpointAuthMethod, User,
+};
+use crate::services::auth::NoClientAuth;
+use crate::services::idp::ConfiguredIdp;
+use crate::services::oidc::ScopeSet;
+use crate::services::oidc::grant_type::OAuthGrantType;
+use crate::services::oidc::mtls::{CertThumbprint, ClientCertTrust};
+use crate::services::policy;
+use crate::{AppState, crypto, handlers};
+use vouch_common::AaguidPolicy;
+use vouch_httpsig::SignatureBuilder;
+use vouch_httpsig::algorithm::ecdsa_p256::EcdsaP256Signer;
+use vouch_httpsig::digest;
 
 /// Create an in-memory SQLite database with migrations for testing.
 pub async fn test_db() -> Pool {
-    let pool = Pool::connect("sqlite::memory:", &crate::db::pool::PoolConfig::default())
+    let pool = Pool::connect("sqlite::memory:", &PoolConfig::default())
         .await
         .expect("Failed to create test database");
 
@@ -69,7 +96,7 @@ pub fn test_config() -> ServerConfig {
             client_id: "test-client-id".to_string(),
             client_secret: SecretString::from("test-client-secret"),
         })],
-        base_url: crate::config::BaseUrl::new("https://test.example.com"),
+        base_url: BaseUrl::new("https://test.example.com"),
         device_code_expires_seconds: 600,
         device_poll_interval_seconds: 5,
         allowed_domains: Some(vec!["example.com".to_string()]),
@@ -114,14 +141,14 @@ pub fn test_config() -> ServerConfig {
         aws_partition: None,
         aws_use_fips_endpoint: None,
         jwt_assertion_max_lifetime_seconds: 300,
-        allowed_aaguids: vouch_common::AaguidPolicy::Any,
-        log_format: crate::config::LogFormat::Text,
+        allowed_aaguids: AaguidPolicy::Any,
+        log_format: LogFormat::Text,
         trusted_proxies: Vec::new(),
         metrics_bearer_token: None,
         certification_test_token: None,
         extra_ca_certs: None,
         mtls_client_ca_certs: None,
-        pool_config: crate::db::pool::PoolConfig::default(),
+        pool_config: PoolConfig::default(),
         session_cache_max_capacity: 10_000,
         session_cache_ttl_secs: 30,
     }
@@ -150,9 +177,7 @@ pub async fn test_app_state() -> Arc<AppState> {
 ///
 /// Used by tests that exercise multi-IdP code paths (chooser rendering,
 /// provider slug validation, etc.) without standing up real IdP metadata.
-pub async fn test_app_state_with_idps(
-    idps: Vec<crate::services::idp::ConfiguredIdp>,
-) -> Arc<AppState> {
+pub async fn test_app_state_with_idps(idps: Vec<ConfiguredIdp>) -> Arc<AppState> {
     build_test_app_state(idps, |_| {}).await
 }
 
@@ -163,10 +188,7 @@ pub async fn test_app_state_with_idps(
 /// ([`DocumentStore::set_modify_test_hook`]) to deterministically reproduce
 /// OCC races through the full axum router, without each test reconstructing
 /// the entire state by hand.
-pub async fn build_test_app_state<F>(
-    idps: Vec<crate::services::idp::ConfiguredIdp>,
-    configure_store: F,
-) -> Arc<AppState>
+pub async fn build_test_app_state<F>(idps: Vec<ConfiguredIdp>, configure_store: F) -> Arc<AppState>
 where
     F: FnOnce(&mut DocumentStore),
 {
@@ -181,7 +203,7 @@ where
 /// self-signed certificate, while the rest of the state is built exactly as
 /// [`build_test_app_state`] builds it.
 pub async fn build_test_app_state_with_http_client<F>(
-    idps: Vec<crate::services::idp::ConfiguredIdp>,
+    idps: Vec<ConfiguredIdp>,
     configure_store: F,
     http_client: reqwest::Client,
 ) -> Arc<AppState>
@@ -201,8 +223,7 @@ where
     // Generate OIDC signing key for tests
     let oidc_key = OidcSigningKey::generate().expect("Failed to generate test OIDC key");
 
-    let crypto: Arc<dyn crate::crypto::document_crypto::DocumentCrypto> =
-        Arc::new(PlaintextDocumentCrypto);
+    let crypto: Arc<dyn DocumentCrypto> = Arc::new(PlaintextDocumentCrypto);
     let mut store = DocumentStore::new(pool.clone(), crypto.clone());
     configure_store(&mut store);
     let audit = AuditStore::new(pool.clone(), crypto);
@@ -220,12 +241,12 @@ where
         ssh_ca: None,
         oidc_key,
         oidc_rsa_key: None,
-        state_signer: crate::crypto::jwt::StateTokenSigner::local(
+        state_signer: StateTokenSigner::local(
             b"test_jwt_secret_must_be_at_least_32_characters_long".to_vec(),
         ),
         github_app: None,
         http_client,
-        session_cache: crate::db::SessionCache::new(10_000, 30),
+        session_cache: SessionCache::new(10_000, 30),
         org_keys_cache: Default::default(),
         policy: Default::default(),
         idps,
@@ -254,8 +275,7 @@ pub async fn test_app_state_with_rsa_key() -> Arc<AppState> {
     let oidc_key = OidcSigningKey::generate().expect("Failed to generate test OIDC key");
     let oidc_rsa_key = OidcRsaSigningKey::generate().expect("Failed to generate test RSA key");
 
-    let crypto: Arc<dyn crate::crypto::document_crypto::DocumentCrypto> =
-        Arc::new(PlaintextDocumentCrypto);
+    let crypto: Arc<dyn DocumentCrypto> = Arc::new(PlaintextDocumentCrypto);
     let store = DocumentStore::new(pool.clone(), crypto.clone());
     let audit = AuditStore::new(pool.clone(), crypto);
 
@@ -270,12 +290,12 @@ pub async fn test_app_state_with_rsa_key() -> Arc<AppState> {
         ssh_ca: None,
         oidc_key,
         oidc_rsa_key: Some(oidc_rsa_key),
-        state_signer: crate::crypto::jwt::StateTokenSigner::local(
+        state_signer: StateTokenSigner::local(
             b"test_jwt_secret_must_be_at_least_32_characters_long".to_vec(),
         ),
         github_app: None,
         http_client: reqwest::Client::new(),
-        session_cache: crate::db::SessionCache::new(10_000, 30),
+        session_cache: SessionCache::new(10_000, 30),
         org_keys_cache: Default::default(),
         policy: Default::default(),
         idps: Vec::new(),
@@ -335,8 +355,7 @@ pub async fn test_app_state_with_github_app(http_client: reqwest::Client) -> Arc
     ));
     config.github_app_name = Some("vouch-test".to_string());
     config.github_app_client_id = Some("Iv1.test-client".to_string());
-    config.github_app_client_secret =
-        crate::config::NonEmptySecret::new(SecretString::from("test-client-secret"));
+    config.github_app_client_secret = NonEmptySecret::new(SecretString::from("test-client-secret"));
 
     let rp_origin = url::Url::parse(&config.base_url).expect("Invalid RP origin");
     let webauthn = webauthn_rs::WebauthnBuilder::new(&config.rp_id, &rp_origin)
@@ -347,8 +366,7 @@ pub async fn test_app_state_with_github_app(http_client: reqwest::Client) -> Arc
 
     let oidc_key = OidcSigningKey::generate().expect("Failed to generate test OIDC key");
 
-    let crypto: Arc<dyn crate::crypto::document_crypto::DocumentCrypto> =
-        Arc::new(PlaintextDocumentCrypto);
+    let crypto: Arc<dyn DocumentCrypto> = Arc::new(PlaintextDocumentCrypto);
     let store = DocumentStore::new(pool.clone(), crypto.clone());
     let audit = AuditStore::new(pool.clone(), crypto);
 
@@ -367,12 +385,12 @@ pub async fn test_app_state_with_github_app(http_client: reqwest::Client) -> Arc
         ssh_ca: None,
         oidc_key,
         oidc_rsa_key: None,
-        state_signer: crate::crypto::jwt::StateTokenSigner::local(
+        state_signer: StateTokenSigner::local(
             b"test_jwt_secret_must_be_at_least_32_characters_long".to_vec(),
         ),
         github_app: Some(Arc::new(github_app)),
         http_client,
-        session_cache: crate::db::SessionCache::new(10_000, 30),
+        session_cache: SessionCache::new(10_000, 30),
         org_keys_cache: Default::default(),
         policy: Default::default(),
         idps: Vec::new(),
@@ -402,8 +420,7 @@ pub async fn test_app_state_encrypted() -> Arc<AppState> {
     let oidc_key = OidcSigningKey::generate().expect("Failed to generate test OIDC key");
     let oidc_rsa_key = OidcRsaSigningKey::generate().expect("Failed to generate test RSA key");
 
-    let crypto: Arc<dyn crate::crypto::document_crypto::DocumentCrypto> =
-        Arc::new(HpkeDocumentCrypto::generate_for_test());
+    let crypto: Arc<dyn DocumentCrypto> = Arc::new(HpkeDocumentCrypto::generate_for_test());
     let store = DocumentStore::new(pool.clone(), crypto.clone());
     let audit = AuditStore::new(pool.clone(), crypto);
 
@@ -418,12 +435,12 @@ pub async fn test_app_state_encrypted() -> Arc<AppState> {
         ssh_ca: None,
         oidc_key,
         oidc_rsa_key: Some(oidc_rsa_key),
-        state_signer: crate::crypto::jwt::StateTokenSigner::local(
+        state_signer: StateTokenSigner::local(
             b"test_jwt_secret_must_be_at_least_32_characters_long".to_vec(),
         ),
         github_app: None,
         http_client: reqwest::Client::new(),
-        session_cache: crate::db::SessionCache::new(10_000, 30),
+        session_cache: SessionCache::new(10_000, 30),
         org_keys_cache: Default::default(),
         policy: Default::default(),
         idps: Vec::new(),
@@ -455,9 +472,7 @@ where
 }
 
 /// Create test app (router + state) with the given upstream IdPs seeded.
-pub async fn test_app_with_idps(
-    idps: Vec<crate::services::idp::ConfiguredIdp>,
-) -> (Router, Arc<AppState>) {
+pub async fn test_app_with_idps(idps: Vec<ConfiguredIdp>) -> (Router, Arc<AppState>) {
     let state = test_app_state_with_idps(idps).await;
     let config = state.config();
     let router = build_app(state.clone(), &config).expect("Failed to build test app router");
@@ -513,7 +528,7 @@ const TEST_HTTPSIG_KID: &str = "vouch-test-httpsig-key";
 /// Process-wide P-256 key used to sign `/v1/*` test requests, plus the JWKS
 /// document registered for the first-party test client.
 struct TestHttpSig {
-    signer: vouch_httpsig::algorithm::ecdsa_p256::EcdsaP256Signer,
+    signer: EcdsaP256Signer,
     jwks: serde_json::Value,
 }
 
@@ -554,7 +569,7 @@ async fn register_test_httpsig_client(store: &DocumentStore, base_url: &str) {
         application_type: OAuthClientType::Native,
         redirect_uris: Vec::new(),
         active: true,
-        access_scope: crate::db::AccessScope::Public,
+        access_scope: AccessScope::Public,
         org_id: None,
         resource_uris: Vec::new(),
         jwks: Some(TEST_HTTPSIG.jwks.clone()),
@@ -626,7 +641,7 @@ pub fn test_signature_headers(
         .expect("build signing request");
 
     if has_body {
-        vouch_httpsig::digest::set_content_digest(
+        digest::set_content_digest(
             req.headers_mut(),
             body_bytes,
             vouch_httpsig::DigestAlgorithm::Sha256,
@@ -634,10 +649,7 @@ pub fn test_signature_headers(
         .expect("set content-digest");
     }
 
-    let mut sig_builder = vouch_httpsig::SignatureBuilder::new("sig1")
-        .method()
-        .path()
-        .created_now();
+    let mut sig_builder = SignatureBuilder::new("sig1").method().path().created_now();
     if has_body {
         sig_builder = sig_builder.field("content-digest");
     }
@@ -953,9 +965,8 @@ impl TestClientCa {
     }
 
     /// Trust anchors holding only this CA.
-    pub(crate) fn trust(&self) -> crate::services::oidc::mtls::ClientCertTrust {
-        crate::services::oidc::mtls::ClientCertTrust::from_pem(self.pem().as_bytes())
-            .expect("test CA is a valid trust anchor")
+    pub(crate) fn trust(&self) -> ClientCertTrust {
+        ClientCertTrust::from_pem(self.pem().as_bytes()).expect("test CA is a valid trust anchor")
     }
 }
 
@@ -1233,11 +1244,11 @@ pub async fn http_get_with_cert(
 }
 
 /// Create a test user in the database.
-pub async fn create_test_user(store: &DocumentStore, email: &str) -> crate::db::User {
-    let (user_id, _created) = crate::db::upsert_user(store, email, Some("Test User"))
+pub async fn create_test_user(store: &DocumentStore, email: &str) -> User {
+    let (user_id, _created) = db::upsert_user(store, email, Some("Test User"))
         .await
         .expect("Failed to create test user");
-    crate::db::get_user_by_id(store, &user_id)
+    db::get_user_by_id(store, &user_id)
         .await
         .expect("Failed to fetch test user")
         .expect("Test user not found after creation")
@@ -1255,8 +1266,8 @@ pub fn test_domain(domain: &str) -> Domain {
 }
 
 /// Create a test organization in the database.
-pub async fn create_test_org(store: &DocumentStore, domain: &str) -> crate::db::Organization {
-    crate::db::create_organization(store, domain, Some("Test Org"), None)
+pub async fn create_test_org(store: &DocumentStore, domain: &str) -> Organization {
+    db::create_organization(store, domain, Some("Test Org"), None)
         .await
         .expect("Failed to create test org")
 }
@@ -1267,12 +1278,12 @@ pub async fn create_test_user_in_org(
     email: &str,
     org_id: &str,
     is_admin: bool,
-) -> crate::db::User {
+) -> User {
     let (user_id, _created) =
-        crate::db::upsert_user_with_org(store, email, Some("Test User"), Some(org_id), is_admin)
+        db::upsert_user_with_org(store, email, Some("Test User"), Some(org_id), is_admin)
             .await
             .expect("Failed to create test user in org");
-    crate::db::get_user_by_id(store, &user_id)
+    db::get_user_by_id(store, &user_id)
         .await
         .expect("Failed to fetch test user")
         .expect("Test user not found after creation")
@@ -1285,7 +1296,7 @@ pub async fn create_test_user_in_org(
 /// repeating begin/commit at each call site.
 pub async fn remove_test_authenticator(store: &DocumentStore, authenticator_id: &str) {
     let mut tx = store.begin().await.expect("Failed to start transaction");
-    crate::db::delete_authenticator(&mut tx, authenticator_id)
+    db::delete_authenticator(&mut tx, authenticator_id)
         .await
         .expect("Failed to delete authenticator");
     tx.commit().await.expect("Failed to commit deletion");
@@ -1293,9 +1304,9 @@ pub async fn remove_test_authenticator(store: &DocumentStore, authenticator_id: 
 
 /// Create a test authenticator for a user.
 pub async fn create_test_authenticator(store: &DocumentStore, user_id: &str) -> String {
-    crate::db::create_authenticator(
+    db::create_authenticator(
         store,
-        &crate::db::CreateAuthenticatorParams {
+        &CreateAuthenticatorParams {
             user_id,
             name: "Test Key",
             credential_id: format!("test-cred-{}", uuid::Uuid::now_v7()).as_bytes(),
@@ -1337,7 +1348,7 @@ async fn resolve_session_snapshot(
     auth_id: Option<&str>,
 ) -> (Option<String>, Option<String>) {
     let hardware_aaguid = match auth_id {
-        Some(id) => crate::db::get_authenticator_by_id(&state.store, id)
+        Some(id) => db::get_authenticator_by_id(&state.store, id)
             .await
             .ok()
             .flatten()
@@ -1347,10 +1358,10 @@ async fn resolve_session_snapshot(
     // Read-only, no `get_user_org_domain`: its lazy-backfill write would
     // fire first for any test that installs a `modify` hook to intercept a
     // specific document.
-    let org_domain = match crate::db::get_user_by_id(&state.store, user_id).await {
+    let org_domain = match db::get_user_by_id(&state.store, user_id).await {
         Ok(Some(u)) => match (u.org_domain, u.org_id) {
             (Some(domain), _) => Some(domain),
-            (None, Some(org_id)) => crate::db::get_organization_domain(&state.store, &org_id)
+            (None, Some(org_id)) => db::get_organization_domain(&state.store, &org_id)
                 .await
                 .unwrap_or(None),
             (None, None) => None,
@@ -1373,7 +1384,7 @@ pub enum TestBinding<'a> {
     /// RFC 9449 §6: `cnf.jkt` set to this JWK thumbprint.
     Dpop(&'a str),
     /// RFC 8705 §3.1: `cnf.x5t#S256` set to this certificate thumbprint.
-    Mtls(&'a crate::services::oidc::mtls::CertThumbprint),
+    Mtls(&'a CertThumbprint),
 }
 
 /// The authentication assurance a test session's token claims.
@@ -1457,7 +1468,7 @@ pub struct TestSessionSpec<'a> {
     pub verification: TestVerification,
     /// Granted scope. Default: `None`, meaning every scope. A scope without
     /// `email` mints a token with no `email` claim.
-    pub scope: Option<crate::services::oidc::ScopeSet>,
+    pub scope: Option<ScopeSet>,
 }
 
 impl Default for TestSessionSpec<'_> {
@@ -1545,7 +1556,7 @@ pub async fn create_test_session_with(state: &AppState, spec: TestSessionSpec<'_
             audience: spec.audience,
             max_lifetime_secs: Option::None,
             hardware_verification,
-            session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
+            session_purpose: SessionPurpose::OAuthAccessToken,
             authorization_details: Option::None,
             hardware_aaguid: hardware_aaguid.as_deref(),
             org_domain: org_domain.as_deref(),
@@ -1553,9 +1564,7 @@ pub async fn create_test_session_with(state: &AppState, spec: TestSessionSpec<'_
         },
         TokenIssuanceProof {
             grant: GrantProof::TestingOnly,
-            client_auth: ClientAuthProof::NoAuth(
-                crate::services::auth::NoClientAuth::internal_endpoint(),
-            ),
+            client_auth: ClientAuthProof::NoAuth(NoClientAuth::internal_endpoint()),
             sender_constraint: SenderConstraintProof::no_registered_client(),
         },
         test_arrival(),
@@ -1605,15 +1614,15 @@ async fn forge_auth_time(
     let (hardware_aaguid, org_domain) =
         resolve_session_snapshot(state, spec.user_id, spec.auth_id).await;
     let expires_at = jiff::Timestamp::from_second(claims.exp).expect("valid expiry");
-    crate::db::create_session(
+    db::create_session(
         &state.store,
-        &crate::db::CreateSessionParams {
+        &CreateSessionParams {
             user_id: spec.user_id,
             user_email: spec.email,
-            token_hash: &crate::crypto::hash_token(&token),
+            token_hash: &crypto::hash_token(&token),
             authenticator_id: Option::None,
             expires_at,
-            session_type: crate::db::SessionPurpose::OAuthAccessToken,
+            session_type: SessionPurpose::OAuthAccessToken,
             authorization_details: Option::None,
             hardware_aaguid: hardware_aaguid.as_deref(),
             org_domain: org_domain.as_deref(),
@@ -1693,15 +1702,15 @@ pub async fn forge_short_lived_access_token(
     let (hardware_aaguid, org_domain) = resolve_session_snapshot(state, user_id, auth_id).await;
     let expires_at =
         jiff::Timestamp::from_second(claims.exp).expect("the forged exp is a valid Unix second");
-    crate::db::create_session(
+    db::create_session(
         &state.store,
-        &crate::db::CreateSessionParams {
+        &CreateSessionParams {
             user_id,
             user_email: email,
-            token_hash: &crate::crypto::hash_token(&token),
+            token_hash: &crypto::hash_token(&token),
             authenticator_id: Option::None,
             expires_at,
-            session_type: crate::db::SessionPurpose::OAuthAccessToken,
+            session_type: SessionPurpose::OAuthAccessToken,
             authorization_details: Option::None,
             hardware_aaguid: hardware_aaguid.as_deref(),
             org_domain: org_domain.as_deref(),
@@ -1742,16 +1751,16 @@ pub async fn create_test_expired_session_row(
     user_id: &str,
     email: &str,
     client_id: Option<&str>,
-    purpose: crate::db::SessionPurpose,
+    purpose: SessionPurpose,
 ) -> (String, String) {
     let token = format!("expired-cookie-{}", uuid::Uuid::now_v7());
-    let token_hash = crate::crypto::hash_token(&token);
+    let token_hash = crypto::hash_token(&token);
     let expires_at = jiff::Timestamp::now()
         .checked_sub(jiff::Span::new().seconds(1))
         .expect("backdate session row by 1s");
-    crate::db::create_session(
+    db::create_session(
         &state.store,
-        &crate::db::CreateSessionParams {
+        &CreateSessionParams {
             user_id,
             user_email: email,
             token_hash: &token_hash,
@@ -1785,7 +1794,7 @@ pub async fn assert_audit_rows_record_transport(
 ) {
     let events = state
         .audit
-        .query_events(&crate::db::AuditEventFilter {
+        .query_events(&AuditEventFilter {
             event_types: Some(vec![event_type.to_string()]),
             ..Default::default()
         })
@@ -1810,7 +1819,7 @@ pub async fn assert_audit_rows_record_transport(
 
 /// Create an org with an admin user, a FIDO2-verified session, and return
 /// the admin plus the session's raw access token.
-pub async fn create_test_org_admin(state: &AppState) -> (crate::db::User, String) {
+pub async fn create_test_org_admin(state: &AppState) -> (User, String) {
     let org = create_test_org(&state.store, "example.com").await;
     let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
     let auth_id = create_test_authenticator(&state.store, &admin.id).await;
@@ -1839,7 +1848,7 @@ pub async fn create_test_org_token_with_scope(
     store: &DocumentStore,
     description: &str,
     org_id: &str,
-    scope: crate::db::ScimScopeSet,
+    scope: ScimScopeSet,
 ) -> String {
     create_test_org_token_with_scope_expiring(store, description, org_id, scope, None).await
 }
@@ -1851,7 +1860,7 @@ pub async fn create_test_org_token_with_scope_expiring(
     store: &DocumentStore,
     description: &str,
     org_id: &str,
-    scope: crate::db::ScimScopeSet,
+    scope: ScimScopeSet,
     expires_at: Option<jiff::Timestamp>,
 ) -> String {
     use aws_lc_rs::digest::{self, SHA256};
@@ -1871,7 +1880,7 @@ pub async fn create_test_org_token_with_scope_expiring(
     // the org must exist. Tests pass opaque ids like "test-org" rather than
     // building an org first, so seed one on demand.
     if store
-        .get::<crate::db::documents::organization::OrganizationDoc>(org_id)
+        .get::<OrganizationDoc>(org_id)
         .await
         .expect("look up test org")
         .is_none()
@@ -1879,7 +1888,7 @@ pub async fn create_test_org_token_with_scope_expiring(
         store
             .insert_with_id(
                 org_id,
-                &crate::db::documents::organization::OrganizationDoc {
+                &OrganizationDoc {
                     // ".example" alone is a reserved TLD (RESERVED_TLDS) and
                     // is rejected by `Domain::parse`, which SCIM user
                     // creation now runs the candidate email's domain
@@ -1898,9 +1907,9 @@ pub async fn create_test_org_token_with_scope_expiring(
     }
 
     // Store in database with org_id so authenticate_scim accepts it
-    crate::db::create_scim_token(
+    db::create_scim_token(
         store,
-        &crate::db::CreateScimTokenParams {
+        &CreateScimTokenParams {
             org_id,
             token_hash: &token_hash,
             description: Some(description),
@@ -1921,13 +1930,7 @@ pub async fn create_test_scim_token(
     description: &str,
     org_id: &str,
 ) -> String {
-    create_test_org_token_with_scope(
-        store,
-        description,
-        org_id,
-        crate::db::ScimScopeSet::default(),
-    )
-    .await
+    create_test_org_token_with_scope(store, description, org_id, ScimScopeSet::default()).await
 }
 
 /// [`create_test_scim_token`] with an explicit expiry.
@@ -1941,7 +1944,7 @@ pub async fn create_test_scim_token_expiring(
         store,
         description,
         org_id,
-        crate::db::ScimScopeSet::default(),
+        ScimScopeSet::default(),
         expires_at,
     )
     .await
@@ -1959,7 +1962,7 @@ pub async fn create_test_audit_token(
         store,
         description,
         org_id,
-        crate::db::ScimScopeSet::from_scopes(vec![crate::db::ScimScope::AuditRead]),
+        ScimScopeSet::from_scopes(vec![ScimScope::AuditRead]),
     )
     .await
 }
@@ -1999,17 +2002,17 @@ pub struct TestClientSpec {
     /// OAuth client display name. Default: `"Test App"`.
     pub name: String,
     /// Client application type. Default: `OAuthClientType::Web`.
-    pub application_type: crate::db::OAuthClientType,
+    pub application_type: OAuthClientType,
     /// Registered redirect URIs. Default: `["https://example.com/callback"]`.
     pub redirect_uris: Vec<String>,
     /// Access scope (Personal vs Public). Default: `AccessScope::Public`.
-    pub access_scope: crate::db::AccessScope,
+    pub access_scope: AccessScope,
     /// Organisation the client belongs to. Default: `None`.
     pub org_id: Option<String>,
     /// Permitted resource URIs (RAR). Default: empty.
     pub resource_uris: Vec<String>,
     /// Token endpoint auth method override. Default: `None` (→ ClientSecretBasic).
-    pub token_endpoint_auth_method: Option<crate::db::TokenEndpointAuthMethod>,
+    pub token_endpoint_auth_method: Option<TokenEndpointAuthMethod>,
     /// JWKS to register with the client. Default: `TestJwks::None`.
     pub jwks: TestJwks,
     /// Remote JWKS URI to register. Default: `None`. Required for clients whose
@@ -2024,23 +2027,23 @@ pub struct TestClientSpec {
     /// endpoint treats an absent list as "defaults apply").
     pub response_types: Option<Vec<String>>,
     /// FAPI security profile. Default: `None` (→ FapiProfile::None).
-    pub fapi_profile: Option<crate::db::FapiProfile>,
+    pub fapi_profile: Option<FapiProfile>,
     /// ID-token signing algorithm. Default: `JwsAlgorithm::Rs256`.
-    pub id_token_signed_response_alg: crate::crypto::alg::JwsAlgorithm,
+    pub id_token_signed_response_alg: JwsAlgorithm,
     /// mTLS subject DN for `tls_client_auth`. Default: `None`.
     pub tls_client_auth_subject_dn: Option<String>,
     /// Bind issued tokens to the mTLS certificate. Default: `false`.
     pub tls_client_certificate_bound_access_tokens: bool,
     /// UserInfo JWT signing algorithm override. Default: `None`.
-    pub userinfo_signed_response_alg: Option<crate::crypto::alg::JwsAlgorithm>,
+    pub userinfo_signed_response_alg: Option<JwsAlgorithm>,
     /// Introspection JWT signing algorithm override. Default: `None`.
-    pub introspection_signed_response_alg: Option<crate::crypto::alg::JwsAlgorithm>,
+    pub introspection_signed_response_alg: Option<JwsAlgorithm>,
     /// JARM response signing algorithm override. Default: `None` (ES256).
-    pub authorization_signed_response_alg: Option<crate::crypto::alg::JwsAlgorithm>,
+    pub authorization_signed_response_alg: Option<JwsAlgorithm>,
     /// Whether to mint a client secret. `false` for public/SPA clients. Default: `true`.
     pub with_secret: bool,
     /// Restrict request-object signing algorithm. Default: `None`.
-    pub request_object_signing_alg: Option<crate::crypto::alg::JwsAlgorithm>,
+    pub request_object_signing_alg: Option<JwsAlgorithm>,
     /// Require a signed request object (JAR). Default: `None`.
     pub require_signed_request_object: Option<bool>,
     /// Registered post-logout redirect URIs (RP-Initiated Logout). Default: empty.
@@ -2063,7 +2066,7 @@ pub struct TestClientSpec {
 /// restrict the client explicitly (e.g. `enable_grant_types(&["authorization_code"])`).
 #[must_use]
 pub fn all_supported_grant_types() -> Vec<String> {
-    crate::services::oidc::grant_type::OAuthGrantType::supported_wire_values()
+    OAuthGrantType::supported_wire_values()
         .iter()
         .map(|s| (*s).to_string())
         .collect()
@@ -2073,10 +2076,10 @@ impl Default for TestClientSpec {
     fn default() -> Self {
         Self {
             name: "Test App".to_string(),
-            application_type: crate::db::OAuthClientType::Web,
+            application_type: OAuthClientType::Web,
             redirect_uris: vec!["https://example.com/callback".to_string()],
             // Intentionally Public, not AccessScope::default() which is Personal.
-            access_scope: crate::db::AccessScope::Public,
+            access_scope: AccessScope::Public,
             org_id: Option::None,
             resource_uris: vec![],
             token_endpoint_auth_method: Option::None,
@@ -2089,7 +2092,7 @@ impl Default for TestClientSpec {
             grant_types: Some(all_supported_grant_types()),
             response_types: Option::None,
             fapi_profile: Option::None,
-            id_token_signed_response_alg: crate::crypto::alg::JwsAlgorithm::Rs256,
+            id_token_signed_response_alg: JwsAlgorithm::Rs256,
             tls_client_auth_subject_dn: Option::None,
             tls_client_certificate_bound_access_tokens: false,
             userinfo_signed_response_alg: Option::None,
@@ -2146,10 +2149,10 @@ pub async fn create_test_client(
 
     // `TestClientSpec` still offers the two knobs separately; pairing them here
     // is what a caller setting both would trip on, which mirrors the endpoints.
-    let client_keys = crate::db::ClientKeys::from_stored(jwks_value, spec.jwks_uri.clone())
+    let client_keys = ClientKeys::from_stored(jwks_value, spec.jwks_uri.clone())
         .expect("test spec sets jwks or jwks_uri, never both");
 
-    let (client, client_id) = crate::db::create_oauth_client(
+    let (client, client_id) = db::create_oauth_client(
         store,
         &CreateOAuthClientParams {
             user_id: Some(user_id),
@@ -2209,8 +2212,8 @@ pub async fn create_test_client(
         let mut secret_bytes = [0u8; 32];
         aws_rand::fill(&mut secret_bytes).expect("RNG failure");
         let raw = URL_SAFE_NO_PAD.encode(secret_bytes);
-        let secret_hash = crate::handlers::hash_token(&raw);
-        crate::db::create_oauth_client_secret(store, &client.id, &secret_hash, Some("test"), None)
+        let secret_hash = handlers::hash_token(&raw);
+        db::create_oauth_client_secret(store, &client.id, &secret_hash, Some("test"), None)
             .await
             .expect("Failed to create test OAuth client secret");
         raw
@@ -2243,7 +2246,7 @@ pub struct TestPendingAuthSpec<'a> {
     /// RFC 9470 maximum authentication age. Default: `None`.
     pub max_age: Option<i64>,
     /// Response mode stored on the request. Default: `query`.
-    pub response_mode: crate::db::documents::oauth::ResponseMode,
+    pub response_mode: ResponseMode,
     /// `state` stored on the request. Default: `None`.
     pub state: Option<&'a str>,
 }
@@ -2253,9 +2256,9 @@ pub async fn create_test_pending_auth(
     store: &DocumentStore,
     spec: TestPendingAuthSpec<'_>,
 ) -> String {
-    crate::db::create_pending_oauth_authorization(
+    db::create_pending_oauth_authorization(
         store,
-        crate::db::CreatePendingOAuthParams {
+        CreatePendingOAuthParams {
             client_id: spec.client_id,
             redirect_uri: "https://example.com/callback",
             response_type: "code",
@@ -2288,8 +2291,8 @@ pub async fn create_test_public_oauth_client(
         user_id,
         TestClientSpec {
             name: "Public Test App".to_string(),
-            application_type: crate::db::OAuthClientType::Spa,
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::None),
+            application_type: OAuthClientType::Spa,
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::None),
             with_secret: false,
             ..Default::default()
         },
@@ -2313,7 +2316,7 @@ pub const TEST_ISSUER: &str = "https://example.com";
 /// schema). Must never panic — admin-supplied policy text reaches this
 /// path, and the release profile is `panic = "abort"`.
 pub fn fuzz_validate_policy_text(text: &str) {
-    let _result = crate::services::policy::validate_policy_text(text);
+    let _result = policy::validate_policy_text(text);
 }
 
 /// Fuzzing entry: run arbitrary history-event shapes through the runtime
@@ -2326,7 +2329,7 @@ pub fn fuzz_validate_policy_text(text: &str) {
 /// `rows` are `(event_type, user_id, data_json, secs_offset)` tuples, mapped
 /// through the same ingestion the production path uses.
 pub fn fuzz_evaluate_history(rows: &[(String, String, String, i64)]) {
-    crate::services::policy::fuzz_evaluate_history(rows);
+    policy::fuzz_evaluate_history(rows);
 }
 
 pub fn make_test_oidc_key() -> OidcSigningKey {

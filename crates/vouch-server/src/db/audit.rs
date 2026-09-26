@@ -15,6 +15,8 @@ use super::documents::audit::{AuditData, CredentialAuditDetails, CredentialAudit
 use super::pool::Pool;
 use super::store::TimestampSeconds;
 use crate::crypto::document_crypto::DocumentCrypto;
+use crate::db::documents::audit::CredentialAuditPayload;
+use crate::email::Email;
 
 // ============================================================================
 // Schema Iden Enum
@@ -314,7 +316,7 @@ impl AuditStore {
     /// in a `text` column or bind parameter is a hard error on
     /// Postgres/DSQL (issue #883).
     fn email_hmac(&self, email: &str) -> Option<String> {
-        let canonical = crate::email::Email::new(email);
+        let canonical = Email::new(email);
         if canonical.as_str().contains('\0') {
             return None;
         }
@@ -337,7 +339,7 @@ impl AuditStore {
         email: Option<&str>,
         data: &D,
     ) {
-        let email_domain = email.and_then(crate::email::Email::domain_of);
+        let email_domain = email.and_then(Email::domain_of);
         let email_hmac = email.and_then(|e| self.email_hmac(e));
         self.record_best_effort(
             kind,
@@ -483,7 +485,7 @@ impl AuditStore {
         email: Option<&str>,
         data_json: &str,
     ) -> Result<String> {
-        let email_domain = email.and_then(crate::email::Email::domain_of);
+        let email_domain = email.and_then(Email::domain_of);
         let email_hmac = email.and_then(|e| self.email_hmac(e));
         self.insert_event_raw(
             kind,
@@ -549,7 +551,7 @@ impl AuditStore {
         envelope: CredentialAuditEnvelope,
         details: &D,
     ) {
-        let payload = crate::db::documents::audit::CredentialAuditPayload {
+        let payload = CredentialAuditPayload {
             envelope: &envelope,
             details,
         };
@@ -753,9 +755,11 @@ fn raw_to_audit_event(row: RawAuditRow) -> Result<AuditEvent> {
 mod tests {
     use super::*;
     use crate::crypto::document_crypto::PlaintextDocumentCrypto;
+    use crate::db::ScimAuditData;
+    use crate::db::pool::PoolConfig;
 
     async fn test_audit() -> AuditStore {
-        let pool = Pool::connect("sqlite::memory:", &crate::db::pool::PoolConfig::default())
+        let pool = Pool::connect("sqlite::memory:", &PoolConfig::default())
             .await
             .unwrap();
 
@@ -1066,7 +1070,7 @@ mod tests {
                 AuditEventKind::ScimOperation,
                 None,
                 Some("example.com"),
-                &super::super::documents::audit::ScimAuditData {
+                &ScimAuditData {
                     operation: "create",
                     resource_type: "User",
                     resource_id: "u-1",

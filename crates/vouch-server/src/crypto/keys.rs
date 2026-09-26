@@ -26,6 +26,7 @@ use zeroize::Zeroizing;
 
 use crate::crypto::jwk::{EcJwk, RsaJwk};
 use crate::crypto::kms_signer::{KmsSignerP256, KmsSignerRsa3072, parse_spki_rsa};
+use crate::crypto::pem;
 
 /// OIDC signing key using P-256 ECDSA (ES256).
 ///
@@ -101,7 +102,7 @@ impl OidcSigningKey {
         let der_bytes = Zeroizing::new(if trimmed.starts_with("-----BEGIN") {
             pem_to_der(trimmed)?
         } else {
-            match crate::crypto::pem::decode_base64_pem(trimmed) {
+            match pem::decode_base64_pem(trimmed) {
                 Ok(pem_text) => pem_to_der(&pem_text)?,
                 Err(_) => {
                     // Fall back to base64-encoded DER
@@ -485,7 +486,7 @@ impl OidcRsaSigningKey {
         let der_bytes = Zeroizing::new(if trimmed.starts_with("-----BEGIN") {
             pem_to_der(trimmed)?
         } else {
-            match crate::crypto::pem::decode_base64_pem(trimmed) {
+            match pem::decode_base64_pem(trimmed) {
                 Ok(pem_text) => pem_to_der(&pem_text)?,
                 Err(_) => {
                     // Fall back to base64-encoded DER

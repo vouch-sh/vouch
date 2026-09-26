@@ -8,6 +8,7 @@
 )]
 
 use super::*;
+use crate::db::Principal;
 
 // ========================================================================
 // Authentication Event Tests
@@ -25,7 +26,7 @@ async fn test_auth_event_logging() {
     config::record_auth_event(
         &audit,
         AuthEventParams {
-            user_id: crate::db::Principal::Verified(user_id.clone()),
+            user_id: Principal::Verified(user_id.clone()),
             event_type: AuthEventType::LoginSuccess,
             authenticator_id: Some("auth-123".to_string()),
             client: ClientInfo::for_test(
@@ -46,7 +47,7 @@ async fn test_auth_event_logging() {
     config::record_auth_event(
         &audit,
         AuthEventParams {
-            user_id: crate::db::Principal::Verified(user_id.clone()),
+            user_id: Principal::Verified(user_id.clone()),
             event_type: AuthEventType::LoginFailed,
             client: ClientInfo::for_test(
                 Some("192.168.1.1".parse().unwrap()),
@@ -93,7 +94,7 @@ async fn test_key_and_device_auth_events_round_trip_and_expire() {
         config::record_auth_event(
             &audit,
             AuthEventParams {
-                user_id: crate::db::Principal::Verified(user_id.clone()),
+                user_id: Principal::Verified(user_id.clone()),
                 event_type,
                 authenticator_id: Some("auth-123".to_string()),
                 success: true,

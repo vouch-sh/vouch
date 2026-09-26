@@ -16,6 +16,7 @@ use crate::db;
 use crate::db::documents::jwks_cache::{JWKS_STALE_MAX_AGE_SECONDS, JwksCacheDoc};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use crate::infra::egress::{BodyError, read_capped_text};
+use crate::infra::ssrf;
 
 /// Maximum JWKS response size (256KB).
 const MAX_JWKS_RESPONSE_SIZE: usize = 256 * 1024;
@@ -82,12 +83,7 @@ async fn fetch_jwks(
     // dynamic client registration is unauthenticated — refuse to dial
     // private/link-local targets. Loopback is permitted only in local
     // development (`allow_loopback`).
-    crate::infra::ssrf::assert_public_destination(
-        uri,
-        allow_loopback,
-        OAuthErrorCode::InvalidClient,
-    )
-    .await?;
+    ssrf::assert_public_destination(uri, allow_loopback, OAuthErrorCode::InvalidClient).await?;
 
     let response = http_client
         .get(uri)
@@ -211,6 +207,7 @@ pub(crate) async fn resolve_cached_jwks(
 )]
 mod tests {
     use super::*;
+    use crate::test_utils;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     // Throwaway self-signed P-256 cert (SAN: localhost) + PKCS#8 key, reused
@@ -293,7 +290,7 @@ DSm5DhvbpaRCAFaGWhhzAJSu2Rky3/7QbpEMYVw8ECiy6LdtzzrBfJz/\n\
 
     #[tokio::test]
     async fn resolve_returns_fresh_cache_without_fetching() {
-        let state = crate::test_utils::test_app_state().await;
+        let state = test_utils::test_app_state().await;
         let cached = cache_doc(60, "fresh-key");
 
         // The URI would fail if dialed, so a success proves no fetch happened.
@@ -317,7 +314,7 @@ DSm5DhvbpaRCAFaGWhhzAJSu2Rky3/7QbpEMYVw8ECiy6LdtzzrBfJz/\n\
     /// so a stale key stayed valid until the row happened to be replaced.
     #[tokio::test]
     async fn resolve_rejects_cache_older_than_the_stale_window() {
-        let state = crate::test_utils::test_app_state().await;
+        let state = test_utils::test_app_state().await;
         let cached = cache_doc(JWKS_STALE_MAX_AGE_SECONDS + 3600, "rotated-out-key");
 
         let result = resolve_cached_jwks(
@@ -340,7 +337,7 @@ DSm5DhvbpaRCAFaGWhhzAJSu2Rky3/7QbpEMYVw8ECiy6LdtzzrBfJz/\n\
     /// not break verification outright.
     #[tokio::test]
     async fn resolve_serves_stale_cache_within_the_window() {
-        let state = crate::test_utils::test_app_state().await;
+        let state = test_utils::test_app_state().await;
         let cached = cache_doc(JWKS_CACHE_TTL_SECONDS + 60, "recently-stale-key");
 
         let (value, origin) = resolve_cached_jwks(

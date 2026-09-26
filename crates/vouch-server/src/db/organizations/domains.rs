@@ -10,9 +10,13 @@
 use super::ORG_SCAN_PAGE_SIZE;
 use super::issuer::{release_ineligible_subdomain, subdomain_to_release};
 use super::validation::{Domain, DomainValidationError};
+use crate::crypto;
 use crate::db::documents::organization::{
     AdditionalDomain, AdditionalDomainState, DomainClaimDoc, OrganizationDoc,
+    UNVERIFY_FAILURE_THRESHOLD,
 };
+use crate::db::pool::{self, RetryableError};
+use crate::db::sessions::{self, SessionCache};
 use crate::db::store::DocumentStore;
 use anyhow::Result;
 use jiff::Timestamp;
@@ -54,7 +58,7 @@ impl std::fmt::Debug for AddedDomain {
 
 /// Generate a fresh verification token suitable for use in a DNS TXT record.
 fn generate_verification_token() -> Result<String> {
-    Ok(hex::encode(crate::crypto::generate_random_bytes(32)?))
+    Ok(hex::encode(crypto::generate_random_bytes(32)?))
 }
 
 /// Internal OCC-retry error for organization document CAS mutations.
@@ -76,11 +80,11 @@ enum OrgCasError {
     Other(#[from] anyhow::Error),
 }
 
-impl crate::db::pool::RetryableError for OrgCasError {
+impl RetryableError for OrgCasError {
     fn is_retryable(&self) -> bool {
         match self {
             Self::OccConflict => true,
-            Self::Other(e) => crate::db::pool::is_retryable_db_error(e),
+            Self::Other(e) => pool::is_retryable_db_error(e),
         }
     }
 }
@@ -139,11 +143,11 @@ pub enum AddDomainError {
     Other(#[from] anyhow::Error),
 }
 
-impl crate::db::pool::RetryableError for AddDomainError {
+impl RetryableError for AddDomainError {
     fn is_retryable(&self) -> bool {
         match self {
             Self::OccConflict => true,
-            Self::Other(e) => crate::db::pool::is_retryable_db_error(e),
+            Self::Other(e) => pool::is_retryable_db_error(e),
             Self::MaxDomains
             | Self::PrimaryDomain
             | Self::AlreadyAttached
@@ -177,11 +181,11 @@ pub enum MarkVerifiedError {
     Other(#[from] anyhow::Error),
 }
 
-impl crate::db::pool::RetryableError for MarkVerifiedError {
+impl RetryableError for MarkVerifiedError {
     fn is_retryable(&self) -> bool {
         match self {
             Self::OccConflict => true,
-            Self::Other(e) => crate::db::pool::is_retryable_db_error(e),
+            Self::Other(e) => pool::is_retryable_db_error(e),
             Self::ClaimedByOtherOrg => false,
         }
     }
@@ -381,7 +385,7 @@ pub async fn mark_additional_domain_verified(
                     org_id: org_id.to_string(),
                 };
                 if let Err(e) = tx.insert_with_id(&claim_id, &slot).await {
-                    if crate::db::pool::is_unique_violation(&e) {
+                    if pool::is_unique_violation(&e) {
                         return Err(MarkVerifiedError::ClaimedByOtherOrg);
                     }
                     return Err(MarkVerifiedError::Other(e));
@@ -441,7 +445,7 @@ pub struct DomainRemovalSummary {
 /// user lands wherever their email maps in the new state.
 pub async fn remove_additional_domain(
     store: &DocumentStore,
-    session_cache: &crate::db::sessions::SessionCache,
+    session_cache: &SessionCache,
     org_id: &str,
     domain: &str,
 ) -> Result<Option<DomainRemovalSummary>> {
@@ -557,7 +561,7 @@ pub async fn remove_additional_domain(
 /// `delete_oauth_client_and_revoke_sessions`).
 async fn revoke_sessions_for_domain_users(
     store: &DocumentStore,
-    session_cache: &crate::db::sessions::SessionCache,
+    session_cache: &SessionCache,
     org_id: &str,
     domain: &str,
 ) -> Result<u64> {
@@ -573,7 +577,7 @@ async fn revoke_sessions_for_domain_users(
         if !matches {
             continue;
         }
-        match crate::db::sessions::delete_sessions_for_user(store, &user.id).await {
+        match sessions::delete_sessions_for_user(store, &user.id).await {
             Ok(_) => {
                 // Companion cache eviction: invalidate only after the DB
                 // delete committed, so a cache refill can't reintroduce the
@@ -917,9 +921,7 @@ pub async fn record_recheck_result(
             }
             RecheckOutcome::Failure => {
                 entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
-                if entry.consecutive_failures
-                    >= crate::db::documents::organization::UNVERIFY_FAILURE_THRESHOLD
-                {
+                if entry.consecutive_failures >= UNVERIFY_FAILURE_THRESHOLD {
                     entry.consecutive_failures = 0;
                     entry.state = AdditionalDomainState::Unverified {
                         verified_at,
@@ -1038,8 +1040,12 @@ async fn find_conflicting_claim_in_other_org(
 mod tests {
     use secrecy::ExposeSecret;
 
-    use super::super::{create_organization, fresh_store};
     use super::*;
+    use crate::db::UNVERIFY_FAILURE_THRESHOLD;
+    use crate::db::documents::organization::OrganizationDoc;
+    use crate::db::organizations::{create_organization, fresh_store};
+    use crate::db::sessions::SessionCache;
+    use crate::email::Email;
 
     /// Read back an organization's additional domains.
     async fn list_additional_domains(
@@ -1076,7 +1082,7 @@ mod tests {
 
         // Pending entry is not indexed — find_one("domain", "acme.co.uk") must return None.
         let found = store
-            .find_one::<crate::db::documents::organization::OrganizationDoc>("domain", "acme.co.uk")
+            .find_one::<OrganizationDoc>("domain", "acme.co.uk")
             .await
             .unwrap();
         assert!(
@@ -1193,7 +1199,7 @@ mod tests {
             .await
             .unwrap();
         // Drive the entry to auto-unverified via consecutive failures.
-        for _ in 0..crate::db::UNVERIFY_FAILURE_THRESHOLD {
+        for _ in 0..UNVERIFY_FAILURE_THRESHOLD {
             record_recheck_result(
                 &store,
                 &other.id,
@@ -1330,7 +1336,7 @@ mod tests {
             .await
             .unwrap();
 
-        let cache = crate::db::sessions::SessionCache::new(100, 30);
+        let cache = SessionCache::new(100, 30);
         remove_additional_domain(&store, &cache, &org_a.id, "shared.com")
             .await
             .unwrap()
@@ -1391,7 +1397,7 @@ mod tests {
         ));
 
         let found = store
-            .find_one::<crate::db::documents::organization::OrganizationDoc>("domain", "acme.co.uk")
+            .find_one::<OrganizationDoc>("domain", "acme.co.uk")
             .await
             .unwrap()
             .expect("verified domain must be indexed");
@@ -1417,7 +1423,7 @@ mod tests {
             .await
             .unwrap();
 
-        let cache = crate::db::sessions::SessionCache::new(100, 30);
+        let cache = SessionCache::new(100, 30);
         let summary = remove_additional_domain(&store, &cache, &org.id, "Acme.Co.UK")
             .await
             .unwrap();
@@ -1429,7 +1435,7 @@ mod tests {
 
         // No longer indexed.
         let found = store
-            .find_one::<crate::db::documents::organization::OrganizationDoc>("domain", "acme.co.uk")
+            .find_one::<OrganizationDoc>("domain", "acme.co.uk")
             .await
             .unwrap();
         assert!(found.is_none());
@@ -1508,7 +1514,7 @@ mod tests {
             .unwrap();
 
         let mut last_effect = RecheckEffect::StillVerified;
-        for _ in 0..crate::db::UNVERIFY_FAILURE_THRESHOLD {
+        for _ in 0..UNVERIFY_FAILURE_THRESHOLD {
             last_effect =
                 record_recheck_result(&store, &org.id, "acme.co.uk", RecheckOutcome::Failure)
                     .await
@@ -1529,7 +1535,7 @@ mod tests {
 
         // No longer indexed.
         let found = store
-            .find_one::<crate::db::documents::organization::OrganizationDoc>("domain", "acme.co.uk")
+            .find_one::<OrganizationDoc>("domain", "acme.co.uk")
             .await
             .unwrap();
         assert!(
@@ -1552,7 +1558,7 @@ mod tests {
             .unwrap();
 
         // Drive the entry to auto-unverified via consecutive failures.
-        for _ in 0..crate::db::UNVERIFY_FAILURE_THRESHOLD {
+        for _ in 0..UNVERIFY_FAILURE_THRESHOLD {
             record_recheck_result(&store, &org.id, "acme.co.uk", RecheckOutcome::Failure)
                 .await
                 .unwrap();
@@ -1595,7 +1601,7 @@ mod tests {
 
         // Indexed again.
         let found = store
-            .find_one::<crate::db::documents::organization::OrganizationDoc>("domain", "acme.co.uk")
+            .find_one::<OrganizationDoc>("domain", "acme.co.uk")
             .await
             .unwrap();
         assert!(found.is_some(), "re-verified domain must be re-indexed");
@@ -1933,7 +1939,7 @@ mod tests {
         let org = create_organization(&store, "acme.com", None, None)
             .await
             .unwrap();
-        let cache = crate::db::sessions::SessionCache::new(100, 30);
+        let cache = SessionCache::new(100, 30);
         let summary = remove_additional_domain(&store, &cache, &org.id, "never-added.example.com")
             .await
             .unwrap();
@@ -1964,7 +1970,7 @@ mod tests {
             .unwrap();
 
         let mk_user = |email: &str| UserDoc {
-            email: crate::email::Email::new(email),
+            email: Email::new(email),
             name: None,
             org_id: Some(org.id.clone()),
             org_domain: Some(org.domain.clone()),
@@ -2013,7 +2019,7 @@ mod tests {
             .await
             .unwrap();
 
-        let cache = crate::db::sessions::SessionCache::new(100, 30);
+        let cache = SessionCache::new(100, 30);
         let summary = remove_additional_domain(&store, &cache, &org.id, "acme.co.uk")
             .await
             .unwrap()

@@ -26,6 +26,7 @@ use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
 
 use crate::crypto::alg::JwsAlgorithm;
+use vouch_common::jwk::JwkThumbprintKey;
 
 /// A JSON Web Key, tagged by `kty` (RFC 7517 Section 4.1).
 ///
@@ -232,16 +233,16 @@ impl Jwk {
     #[must_use]
     pub fn thumbprint(&self) -> String {
         match self {
-            Self::Ec(ec) => vouch_common::jwk::JwkThumbprintKey::Ec {
+            Self::Ec(ec) => JwkThumbprintKey::Ec {
                 crv: ec.crv.as_str(),
                 x: &ec.x,
                 y: &ec.y,
             },
-            Self::Rsa(rsa) => vouch_common::jwk::JwkThumbprintKey::Rsa {
+            Self::Rsa(rsa) => JwkThumbprintKey::Rsa {
                 e: &rsa.e,
                 n: &rsa.n,
             },
-            Self::Okp(okp) => vouch_common::jwk::JwkThumbprintKey::Okp {
+            Self::Okp(okp) => JwkThumbprintKey::Okp {
                 crv: okp.crv.as_str(),
                 x: &okp.x,
             },

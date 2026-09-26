@@ -8,6 +8,8 @@ use super::audit::{AuditEventKind, AuditStore};
 use serde::Serialize;
 
 pub use crate::client_info::ClientInfo;
+use crate::db::documents::audit::AuthEventData;
+use crate::db::documents::audit::GeoFields;
 
 // ============================================================================
 // Authentication Events
@@ -155,8 +157,8 @@ pub struct AuthEventParams {
 /// best-effort like every [`AuditStore`] write: failures are logged with
 /// the wire `event_type` and swallowed.
 pub async fn record_auth_event(audit: &AuditStore, params: AuthEventParams, email: Option<String>) {
-    let data = crate::db::documents::audit::AuthEventData {
-        geo: crate::db::documents::audit::GeoFields::from_ip(params.client.client_ip()),
+    let data = AuthEventData {
+        geo: GeoFields::from_ip(params.client.client_ip()),
         params: &params,
     };
     audit

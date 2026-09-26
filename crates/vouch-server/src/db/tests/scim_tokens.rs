@@ -7,6 +7,7 @@
 )]
 
 use super::*;
+use crate::error::ServiceError;
 
 // ========================================================================
 // SCIM Token Tests
@@ -182,7 +183,7 @@ async fn test_expired_scim_tokens_excluded_from_active_count() {
     )
     .await
     {
-        Err(crate::error::ServiceError::Api { ref code, .. }) if code == "token_limit_reached" => {}
+        Err(ServiceError::Api { ref code, .. }) if code == "token_limit_reached" => {}
         other => panic!("a third active token must hit the cap; got {other:?}"),
     }
 

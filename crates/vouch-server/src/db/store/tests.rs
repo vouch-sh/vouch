@@ -9,6 +9,7 @@
 use super::*;
 use crate::crypto::document_crypto::PlaintextDocumentCrypto;
 use crate::db::document_type::IndexEntry;
+use crate::db::pool::{self, PoolConfig};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -50,7 +51,7 @@ impl DocumentType for ExpiringDoc {
 }
 
 async fn test_store() -> DocumentStore {
-    let pool = Pool::connect("sqlite::memory:", &crate::db::pool::PoolConfig::default())
+    let pool = Pool::connect("sqlite::memory:", &PoolConfig::default())
         .await
         .unwrap();
 
@@ -1318,7 +1319,7 @@ async fn tx_update_by_index_rejects_row_changed_since_read() {
     );
     assert_eq!(conflict.expected, raced.version);
     assert!(
-        crate::db::pool::is_retryable_db_error(&err),
+        pool::is_retryable_db_error(&err),
         "an enclosing with_dsql_retry! must re-run the operation from a fresh read"
     );
     drop(tx);

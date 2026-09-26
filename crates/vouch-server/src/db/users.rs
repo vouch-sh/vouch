@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use super::document_type::Document;
 use super::documents::user::UserDoc;
 use super::store::{DocumentStore, Transition};
+use crate::email::Email;
 use anyhow::Result;
 
 /// User record.
@@ -77,7 +78,7 @@ pub async fn upsert_user(
     email: &str,
     name: Option<&str>,
 ) -> Result<(String, bool)> {
-    let email = crate::email::Email::new(email);
+    let email = Email::new(email);
     if let Some(doc) = store.find_one::<UserDoc>("email", email.as_str()).await? {
         return Ok((doc.id, false));
     }
@@ -113,7 +114,7 @@ pub async fn upsert_user_with_org(
     org_id: Option<&str>,
     is_org_admin: bool,
 ) -> Result<(String, bool)> {
-    let email = crate::email::Email::new(email);
+    let email = Email::new(email);
     if let Some(doc) = store.find_one::<UserDoc>("email", email.as_str()).await? {
         return Ok((doc.id, false));
     }
@@ -145,7 +146,7 @@ pub async fn upsert_user_with_org(
 /// callers may pass any casing; user emails are stored lowercase by
 /// `enroll_user_with_org` and `create_scim_user`.
 pub async fn get_user_by_email(store: &DocumentStore, email: &str) -> Result<Option<User>> {
-    let email = crate::email::Email::new(email);
+    let email = Email::new(email);
     let doc = store.find_one::<UserDoc>("email", email.as_str()).await?;
     Ok(doc.map(User::from))
 }

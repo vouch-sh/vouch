@@ -92,11 +92,13 @@ pub(crate) async fn org_host_gate(
 )]
 mod tests {
     use super::*;
+    use crate::config::BaseUrl;
+    use crate::test_utils;
     use axum::http::HeaderValue;
 
     fn config_with_base_url(base_url: &str) -> ServerConfig {
-        let mut config = crate::test_utils::test_config();
-        config.base_url = crate::config::BaseUrl::new(base_url);
+        let mut config = test_utils::test_config();
+        config.base_url = BaseUrl::new(base_url);
         config
     }
 

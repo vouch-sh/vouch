@@ -14,6 +14,7 @@ use crate::db::documents::organization::{
     AdditionalDomain, AdditionalDomainState, OrganizationDoc,
 };
 use crate::db::documents::user::UserDoc;
+use crate::email::Email;
 use crate::test_utils::{test_arrival, test_domain};
 use secrecy::SecretString;
 
@@ -21,7 +22,7 @@ use secrecy::SecretString;
 /// written before this field existed looks on disk.
 fn legacy_org_user_doc(email: &str, org_id: &str) -> UserDoc {
     UserDoc {
-        email: crate::email::Email::new(email),
+        email: Email::new(email),
         name: None,
         org_id: Some(org_id.to_string()),
         org_domain: None,

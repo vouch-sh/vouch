@@ -8,6 +8,7 @@
 )]
 
 use super::*;
+use crate::db::documents::oauth::ResponseMode;
 
 // ========================================================================
 // Every helper below decides whether a request succeeds by comparing a
@@ -112,7 +113,7 @@ async fn pending_oauth_lookup_reads_the_callers_instant() {
             prompt: None,
             dpop_jkt: None,
             authorization_details: None,
-            response_mode: crate::db::documents::oauth::ResponseMode::Query,
+            response_mode: ResponseMode::Query,
             par_request_uri: None,
         },
     )
