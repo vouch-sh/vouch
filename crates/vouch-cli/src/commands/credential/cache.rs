@@ -7,9 +7,12 @@
 
 use std::future::Future;
 
+use crate::exit_code::{self, NETWORK_ERROR};
 use anyhow::Result;
 #[cfg(unix)]
 use tracing::debug;
+#[cfg(unix)]
+use vouch_agent::AgentClient;
 
 /// Try to retrieve a cached credential from the agent.
 ///
@@ -24,7 +27,7 @@ pub(crate) async fn get(cache_key: &str) -> Option<serde_json::Value> {
 
     #[cfg(unix)]
     {
-        let mut client = vouch_agent::AgentClient::connect().await.ok()?;
+        let mut client = AgentClient::connect().await.ok()?;
         match client.get_cached_credential(cache_key).await {
             Ok(Some(cached)) => Some(cached.data()),
             Ok(None) => None,
@@ -47,7 +50,7 @@ pub(crate) async fn store(cache_key: &str, data: serde_json::Value, expires_at: 
 
     #[cfg(unix)]
     {
-        if let Ok(mut client) = vouch_agent::AgentClient::connect().await
+        if let Ok(mut client) = AgentClient::connect().await
             && let Err(e) = client.cache_credential(cache_key, data, expires_at).await
         {
             debug!("failed to cache credential {cache_key}: {e}");
@@ -101,7 +104,7 @@ where
 /// Delegates to [`crate::exit_code::classify`] which checks for `reqwest::Error`,
 /// `CliError::NetworkError`, and message-based patterns in a single place.
 pub(crate) fn is_network_error(err: &anyhow::Error) -> bool {
-    crate::exit_code::classify(err) == std::process::ExitCode::from(crate::exit_code::NETWORK_ERROR)
+    exit_code::classify(err) == std::process::ExitCode::from(NETWORK_ERROR)
 }
 
 /// Build a default expiry timestamp (1 hour from now) for tokens that don't

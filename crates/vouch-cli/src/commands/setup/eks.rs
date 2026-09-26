@@ -9,7 +9,9 @@ use serde::Deserialize;
 use std::path::PathBuf;
 use vouch_cli::tr;
 
-use crate::commands::credential::aws::{StsRequest, exchange_for_sts_credentials};
+use crate::commands::credential::aws::{
+    StsRequest, detect_agent_source, exchange_for_sts_credentials,
+};
 use crate::integrations::aws;
 use crate::integrations::aws::sigv4::sign_and_send_rest;
 
@@ -18,6 +20,8 @@ use super::kubeconfig::{
     KubeconfigUser, KubeconfigUserData, default_kubeconfig_path, existing_cluster_other,
     existing_context_other, existing_user_other, load_kubeconfig, save_kubeconfig,
 };
+use crate::integrations::aws::sigv4;
+use crate::server_url::ServerUrl;
 
 // ============================================================================
 // EKS describe-cluster response (partial)
@@ -46,12 +50,12 @@ struct CertificateAuthority {
 
 /// Fetch EKS cluster endpoint and CA data via native SigV4-signed REST API.
 async fn describe_cluster(
-    server: &crate::server_url::ServerUrl,
+    server: &ServerUrl,
     cluster_name: &str,
     region: &str,
     role_arn: &str,
 ) -> Result<(String, String)> {
-    let agent_source = crate::commands::credential::aws::detect_agent_source();
+    let agent_source = detect_agent_source();
     let result = exchange_for_sts_credentials(StsRequest {
         server,
         role_arn,
@@ -63,10 +67,7 @@ async fn describe_cluster(
 
     // Call EKS DescribeCluster REST API
     let endpoint = format!("https://eks.{region}.{}", result.domain_suffix);
-    let path = format!(
-        "/clusters/{}",
-        crate::integrations::aws::sigv4::uri_encode(cluster_name)
-    );
+    let path = format!("/clusters/{}", sigv4::uri_encode(cluster_name));
 
     let response_body = sign_and_send_rest(
         &result.http_client,
@@ -108,7 +109,7 @@ async fn describe_cluster(
 /// Configures kubeconfig so kubectl uses `vouch credential eks` for
 /// native EKS token generation (no AWS CLI required).
 pub(crate) async fn run(
-    server: &crate::server_url::ServerUrl,
+    server: &ServerUrl,
     cluster_name: &str,
     region: Option<&str>,
     profile: Option<&str>,

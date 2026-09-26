@@ -12,18 +12,19 @@ use secrecy::{ExposeSecret, SecretString};
 use vouch_cli::tr;
 
 use crate::config::Config;
+use crate::server_url::ServerUrl;
 
 /// Default OpenAI token endpoint.
 const DEFAULT_ENDPOINT: &str = "https://auth.openai.com/oauth/token";
 
 /// Run `vouch credential openai`.
-pub(crate) async fn run(server: &crate::server_url::ServerUrl) -> Result<()> {
+pub(crate) async fn run(server: &ServerUrl) -> Result<()> {
     let token = get_token(server).await?;
     print!("{}", token.expose_secret());
     Ok(())
 }
 
-pub(crate) async fn get_token(server: &crate::server_url::ServerUrl) -> Result<SecretString> {
+pub(crate) async fn get_token(server: &ServerUrl) -> Result<SecretString> {
     let config = Config::load().context(tr!("err-failed-load-vouch-config"))?;
     let fed = config.ai().and_then(|ai| ai.openai.clone()).context(tr!(
         "err-openai-federation-not-configured-run-vouch-setup-ope"

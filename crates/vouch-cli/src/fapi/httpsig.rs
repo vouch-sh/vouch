@@ -18,6 +18,7 @@ use vouch_httpsig::algorithm::SigningAlgorithm;
 
 use super::error::FapiError;
 use super::key::ClientKey;
+use vouch_httpsig::algorithm::SignatureAlgorithm;
 
 /// Adapter that wraps a `ClientKey` as an RFC 9421 signer.
 ///
@@ -61,8 +62,8 @@ impl ClientKeySigner {
 }
 
 impl SigningAlgorithm for ClientKeySigner {
-    fn algorithm(&self) -> vouch_httpsig::algorithm::SignatureAlgorithm {
-        vouch_httpsig::algorithm::SignatureAlgorithm::EcdsaP256Sha256
+    fn algorithm(&self) -> SignatureAlgorithm {
+        SignatureAlgorithm::EcdsaP256Sha256
     }
 
     fn key_id(&self) -> &str {

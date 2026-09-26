@@ -8,6 +8,12 @@ use vouch_cli::{tr, tr_args};
 
 use super::CredentialType;
 use super::credential::cache;
+use crate::client::VouchClient;
+use crate::integrations::aws;
+use crate::integrations::aws::codeartifact::CodeArtifactToken;
+use crate::integrations::aws::redshift::RedshiftCredentials;
+use crate::server_url::ServerUrl;
+use vouch_common::GitHubTokenRequest;
 
 /// CodeArtifact-specific options for exec/env commands.
 #[derive(Default)]
@@ -64,7 +70,7 @@ impl std::fmt::Debug for AwsEnvCredentials {
 
 /// Fetch AWS credentials (cache-first) and extract environment variable values.
 pub(crate) async fn fetch_aws_credentials(
-    server: &crate::server_url::ServerUrl,
+    server: &ServerUrl,
     role_arn: &str,
 ) -> Result<AwsEnvCredentials> {
     let data = super::credential::aws::get_aws_credentials(server, role_arn).await?;
@@ -116,9 +122,7 @@ impl std::fmt::Debug for GitHubEnvToken {
 }
 
 /// Fetch a GitHub token (cache-first) and extract the token value.
-pub(crate) async fn fetch_github_token_cached(
-    server: &crate::server_url::ServerUrl,
-) -> Result<GitHubEnvToken> {
+pub(crate) async fn fetch_github_token_cached(server: &ServerUrl) -> Result<GitHubEnvToken> {
     let cache_key = "github";
 
     let data = cache::get_or_fetch(cache_key, "GitHub token", || async {
@@ -144,7 +148,7 @@ pub(crate) async fn fetch_github_token_cached(
 
 /// Run a command with credentials injected as environment variables.
 pub(crate) async fn run(
-    server: &crate::server_url::ServerUrl,
+    server: &ServerUrl,
     credential_type: &CredentialType,
     role: Option<&str>,
     command: &[String],
@@ -231,7 +235,7 @@ pub(crate) async fn run(
 /// See: <https://hackingthe.cloud/aws/general-knowledge/aws_cli_tips_and_tricks/#modifying-the-cloudtrail-log-user-agent-with-aws_execution_env>
 async fn inject_aws_credentials(
     cmd: &mut Command,
-    server: &crate::server_url::ServerUrl,
+    server: &ServerUrl,
     role_arn: &str,
 ) -> Result<()> {
     let creds = fetch_aws_credentials(server, role_arn).await?;
@@ -256,10 +260,7 @@ async fn inject_aws_credentials(
 }
 
 /// Fetch a GitHub token (cache-first) and inject it into the environment.
-async fn inject_github_credentials(
-    cmd: &mut Command,
-    server: &crate::server_url::ServerUrl,
-) -> Result<()> {
+async fn inject_github_credentials(cmd: &mut Command, server: &ServerUrl) -> Result<()> {
     let gh = fetch_github_token_cached(server).await?;
 
     cmd.env("GITHUB_TOKEN", gh.token.expose_secret());
@@ -275,10 +276,7 @@ async fn inject_github_credentials(
 /// as a Bearer token (`ANTHROPIC_AUTH_TOKEN`), not an API key
 /// (`ANTHROPIC_API_KEY`). It acts as a service account — the workload path,
 /// intended for CI/headless automation.
-async fn inject_anthropic_credentials(
-    cmd: &mut Command,
-    server: &crate::server_url::ServerUrl,
-) -> Result<()> {
+async fn inject_anthropic_credentials(cmd: &mut Command, server: &ServerUrl) -> Result<()> {
     let token = super::credential::anthropic::get_token(server).await?;
     cmd.env("ANTHROPIC_AUTH_TOKEN", token.expose_secret());
     Ok(())
@@ -292,24 +290,19 @@ async fn inject_anthropic_credentials(
 /// API-key variable name even though the minted token is an OAuth access
 /// token. Workload path: the token acts as a service account, intended
 /// for CI/headless automation.
-async fn inject_openai_credentials(
-    cmd: &mut Command,
-    server: &crate::server_url::ServerUrl,
-) -> Result<()> {
+async fn inject_openai_credentials(cmd: &mut Command, server: &ServerUrl) -> Result<()> {
     let token = super::credential::openai::get_token(server).await?;
     cmd.env("OPENAI_API_KEY", token.expose_secret());
     Ok(())
 }
 
 /// Fetch a GitHub token from the Vouch server.
-pub(crate) async fn fetch_github_token(
-    server: &crate::server_url::ServerUrl,
-) -> Result<serde_json::Value> {
-    let client = crate::client::VouchClient::new(server).await?;
+pub(crate) async fn fetch_github_token(server: &ServerUrl) -> Result<serde_json::Value> {
+    let client = VouchClient::new(server).await?;
     client
         .post_authenticated(
             "/v1/credentials/github/token",
-            &vouch_common::GitHubTokenRequest::default(),
+            &GitHubTokenRequest::default(),
         )
         .await
         .with_context(|| tr!("exec-err-github-fetch"))
@@ -317,9 +310,9 @@ pub(crate) async fn fetch_github_token(
 
 /// Resolve CodeArtifact parameters and fetch a token.
 pub(super) async fn fetch_codeartifact_token(
-    server: &crate::server_url::ServerUrl,
+    server: &ServerUrl,
     opts: &CodeArtifactOptions<'_>,
-) -> Result<crate::integrations::aws::codeartifact::CodeArtifactToken> {
+) -> Result<CodeArtifactToken> {
     let target = super::credential::codeartifact::resolve_codeartifact_params(
         opts.domain,
         opts.domain_owner,
@@ -343,7 +336,7 @@ pub(super) struct RdsEnvCredentials {
 
 /// Validate RDS options and fetch an IAM auth token.
 pub(super) async fn fetch_rds_with_opts(
-    server: &crate::server_url::ServerUrl,
+    server: &ServerUrl,
     role: Option<&str>,
     opts: &RdsOptions<'_>,
 ) -> Result<RdsEnvCredentials> {
@@ -374,18 +367,17 @@ pub(super) async fn fetch_rds_with_opts(
 
 /// Resolve Redshift target, role, and region, then fetch credentials.
 pub(super) async fn fetch_redshift_with_opts(
-    server: &crate::server_url::ServerUrl,
+    server: &ServerUrl,
     role: Option<&str>,
     opts: &RedshiftOptions<'_>,
-) -> Result<crate::integrations::aws::redshift::RedshiftCredentials> {
+) -> Result<RedshiftCredentials> {
     let target = super::credential::redshift::resolve_target(
         opts.cluster_id,
         opts.workgroup,
         opts.duration,
     )?;
 
-    let (role_arn, region_name) =
-        crate::integrations::aws::resolve_role_and_region(role, opts.region, None)?;
+    let (role_arn, region_name) = aws::resolve_role_and_region(role, opts.region, None)?;
 
     let agent_source = super::credential::aws::detect_agent_source();
     super::credential::redshift::fetch_redshift_credentials(
@@ -402,7 +394,7 @@ pub(super) async fn fetch_redshift_with_opts(
 /// Fetch a CodeArtifact token and inject it into the environment.
 async fn inject_codeartifact_credentials(
     cmd: &mut Command,
-    server: &crate::server_url::ServerUrl,
+    server: &ServerUrl,
     opts: &CodeArtifactOptions<'_>,
 ) -> Result<()> {
     let token = fetch_codeartifact_token(server, opts).await?;
@@ -418,7 +410,7 @@ async fn inject_codeartifact_credentials(
 /// Fetch an RDS IAM auth token and inject PostgreSQL env vars.
 async fn inject_rds_credentials(
     cmd: &mut Command,
-    server: &crate::server_url::ServerUrl,
+    server: &ServerUrl,
     role: Option<&str>,
     opts: &RdsOptions<'_>,
 ) -> Result<()> {
@@ -436,7 +428,7 @@ async fn inject_rds_credentials(
 /// Fetch Redshift credentials and inject PostgreSQL env vars.
 async fn inject_redshift_credentials(
     cmd: &mut Command,
-    server: &crate::server_url::ServerUrl,
+    server: &ServerUrl,
     role: Option<&str>,
     opts: &RedshiftOptions<'_>,
 ) -> Result<()> {

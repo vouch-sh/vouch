@@ -15,12 +15,13 @@ use secrecy::{ExposeSecret, SecretString};
 use vouch_cli::tr;
 
 use crate::commands::credential::aws::{StsRequest, exchange_for_sts_credentials};
-use crate::commands::credential::cache;
+use crate::commands::credential::{aws, cache};
 use crate::config::Config;
 use crate::integrations::aws::codeartifact::{
     CodeArtifactRegistry, CodeArtifactToken, get_authorization_token,
 };
 use crate::integrations::aws::{ProfileOverride, resolve_vouch_profile};
+use crate::server_url::ServerUrl;
 
 /// A CodeArtifact domain plus the AWS account that mints tokens for it.
 #[derive(Debug, Clone)]
@@ -193,7 +194,7 @@ pub(crate) fn resolve_codeartifact_params(
 /// 3. Calls CodeArtifact `GetAuthorizationToken` with SigV4 signing
 /// 4. Outputs the bearer token to stdout
 pub(crate) async fn run(
-    server: &crate::server_url::ServerUrl,
+    server: &ServerUrl,
     domain: Option<&str>,
     domain_owner: Option<&str>,
     region: Option<&str>,
@@ -214,7 +215,7 @@ pub(crate) async fn run(
 /// This is the shared core used by both the standalone command and the
 /// Cargo credential provider when it detects a CodeArtifact index URL.
 pub(crate) async fn get_token(
-    server: &crate::server_url::ServerUrl,
+    server: &ServerUrl,
     target: &CodeArtifactTarget,
 ) -> Result<CodeArtifactToken> {
     // Resolve the role BEFORE the cache lookup: `target.profile` is only the
@@ -231,7 +232,7 @@ pub(crate) async fn get_token(
     // entry — an agent must not receive a token minted without the
     // ReadOnlyAccess session policy / `vouch:AccessType=ai` tags
     // (issues #398, #426).
-    let agent_source = crate::commands::credential::aws::detect_agent_source();
+    let agent_source = aws::detect_agent_source();
     let cache_key = build_cache_key(target, &role_arn, agent_source.as_deref());
 
     let agent = agent_source;
@@ -283,7 +284,7 @@ fn build_cache_key(target: &CodeArtifactTarget, role_arn: &str, agent: Option<&s
 
 /// Fetch a fresh CodeArtifact token (no caching).
 async fn fetch_token(
-    server: &crate::server_url::ServerUrl,
+    server: &ServerUrl,
     target: &CodeArtifactTarget,
     role_arn: &str,
     agent_source: Option<&str>,

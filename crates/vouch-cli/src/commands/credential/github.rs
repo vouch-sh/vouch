@@ -16,7 +16,7 @@ use vouch_common::{GitHubStatusResponse, GitHubTokenRequest, GitHubTokenResponse
 
 use crate::client::VouchClient;
 use crate::commands::credential::git_protocol::read_credential_input;
-use crate::server_url::{InsecureOptIn, ServerUrlError};
+use crate::server_url::{InsecureOptIn, ServerUrl, ServerUrlError};
 use crate::session::resolve_session;
 
 /// Check if the host is a GitHub host.
@@ -118,9 +118,7 @@ async fn get_credential(opt_in: InsecureOptIn) -> Result<()> {
 }
 
 /// Check GitHub integration status.
-pub(crate) async fn check_status(
-    server: &crate::server_url::ServerUrl,
-) -> Result<GitHubStatusResponse> {
+pub(crate) async fn check_status(server: &ServerUrl) -> Result<GitHubStatusResponse> {
     let client = VouchClient::new(server).await?;
     client
         .get_authenticated("/v1/credentials/github/status")

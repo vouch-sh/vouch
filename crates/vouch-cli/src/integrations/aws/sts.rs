@@ -9,7 +9,9 @@ use jiff::Timestamp;
 use secrecy::SecretString;
 use vouch_cli::{tr, tr_args};
 
+use crate::exit_code::CliError;
 pub(crate) use vouch_common::aws::Arn;
+use vouch_common::aws::Partition;
 
 /// Parse and validate an IAM role ARN.
 ///
@@ -24,7 +26,7 @@ pub(crate) fn parse_role_arn(arn: &str) -> Result<Arn> {
         Arn::parse(arn).map_err(|e| anyhow::anyhow!(tr_args!("err-", e = e.to_string())))?;
 
     if !parsed.is_iam_role() {
-        return Err(crate::exit_code::CliError::ConfigError(format!(
+        return Err(CliError::ConfigError(format!(
             "Invalid role ARN format: {arn}\n\
              Expected: arn:<partition>:iam::<account-id>:role/<role-name>\n\
              Example:  arn:aws:iam::123456789012:role/MyRole"
@@ -95,7 +97,7 @@ pub(crate) async fn assume_role_with_web_identity(
     // Use regional STS endpoint for the appropriate partition
     let sts_url = format!("https://sts.{}.{}/", req.region, req.domain_suffix);
 
-    let partition = vouch_common::aws::Partition::from_region(req.region);
+    let partition = Partition::from_region(req.region);
 
     let mut form_params: Vec<(String, String)> = vec![
         (
@@ -145,10 +147,9 @@ pub(crate) async fn assume_role_with_web_identity(
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        return Err(crate::exit_code::CliError::NetworkError(format!(
-            "AWS STS returned error {status}: {body}"
-        ))
-        .into());
+        return Err(
+            CliError::NetworkError(format!("AWS STS returned error {status}: {body}")).into(),
+        );
     }
 
     let body = response

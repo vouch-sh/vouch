@@ -9,7 +9,15 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use vouch_cli::{tr, tr_args, tr_eprintln, tr_println};
 
+use crate::commands::credential::aws::{
+    StsRequest, detect_agent_source, exchange_for_sts_credentials, resolve_identity_center,
+    resolve_management_role_for,
+};
+use crate::config::Config;
+use crate::exit_code::CliError;
 use crate::integrations::aws;
+use crate::server_url::ServerUrl;
+use vouch_common::aws::Partition;
 
 /// Arguments for `vouch aws console`.
 #[derive(clap::Args)]
@@ -50,7 +58,7 @@ struct ConsoleCreds {
     access_key_id: String,
     secret_access_key: SecretString,
     session_token: SecretString,
-    partition: vouch_common::aws::Partition,
+    partition: Partition,
     http_client: reqwest::Client,
 }
 
@@ -62,10 +70,7 @@ struct SigninTokenResponse {
 }
 
 /// Obtain console credentials via the Identity Center path.
-async fn get_idc_console_creds(
-    server: &crate::server_url::ServerUrl,
-    args: &ConsoleArgs,
-) -> Result<ConsoleCreds> {
+async fn get_idc_console_creds(server: &ServerUrl, args: &ConsoleArgs) -> Result<ConsoleCreds> {
     use crate::commands::credential::aws::{detect_agent_source, obtain_identity_center_token};
     use crate::integrations::aws::sso_portal::get_role_credentials;
     use vouch_common::http::credential_client;
@@ -73,9 +78,7 @@ async fn get_idc_console_creds(
     // Block AI agents early (fast-fail before config load): permission-set
     // credentials cannot be downscoped.
     if detect_agent_source().is_some() {
-        return Err(
-            crate::exit_code::CliError::ConfigError(tr!("aws-err-agent-idc-unsupported")).into(),
-        );
+        return Err(CliError::ConfigError(tr!("aws-err-agent-idc-unsupported")).into());
     }
 
     let account_id = args
@@ -87,25 +90,22 @@ async fn get_idc_console_creds(
         .as_deref()
         .context(tr!("err-permission-set-is-required"))?;
 
-    let vouch_config = crate::config::Config::load()?;
+    let vouch_config = Config::load()?;
     let aws_cfg = vouch_config
         .aws()
-        .ok_or_else(|| crate::exit_code::CliError::ConfigError(tr!("aws-err-not-configured")))?;
+        .ok_or_else(|| CliError::ConfigError(tr!("aws-err-not-configured")))?;
 
     // `resolve_identity_center` returns the owning org+idc pair so the
     // management role always comes from the same org as the IdC instance.
-    let (org, idc) = crate::commands::credential::aws::resolve_identity_center(
-        aws_cfg,
-        args.idc_application.as_deref(),
-    )?
-    .ok_or_else(|| crate::exit_code::CliError::ConfigError(tr!("aws-err-idc-not-configured")))?;
+    let (org, idc) = resolve_identity_center(aws_cfg, args.idc_application.as_deref())?
+        .ok_or_else(|| CliError::ConfigError(tr!("aws-err-idc-not-configured")))?;
 
     // If --via is supplied it must match the owning org's management role;
     // cross-org pairings are rejected.
     if let Some(via_role) = args.via.as_deref()
         && via_role != org.management_role
     {
-        return Err(crate::exit_code::CliError::ConfigError(tr_args!(
+        return Err(CliError::ConfigError(tr_args!(
             "aws-err-via-not-found",
             management_role = via_role.to_string()
         ))
@@ -130,7 +130,7 @@ async fn get_idc_console_creds(
     .await
     .with_context(|| tr!("aws-console-err-aws-credentials"))?;
 
-    let partition = vouch_common::aws::Partition::from_region(&idc.region);
+    let partition = Partition::from_region(&idc.region);
     Ok(ConsoleCreds {
         access_key_id: creds.access_key_id,
         secret_access_key: creds.secret_access_key,
@@ -141,10 +141,7 @@ async fn get_idc_console_creds(
 }
 
 /// Obtain console credentials via the STS role path.
-async fn get_sts_console_creds(
-    server: &crate::server_url::ServerUrl,
-    args: ConsoleArgs,
-) -> Result<ConsoleCreds> {
+async fn get_sts_console_creds(server: &ServerUrl, args: ConsoleArgs) -> Result<ConsoleCreds> {
     // Resolve role ARN from explicit arg or from ~/.aws/config
     let role_arn = match args.role {
         Some(r) => r,
@@ -158,30 +155,25 @@ async fn get_sts_console_creds(
     };
 
     // Determine partition and region from role ARN
-    let partition = vouch_common::aws::Partition::from_arn(&role_arn)
-        .with_context(|| tr!("aws-console-err-invalid-role-arn"))?;
+    let partition =
+        Partition::from_arn(&role_arn).with_context(|| tr!("aws-console-err-invalid-role-arn"))?;
     let region = aws::resolve_region_with_fallback(&role_arn)?;
 
     // Validate/resolve --via the same way `vouch credential aws` does, so an
     // unconfigured management role fails fast with a Vouch error instead of an
     // opaque AWS AccessDenied at the STS call.
-    let vouch_config = crate::config::Config::load()?;
-    let management_role = crate::commands::credential::aws::resolve_management_role_for(
-        &vouch_config,
-        &role_arn,
-        args.via.as_deref(),
-    )?;
+    let vouch_config = Config::load()?;
+    let management_role =
+        resolve_management_role_for(&vouch_config, &role_arn, args.via.as_deref())?;
 
-    let agent_source = crate::commands::credential::aws::detect_agent_source();
-    let result = crate::commands::credential::aws::exchange_for_sts_credentials(
-        crate::commands::credential::aws::StsRequest {
-            server,
-            role_arn: &role_arn,
-            region: &region,
-            management_role: management_role.as_deref(),
-            agent_source: agent_source.as_deref(),
-        },
-    )
+    let agent_source = detect_agent_source();
+    let result = exchange_for_sts_credentials(StsRequest {
+        server,
+        role_arn: &role_arn,
+        region: &region,
+        management_role: management_role.as_deref(),
+        agent_source: agent_source.as_deref(),
+    })
     .await
     .with_context(|| tr!("aws-console-err-aws-credentials"))?;
 
@@ -195,7 +187,7 @@ async fn get_sts_console_creds(
 }
 
 /// Run `vouch aws console`.
-pub(crate) async fn run(server: &crate::server_url::ServerUrl, args: ConsoleArgs) -> Result<()> {
+pub(crate) async fn run(server: &ServerUrl, args: ConsoleArgs) -> Result<()> {
     let console_creds = if args.account.is_some() {
         get_idc_console_creds(server, &args).await?
     } else {
@@ -271,6 +263,7 @@ pub(crate) async fn run(server: &crate::server_url::ServerUrl, args: ConsoleArgs
 )]
 mod tests {
     use super::*;
+    use crate::commands::credential::aws::test_support::ENV_LOCK;
 
     // Agent-block test --------------------------------------------------------
     //
@@ -284,9 +277,7 @@ mod tests {
         reason = "env mutation to trigger agent detection in an isolated test; var is restored after assertion"
     )]
     async fn agent_block_in_get_idc_console_creds_fires_before_config_load() {
-        let _guard = crate::commands::credential::aws::test_support::ENV_LOCK
-            .lock()
-            .await;
+        let _guard = ENV_LOCK.lock().await;
         // SAFETY: agent check is the first statement; Config::load is never reached.
         unsafe {
             std::env::set_var("CLAUDECODE", "1");
@@ -300,7 +291,7 @@ mod tests {
             idc_application: None,
         };
         let result = get_idc_console_creds(
-            &crate::server_url::ServerUrl::parse("https://example.com", false).unwrap(),
+            &ServerUrl::parse("https://example.com", false).unwrap(),
             &args,
         )
         .await;
@@ -312,8 +303,8 @@ mod tests {
         let err = result.err().unwrap();
         assert!(
             matches!(
-                err.downcast_ref::<crate::exit_code::CliError>(),
-                Some(crate::exit_code::CliError::ConfigError(_))
+                err.downcast_ref::<CliError>(),
+                Some(CliError::ConfigError(_))
             ),
             "expected ConfigError(aws-err-agent-idc-unsupported), got: {err}"
         );

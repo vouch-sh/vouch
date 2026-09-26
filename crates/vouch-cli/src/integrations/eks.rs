@@ -4,6 +4,7 @@
 use serde::Deserialize;
 
 use super::{ConfiguredDetails, IntegrationCheck, IntegrationState};
+use crate::commands::setup::kubeconfig;
 
 /// EKS integration checker.
 pub(crate) struct EksIntegration;
@@ -90,7 +91,7 @@ impl IntegrationCheck for EksIntegration {
 
 /// Find all kubeconfig contexts using `vouch credential eks`.
 fn find_vouch_eks_contexts() -> Vec<String> {
-    let kubeconfig_path = match crate::commands::setup::kubeconfig::default_kubeconfig_path().ok() {
+    let kubeconfig_path = match kubeconfig::default_kubeconfig_path().ok() {
         Some(p) if p.exists() => p,
         _ => return Vec::new(),
     };

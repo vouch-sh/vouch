@@ -29,9 +29,12 @@ use vouch_common::{Fido2ChallengeResponse, protocol};
 use super::enroll::expiry_offset_seconds;
 use crate::client::VouchClient;
 use crate::config::Config;
+use crate::exit_code::CliError;
 use crate::fido2::{self, FidoDevice, YubiKey};
-use crate::session;
-use vouch_cli::{tr, tr_args, tr_println};
+use crate::server_url::ServerUrl;
+use crate::{config, session};
+use vouch_cli::fapi::{key_store, registration};
+use vouch_cli::{posture, tr, tr_args, tr_println};
 
 /// Run the login command.
 ///
@@ -42,14 +45,14 @@ use vouch_cli::{tr, tr_args, tr_println};
 /// 1. Contact the server first (async) — fail fast if unreachable.
 /// 2. All FIDO2 device work on a plain OS thread (wait, PIN, authenticate).
 /// 3. Complete authentication with the server (async).
-pub(crate) async fn run(server: &crate::server_url::ServerUrl, timeout_secs: u64) -> Result<()> {
+pub(crate) async fn run(server: &ServerUrl, timeout_secs: u64) -> Result<()> {
     tr_println!("login-starting");
     println!();
 
     let client = VouchClient::unauthenticated(server)?;
 
     // Load or generate the FAPI client key (required for FAPI 2.0 flow)
-    let fapi_key = vouch_cli::fapi::key_store::load_or_create_client_key()?;
+    let fapi_key = key_store::load_or_create_client_key()?;
 
     run_fapi_login(&client, server, timeout_secs, &fapi_key).await
 }
@@ -132,7 +135,7 @@ struct Fapi2TokenResponse {
 )]
 async fn run_fapi_login(
     client: &VouchClient,
-    server: &crate::server_url::ServerUrl,
+    server: &ServerUrl,
     timeout_secs: u64,
     fapi_key: &ClientKey,
 ) -> Result<()> {
@@ -185,7 +188,7 @@ async fn run_fapi_login(
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
-        return Err(crate::exit_code::CliError::NetworkError(format!(
+        return Err(CliError::NetworkError(format!(
             "challenge request failed (HTTP {status}): {body}"
         ))
         .into());
@@ -208,7 +211,7 @@ async fn run_fapi_login(
 
     // Step 3: Start posture collection early — it runs during the FIDO2 wait
     // (human touch takes 5-30s, posture takes 100ms-2s).
-    let posture_handle = tokio::task::spawn_blocking(vouch_cli::posture::collect);
+    let posture_handle = tokio::task::spawn_blocking(posture::collect);
 
     // Step 4: FIDO2 assertion on a plain OS thread.
     let rp_id = challenge_resp.rp_id.clone();
@@ -382,7 +385,7 @@ async fn run_fapi_login(
 /// Retry the token request with a server-provided DPoP nonce (RFC 9449).
 async fn run_fapi_login_with_nonce(
     client: &VouchClient,
-    server: &crate::server_url::ServerUrl,
+    server: &ServerUrl,
     fapi_key: &ClientKey,
     client_id: &str,
     request: &Fido2AssertionTokenRequest,
@@ -501,8 +504,8 @@ async fn ensure_client_registered(client: &VouchClient, fapi_key: &ClientKey) ->
                 // Check 2: does the registration URI match the
                 // current server? A mismatch means stale config
                 // from a different server (e.g. localhost vs prod).
-                let uri_matches_server = crate::config::hostname_from_url(uri).ok()
-                    == crate::config::hostname_from_url(&base_url).ok();
+                let uri_matches_server = config::hostname_from_url(uri).ok()
+                    == config::hostname_from_url(&base_url).ok();
 
                 if !uri_matches_server {
                     tracing::debug!(
@@ -521,7 +524,7 @@ async fn ensure_client_registered(client: &VouchClient, fapi_key: &ClientKey) ->
                     }
 
                     // Check 3: is the registration still active?
-                    match vouch_cli::fapi::registration::is_client_registered(
+                    match registration::is_client_registered(
                         client.raw_client(),
                         &server,
                         uri,
@@ -565,14 +568,9 @@ async fn ensure_client_registered(client: &VouchClient, fapi_key: &ClientKey) ->
     // Register (or re-register) now.
     tracing::debug!("Registering FAPI client");
 
-    let result = vouch_cli::fapi::registration::register_fapi_client(
-        client.raw_client(),
-        &server,
-        None,
-        fapi_key,
-    )
-    .await
-    .context(tr!("err-failed-register-fapi-client"))?;
+    let result = registration::register_fapi_client(client.raw_client(), &server, None, fapi_key)
+        .await
+        .context(tr!("err-failed-register-fapi-client"))?;
 
     // Persist the registration to config.
     Config::modify(|config| {

@@ -5,17 +5,20 @@
 //! defaulting to [`ReqwestClient`](vouch_cli::http::ReqwestClient) for production use.
 //! Tests can inject [`TestHttpClient`](vouch_cli::http::TestHttpClient) for in-process testing.
 
+use crate::exit_code::CliError;
 use crate::server_url::ServerUrl;
+use crate::session::{self, ResolvedSession};
 use anyhow::{Context, Result};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Serialize, de::DeserializeOwned};
 use vouch_cli::fapi::httpsig::ClientKeySigner;
-use vouch_cli::fapi::{ClientKey, DpopProofBuilder};
+use vouch_cli::fapi::{ClientKey, DpopProofBuilder, key_store};
 use vouch_cli::http::{
     HttpClient, HttpResponse, ReqwestClient, format_http_error, parse_www_authenticate,
 };
 use vouch_cli::{tr, tr_args};
 use vouch_common::protocol;
+use vouch_httpsig::{DigestAlgorithm, SignatureBuilder, digest};
 
 /// Parameters for building RFC 9421 HTTP signature headers.
 struct SignRequestParams<'a> {
@@ -67,10 +70,10 @@ impl VouchClient<ReqwestClient> {
     /// This is the standard constructor for most commands.
     pub(crate) async fn new(base_url: &ServerUrl) -> Result<Self> {
         let mut client = Self::unauthenticated(base_url)?;
-        let token = crate::session::resolve_token().await?;
+        let token = session::resolve_token().await?;
         client.token = Some(token);
         // Load the FAPI key for DPoP on resource endpoints (non-fatal).
-        client.fapi_key = vouch_cli::fapi::key_store::load_client_key();
+        client.fapi_key = key_store::load_client_key();
         Ok(client)
     }
 
@@ -88,7 +91,7 @@ impl VouchClient<ReqwestClient> {
             sig_nonce: std::sync::Mutex::new(None),
             dpop_source: None,
         };
-        client.fapi_key = vouch_cli::fapi::key_store::load_client_key();
+        client.fapi_key = key_store::load_client_key();
         Ok(client)
     }
 
@@ -117,11 +120,11 @@ impl VouchClient<ReqwestClient> {
     ///
     /// This is the standard pattern for credential commands that have already
     /// called `resolve_session()`.
-    pub(crate) fn from_session(session: &crate::session::ResolvedSession) -> Result<Self> {
+    pub(crate) fn from_session(session: &ResolvedSession) -> Result<Self> {
         let mut client = Self::unauthenticated(&session.server_url)?;
         client.token = Some(session.token.clone());
         // Load the FAPI key for DPoP on resource endpoints (non-fatal).
-        client.fapi_key = vouch_cli::fapi::key_store::load_client_key();
+        client.fapi_key = key_store::load_client_key();
         Ok(client)
     }
 
@@ -165,7 +168,7 @@ impl<H: HttpClient> VouchClient<H> {
         self.token.as_ref().ok_or_else(|| {
             // Typed error so `exit_code::classify` maps it by type, not by
             // matching the (translatable) message string.
-            crate::exit_code::CliError::NotAuthenticated {
+            CliError::NotAuthenticated {
                 reason: tr!("client-err-not-authenticated"),
             }
             .into()
@@ -272,11 +275,8 @@ impl<H: HttpClient> VouchClient<H> {
 
         // Add Content-Digest for requests with a body (RFC 9530)
         if params.body.is_some()
-            && let Err(e) = vouch_httpsig::digest::set_content_digest(
-                req.headers_mut(),
-                body_bytes,
-                vouch_httpsig::DigestAlgorithm::Sha256,
-            )
+            && let Err(e) =
+                digest::set_content_digest(req.headers_mut(), body_bytes, DigestAlgorithm::Sha256)
         {
             tracing::warn!("Content-Digest computation failed: {e}");
             crate::tr_eprintln!("httpsig-warn-create-failed", error = e.to_string());
@@ -286,7 +286,7 @@ impl<H: HttpClient> VouchClient<H> {
         // Build the signature covering relevant components.
         // Includes @query to protect query parameters on GET requests
         // (e.g., /v1/credentials/aws/token?role_arn=...).
-        let mut sig_builder = vouch_httpsig::SignatureBuilder::new("sig1")
+        let mut sig_builder = SignatureBuilder::new("sig1")
             .method()
             .authority()
             .path()
@@ -396,14 +396,14 @@ impl<H: HttpClient> VouchClient<H> {
                         });
                         if signature_required && !sig_headers.iter().any(|(k, _)| k == "Signature")
                         {
-                            return Err(crate::exit_code::CliError::NotAuthenticated {
+                            return Err(CliError::NotAuthenticated {
                                 reason: tr_args!("httpsig-err-no-signature", path = path),
                             }
                             .into());
                         }
                         extra_headers.extend(sig_headers);
                     } else if signature_required {
-                        return Err(crate::exit_code::CliError::NotAuthenticated {
+                        return Err(CliError::NotAuthenticated {
                             reason: tr_args!("httpsig-err-key-unavailable", path = path),
                         }
                         .into());
@@ -747,17 +747,16 @@ mod tests {
 
     #[test]
     fn test_unauthenticated_trims_trailing_slash() {
-        let client = VouchClient::unauthenticated(
-            &crate::server_url::ServerUrl::parse("https://example.com/", false).unwrap(),
-        )
-        .unwrap();
+        let client =
+            VouchClient::unauthenticated(&ServerUrl::parse("https://example.com/", false).unwrap())
+                .unwrap();
         assert_eq!(client.base_url(), "https://example.com");
     }
 
     #[test]
     fn test_unauthenticated_trims_multiple_trailing_slashes() {
         let client = VouchClient::unauthenticated(
-            &crate::server_url::ServerUrl::parse("https://example.com///", false).unwrap(),
+            &ServerUrl::parse("https://example.com///", false).unwrap(),
         )
         .unwrap();
         assert_eq!(client.base_url(), "https://example.com");
@@ -765,38 +764,34 @@ mod tests {
 
     #[test]
     fn test_unauthenticated_no_trailing_slash() {
-        let client = VouchClient::unauthenticated(
-            &crate::server_url::ServerUrl::parse("https://example.com", false).unwrap(),
-        )
-        .unwrap();
+        let client =
+            VouchClient::unauthenticated(&ServerUrl::parse("https://example.com", false).unwrap())
+                .unwrap();
         assert_eq!(client.base_url(), "https://example.com");
     }
 
     #[test]
     fn test_token_returns_error_when_not_set() {
-        let client = VouchClient::unauthenticated(
-            &crate::server_url::ServerUrl::parse("https://example.com", false).unwrap(),
-        )
-        .unwrap();
+        let client =
+            VouchClient::unauthenticated(&ServerUrl::parse("https://example.com", false).unwrap())
+                .unwrap();
         assert!(client.token().is_err());
     }
 
     #[test]
     fn test_set_token_makes_token_available() {
-        let mut client = VouchClient::unauthenticated(
-            &crate::server_url::ServerUrl::parse("https://example.com", false).unwrap(),
-        )
-        .unwrap();
+        let mut client =
+            VouchClient::unauthenticated(&ServerUrl::parse("https://example.com", false).unwrap())
+                .unwrap();
         client.token = Some(SecretString::from("test-token".to_string()));
         assert!(client.token().is_ok());
     }
 
     #[test]
     fn test_base_url_returns_stored_url() {
-        let client = VouchClient::unauthenticated(
-            &crate::server_url::ServerUrl::parse("https://example.com", false).unwrap(),
-        )
-        .unwrap();
+        let client =
+            VouchClient::unauthenticated(&ServerUrl::parse("https://example.com", false).unwrap())
+                .unwrap();
         assert_eq!(client.base_url(), "https://example.com");
     }
 
@@ -807,7 +802,7 @@ mod tests {
             VouchClient::<ReqwestClient>::handle_response(response);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.downcast_ref::<crate::exit_code::CliError>().is_some());
+        assert!(err.downcast_ref::<CliError>().is_some());
     }
 
     #[test]
@@ -817,7 +812,7 @@ mod tests {
             VouchClient::<ReqwestClient>::handle_response(response);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.downcast_ref::<crate::exit_code::CliError>().is_some());
+        assert!(err.downcast_ref::<CliError>().is_some());
     }
 
     #[test]
@@ -845,10 +840,10 @@ mod tests {
             VouchClient::<ReqwestClient>::handle_response(response);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        let cli_err = err.downcast_ref::<crate::exit_code::CliError>().unwrap();
+        let cli_err = err.downcast_ref::<CliError>().unwrap();
         assert!(matches!(
             cli_err,
-            crate::exit_code::CliError::StepUpRequired {
+            CliError::StepUpRequired {
                 max_age: Some(300),
                 ..
             }
@@ -863,11 +858,8 @@ mod tests {
             VouchClient::<ReqwestClient>::handle_response(response);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        let cli_err = err.downcast_ref::<crate::exit_code::CliError>().unwrap();
-        assert!(matches!(
-            cli_err,
-            crate::exit_code::CliError::NotAuthenticated { .. }
-        ));
+        let cli_err = err.downcast_ref::<CliError>().unwrap();
+        assert!(matches!(cli_err, CliError::NotAuthenticated { .. }));
     }
 
     #[test]
@@ -878,10 +870,10 @@ mod tests {
             VouchClient::<ReqwestClient>::handle_response(response);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        let cli_err = err.downcast_ref::<crate::exit_code::CliError>().unwrap();
+        let cli_err = err.downcast_ref::<CliError>().unwrap();
         assert!(matches!(
             cli_err,
-            crate::exit_code::CliError::RateLimited {
+            CliError::RateLimited {
                 retry_after: Some(5)
             }
         ));
@@ -982,10 +974,9 @@ mod tests {
 
     #[test]
     fn test_build_auth_without_fapi_key_returns_bearer() {
-        let mut client = VouchClient::unauthenticated(
-            &crate::server_url::ServerUrl::parse("https://example.com", false).unwrap(),
-        )
-        .unwrap();
+        let mut client =
+            VouchClient::unauthenticated(&ServerUrl::parse("https://example.com", false).unwrap())
+                .unwrap();
         client.token = Some(SecretString::from("my-token".to_string()));
         // No fapi_key set → always Bearer
         let (auth, proof) = client
@@ -999,10 +990,9 @@ mod tests {
     fn test_build_auth_with_fapi_key_returns_dpop() {
         use vouch_cli::fapi::ClientKey;
 
-        let mut client = VouchClient::unauthenticated(
-            &crate::server_url::ServerUrl::parse("https://example.com", false).unwrap(),
-        )
-        .unwrap();
+        let mut client =
+            VouchClient::unauthenticated(&ServerUrl::parse("https://example.com", false).unwrap())
+                .unwrap();
         client.token = Some(SecretString::from("my-dpop-token".to_string()));
         client.fapi_key = Some(ClientKey::generate().unwrap());
 
@@ -1028,10 +1018,9 @@ mod tests {
         use base64::engine::general_purpose::URL_SAFE_NO_PAD;
         use vouch_cli::fapi::ClientKey;
 
-        let mut client = VouchClient::unauthenticated(
-            &crate::server_url::ServerUrl::parse("https://example.com", false).unwrap(),
-        )
-        .unwrap();
+        let mut client =
+            VouchClient::unauthenticated(&ServerUrl::parse("https://example.com", false).unwrap())
+                .unwrap();
         client.token = Some(SecretString::from("access-token-abc".to_string()));
         client.fapi_key = Some(ClientKey::generate().unwrap());
 
@@ -1060,7 +1049,7 @@ mod tests {
 
     #[test]
     fn test_sign_request_headers_produces_signature_for_get() {
-        let key = vouch_cli::fapi::ClientKey::generate().unwrap();
+        let key = ClientKey::generate().unwrap();
         let headers = VouchClient::<ReqwestClient>::sign_request_headers(&SignRequestParams {
             method: "GET",
             url: "https://example.com/v1/keys",
@@ -1090,7 +1079,7 @@ mod tests {
 
     #[test]
     fn test_sign_request_headers_includes_content_digest_for_body() {
-        let key = vouch_cli::fapi::ClientKey::generate().unwrap();
+        let key = ClientKey::generate().unwrap();
         let body = br#"{"key":"value"}"#;
         let headers = VouchClient::<ReqwestClient>::sign_request_headers(&SignRequestParams {
             method: "POST",
@@ -1140,7 +1129,7 @@ mod tests {
 
     #[test]
     fn test_sign_request_headers_covers_required_components() {
-        let key = vouch_cli::fapi::ClientKey::generate().unwrap();
+        let key = ClientKey::generate().unwrap();
         let headers = VouchClient::<ReqwestClient>::sign_request_headers(&SignRequestParams {
             method: "GET",
             url: "https://example.com/v1/keys",

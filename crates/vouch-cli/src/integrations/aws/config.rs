@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use ini::Ini;
 use std::path::PathBuf;
 use vouch_cli::{tr, tr_args};
+use vouch_common::{env, fs, paths};
 
 /// Represents an AWS profile configuration.
 #[derive(Debug, Clone, Default)]
@@ -94,7 +95,7 @@ impl AwsConfig {
             // in `env_region` — an empty region would otherwise short-circuit
             // the fallback chain and build endpoints like
             // `https://sts..amazonaws.com`.
-            region: vouch_common::env::non_empty(section.get("region").map(|s| s.to_string())),
+            region: env::non_empty(section.get("region").map(|s| s.to_string())),
             output: section.get("output").map(|s| s.to_string()),
         })
     }
@@ -160,7 +161,7 @@ impl AwsConfig {
             name,
             credential_process: props.get("credential_process").map(|s| s.to_string()),
             // Bare `region =` means unset — see `get_profile`.
-            region: vouch_common::env::non_empty(props.get("region").map(|s| s.to_string())),
+            region: env::non_empty(props.get("region").map(|s| s.to_string())),
             output: props.get("output").map(|s| s.to_string()),
         }
     }
@@ -240,7 +241,7 @@ impl AwsConfig {
                 value = self.path.display().to_string()
             )
         })?;
-        vouch_common::fs::atomic_write(&self.path, &buf).with_context(|| {
+        fs::atomic_write(&self.path, &buf).with_context(|| {
             tr_args!(
                 "err-failed-write-5",
                 value = self.path.display().to_string()
@@ -277,7 +278,7 @@ impl AwsConfig {
     /// the config — the AWS CLI offers no equivalent command-line flag or
     /// profile setting.
     pub(crate) fn default_path() -> Result<PathBuf> {
-        let home = vouch_common::paths::home_dir();
+        let home = paths::home_dir();
         let env_file = std::env::var_os("AWS_CONFIG_FILE").filter(|v| !v.is_empty());
         Self::config_path_from(env_file.as_deref(), home.as_deref())
             .context(tr!("err-could-not-determine-home-directory"))

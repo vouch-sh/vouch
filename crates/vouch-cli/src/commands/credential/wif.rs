@@ -31,9 +31,11 @@ use serde::Deserialize;
 use vouch_cli::{tr, tr_args};
 
 use crate::config::Config;
+use crate::server_url::ServerUrl;
 use crate::session::resolve_token;
 use vouch_cli::fapi::key_store::load_client_key;
 use vouch_cli::fapi::{ClientAssertionBuilder, ClientKey, DpopProofBuilder};
+use vouch_common::http;
 use vouch_common::protocol::{
     CONTENT_TYPE_FORM_URLENCODED, ERROR_USE_DPOP_NONCE, GRANT_TYPE_TOKEN_EXCHANGE, HEADER_DPOP,
     HEADER_DPOP_NONCE, TOKEN_TYPE_ACCESS_TOKEN, TOKEN_TYPE_ID_TOKEN,
@@ -85,7 +87,7 @@ enum ExchangeOutcome {
 /// `None`, the server defaults to its own issuer URL. Returns the issued ID
 /// token paired with its `expires_in` (seconds), when the server reports one.
 pub(crate) async fn fetch_assertion(
-    server: &crate::server_url::ServerUrl,
+    server: &ServerUrl,
     audience: Option<&str>,
 ) -> Result<(SecretString, Option<u64>)> {
     let config = Config::load().context(tr!("err-failed-load-vouch-config"))?;
@@ -97,9 +99,8 @@ pub(crate) async fn fetch_assertion(
     let subject_token = resolve_token().await?;
 
     let endpoint = format!("{server}/oauth/token");
-    let http =
-        vouch_common::http::credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
-            .context(tr!("err-failed-create-http-client"))?;
+    let http = http::credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
+        .context(tr!("err-failed-create-http-client"))?;
 
     // First attempt without a nonce. A DPoP-bound client at the token
     // endpoint always gets `use_dpop_nonce` on the first try (RFC 9449),
@@ -279,9 +280,8 @@ pub(crate) async fn exchange(
     body: &serde_json::Value,
     label: &str,
 ) -> Result<(SecretString, String)> {
-    let client =
-        vouch_common::http::credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
-            .context(tr!("err-failed-create-http-client"))?;
+    let client = http::credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
+        .context(tr!("err-failed-create-http-client"))?;
 
     let payload =
         serde_json::to_vec(body).context(tr!("err-failed-serialize-token-exchange-request"))?;

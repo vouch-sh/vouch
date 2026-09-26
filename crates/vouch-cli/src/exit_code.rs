@@ -6,6 +6,9 @@
 
 use std::process::ExitCode;
 
+#[cfg(unix)]
+use vouch_agent::AgentError;
+
 /// General or unknown error.
 pub(crate) const GENERAL: u8 = 1;
 
@@ -217,14 +220,12 @@ pub(crate) fn classify(err: &anyhow::Error) -> ExitCode {
 
     // 2. Check for agent-specific error types in the chain
     #[cfg(unix)]
-    if let Some(agent_err) = err.downcast_ref::<vouch_agent::AgentError>() {
+    if let Some(agent_err) = err.downcast_ref::<AgentError>() {
         return match agent_err {
-            vouch_agent::AgentError::SessionExpired | vouch_agent::AgentError::NotAuthenticated => {
+            AgentError::SessionExpired | AgentError::NotAuthenticated => {
                 ExitCode::from(NOT_AUTHENTICATED)
             }
-            vouch_agent::AgentError::NotRunning | vouch_agent::AgentError::Connection(_) => {
-                ExitCode::from(CONFIG_ERROR)
-            }
+            AgentError::NotRunning | AgentError::Connection(_) => ExitCode::from(CONFIG_ERROR),
             _ => ExitCode::from(GENERAL),
         };
     }

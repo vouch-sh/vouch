@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 use crate::utils::ensure_secure_dir;
 use vouch_common::fs::write_secure_file;
+use vouch_common::paths;
 
 // ============================================================================
 // Kubeconfig Types
@@ -129,8 +130,7 @@ pub(crate) fn default_kubeconfig_path() -> Result<PathBuf> {
         return Ok(path);
     }
 
-    let home =
-        vouch_common::paths::home_dir().with_context(|| vouch_cli::tr!("setup-err-no-home"))?;
+    let home = paths::home_dir().with_context(|| vouch_cli::tr!("setup-err-no-home"))?;
     Ok(home.join(".kube").join("config"))
 }
 

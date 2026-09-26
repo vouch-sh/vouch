@@ -15,8 +15,10 @@
 use anyhow::{Context, Result};
 
 use crate::config::Config;
+use crate::exit_code::CliError;
 use crate::install_path::resolve_install_path;
 use crate::integrations::aws::{ProfileOverride, resolve_vouch_profile};
+use crate::{git_config, utils};
 
 /// Git config patterns for CodeCommit credential helper by partition.
 ///
@@ -98,7 +100,7 @@ pub(crate) async fn run(
     };
 
     // Symlink path for git-remote-codecommit
-    let symlink_path = crate::utils::vouch_helper_path("git-remote-codecommit")?;
+    let symlink_path = utils::vouch_helper_path("git-remote-codecommit")?;
 
     if configure {
         // Check for conflicting credential helpers
@@ -112,10 +114,10 @@ pub(crate) async fn run(
             let config_key = format!("credential.{pattern}.helper");
             let use_http_path_key = format!("credential.{pattern}.useHttpPath");
 
-            if !crate::git_config::set_global(&config_key, &helper_command)
+            if !git_config::set_global(&config_key, &helper_command)
                 .with_context(|| tr!("setup-codecommit-err-run-config"))?
             {
-                return Err(crate::exit_code::CliError::ConfigError(tr_args!(
+                return Err(CliError::ConfigError(tr_args!(
                     "setup-codecommit-err-helper-pattern",
                     pattern = pattern,
                 ))
@@ -123,10 +125,10 @@ pub(crate) async fn run(
             }
 
             // useHttpPath is critical — git must pass the full path (region + repo)
-            if !crate::git_config::set_global(&use_http_path_key, "true")
+            if !git_config::set_global(&use_http_path_key, "true")
                 .with_context(|| tr!("setup-codecommit-err-run-config"))?
             {
-                return Err(crate::exit_code::CliError::ConfigError(tr_args!(
+                return Err(CliError::ConfigError(tr_args!(
                     "setup-codecommit-err-http-path",
                     pattern = pattern,
                 ))
@@ -208,7 +210,7 @@ pub(crate) async fn run(
 /// Returns an error when the profile name is not one the AWS CLI could address.
 fn credential_helper_command(vouch_path: &std::path::Path, profile_name: &str) -> Result<String> {
     reject_unaddressable_profile(profile_name)?;
-    let quoted_path = crate::utils::shell_single_quote(&vouch_path.display().to_string());
+    let quoted_path = utils::shell_single_quote(&vouch_path.display().to_string());
     Ok(format!(
         "!{quoted_path} credential codecommit --profile {profile_name}"
     ))
@@ -228,7 +230,7 @@ fn reject_unaddressable_profile(profile_name: &str) -> Result<()> {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '@' | '+' | '='));
 
     if !addressable {
-        return Err(crate::exit_code::CliError::ConfigError(format!(
+        return Err(CliError::ConfigError(format!(
             "AWS profile name {profile_name:?} cannot be used with CodeCommit.\n\
              Use a name of letters, digits and _-.@+= — the AWS CLI cannot \
              address profiles containing spaces or other characters either."
@@ -250,14 +252,14 @@ fn create_remote_helper_symlink(
         "@echo off\r\nset VOUCH_GIT_REMOTE_CODECOMMIT=1\r\n\"{}\" %*\r\n",
         vouch_path.display()
     );
-    crate::utils::create_symlink_with_fallback(vouch_path, symlink_path, &batch_content)
+    utils::create_symlink_with_fallback(vouch_path, symlink_path, &batch_content)
 }
 
 /// Detect credential helpers that may conflict with Vouch.
 fn detect_conflicting_helpers() {
     use vouch_cli::tr_println;
 
-    for line in crate::git_config::get_regexp_global(r"credential.*codecommit.*helper") {
+    for line in git_config::get_regexp_global(r"credential.*codecommit.*helper") {
         // Skip entries that already use vouch. Match the bare binary name, not
         // "vouch credential codecommit": git returns the value with the path's
         // closing quote attached (`"…/vouch" credential codecommit`) and the

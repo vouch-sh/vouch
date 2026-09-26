@@ -4,6 +4,8 @@
 //! no arguments and flags nonzero codes) and clap's usage-error code 2 on Unix.
 
 #![expect(clippy::unwrap_used, reason = "test code")]
+// Own-crate items are imported with `use`; see `absolute-paths-allowed-crates` in `.clippy.toml`.
+#![deny(clippy::absolute_paths)]
 
 #[test]
 fn bare_invocation_prints_help_with_platform_exit_code() {

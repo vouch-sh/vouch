@@ -9,6 +9,8 @@
     clippy::print_stderr,
     reason = "stdout and stderr are this binary's user interface"
 )]
+// Own-crate items are imported with `use`; see `absolute-paths-allowed-crates` in `.clippy.toml`.
+#![deny(clippy::absolute_paths)]
 
 pub mod fapi;
 pub mod fido2;
