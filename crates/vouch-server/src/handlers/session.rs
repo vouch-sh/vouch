@@ -5,9 +5,13 @@ use crate::AppState;
 use crate::arrival::ArrivalTime;
 use crate::crypto::hash_token;
 use crate::db;
-use crate::error::ServiceError;
-use crate::services::auth::ValidatedResourceToken;
+use crate::error::{OAuthErrorCode, ServiceError};
+use crate::http::strip_auth_scheme;
+use crate::services::auth::{self, AccessTokenClaims, DecodedToken, ValidatedResourceToken};
 use crate::services::keys as key_svc;
+use crate::services::oidc::dpop::{self, DpopError};
+use crate::services::oidc::mtls::ClientCertificate;
+use crate::services::oidc::resource;
 use axum::extract::FromRequestParts;
 use axum::http::StatusCode;
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
@@ -86,7 +90,7 @@ async fn extract_resource_token(
     jar: &CookieJar,
     method: &str,
     uri: &str,
-    client_cert: Option<&crate::services::oidc::mtls::ClientCertificate>,
+    client_cert: Option<&ClientCertificate>,
     arrival: ArrivalTime,
 ) -> Result<ValidatedResourceToken, ServiceError> {
     // Track DPoP source claim (custom claim for MCP attribution)
@@ -97,8 +101,8 @@ async fn extract_resource_token(
 
     // 2. Decode as ES256 at+jwt using the OIDC signing key
     let config = state.config();
-    let decoded = crate::services::auth::decode_token(&token, &state.oidc_key, &config.base_url)
-        .ok_or_else(|| {
+    let decoded =
+        auth::decode_token(&token, &state.oidc_key, &config.base_url).ok_or_else(|| {
             ServiceError::api(
                 StatusCode::UNAUTHORIZED,
                 "invalid_token",
@@ -106,7 +110,7 @@ async fn extract_resource_token(
             )
         })?;
 
-    let crate::services::auth::DecodedToken::AccessToken(access_claims) = decoded;
+    let DecodedToken::AccessToken(access_claims) = decoded;
 
     // 2b. Audience coverage for resource-narrowed tokens.
     enforce_audience_coverage(&access_claims, &config.base_url, uri)?;
@@ -138,7 +142,7 @@ async fn extract_resource_token(
                     .and_then(|v| v.to_str().ok());
                 if let Some(proof) = dpop_header {
                     let full_uri = format!("{}{}", config.base_url, uri);
-                    match crate::services::oidc::dpop::validate_dpop_at_resource(
+                    match dpop::validate_dpop_at_resource(
                         &token,
                         proof,
                         method,
@@ -163,7 +167,7 @@ async fn extract_resource_token(
                             }
                             dpop_source = validated.source;
                         }
-                        Err(e @ crate::services::oidc::dpop::DpopError::Database(_)) => {
+                        Err(e @ DpopError::Database(_)) => {
                             tracing::error!("DPoP backend failure: {e}");
                             return Err(ServiceError::api(
                                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -171,7 +175,7 @@ async fn extract_resource_token(
                                 "DPoP validation backend error",
                             ));
                         }
-                        Err(crate::services::oidc::dpop::DpopError::UseNonce(nonce)) => {
+                        Err(DpopError::UseNonce(nonce)) => {
                             // RFC 9449 §7.2: When the server requires (or
                             // reissues) a nonce, the error response MUST carry
                             // a fresh `DPoP-Nonce` header so the client can
@@ -180,7 +184,7 @@ async fn extract_resource_token(
                             // the fresh nonce lets the caller retry once.
                             return Err(ServiceError::api_with_header(
                                 StatusCode::UNAUTHORIZED,
-                                crate::error::OAuthErrorCode::UseDpopNonce.as_str(),
+                                OAuthErrorCode::UseDpopNonce.as_str(),
                                 "Authorization server requires nonce in DPoP proof",
                                 (protocol::HEADER_DPOP_NONCE, nonce.as_str()),
                             ));
@@ -289,16 +293,12 @@ async fn extract_resource_token(
 /// [`crate::services::oidc::resource::audience_covers_resource`] accepts
 /// the audience for this deployment and request path.
 fn enforce_audience_coverage(
-    access_claims: &crate::services::auth::AccessTokenClaims,
+    access_claims: &AccessTokenClaims,
     base_url: &str,
     uri: &str,
 ) -> Result<(), ServiceError> {
     if access_claims.aud == access_claims.client_id
-        || crate::services::oidc::resource::audience_covers_resource(
-            &access_claims.aud,
-            base_url,
-            uri,
-        )
+        || resource::audience_covers_resource(&access_claims.aud, base_url, uri)
     {
         return Ok(());
     }
@@ -561,13 +561,10 @@ fn extract_token_from_request(
 
     // Check Authorization header
     if let Some(auth_value) = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()) {
-        if let Some(token) = crate::http::strip_auth_scheme(auth_value, protocol::AUTH_SCHEME_DPOP)
-        {
+        if let Some(token) = strip_auth_scheme(auth_value, protocol::AUTH_SCHEME_DPOP) {
             return Ok((token.to_string(), AuthScheme::DPoP));
         }
-        if let Some(token) =
-            crate::http::strip_auth_scheme(auth_value, protocol::AUTH_SCHEME_BEARER)
-        {
+        if let Some(token) = strip_auth_scheme(auth_value, protocol::AUTH_SCHEME_BEARER) {
             return Ok((token.to_string(), AuthScheme::Bearer));
         }
     }
@@ -627,7 +624,7 @@ pub(crate) async fn extract_user_with_org(
     jar: &CookieJar,
     method: &str,
     uri: &str,
-    client_cert: Option<&crate::services::oidc::mtls::ClientCertificate>,
+    client_cert: Option<&ClientCertificate>,
     arrival: ArrivalTime,
 ) -> Result<(db::User, String), ServiceError> {
     let token =
@@ -658,7 +655,7 @@ pub(crate) async fn extract_org_admin(
     jar: &CookieJar,
     method: &str,
     uri: &str,
-    client_cert: Option<&crate::services::oidc::mtls::ClientCertificate>,
+    client_cert: Option<&ClientCertificate>,
     arrival: ArrivalTime,
 ) -> Result<(db::User, String), ServiceError> {
     let (user, org_id) =

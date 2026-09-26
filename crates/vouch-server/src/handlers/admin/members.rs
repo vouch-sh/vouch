@@ -14,9 +14,11 @@ use axum_extra::extract::cookie::CookieJar;
 use std::sync::Arc;
 
 use super::{PaginationParams, extract_admin_and_target};
+use crate::db::Refusal;
 use crate::handlers::extractors::{AdminPage, OrgAdmin};
 use crate::handlers::session::AuthContext;
 use crate::handlers::{ValidPath, ValidUuid};
+use crate::services::auth::{self, DeactivationError};
 
 /// Page size for the members list.
 const MEMBERS_PAGE_SIZE: u64 = 50;
@@ -221,7 +223,7 @@ pub(crate) async fn deactivate_member(
     // the active=false write commits. If the write landed first and revocation
     // then failed, the member would be left inactive with live SSH certificates
     // (#1116); revoking first leaves them active and retryable on failure.
-    let updated = match crate::services::auth::revoke_then_persist(
+    let updated = match auth::revoke_then_persist(
         &state,
         &target_id,
         "User deactivated by admin",
@@ -242,8 +244,8 @@ pub(crate) async fn deactivate_member(
     .await
     {
         Ok(updated) => updated,
-        Err(crate::services::auth::DeactivationError::Revoke(err)) => return Err(err),
-        Err(crate::services::auth::DeactivationError::Persist(err)) => {
+        Err(DeactivationError::Revoke(err)) => return Err(err),
+        Err(DeactivationError::Persist(err)) => {
             if matches!(err, db::MemberDowngradeError::LastAdmin) {
                 // `revoke_then_persist` already committed the target's
                 // session deletions, SSH-cert revocations, and GitHub
@@ -266,7 +268,7 @@ pub(crate) async fn deactivate_member(
                             target_user_id: &target_id,
                             admin_user_id: &admin.id,
                             keys_revoked: None,
-                            refusal: Some(crate::db::Refusal::LastAdmin),
+                            refusal: Some(Refusal::LastAdmin),
                         },
                     )
                     .await;
@@ -363,7 +365,7 @@ pub(crate) async fn revoke_member_credentials(
     // `key_count` is computed from the in-transaction authenticator read below
     // (not a pre-revocation snapshot), so the `AdminRevokeCredentials` audit
     // `keys_revoked` reflects the set this request actually deleted.
-    let key_count = crate::services::auth::revoke_then_persist(
+    let key_count = auth::revoke_then_persist(
         &state,
         &target_id,
         "Credentials revoked by admin",
@@ -421,8 +423,8 @@ pub(crate) async fn revoke_member_credentials(
     )
     .await
     .map_err(|e| match e {
-        crate::services::auth::DeactivationError::Revoke(err) => err,
-        crate::services::auth::DeactivationError::Persist(err) => err,
+        DeactivationError::Revoke(err) => err,
+        DeactivationError::Persist(err) => err,
     })?;
 
     let data = AdminMemberActionData {
@@ -474,13 +476,7 @@ pub(crate) async fn remove_member(
     // Withdraw access before deleting. Certificate revocation in particular
     // must happen first: delete_user destroys the issued cert records, which
     // would make those certificates permanently unrevocable.
-    crate::services::auth::revoke_user_access(
-        &state,
-        &target_id,
-        "User removed by admin",
-        &admin.id,
-    )
-    .await?;
+    auth::revoke_user_access(&state, &target_id, "User removed by admin", &admin.id).await?;
 
     let deleted = match db::delete_user(&state.store, &target_id, db::LastAdminGuard::Enforce).await
     {
@@ -509,7 +505,7 @@ pub(crate) async fn remove_member(
                         target_user_id: &target_id,
                         admin_user_id: &admin.id,
                         keys_revoked: None,
-                        refusal: Some(crate::db::Refusal::LastAdmin),
+                        refusal: Some(Refusal::LastAdmin),
                     },
                 )
                 .await;
@@ -591,12 +587,15 @@ fn member_gone() -> ServiceError {
 mod tests {
     use axum::http::StatusCode;
 
-    use crate::test_utils::*;
+    use crate::db::{
+        self, AuditEventFilter, AuthorizeDeviceAuthParams, CreateAuthenticatorParams,
+        DeviceAuthState, User,
+    };
+    use crate::infra::router;
+    use crate::test_utils::{self, *};
 
     /// Helper: create an org, admin user with session, and a target member.
-    async fn setup_admin_and_member(
-        state: &crate::AppState,
-    ) -> (crate::db::User, String, crate::db::User) {
+    async fn setup_admin_and_member(state: &crate::AppState) -> (User, String, User) {
         let org = create_test_org(&state.store, "example.com").await;
         let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
         let auth_id = create_test_authenticator(&state.store, &admin.id).await;
@@ -639,7 +638,7 @@ mod tests {
         .await;
 
         // Deactivate the admin
-        crate::db::update_user_active_status(&state.store, &admin.id, false)
+        db::update_user_active_status(&state.store, &admin.id, false)
             .await
             .unwrap();
 
@@ -672,7 +671,7 @@ mod tests {
         .await;
 
         // Deactivate the user
-        crate::db::update_user_active_status(&state.store, &admin.id, false)
+        db::update_user_active_status(&state.store, &admin.id, false)
             .await
             .unwrap();
 
@@ -882,8 +881,7 @@ mod tests {
         .await;
 
         let resp =
-            crate::test_utils::http_get_full(&app, "/admin", &[("Cookie", &admin_cookie(&token))])
-                .await;
+            test_utils::http_get_full(&app, "/admin", &[("Cookie", &admin_cookie(&token))]).await;
 
         assert_eq!(
             resp.status,
@@ -930,7 +928,7 @@ mod tests {
             "a signed-in admin promotes without a key ceremony: {body}"
         );
 
-        let promoted = crate::db::get_user_by_id(&state.store, &target.id)
+        let promoted = db::get_user_by_id(&state.store, &target.id)
             .await
             .expect("target lookup")
             .expect("target exists");
@@ -1062,7 +1060,7 @@ mod tests {
         assert_eq!(status, StatusCode::SEE_OTHER, "Deactivate should succeed");
 
         // Verify user is now inactive
-        let updated = crate::db::get_user_by_id(&state.store, &member.id)
+        let updated = db::get_user_by_id(&state.store, &member.id)
             .await
             .unwrap()
             .unwrap();
@@ -1076,7 +1074,7 @@ mod tests {
         let cookie = admin_cookie(&token);
 
         // Deactivate first
-        crate::db::update_user_active_status(&state.store, &member.id, false)
+        db::update_user_active_status(&state.store, &member.id, false)
             .await
             .unwrap();
 
@@ -1090,7 +1088,7 @@ mod tests {
 
         assert_eq!(status, StatusCode::SEE_OTHER, "Activate should succeed");
 
-        let updated = crate::db::get_user_by_id(&state.store, &member.id)
+        let updated = db::get_user_by_id(&state.store, &member.id)
             .await
             .unwrap()
             .unwrap();
@@ -1130,7 +1128,7 @@ mod tests {
 
         assert_eq!(status, StatusCode::SEE_OTHER, "Demote should succeed");
 
-        let updated = crate::db::get_user_by_id(&state.store, &admin2.id)
+        let updated = db::get_user_by_id(&state.store, &admin2.id)
             .await
             .unwrap()
             .unwrap();
@@ -1154,9 +1152,7 @@ mod tests {
 
         assert_eq!(status, StatusCode::SEE_OTHER, "Remove should succeed");
 
-        let deleted = crate::db::get_user_by_id(&state.store, &member_id)
-            .await
-            .unwrap();
+        let deleted = db::get_user_by_id(&state.store, &member_id).await.unwrap();
         assert!(deleted.is_none(), "User should be deleted");
     }
 
@@ -1214,9 +1210,9 @@ mod tests {
 
         let events = state
             .audit
-            .query_events(&crate::db::AuditEventFilter {
+            .query_events(&AuditEventFilter {
                 user_id: Some(admin.id.clone()),
-                ..crate::db::AuditEventFilter::default()
+                ..AuditEventFilter::default()
             })
             .await
             .expect("query audit events");
@@ -1252,7 +1248,7 @@ mod tests {
         let expires_at = jiff::Timestamp::now()
             .checked_add(jiff::Span::new().hours(8))
             .expect("future timestamp");
-        crate::db::record_ssh_certificate_issuance(
+        db::record_ssh_certificate_issuance(
             &state.store,
             42_000_001,
             user_id,
@@ -1273,12 +1269,11 @@ mod tests {
         record_test_ssh_cert(&state, &member.id).await;
 
         // Pre-condition: one issued cert, zero revoked.
-        let issued_before =
-            crate::db::get_issued_ssh_certificates_for_user(&state.store, &member.id)
-                .await
-                .unwrap();
+        let issued_before = db::get_issued_ssh_certificates_for_user(&state.store, &member.id)
+            .await
+            .unwrap();
         assert_eq!(issued_before.len(), 1, "setup: one cert should be issued");
-        let revoked_before = crate::db::get_revoked_ssh_certificates(&state.store)
+        let revoked_before = db::get_revoked_ssh_certificates(&state.store)
             .await
             .unwrap();
         assert!(revoked_before.is_empty(), "setup: no revocations yet");
@@ -1294,7 +1289,7 @@ mod tests {
         assert_eq!(status, StatusCode::SEE_OTHER, "deactivate should succeed");
 
         // The cert should now appear in the revocation list.
-        let revoked = crate::db::get_revoked_ssh_certificates(&state.store)
+        let revoked = db::get_revoked_ssh_certificates(&state.store)
             .await
             .unwrap();
         assert_eq!(
@@ -1316,10 +1311,9 @@ mod tests {
 
         record_test_ssh_cert(&state, &member.id).await;
 
-        let issued_before =
-            crate::db::get_issued_ssh_certificates_for_user(&state.store, &member.id)
-                .await
-                .unwrap();
+        let issued_before = db::get_issued_ssh_certificates_for_user(&state.store, &member.id)
+            .await
+            .unwrap();
         assert_eq!(issued_before.len(), 1, "setup: one cert should be issued");
 
         let (status, _body) = http_post_form(
@@ -1336,7 +1330,7 @@ mod tests {
             "revoke-credentials should succeed"
         );
 
-        let revoked = crate::db::get_revoked_ssh_certificates(&state.store)
+        let revoked = db::get_revoked_ssh_certificates(&state.store)
             .await
             .unwrap();
         assert_eq!(
@@ -1400,10 +1394,10 @@ mod tests {
                     // refresh-token clear runs — the last sub-step of
                     // `revoke_user_access`. With the fix this point
                     // precedes the auth-deletion transaction.
-                    let auths = crate::db::get_authenticators_for_user(&writer, &doc_id)
+                    let auths = db::get_authenticators_for_user(&writer, &doc_id)
                         .await
                         .expect("list auths");
-                    let revoked = crate::db::get_revoked_ssh_certificates(&writer)
+                    let revoked = db::get_revoked_ssh_certificates(&writer)
                         .await
                         .expect("list revoked");
                     *snap.lock().expect("snap lock") = Some((auths.len(), revoked.len()));
@@ -1456,7 +1450,7 @@ mod tests {
 
         // Post-condition: the auth-deletion (the persist closure) did land
         // after revocation succeeded.
-        let remaining = crate::db::get_authenticators_for_user(&state.store, &member.id)
+        let remaining = db::get_authenticators_for_user(&state.store, &member.id)
             .await
             .unwrap();
         assert!(
@@ -1464,7 +1458,7 @@ mod tests {
             "all member authenticators must be deleted after a successful revoke"
         );
 
-        let revoked = crate::db::get_revoked_ssh_certificates(&state.store)
+        let revoked = db::get_revoked_ssh_certificates(&state.store)
             .await
             .unwrap();
         assert_eq!(
@@ -1532,9 +1526,9 @@ mod tests {
                     // BEFORE the persist closure's delete transaction. The
                     // credential_id is the controlled one above so the
                     // post-request check resolves it via the login path.
-                    let _ = crate::db::create_authenticator(
+                    let _ = db::create_authenticator(
                         &writer,
-                        &crate::db::CreateAuthenticatorParams {
+                        &CreateAuthenticatorParams {
                             user_id: &doc_id,
                             name: "Hook-Enrolled Key",
                             credential_id: cred.as_slice(),
@@ -1575,7 +1569,7 @@ mod tests {
 
         // The fix: the concurrently-enrolled authenticator must be deleted,
         // not left live. Pre-fix this assertion fails — one survivor remains.
-        let remaining = crate::db::get_authenticators_for_user(&state.store, &member.id)
+        let remaining = db::get_authenticators_for_user(&state.store, &member.id)
             .await
             .unwrap();
         assert!(
@@ -1590,12 +1584,10 @@ mod tests {
         // `browser_login_complete` uses at `db/authenticators.rs:120`). The fix
         // deletes the survivor, so a fresh login attempt with this credential
         // would find no authenticator — closing the re-authentication bypass.
-        let gone = crate::db::get_authenticator_by_credential_id(
-            &state.store,
-            survivor_credential_id.as_slice(),
-        )
-        .await
-        .unwrap();
+        let gone =
+            db::get_authenticator_by_credential_id(&state.store, survivor_credential_id.as_slice())
+                .await
+                .unwrap();
         assert!(
             gone.is_none(),
             "the survivor's credential_id must not resolve after revocation — \
@@ -1607,9 +1599,9 @@ mod tests {
         // the completeness signal the pre-fix event lacked.
         let event = state
             .audit
-            .query_events(&crate::db::AuditEventFilter {
+            .query_events(&AuditEventFilter {
                 event_types: Some(vec!["admin_revoke_credentials".to_string()]),
-                ..crate::db::AuditEventFilter::default()
+                ..AuditEventFilter::default()
             })
             .await
             .expect("query audit events");
@@ -1631,7 +1623,7 @@ mod tests {
         // The handler never flips `active` — that is by design (#1116), and it
         // is exactly why a surviving authenticator is a security bypass rather
         // than a no-op. Assert it here to pin the impact the fix closes.
-        let updated = crate::db::get_user_by_id(&state.store, &member.id)
+        let updated = db::get_user_by_id(&state.store, &member.id)
             .await
             .unwrap()
             .expect("member still exists");
@@ -1679,7 +1671,7 @@ mod tests {
         // the in-transaction stale-once seam (the only test seam that forces
         // the persist closure's `with_dsql_retry!` to retry). The modify hook
         // for the concurrent enrollment is installed here.
-        let mut state = crate::test_utils::build_test_app_state(Vec::new(), move |store| {
+        let mut state = test_utils::build_test_app_state(Vec::new(), move |store| {
             let writer = store.clone();
             store.set_modify_test_hook(Arc::new(move |doc_id: &str, attempt: u32| {
                 let writer = writer.clone();
@@ -1692,9 +1684,9 @@ mod tests {
                     if !is_target || attempt != 0 {
                         return;
                     }
-                    let _ = crate::db::create_authenticator(
+                    let _ = db::create_authenticator(
                         &writer,
-                        &crate::db::CreateAuthenticatorParams {
+                        &CreateAuthenticatorParams {
                             user_id: &doc_id,
                             name: "Retry Hook Key",
                             credential_id: cred.as_slice(),
@@ -1724,7 +1716,7 @@ mod tests {
         // conflict when the stale-once seam bumps this doc's version
         // mid-transaction, forcing `with_dsql_retry!` to retry the cascade.
         let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().unwrap();
-        let da_id = crate::db::create_device_auth_request(
+        let da_id = db::create_device_auth_request(
             &state.store,
             "retry-seam-hash",
             "RETRY-UCODE",
@@ -1734,9 +1726,9 @@ mod tests {
         )
         .await
         .unwrap();
-        crate::db::authorize_device_auth(
+        db::authorize_device_auth(
             &state.store,
-            crate::db::AuthorizeDeviceAuthParams {
+            AuthorizeDeviceAuthParams {
                 id: &da_id,
                 user_id: &member.id,
                 user_email: &member.email,
@@ -1761,8 +1753,8 @@ mod tests {
         // shared `store` field, and `store.begin()` propagates it into each
         // transaction the handler opens).
         let config = state.config();
-        let app = crate::infra::router::build_app(state.clone(), &config)
-            .expect("Failed to build test app router");
+        let app =
+            router::build_app(state.clone(), &config).expect("Failed to build test app router");
 
         let cookie = admin_cookie(&token);
         let (status, body) = http_post_form(
@@ -1782,7 +1774,7 @@ mod tests {
         // The fix re-reads authenticators on the live transaction inside
         // `with_dsql_retry!`, so the hook-enrolled authenticator is deleted
         // on the retried attempt — 0 survivors. Pre-fix this leaves 1.
-        let remaining = crate::db::get_authenticators_for_user(&state.store, &member.id)
+        let remaining = db::get_authenticators_for_user(&state.store, &member.id)
             .await
             .unwrap();
         assert!(
@@ -1794,12 +1786,10 @@ mod tests {
 
         // Login path can no longer resolve the survivor's credential — the
         // re-read on retry deleted it.
-        let gone = crate::db::get_authenticator_by_credential_id(
-            &state.store,
-            survivor_credential_id.as_slice(),
-        )
-        .await
-        .unwrap();
+        let gone =
+            db::get_authenticator_by_credential_id(&state.store, survivor_credential_id.as_slice())
+                .await
+                .unwrap();
         assert!(
             gone.is_none(),
             "under a forced retry, the survivor's credential_id must not resolve"
@@ -1809,9 +1799,9 @@ mod tests {
         // (both keys), not the pre-revocation snapshot size (one).
         let event = state
             .audit
-            .query_events(&crate::db::AuditEventFilter {
+            .query_events(&AuditEventFilter {
                 event_types: Some(vec!["admin_revoke_credentials".to_string()]),
-                ..crate::db::AuditEventFilter::default()
+                ..AuditEventFilter::default()
             })
             .await
             .expect("query audit events");
@@ -1829,16 +1819,16 @@ mod tests {
         // — the guarded `update_by_index` landed via `with_dsql_retry!`,
         // transitioning the `Authorized` row to `Denied` (the detach sets
         // `authenticator_id = None` and `Authorized → Denied`).
-        let da = crate::db::get_device_auth_by_id(&state.store, &da_id)
+        let da = db::get_device_auth_by_id(&state.store, &da_id)
             .await
             .unwrap()
             .expect("device-auth doc still exists (cascade detaches, never deletes)");
         assert!(
-            matches!(da.state, crate::db::DeviceAuthState::Denied),
+            matches!(da.state, DeviceAuthState::Denied),
             "the retried cascade must detach the device-auth approval (Authorized → Denied)"
         );
 
-        let updated = crate::db::get_user_by_id(&state.store, &member.id)
+        let updated = db::get_user_by_id(&state.store, &member.id)
             .await
             .unwrap()
             .expect("member still exists");
@@ -1932,9 +1922,9 @@ mod tests {
 
             let events = state
                 .audit
-                .query_events(&crate::db::AuditEventFilter {
+                .query_events(&AuditEventFilter {
                     event_types: Some(vec![kind.to_string()]),
-                    ..crate::db::AuditEventFilter::default()
+                    ..AuditEventFilter::default()
                 })
                 .await
                 .expect("query audit events");
@@ -2002,9 +1992,9 @@ mod tests {
 
         let events = state
             .audit
-            .query_events(&crate::db::AuditEventFilter {
+            .query_events(&AuditEventFilter {
                 event_types: Some(vec!["admin_remove_user".to_string()]),
-                ..crate::db::AuditEventFilter::default()
+                ..AuditEventFilter::default()
             })
             .await
             .expect("query audit events");
@@ -2120,7 +2110,7 @@ mod tests {
         let expires_at = jiff::Timestamp::now()
             .checked_add(jiff::Span::new().hours(8))
             .expect("future timestamp");
-        crate::db::record_ssh_certificate_issuance(
+        db::record_ssh_certificate_issuance(
             &state.store,
             42_010_050,
             &admin1.id,
@@ -2130,7 +2120,7 @@ mod tests {
         )
         .await
         .expect("record admin1 issuance");
-        crate::db::record_ssh_certificate_issuance(
+        db::record_ssh_certificate_issuance(
             &state.store,
             42_010_051,
             &admin2.id,
@@ -2147,7 +2137,7 @@ mod tests {
         // — the authoritative floor is the in-transaction count — so this just
         // fixes the starting state.)
         assert!(
-            !crate::db::is_last_active_org_admin(&state.store, &admin2.id)
+            !db::is_last_active_org_admin(&state.store, &admin2.id)
                 .await
                 .expect("count admins for admin2"),
             "setup: admin2 has a second active admin",
@@ -2159,7 +2149,7 @@ mod tests {
             .expect("count admin2 sessions");
         assert!(session_count_before >= 1, "setup: admin2 has a session");
         assert!(
-            crate::db::get_revoked_ssh_certificates(&state.store)
+            db::get_revoked_ssh_certificates(&state.store)
                 .await
                 .expect("list revoked")
                 .is_empty(),
@@ -2207,7 +2197,7 @@ mod tests {
             session_count_after, 0,
             "admin remove revocation must delete the target's sessions before the floor refuses",
         );
-        let revoked = crate::db::get_revoked_ssh_certificates(&state.store)
+        let revoked = db::get_revoked_ssh_certificates(&state.store)
             .await
             .expect("list revoked after");
         assert_eq!(
@@ -2229,7 +2219,7 @@ mod tests {
         // returned before the user-row delete and the org-row OCC), so admin2
         // stays active/admin and is now the floor's only live admin (admin1
         // was deactivated by the hook).
-        let admin2_after = crate::db::get_user_by_id(&state.store, &admin2.id)
+        let admin2_after = db::get_user_by_id(&state.store, &admin2.id)
             .await
             .expect("fetch admin2 after")
             .expect("admin2 record still exists");
@@ -2239,7 +2229,7 @@ mod tests {
         );
         assert!(admin2_after.is_org_admin, "admin2 still admin");
         assert!(
-            crate::db::is_last_active_org_admin(&state.store, &admin2.id)
+            db::is_last_active_org_admin(&state.store, &admin2.id)
                 .await
                 .expect("rerun floor"),
             "admin2 is the last active admin after admin1 was deactivated by the hook",
@@ -2251,9 +2241,9 @@ mod tests {
         // successful removal.
         let events = state
             .audit
-            .query_events(&crate::db::AuditEventFilter {
+            .query_events(&AuditEventFilter {
                 event_types: Some(vec!["admin_remove_user".to_string()]),
-                ..crate::db::AuditEventFilter::default()
+                ..AuditEventFilter::default()
             })
             .await
             .expect("query audit events");
@@ -2373,7 +2363,7 @@ mod tests {
         let expires_at = jiff::Timestamp::now()
             .checked_add(jiff::Span::new().hours(8))
             .expect("future timestamp");
-        crate::db::record_ssh_certificate_issuance(
+        db::record_ssh_certificate_issuance(
             &state.store,
             42_010_060,
             &admin1.id,
@@ -2383,7 +2373,7 @@ mod tests {
         )
         .await
         .expect("record admin1 issuance");
-        crate::db::record_ssh_certificate_issuance(
+        db::record_ssh_certificate_issuance(
             &state.store,
             42_010_061,
             &admin2.id,
@@ -2397,7 +2387,7 @@ mod tests {
         // Sanity: admin2 is not the last active admin, admin2 has a live
         // session, and no cert has been revoked yet.
         assert!(
-            !crate::db::is_last_active_org_admin(&state.store, &admin2.id)
+            !db::is_last_active_org_admin(&state.store, &admin2.id)
                 .await
                 .expect("count admins for admin2"),
             "setup: admin2 has a second active admin",
@@ -2409,7 +2399,7 @@ mod tests {
             .expect("count admin2 sessions");
         assert!(session_count_before >= 1, "setup: admin2 has a session");
         assert!(
-            crate::db::get_revoked_ssh_certificates(&state.store)
+            db::get_revoked_ssh_certificates(&state.store)
                 .await
                 .expect("list revoked")
                 .is_empty(),
@@ -2456,7 +2446,7 @@ mod tests {
             session_count_after, 0,
             "admin deactivate revocation must delete the target's sessions before the floor refuses",
         );
-        let revoked = crate::db::get_revoked_ssh_certificates(&state.store)
+        let revoked = db::get_revoked_ssh_certificates(&state.store)
             .await
             .expect("list revoked after");
         assert_eq!(
@@ -2478,7 +2468,7 @@ mod tests {
         // committed (the floor returned before the compare-and-update), so
         // admin2 stays active/admin and is now the floor's only live admin
         // (admin1 was deactivated by the hook).
-        let admin2_after = crate::db::get_user_by_id(&state.store, &admin2.id)
+        let admin2_after = db::get_user_by_id(&state.store, &admin2.id)
             .await
             .expect("fetch admin2 after")
             .expect("admin2 record still exists");
@@ -2488,7 +2478,7 @@ mod tests {
         );
         assert!(admin2_after.is_org_admin, "admin2 still admin");
         assert!(
-            crate::db::is_last_active_org_admin(&state.store, &admin2.id)
+            db::is_last_active_org_admin(&state.store, &admin2.id)
                 .await
                 .expect("rerun floor"),
             "admin2 is the last active admin after admin1 was deactivated by the hook",
@@ -2500,9 +2490,9 @@ mod tests {
         // successful deactivation.
         let events = state
             .audit
-            .query_events(&crate::db::AuditEventFilter {
+            .query_events(&AuditEventFilter {
                 event_types: Some(vec!["admin_deactivate".to_string()]),
-                ..crate::db::AuditEventFilter::default()
+                ..AuditEventFilter::default()
             })
             .await
             .expect("query audit events");

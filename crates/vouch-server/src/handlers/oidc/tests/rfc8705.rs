@@ -3,7 +3,9 @@
 
 use super::helpers::*;
 use crate::crypto::webauthn_verify::AuthTime;
-use crate::db::DeviceApproval;
+use crate::db::documents::oauth::OAuthClientDoc;
+use crate::db::{self, AuthorizeDeviceAuthParams, DeviceApproval, User};
+use crate::handlers;
 use crate::services::oidc::mtls::parse_client_certificate;
 
 // ========================================================================
@@ -591,7 +593,7 @@ async fn create_private_key_jwt_client_with_cert_binding(
         .expect("DB error")
         .expect("client");
     store
-        .modify::<crate::db::documents::oauth::OAuthClientDoc, _>(&oauth.id, |data| {
+        .modify::<OAuthClientDoc, _>(&oauth.id, |data| {
             data.tls_client_certificate_bound_access_tokens = true;
         })
         .await
@@ -841,7 +843,7 @@ async fn test_rfc8705_id_token_carries_the_same_binding_as_the_access_token() {
 /// concurrent device authorizations within one test.
 async fn setup_authorized_device_for_client(
     state: &std::sync::Arc<crate::AppState>,
-    user: &crate::db::User,
+    user: &User,
     authenticator_id: &str,
     client_id: &str,
     label: &str,
@@ -850,7 +852,7 @@ async fn setup_authorized_device_for_client(
     let expires_at = jiff::Timestamp::now()
         .checked_add(jiff::Span::new().hours(1))
         .expect("device code expiry");
-    let id = crate::db::create_device_auth_request(
+    let id = db::create_device_auth_request(
         &state.store,
         &sha256_base64url(&device_code),
         &format!("MT{label}"),
@@ -860,9 +862,9 @@ async fn setup_authorized_device_for_client(
     )
     .await
     .expect("create device authorization request");
-    crate::db::authorize_device_auth(
+    db::authorize_device_auth(
         &state.store,
-        crate::db::AuthorizeDeviceAuthParams {
+        AuthorizeDeviceAuthParams {
             id: &id,
             user_id: &user.id,
             user_email: &user.email,
@@ -1312,7 +1314,7 @@ async fn mtls_client_with_token(
 async fn session_exists(state: &std::sync::Arc<crate::AppState>, token: &str) -> bool {
     db::get_session_by_token_hash(
         &state.store,
-        &crate::handlers::hash_token(token),
+        &handlers::hash_token(token),
         jiff::Timestamp::now(),
     )
     .await

@@ -26,7 +26,10 @@ use vouch_common::{
 use super::extractors::ValidJson;
 use super::session::{AuthenticatedToken, SteppedUpToken};
 use super::{generate_challenge, validate_registration_attestation};
+use crate::crypto::jwt::{JwtType, StateTokenError, StateTokenSigner};
 use crate::crypto::webauthn_verify;
+use crate::db::documents::audit::RegistrationReplayData;
+use vouch_common::fido2_types::{CoseKey, CredentialId};
 
 // ============================================================================
 // Registration State (stored temporarily between start and complete)
@@ -49,26 +52,19 @@ struct RegistrationState {
 }
 
 impl RegistrationState {
-    async fn encode(
-        &self,
-        signer: &crate::crypto::jwt::StateTokenSigner,
-    ) -> Result<String, crate::crypto::jwt::StateTokenError> {
+    async fn encode(&self, signer: &StateTokenSigner) -> Result<String, StateTokenError> {
         signer
-            .encode_state_token(self, crate::crypto::jwt::JwtType::RegistrationState)
+            .encode_state_token(self, JwtType::RegistrationState)
             .await
     }
 
     async fn decode(
         token: &str,
-        signer: &crate::crypto::jwt::StateTokenSigner,
+        signer: &StateTokenSigner,
         arrival: ArrivalTime,
-    ) -> Result<Self, crate::crypto::jwt::StateTokenError> {
+    ) -> Result<Self, StateTokenError> {
         signer
-            .decode_state_token(
-                token,
-                crate::crypto::jwt::JwtType::RegistrationState,
-                arrival.as_second(),
-            )
+            .decode_state_token(token, JwtType::RegistrationState, arrival.as_second())
             .await
     }
 }
@@ -295,7 +291,7 @@ pub(crate) async fn register_complete(
                 user_id = %checked.reg_state.user_id,
                 "CLI registration state replay rejected"
             );
-            let audit_data = crate::db::documents::audit::RegistrationReplayData {
+            let audit_data = RegistrationReplayData {
                 flow: "cli_register",
                 success: false,
                 error_code: "state_already_used",
@@ -349,8 +345,7 @@ pub(crate) async fn register_complete(
     })?;
 
     // Use server-verified credential_id from authData (not from request body)
-    let verified_cred_id: vouch_common::fido2_types::CredentialId<Raw> =
-        verified.credential_id.into();
+    let verified_cred_id: CredentialId<Raw> = verified.credential_id.into();
 
     // Check for duplicate credential registration
     if let Some(_existing) =
@@ -378,8 +373,7 @@ pub(crate) async fn register_complete(
     let aaguid = validated.aaguid;
 
     // Use server-verified public key from authData
-    let verified_public_key: vouch_common::fido2_types::CoseKey<Raw> =
-        verified.public_key_cose.into();
+    let verified_public_key: CoseKey<Raw> = verified.public_key_cose.into();
 
     // Store the authenticator
     // user_handle is the user_id as bytes (for discoverable credentials)
@@ -557,6 +551,8 @@ mod tests {
     use super::*;
     use crate::crypto::jwt::{JwtType, StateTokenSigner};
     use crate::db::store::GetUserByIdTestHook;
+    use crate::db::{self, User};
+    use crate::services::oidc::ScopeSet;
     use crate::test_utils::TEST_JWT_SECRET;
     use crate::test_utils::*;
     use axum::http::StatusCode;
@@ -796,7 +792,7 @@ mod tests {
         )
         .await;
 
-        crate::db::update_user_active_status(&state.store, &user.id, false)
+        db::update_user_active_status(&state.store, &user.id, false)
             .await
             .expect("deactivate user");
 
@@ -859,7 +855,7 @@ mod tests {
 
     /// Mint a valid `RegistrationState` JWT for `user`, returning it with its
     /// expiry so a caller can check afterwards whether it was consumed.
-    async fn make_reg_state(state: &AppState, user: &crate::db::User) -> (String, i64) {
+    async fn make_reg_state(state: &AppState, user: &User) -> (String, i64) {
         let now = jiff::Timestamp::now();
         let exp = now
             .checked_add(jiff::Span::new().minutes(5))
@@ -924,7 +920,7 @@ mod tests {
     async fn assert_state_unconsumed(state: &AppState, state_jwt: &str, exp: i64) {
         let expires_at = jiff::Timestamp::from_second(exp).expect("valid exp");
         let consume =
-            crate::db::consume_challenge_state_for_test(&state.store, state_jwt, expires_at).await;
+            db::consume_challenge_state_for_test(&state.store, state_jwt, expires_at).await;
         assert!(
             consume.is_ok(),
             "a rejected request consumed the registration state: {consume:?}"
@@ -1079,10 +1075,9 @@ mod tests {
 
         // Pre-consume the state token to simulate prior use.
         let expires_at = jiff::Timestamp::from_second(exp).expect("valid exp");
-        let _claim =
-            crate::db::consume_challenge_state_for_test(&state.store, &state_jwt, expires_at)
-                .await
-                .expect("pre-consume must succeed");
+        let _claim = db::consume_challenge_state_for_test(&state.store, &state_jwt, expires_at)
+            .await
+            .expect("pre-consume must succeed");
 
         // POST to register/complete with the already-consumed state. The field
         // bounds precede the replay check, so the binary fields must be
@@ -1153,7 +1148,7 @@ mod tests {
         let state_jwt = reg_state.encode(signer).await.expect("encode state");
 
         // Admin deactivates the user after the state token was issued.
-        crate::db::update_user_active_status(&state.store, &user.id, false)
+        db::update_user_active_status(&state.store, &user.id, false)
             .await
             .expect("deactivate user");
 
@@ -1415,7 +1410,7 @@ mod tests {
     /// Build a bearer-token session for `user` exactly the way `register_start`
     /// expects (so the test reflects the legitimate CLI flow), plus a
     /// `RegistrationState` JWT bound to a caller-chosen user id.
-    async fn register_complete_session(state: &AppState, email: &str) -> (crate::db::User, String) {
+    async fn register_complete_session(state: &AppState, email: &str) -> (User, String) {
         let user = create_test_user(&state.store, email).await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
         let token = create_test_session_with(
@@ -1432,7 +1427,7 @@ mod tests {
     }
 
     /// Mint a valid `RegistrationState` JWT bound to `user_id`.
-    async fn register_state_for(state: &AppState, user: &crate::db::User) -> (String, i64) {
+    async fn register_state_for(state: &AppState, user: &User) -> (String, i64) {
         let now = jiff::Timestamp::now();
         let exp = now
             .checked_add(jiff::Span::new().minutes(5))
@@ -1504,7 +1499,7 @@ mod tests {
         // *fresh* state JWT.
         let expires_at = jiff::Timestamp::from_second(exp).expect("valid exp");
         let consume =
-            crate::db::consume_challenge_state_for_test(&state.store, &state_jwt, expires_at).await;
+            db::consume_challenge_state_for_test(&state.store, &state_jwt, expires_at).await;
         assert!(
             consume.is_ok(),
             "a rejected mismatch consumed the victim's registration state: {consume:?}"
@@ -1706,7 +1701,7 @@ mod tests {
                 user_id: &user.id,
                 email: &user.email,
                 auth_id: Some(&session_key),
-                scope: Some(crate::services::oidc::ScopeSet::parse("openid")),
+                scope: Some(ScopeSet::parse("openid")),
                 ..Default::default()
             },
         )
@@ -1850,7 +1845,7 @@ mod tests {
 
         // Deactivate WITHOUT deleting the session — the
         // deactivated-with-live-session fixture the sibling tests use.
-        crate::db::update_user_active_status(&state.store, &user.id, false)
+        db::update_user_active_status(&state.store, &user.id, false)
             .await
             .expect("deactivate user");
 
@@ -2192,7 +2187,7 @@ mod tests {
     }
 
     async fn surviving_keys(state: &AppState, user_id: &str) -> usize {
-        crate::db::get_authenticators_for_user(&state.store, user_id)
+        db::get_authenticators_for_user(&state.store, user_id)
             .await
             .expect("list keys")
             .len()
@@ -2416,7 +2411,7 @@ mod tests {
         // `test_register_start_rejects_deactivated_user` (above) uses to
         // exercise the deactivated-with-live-session state that #1151 closed
         // on the production path but the codebase still defends per-handler.
-        crate::db::update_user_active_status(&state.store, &user.id, false)
+        db::update_user_active_status(&state.store, &user.id, false)
             .await
             .expect("deactivate user");
 

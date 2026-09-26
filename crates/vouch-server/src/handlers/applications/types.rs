@@ -10,8 +10,9 @@ use askama::Template;
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
-use super::super::session::AuthContext;
+use crate::db::ClientKeys;
 use crate::filters;
+use crate::handlers::session::AuthContext;
 use crate::infra::i18n::Tr;
 
 // ============================================================================
@@ -69,12 +70,12 @@ impl From<OAuthClient> for ApplicationInfo {
         let jwks = client
             .keys
             .as_ref()
-            .and_then(crate::db::ClientKeys::inline)
+            .and_then(ClientKeys::inline)
             .and_then(|set| serde_json::to_string(set).ok());
         let jwks_uri = client
             .keys
             .as_ref()
-            .and_then(crate::db::ClientKeys::uri)
+            .and_then(ClientKeys::uri)
             .map(String::from);
         Self {
             id: client.id,
@@ -363,7 +364,7 @@ impl From<OAuthClient> for ApplicationResponse {
         let jwks_uri = client
             .keys
             .as_ref()
-            .and_then(crate::db::ClientKeys::uri)
+            .and_then(ClientKeys::uri)
             .map(String::from);
         Self {
             id: client.id,

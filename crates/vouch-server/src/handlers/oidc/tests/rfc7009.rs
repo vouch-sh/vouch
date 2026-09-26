@@ -2,6 +2,8 @@
 //! RFC 7009 — Token Revocation tests.
 
 use super::helpers::*;
+use crate::db::User;
+use crate::services::oidc::ScopeSet;
 
 // ========================================================================
 // Token Revocation Tests (RFC 7009)
@@ -371,7 +373,7 @@ async fn test_rfc7009_revoke_without_email_scope_records_org_visible_logout() {
             user_id: &user.id,
             email: &user.email,
             client_id: Some(&client.client_id),
-            scope: Some(crate::services::oidc::ScopeSet::parse("openid")),
+            scope: Some(ScopeSet::parse("openid")),
             ..Default::default()
         },
     )
@@ -718,7 +720,7 @@ async fn repro_human_revoke_does_full_logout() {
 async fn issue_human_token(
     app: &axum::Router,
     state: &std::sync::Arc<crate::AppState>,
-    user: &crate::db::User,
+    user: &User,
     auth_id: &str,
     client: &TestOAuthClient,
     nonce: &str,
@@ -769,7 +771,7 @@ async fn issue_human_token(
 async fn issue_token_to_private_key_jwt_client(
     app: &axum::Router,
     state: &std::sync::Arc<crate::AppState>,
-    user: &crate::db::User,
+    user: &User,
     authenticator_id: &str,
     jwt_client: &TestOAuthClient,
     pkcs8_bytes: &[u8],
@@ -975,7 +977,7 @@ async fn oauth_token_revoked_events(
 /// Build a test client authorized for the `client_credentials` grant.
 async fn create_test_m2m_client(
     state: &std::sync::Arc<crate::AppState>,
-    owner: &crate::db::User,
+    owner: &User,
     spec: TestClientSpec,
 ) -> TestOAuthClient {
     create_test_client(&state.store, &owner.id, spec).await

@@ -34,13 +34,18 @@ use super::{
     create_session_cookie, extract_session_from_cookie, hash_token,
     validate_registration_attestation,
 };
+use crate::crypto::cose;
+use crate::crypto::jwt::{JwtType, StateTokenError, StateTokenSigner};
+use crate::db::documents::audit::RegistrationReplayData;
+use crate::email::Email;
 use crate::error::ServiceError;
+use crate::infra::{egress, metrics};
 use crate::redact_email;
 use crate::services::auth::{
-    ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenBinding,
-    TokenIssuanceProof, create_oauth_access_token,
+    ClientAuthProof, CreateOAuthTokenParams, GrantProof, NoClientAuth, SenderConstraintProof,
+    TokenBinding, TokenIssuanceProof, create_oauth_access_token,
 };
-use crate::services::idp::IdentityResult;
+use crate::services::idp::{AuthAction, ConfiguredIdp, IdentityResult, oidc};
 use crate::services::keys as key_svc;
 use crate::services::oidc::ScopeSet;
 
@@ -215,24 +220,21 @@ struct BrowserRegistrationState {
 }
 
 impl BrowserRegistrationState {
-    async fn encode(
-        &self,
-        signer: &crate::crypto::jwt::StateTokenSigner,
-    ) -> Result<String, crate::crypto::jwt::StateTokenError> {
+    async fn encode(&self, signer: &StateTokenSigner) -> Result<String, StateTokenError> {
         signer
-            .encode_state_token(self, crate::crypto::jwt::JwtType::BrowserRegistrationState)
+            .encode_state_token(self, JwtType::BrowserRegistrationState)
             .await
     }
 
     async fn decode(
         token: &str,
-        signer: &crate::crypto::jwt::StateTokenSigner,
+        signer: &StateTokenSigner,
         arrival: ArrivalTime,
-    ) -> Result<Self, crate::crypto::jwt::StateTokenError> {
+    ) -> Result<Self, StateTokenError> {
         signer
             .decode_state_token(
                 token,
-                crate::crypto::jwt::JwtType::BrowserRegistrationState,
+                JwtType::BrowserRegistrationState,
                 arrival.as_second(),
             )
             .await
@@ -429,7 +431,7 @@ pub(crate) async fn device_verify_submit(
     //     validated `user_code` is carried as a hidden field, which doubles
     //     as an implicit CSRF token (the attacker must already hold it).
     let base_url = state.config().base_url.clone();
-    let chosen_idp: &crate::services::idp::ConfiguredIdp = match form
+    let chosen_idp: &ConfiguredIdp = match form
         .provider
         .as_deref()
         .map(str::trim)
@@ -513,8 +515,8 @@ pub(crate) async fn device_verify_submit(
     // Use 303 See Other (not 307) to ensure browser converts POST to GET
     // A 307 would preserve the POST method and body, sending user_code to the IdP
     match auth_request.action {
-        crate::services::idp::AuthAction::Redirect { url } => Redirect::to(&url).into_response(),
-        crate::services::idp::AuthAction::PostForm {
+        AuthAction::Redirect { url } => Redirect::to(&url).into_response(),
+        AuthAction::PostForm {
             action_url,
             saml_request,
             relay_state,
@@ -617,13 +619,13 @@ pub(crate) async fn oidc_callback(
     // (rolling deploy compatibility).
     let oidc_provider = if stored_state.provider_id.is_empty() {
         state.idps.iter().find_map(|i| match i {
-            crate::services::idp::ConfiguredIdp::Oidc(p) => Some(p),
-            crate::services::idp::ConfiguredIdp::Saml(_) => None,
+            ConfiguredIdp::Oidc(p) => Some(p),
+            ConfiguredIdp::Saml(_) => None,
         })
     } else {
         state.idp(&stored_state.provider_id).and_then(|i| match i {
-            crate::services::idp::ConfiguredIdp::Oidc(p) => Some(p),
-            crate::services::idp::ConfiguredIdp::Saml(_) => None,
+            ConfiguredIdp::Oidc(p) => Some(p),
+            ConfiguredIdp::Saml(_) => None,
         })
     };
     let Some(oidc_provider) = oidc_provider else {
@@ -674,7 +676,7 @@ pub(crate) async fn oidc_callback(
     };
 
     if !token_response.status().is_success() {
-        let error_text = crate::infra::egress::read_error_body(token_response).await;
+        let error_text = egress::read_error_body(token_response).await;
         tracing::error!("Token exchange failed: {}", error_text);
         return ErrorTemplate {
             title: Tr::new("error-heading").to_string(),
@@ -685,8 +687,7 @@ pub(crate) async fn oidc_callback(
     }
 
     let tokens: OidcTokenResponse =
-        match crate::infra::egress::read_capped_json(token_response, MAX_TOKEN_RESPONSE_SIZE).await
-        {
+        match egress::read_capped_json(token_response, MAX_TOKEN_RESPONSE_SIZE).await {
             Ok(t) => t,
             Err(e) => {
                 tracing::error!("Failed to read token response: {}", e);
@@ -701,7 +702,7 @@ pub(crate) async fn oidc_callback(
 
     // Verify ID token: signature, issuer, audience, nonce, email_verified,
     // and extract domain (OIDC Core Section 3.1.3.7).
-    let identity = match crate::services::idp::oidc::verify_id_token(
+    let identity = match oidc::verify_id_token(
         &state.http_client,
         &oidc_provider.provider,
         tokens.id_token.expose_secret(),
@@ -751,7 +752,7 @@ pub(crate) async fn complete_enrollment_after_identity(
     // whitespace-bearing, or local-part-less value must not be persisted
     // verbatim by `enroll_user_with_org`, which only trims and lowercases.
     // This chokepoint covers both the OIDC and SAML callback paths.
-    if !crate::email::Email::is_valid_address(&identity.email) {
+    if !Email::is_valid_address(&identity.email) {
         tracing::warn!(
             email = %redact_email(&identity.email),
             "rejected IdP enrollment: upstream email is not a valid address"
@@ -780,7 +781,7 @@ pub(crate) async fn complete_enrollment_after_identity(
     // reach `enroll_user_with_org` below, so there is nothing left for a
     // handler-side org-domain gate to check. The two diverge whenever a
     // SAML IdP sets `domain_attribute` or an OIDC IdP asserts `hd`.
-    if crate::email::Email::domain_of(&identity.email).is_none_or(|d| Domain::parse(&d).is_err()) {
+    if Email::domain_of(&identity.email).is_none_or(|d| Domain::parse(&d).is_err()) {
         tracing::warn!(
             email = %redact_email(&identity.email),
             "rejected IdP enrollment: upstream email has an invalid domain"
@@ -917,7 +918,7 @@ pub(crate) async fn complete_enrollment_after_identity(
     // logged but never written back: there is no email-change machinery,
     // and downstream artifacts (sessions, certs, audit) must stay
     // consistent with the stored account.
-    if user.email != crate::email::Email::new(&identity.email).as_str() {
+    if user.email != Email::new(&identity.email).as_str() {
         tracing::warn!(
             user_id = %user.id,
             account_email = %redact_email(&user.email),
@@ -1049,9 +1050,7 @@ pub(crate) async fn complete_enrollment_after_identity(
         },
         TokenIssuanceProof {
             grant: GrantProof::EnrollmentBootstrap(oidc_state_claim),
-            client_auth: ClientAuthProof::NoAuth(
-                crate::services::auth::NoClientAuth::internal_endpoint(),
-            ),
+            client_auth: ClientAuthProof::NoAuth(NoClientAuth::internal_endpoint()),
             sender_constraint: SenderConstraintProof::no_registered_client(),
         },
         arrival,
@@ -1517,7 +1516,7 @@ pub(crate) async fn browser_register_complete(
                     user_id = %checked.reg_state.user_id,
                     "browser registration state replay rejected"
                 );
-                let audit_data = crate::db::documents::audit::RegistrationReplayData {
+                let audit_data = RegistrationReplayData {
                     flow: "browser_register",
                     success: false,
                     error_code: "state_already_used",
@@ -1626,7 +1625,7 @@ pub(crate) async fn browser_register_complete(
     // This ensures compatibility with our server-side WebAuthn verification
     let cose_key = passkey.get_public_key();
 
-    let public_key_cbor = crate::crypto::cose::cose_key_to_cbor(cose_key).map_err(|e| {
+    let public_key_cbor = cose::cose_key_to_cbor(cose_key).map_err(|e| {
         tracing::error!("Failed to serialize COSE key to CBOR: {e}");
         ServiceError::api(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1750,9 +1749,7 @@ pub(crate) async fn browser_register_complete(
         },
         TokenIssuanceProof {
             grant: GrantProof::EnrollmentComplete(registration_claim),
-            client_auth: ClientAuthProof::NoAuth(
-                crate::services::auth::NoClientAuth::internal_endpoint(),
-            ),
+            client_auth: ClientAuthProof::NoAuth(NoClientAuth::internal_endpoint()),
             sender_constraint: SenderConstraintProof::no_registered_client(),
         },
         arrival,
@@ -1826,7 +1823,7 @@ async fn finalize_enrollment_audit_and_device_auth(
     )
     .await;
 
-    crate::infra::metrics::record_auth_event("enrollment");
+    metrics::record_auth_event("enrollment");
 
     // Mark device authorization as complete (only for CLI-initiated flows)
     if reg_state.device_auth_id.is_empty() {
@@ -1922,7 +1919,7 @@ pub(crate) async fn direct_enroll_start(
     // the multi-IdP case, so `state.idps.first()` here is the single
     // configured IdP (config validation ensures at least one IdP is present).
     let base_url = state.config().base_url.clone();
-    let chosen_idp: Option<&crate::services::idp::ConfiguredIdp> = match provider_choice {
+    let chosen_idp: Option<&ConfiguredIdp> = match provider_choice {
         Some(slug) => match state.idp(slug) {
             Some(i) => Some(i),
             None => {
@@ -1993,8 +1990,8 @@ pub(crate) async fn direct_enroll_start(
     }
 
     match auth_request.action {
-        crate::services::idp::AuthAction::Redirect { url } => Redirect::to(&url).into_response(),
-        crate::services::idp::AuthAction::PostForm {
+        AuthAction::Redirect { url } => Redirect::to(&url).into_response(),
+        AuthAction::PostForm {
             action_url,
             saml_request,
             relay_state,

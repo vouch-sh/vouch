@@ -8,6 +8,16 @@
 //! Reference: <https://www.rfc-editor.org/rfc/rfc9126>
 
 use super::helpers::*;
+use crate::db::claim::ClaimError;
+use crate::db::documents::oauth::ResponseMode;
+use crate::db::store::DocumentStore;
+use crate::db::{
+    FapiProfile, ParConsumptionMode, ParConsumptionProof, ParRef, TokenEndpointAuthMethod,
+};
+use crate::infra::mtls_listener::PeerClientCert;
+use crate::services::auth::{ClientAuthProof, NoClientAuth, ParCreationProof};
+use crate::services::oidc::mtls;
+use crate::test_utils::{self, HttpResponse, TestOAuthClient};
 
 // ========================================================================
 // RFC 9126 Section 5 — Discovery Metadata
@@ -1228,10 +1238,8 @@ async fn test_rfc9126_consume_par_with_stale_version_returns_false() {
             authorization_details: None,
             response_mode: Default::default(),
         },
-        crate::services::auth::ParCreationProof {
-            client_auth: crate::services::auth::ClientAuthProof::NoAuth(
-                crate::services::auth::NoClientAuth::internal_endpoint(),
-            ),
+        ParCreationProof {
+            client_auth: ClientAuthProof::NoAuth(NoClientAuth::internal_endpoint()),
         },
     )
     .await
@@ -1274,7 +1282,7 @@ async fn test_rfc9126_consume_par_with_stale_version_returns_false() {
     )
     .await;
     assert!(
-        matches!(result, Err(crate::db::claim::ClaimError::AlreadyConsumed)),
+        matches!(result, Err(ClaimError::AlreadyConsumed)),
         "Second consumption should fail with AlreadyConsumed, got: {result:?}"
     );
 }
@@ -1310,10 +1318,8 @@ async fn test_rfc9126_consume_par_concurrent_replay() {
             authorization_details: None,
             response_mode: Default::default(),
         },
-        crate::services::auth::ParCreationProof {
-            client_auth: crate::services::auth::ClientAuthProof::NoAuth(
-                crate::services::auth::NoClientAuth::internal_endpoint(),
-            ),
+        ParCreationProof {
+            client_auth: ClientAuthProof::NoAuth(NoClientAuth::internal_endpoint()),
         },
     )
     .await
@@ -1747,12 +1753,12 @@ async fn test_rfc9126_par_already_consumed_returns_error_not_login() {
     let request_uri = create_par_request(&app, &client).await;
 
     // Consume the PAR directly via DB before the authorize request arrives.
-    let _proof = crate::db::ParConsumptionProof::consume(
+    let _proof = ParConsumptionProof::consume(
         &state.store,
-        crate::db::ParRef {
+        ParRef {
             request_uri: &request_uri,
             client_id: &client.client_id,
-            mode: crate::db::ParConsumptionMode::EnforceExpiry,
+            mode: ParConsumptionMode::EnforceExpiry,
         },
         jiff::Timestamp::now(),
     )
@@ -1934,7 +1940,7 @@ async fn test_rfc9126_par_jti_replay_returns_invalid_client() {
 
 /// Register an OAuth client with `tls_client_auth` bound to the given subject DN.
 async fn create_mtls_oauth_client(
-    store: &crate::db::store::DocumentStore,
+    store: &DocumentStore,
     user_id: &str,
     subject_dn: &str,
 ) -> String {
@@ -1960,8 +1966,7 @@ async fn test_rfc9126_par_accepts_mtls_with_matching_cert() {
     let _auth_id = create_test_authenticator(&state.store, &user.id).await;
 
     let cert_der = test_client_ca().issue("par-mtls-client");
-    let parsed = crate::services::oidc::mtls::parse_client_certificate(&cert_der)
-        .expect("parse generated cert");
+    let parsed = mtls::parse_client_certificate(&cert_der).expect("parse generated cert");
     let subject_dn = parsed.subject_dn.expect("generated cert has subject DN");
 
     let client_id = create_mtls_oauth_client(&state.store, &user.id, &subject_dn).await;
@@ -1997,8 +2002,7 @@ async fn test_rfc9126_par_rejects_mtls_without_cert() {
     let _auth_id = create_test_authenticator(&state.store, &user.id).await;
 
     let cert_der = test_client_ca().issue("par-mtls-nocert-client");
-    let parsed = crate::services::oidc::mtls::parse_client_certificate(&cert_der)
-        .expect("parse generated cert");
+    let parsed = mtls::parse_client_certificate(&cert_der).expect("parse generated cert");
     let subject_dn = parsed.subject_dn.expect("generated cert has subject DN");
 
     let client_id = create_mtls_oauth_client(&state.store, &user.id, &subject_dn).await;
@@ -2032,8 +2036,7 @@ async fn test_rfc9126_par_rejects_mtls_with_non_matching_cert() {
 
     // Client is registered against cert A's subject DN.
     let cert_a_der = test_client_ca().issue("par-mtls-registered");
-    let parsed_a =
-        crate::services::oidc::mtls::parse_client_certificate(&cert_a_der).expect("parse cert A");
+    let parsed_a = mtls::parse_client_certificate(&cert_a_der).expect("parse cert A");
     let subject_dn_a = parsed_a.subject_dn.expect("cert A has subject DN");
     let client_id = create_mtls_oauth_client(&state.store, &user.id, &subject_dn_a).await;
 
@@ -2089,8 +2092,8 @@ async fn create_fapi_jwt_client(
         user_id,
         TestClientSpec {
             jwks: TestJwks::Custom(jwks_value),
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
-            fapi_profile: Some(crate::db::FapiProfile::Fapi2Security),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
+            fapi_profile: Some(FapiProfile::Fapi2Security),
             ..Default::default()
         },
     )
@@ -2112,8 +2115,8 @@ async fn create_fapi_jwt_client_requiring_request_object(
         user_id,
         TestClientSpec {
             jwks: TestJwks::Custom(jwks_value),
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
-            fapi_profile: Some(crate::db::FapiProfile::Fapi2Security),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
+            fapi_profile: Some(FapiProfile::Fapi2Security),
             require_signed_request_object: Some(true),
             ..Default::default()
         },
@@ -2259,7 +2262,7 @@ async fn par_post_full(
     dpop_proof: Option<&str>,
     cert_der: Option<Vec<u8>>,
     extra_headers: &[(&str, &str)],
-) -> crate::test_utils::HttpResponse {
+) -> HttpResponse {
     use tower::ServiceExt;
 
     let mut req_builder = axum::http::Request::builder()
@@ -2282,9 +2285,11 @@ async fn par_post_full(
             [127, 0, 0, 1],
             0,
         ))));
-    parts.extensions.insert(axum::extract::ConnectInfo(
-        crate::infra::mtls_listener::PeerClientCert(cert_der.into_iter().collect()),
-    ));
+    parts
+        .extensions
+        .insert(axum::extract::ConnectInfo(PeerClientCert(
+            cert_der.into_iter().collect(),
+        )));
     let request = axum::http::Request::from_parts(parts, body_inner);
     let response = app
         .clone()
@@ -2296,7 +2301,7 @@ async fn par_post_full(
     let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("Failed to read response body");
-    crate::test_utils::HttpResponse {
+    HttpResponse {
         status,
         body: String::from_utf8_lossy(&body_bytes).to_string(),
         headers: response_headers,
@@ -2898,13 +2903,9 @@ async fn test_rfc9126_par_requires_dpop_nonce_returns_use_dpop_nonce() {
         urlencoding::encode("https://example.com/callback"),
     );
 
-    let response = crate::test_utils::http_post_form_full(
-        &app,
-        "/oauth/par",
-        &body,
-        &[("DPoP", proof.as_str())],
-    )
-    .await;
+    let response =
+        test_utils::http_post_form_full(&app, "/oauth/par", &body, &[("DPoP", proof.as_str())])
+            .await;
     assert_eq!(
         response.status,
         StatusCode::BAD_REQUEST,
@@ -2932,13 +2933,9 @@ async fn test_rfc9126_par_requires_dpop_nonce_returns_use_dpop_nonce() {
         .expect("DPoP-Nonce header")
         .to_string();
     let (proof, _jkt) = build_dpop_proof_with_jkt(&dpop_key, "POST", &par_uri, Some(&nonce));
-    let retry = crate::test_utils::http_post_form_full(
-        &app,
-        "/oauth/par",
-        &body,
-        &[("DPoP", proof.as_str())],
-    )
-    .await;
+    let retry =
+        test_utils::http_post_form_full(&app, "/oauth/par", &body, &[("DPoP", proof.as_str())])
+            .await;
     assert_eq!(
         retry.status,
         StatusCode::CREATED,
@@ -3006,8 +3003,8 @@ async fn test_rfc9126_par_rejects_fapi_client_rs256_assertion() {
         &user.id,
         TestClientSpec {
             jwks: TestJwks::Custom(jwks_value),
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
-            fapi_profile: Some(crate::db::FapiProfile::Fapi2Security),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
+            fapi_profile: Some(FapiProfile::Fapi2Security),
             dpop_bound_access_tokens: true,
             ..Default::default()
         },
@@ -3294,8 +3291,7 @@ async fn test_rfc9126_par_accepts_mtls_with_request_object() {
     let _auth_id = create_test_authenticator(&state.store, &user.id).await;
 
     let cert_der = test_client_ca().issue("par-mtls-ro-client");
-    let parsed = crate::services::oidc::mtls::parse_client_certificate(&cert_der)
-        .expect("parse generated cert");
+    let parsed = mtls::parse_client_certificate(&cert_der).expect("parse generated cert");
     let subject_dn = parsed.subject_dn.expect("generated cert has subject DN");
 
     let (client_id, pkcs8_bytes) =
@@ -3333,8 +3329,7 @@ async fn test_rfc9126_par_accepts_mtls_with_dpop_and_pkce() {
     let _auth_id = create_test_authenticator(&state.store, &user.id).await;
 
     let cert_der = test_client_ca().issue("par-mtls-dpop-client");
-    let parsed = crate::services::oidc::mtls::parse_client_certificate(&cert_der)
-        .expect("parse generated cert");
+    let parsed = mtls::parse_client_certificate(&cert_der).expect("parse generated cert");
     let subject_dn = parsed.subject_dn.expect("generated cert has subject DN");
 
     let (client_id, _pkcs8) = create_fapi_mtls_client(&state.store, &user.id, &subject_dn).await;
@@ -3640,10 +3635,8 @@ async fn test_rfc9126_par_deleted_by_cleanup_breaks_deferred_flow() {
             authorization_details: None,
             response_mode: db::ResponseMode::Query,
         },
-        crate::services::auth::ParCreationProof {
-            client_auth: crate::services::auth::ClientAuthProof::NoAuth(
-                crate::services::auth::NoClientAuth::internal_endpoint(),
-            ),
+        ParCreationProof {
+            client_auth: ClientAuthProof::NoAuth(NoClientAuth::internal_endpoint()),
         },
     )
     .await
@@ -3765,7 +3758,7 @@ async fn test_par_empty_parameter_is_treated_as_omitted() {
 /// auto-submitting form (OAuth 2.0 Form Post Response Mode §2) carrying the
 /// `unauthorized_client` error and echoing `state` — and NOT as a query-string
 /// redirect.
-fn assert_rejection_is_form_post(response: &crate::test_utils::HttpResponse, state_value: &str) {
+fn assert_rejection_is_form_post(response: &HttpResponse, state_value: &str) {
     assert_eq!(
         response.status,
         StatusCode::OK,
@@ -3829,10 +3822,7 @@ fn assert_rejection_is_form_post(response: &crate::test_utils::HttpResponse, sta
 /// redirect (303/302 to `redirect_uri?error=...&state=...`) and NOT as a
 /// `form_post` HTML form — the gate's `Query` baseline, so the fix did not
 /// collapse every mode onto `form_post`.
-fn assert_rejection_is_query_redirect(
-    response: &crate::test_utils::HttpResponse,
-    state_value: &str,
-) {
+fn assert_rejection_is_query_redirect(response: &HttpResponse, state_value: &str) {
     assert!(
         response.status == StatusCode::SEE_OTHER || response.status == StatusCode::FOUND,
         "query rejection must be a 3xx redirect, got: {} body: {}",
@@ -3916,7 +3906,7 @@ async fn authorize_with_par(
     app: &axum::Router,
     client_id: &str,
     request_uri: &str,
-) -> crate::test_utils::HttpResponse {
+) -> HttpResponse {
     http_get_full(
         app,
         &format!(
@@ -3935,7 +3925,7 @@ async fn authorize_with_par(
 /// `response_types: []`; the test seam stores the same shape directly.
 async fn client_not_registered_for_code(
     state: &std::sync::Arc<crate::AppState>,
-) -> crate::test_utils::TestOAuthClient {
+) -> TestOAuthClient {
     let user = create_test_user(&state.store, "par-mode-gate@example.com").await;
     create_test_client(
         &state.store,
@@ -4044,7 +4034,7 @@ async fn test_pending_auth_gate_rejection_renders_in_stored_mode() {
         &state.store,
         TestPendingAuthSpec {
             client_id: &client.client_id,
-            response_mode: crate::db::documents::oauth::ResponseMode::FormPost,
+            response_mode: ResponseMode::FormPost,
             state: Some("pending-formpost-state"),
             ..Default::default()
         },
@@ -4128,12 +4118,12 @@ async fn test_rfc9126_pending_resume_retry_re_renders_par_already_consumed_not_s
     // Simulate a concurrent resume winning the PAR race: consume the PAR
     // out-of-band so this resume's PAR consume in complete_pending_auth
     // returns AlreadyConsumed.
-    let _proof = crate::db::ParConsumptionProof::consume(
+    let _proof = ParConsumptionProof::consume(
         &state.store,
-        crate::db::ParRef {
+        ParRef {
             request_uri: &request_uri,
             client_id: &client.client_id,
-            mode: crate::db::ParConsumptionMode::SkipExpiry,
+            mode: ParConsumptionMode::SkipExpiry,
         },
         jiff::Timestamp::now(),
     )

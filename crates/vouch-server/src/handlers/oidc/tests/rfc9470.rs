@@ -6,6 +6,7 @@
 //! error code.
 
 use super::helpers::*;
+use crate::{crypto, db};
 
 // ========================================================================
 // RFC 9470 Section 4 — acr_values parameter
@@ -1734,9 +1735,9 @@ async fn test_rfc9470_max_age_zero_resume_rejects_code_grant_row_from_same_secon
         Some(second_start.as_second()),
         "the auth_time claim stays the ceremony's whole second"
     );
-    let row = crate::db::get_session_by_token_hash(
+    let row = db::get_session_by_token_hash(
         &state.store,
-        &crate::crypto::hash_token(&access_token),
+        &crypto::hash_token(&access_token),
         test_arrival().timestamp(),
     )
     .await

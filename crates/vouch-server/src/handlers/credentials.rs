@@ -23,8 +23,10 @@ use vouch_common::{
 
 use super::session::{AuthenticatedToken, HardwareVerifiedToken};
 use crate::db::ClientInfo;
+use crate::infra::metrics;
 use crate::redact_email;
 use crate::services::auth::ValidatedResourceToken;
+use vouch_common::aws::Arn;
 
 /// Issue an SSH certificate for the authenticated user.
 ///
@@ -163,7 +165,7 @@ pub(crate) async fn issue_ssh_certificate(
         )
         .await;
 
-    crate::infra::metrics::record_credential_issuance("ssh");
+    metrics::record_credential_issuance("ssh");
 
     tracing::info!(
         "Issued SSH certificate for {} with principals {:?}, serial {}",
@@ -447,7 +449,7 @@ const MAX_ROLE_ARN_LEN: usize = 2048;
 /// clients hit this.
 fn validate_pinned_role(role_arn: &str) -> Result<(), ServiceError> {
     let is_role = role_arn.len() <= MAX_ROLE_ARN_LEN
-        && vouch_common::aws::Arn::parse(role_arn).is_ok_and(|arn| arn.is_iam_role());
+        && Arn::parse(role_arn).is_ok_and(|arn| arn.is_iam_role());
     if is_role {
         Ok(())
     } else {
@@ -564,7 +566,7 @@ pub(crate) async fn get_aws_token(
         )
         .await;
 
-    crate::infra::metrics::record_credential_issuance("aws");
+    metrics::record_credential_issuance("aws");
 
     Ok(Json(AwsTokenResponse {
         id_token: result.id_token,
@@ -817,7 +819,7 @@ pub(crate) async fn get_github_token(
         )
         .await;
 
-    crate::infra::metrics::record_credential_issuance("github");
+    metrics::record_credential_issuance("github");
 
     tracing::info!(
         "Issued GitHub token for {} (org {}, installation {})",
@@ -852,8 +854,11 @@ pub(crate) async fn get_github_token(
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
+    use crate::db::{self, AuditEventFilter, CreateGitHubInstallationParams};
+    use crate::infra::router;
     use crate::test_utils::*;
     use axum::http::StatusCode;
+    use vouch_common::jwk::JwkThumbprintKey;
 
     // ========================================================================
     // SSH Serial Validation Tests — Positive
@@ -1111,7 +1116,7 @@ mod tests {
         let expires_at = jiff::Timestamp::now()
             .checked_add(jiff::Span::new().hours(8))
             .expect("future expires_at");
-        crate::db::record_ssh_certificate_issuance(
+        db::record_ssh_certificate_issuance(
             &state.store,
             serial,
             &user.id,
@@ -1121,7 +1126,7 @@ mod tests {
         )
         .await
         .expect("record issuance");
-        crate::db::revoke_user_credentials(&state.store, &user.id, None, None)
+        db::revoke_user_credentials(&state.store, &user.id, None, None)
             .await
             .expect("revoke user credentials");
 
@@ -1188,7 +1193,7 @@ mod tests {
         let expires_at = jiff::Timestamp::now()
             .checked_add(jiff::Span::new().hours(8))
             .expect("future expires_at");
-        crate::db::record_ssh_certificate_issuance(
+        db::record_ssh_certificate_issuance(
             &state.store,
             serial,
             &user.id,
@@ -1198,7 +1203,7 @@ mod tests {
         )
         .await
         .expect("record issuance");
-        crate::db::revoke_user_credentials(&state.store, &user.id, None, None)
+        db::revoke_user_credentials(&state.store, &user.id, None, None)
             .await
             .expect("revoke");
 
@@ -1268,7 +1273,7 @@ mod tests {
 
         let state = test_app_state_with_rsa_key().await;
         let config = state.config();
-        let app = crate::infra::router::build_app(state.clone(), &config).expect("build app");
+        let app = router::build_app(state.clone(), &config).expect("build app");
 
         let user = create_test_user(&state.store, "user@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
@@ -1318,7 +1323,7 @@ mod tests {
 
         let state = test_app_state_with_rsa_key().await;
         let config = state.config();
-        let app = crate::infra::router::build_app(state.clone(), &config).expect("build app");
+        let app = router::build_app(state.clone(), &config).expect("build app");
 
         let user = create_test_user(&state.store, "aws-audit@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
@@ -1360,7 +1365,7 @@ mod tests {
         // The audit row's `token_expires_at` must agree with the JWT's `exp`.
         let events = state
             .audit
-            .query_events(&crate::db::AuditEventFilter {
+            .query_events(&AuditEventFilter {
                 event_types: Some(vec!["aws_credential".to_string()]),
                 ..Default::default()
             })
@@ -1488,7 +1493,7 @@ mod tests {
         // 2. AppState with a loaded GitHubApp wired to the mock client.
         let state = test_app_state_with_github_app(mock.client()).await;
         let config = state.config();
-        let app = crate::infra::router::build_app(state.clone(), &config).expect("build app");
+        let app = router::build_app(state.clone(), &config).expect("build app");
 
         // 3. Org + user + installation DB row (owner "acme").
         let org = create_test_org(&state.store, "example.com").await;
@@ -1499,9 +1504,9 @@ mod tests {
             ("contents".to_string(), "write".to_string()),
             ("metadata".to_string(), "read".to_string()),
         ]);
-        crate::db::create_github_installation(
+        db::create_github_installation(
             &state.store,
-            &crate::db::CreateGitHubInstallationParams {
+            &CreateGitHubInstallationParams {
                 org_id: &org.id,
                 installation_id: 7,
                 github_account_login: "acme",
@@ -1516,7 +1521,7 @@ mod tests {
 
         // 4. DPoP-bound, hardware-verified session + proof carrying source.
         let (key, jwk) = generate_dpop_key_pair();
-        let jkt = vouch_common::jwk::JwkThumbprintKey::from_json(&jwk)
+        let jkt = JwkThumbprintKey::from_json(&jwk)
             .expect("test JWK carries the required members")
             .thumbprint();
         let token = create_test_session_with(
@@ -1531,7 +1536,7 @@ mod tests {
         )
         .await;
 
-        let nonce = crate::db::generate_dpop_nonce(&state.store, 300)
+        let nonce = db::generate_dpop_nonce(&state.store, 300)
             .await
             .expect("generate nonce");
         let resource_uri = format!("{}/v1/credentials/github/token", state.config().base_url);
@@ -1565,7 +1570,7 @@ mod tests {
         // 6. The github_credential audit row must carry the AI agent attribution.
         let events = state
             .audit
-            .query_events(&crate::db::AuditEventFilter {
+            .query_events(&AuditEventFilter {
                 event_types: Some(vec!["github_credential".to_string()]),
                 ..Default::default()
             })
@@ -1693,7 +1698,7 @@ mod tests {
     async fn test_aws_token_returns_token_for_org_user() {
         let state = test_app_state_with_rsa_key().await;
         let config = state.config();
-        let app = crate::infra::router::build_app(state.clone(), &config).expect("build app");
+        let app = router::build_app(state.clone(), &config).expect("build app");
 
         let org = create_test_org(&state.store, "example.com").await;
         let user =
@@ -1739,7 +1744,7 @@ mod tests {
     async fn test_aws_token_pins_role_from_query() {
         let state = test_app_state_with_rsa_key().await;
         let config = state.config();
-        let app = crate::infra::router::build_app(state.clone(), &config).expect("build app");
+        let app = router::build_app(state.clone(), &config).expect("build app");
 
         let user = create_test_user(&state.store, "pinned@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
@@ -1776,7 +1781,7 @@ mod tests {
     async fn test_aws_token_without_query_omits_roles_claim() {
         let state = test_app_state_with_rsa_key().await;
         let config = state.config();
-        let app = crate::infra::router::build_app(state.clone(), &config).expect("build app");
+        let app = router::build_app(state.clone(), &config).expect("build app");
 
         let user = create_test_user(&state.store, "unpinned@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
@@ -2034,7 +2039,7 @@ mod tests {
         .await;
 
         // Deactivate the user
-        crate::db::update_user_active_status(&state.store, &user.id, false)
+        db::update_user_active_status(&state.store, &user.id, false)
             .await
             .expect("deactivate user");
 
@@ -2068,7 +2073,7 @@ mod tests {
         )
         .await;
 
-        crate::db::update_user_active_status(&state.store, &user.id, false)
+        db::update_user_active_status(&state.store, &user.id, false)
             .await
             .expect("deactivate user");
 

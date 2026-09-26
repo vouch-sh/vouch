@@ -6,6 +6,8 @@
 //! endpoint instead of issuing a token.
 
 use super::helpers::*;
+use crate::handlers::oidc::token::{TokenRequestForm, TokenResponse};
+use crate::test_utils;
 
 // ========================================================================
 // RFC 6749 — Token Endpoint
@@ -290,7 +292,7 @@ async fn test_token_exchange_rejects_revoked_authenticator() {
     .await;
 
     // Revoke the authenticator between code issuance and code exchange.
-    crate::test_utils::remove_test_authenticator(&state.store, &auth_id).await;
+    test_utils::remove_test_authenticator(&state.store, &auth_id).await;
 
     let auth_header = client.basic_auth_header();
     let (status, body) = http_post_form(
@@ -488,7 +490,7 @@ fn test_token_response_wire_shape_with_and_without_id_token() {
     // values serialize as plain strings. Pins the wire shape across the
     // SecretString field migration: the explicit serializers must produce
     // exactly what the bare `String`/`Option<String>` fields did.
-    let with = crate::handlers::oidc::token::TokenResponse {
+    let with = TokenResponse {
         access_token: "at-secret".into(),
         token_type: "Bearer".to_string(),
         expires_in: 3600,
@@ -501,7 +503,7 @@ fn test_token_response_wire_shape_with_and_without_id_token() {
     assert_eq!(json["access_token"], "at-secret");
     assert_eq!(json["id_token"], "idt-secret");
 
-    let without = crate::handlers::oidc::token::TokenResponse {
+    let without = TokenResponse {
         access_token: "at-secret".into(),
         token_type: "Bearer".to_string(),
         expires_in: 3600,
@@ -522,7 +524,7 @@ fn test_token_request_debug_never_prints_credential_material() {
     // Every credential-bearing field must be absent from `{:?}` output —
     // the manual Debug impl prints [REDACTED] and the SecretString fields
     // self-redact even if a future impl prints them directly.
-    let request = crate::handlers::oidc::token::TokenRequestForm {
+    let request = TokenRequestForm {
         grant_type: "authorization_code".to_string(),
         code: Some("visible-code".to_string()),
         redirect_uri: None,

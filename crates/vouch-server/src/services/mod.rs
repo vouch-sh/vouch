@@ -44,9 +44,6 @@
 //! Services return [`ServiceError`] which can be converted to protocol-appropriate
 //! responses (OAuth, SCIM, or standard HTTP errors).
 
-// Own-crate items are imported with `use`; see `absolute-paths-allowed-crates` in `.clippy.toml`.
-#![deny(clippy::absolute_paths)]
-
 pub(crate) mod auth;
 pub(crate) mod idp;
 pub(crate) mod integrations;

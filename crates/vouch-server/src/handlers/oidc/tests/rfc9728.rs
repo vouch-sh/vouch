@@ -14,6 +14,7 @@
 //!   or JWKS routes.
 
 use super::helpers::*;
+use crate::crypto::alg::JwsAlgorithm;
 use crate::infra::resource_metadata::WELL_KNOWN_SUFFIX;
 use crate::services::oidc::protected_resource::{PROTECTED_RESOURCE_PREFIXES, SIGNED_METADATA_TYP};
 use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED, UnparsedPublicKey};
@@ -301,7 +302,7 @@ async fn test_rfc9728_dpop_signing_algs_match_fapi_allowed() {
     assert_eq!(status, StatusCode::OK);
     let outer: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
 
-    let source: BTreeSet<String> = crate::crypto::alg::JwsAlgorithm::FAPI_ALLOWED
+    let source: BTreeSet<String> = JwsAlgorithm::FAPI_ALLOWED
         .iter()
         .map(|alg| alg.as_str().to_string())
         .collect();
@@ -334,7 +335,7 @@ async fn test_rfc9728_dpop_signing_algs_match_fapi_allowed() {
 
     for alg in &source {
         assert!(
-            alg.parse::<crate::crypto::alg::JwsAlgorithm>().is_ok(),
+            alg.parse::<JwsAlgorithm>().is_ok(),
             "FAPI_ALLOWED wire string does not round-trip through JwsAlgorithm parsing: {alg}"
         );
     }

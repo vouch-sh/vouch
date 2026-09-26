@@ -2,6 +2,8 @@
 //! RFC 9700 — OAuth 2.0 Security Best Current Practice tests.
 
 use super::helpers::*;
+use crate::crypto;
+use crate::db::{OAuthClientType, ResponseMode, TokenEndpointAuthMethod};
 
 // ============================================================================
 // RFC 9700 — PKCE Enforcement
@@ -809,7 +811,7 @@ async fn test_rfc9700_authorization_response_is_never_delivered_in_browser() {
     // No code path can select one either: the parser has no such variant, so
     // `response_mode=web_message` cannot reach a delivery branch.
     assert!(
-        crate::db::ResponseMode::parse("web_message").is_none(),
+        ResponseMode::parse("web_message").is_none(),
         "web_message must not parse to a delivery mode"
     );
 
@@ -904,9 +906,9 @@ async fn test_rfc9700_loopback_redirect_uri_allows_a_variable_port() {
         &user.id,
         TestClientSpec {
             name: "Native App".to_string(),
-            application_type: crate::db::OAuthClientType::Native,
+            application_type: OAuthClientType::Native,
             redirect_uris: vec!["http://127.0.0.1:8080/callback".to_string()],
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::None),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::None),
             with_secret: false,
             ..Default::default()
         },
@@ -1242,7 +1244,7 @@ async fn test_rfc9700_access_tokens_are_not_stored_in_plaintext() {
 
     let now = jiff::Timestamp::now();
     let by_hash =
-        db::get_session_by_token_hash(&state.store, &crate::crypto::hash_token(&access_token), now)
+        db::get_session_by_token_hash(&state.store, &crypto::hash_token(&access_token), now)
             .await
             .expect("session lookup succeeds");
     assert!(by_hash.is_some(), "the token is recorded under its hash");

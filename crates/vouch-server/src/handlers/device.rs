@@ -32,8 +32,9 @@ use secrecy::{ExposeSecret, SecretString};
 use std::sync::Arc;
 use vouch_common::{DeviceCodeRequest, DeviceCodeResponse, DeviceTokenResponse, OAuthError};
 
+use crate::db::SessionPurpose;
 use crate::error::{OAuthErrorCode, ServiceError};
-use crate::redact_email;
+use crate::{crypto, redact_email};
 
 /// Characters used for user code generation (no ambiguous characters).
 const USER_CODE_ALPHABET: &[u8] = b"BCDFGHJKLMNPQRSTVWXZ";
@@ -49,7 +50,7 @@ fn oauth_error(status: StatusCode, error: OAuthError) -> Response {
 ///
 /// Returns an error if the system RNG fails.
 fn generate_device_code() -> Result<String, aws_lc_rs::error::Unspecified> {
-    let bytes = crate::crypto::generate_random_bytes(32)?;
+    let bytes = crypto::generate_random_bytes(32)?;
     Ok(URL_SAFE_NO_PAD.encode(&bytes))
 }
 
@@ -59,7 +60,7 @@ fn generate_device_code() -> Result<String, aws_lc_rs::error::Unspecified> {
 ///
 /// Returns an error if the system RNG fails.
 fn generate_user_code() -> Result<String, aws_lc_rs::error::Unspecified> {
-    let bytes = crate::crypto::generate_random_bytes(8)?;
+    let bytes = crypto::generate_random_bytes(8)?;
 
     let chars: Vec<char> = bytes
         .iter()
@@ -576,7 +577,7 @@ pub(crate) async fn device_token(
                     // it by up to the device code's lifetime and would
                     // overstate freshness to the key-deletion step-up gate.
                     hardware_verification: verification,
-                    session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
+                    session_purpose: SessionPurpose::OAuthAccessToken,
                     authorization_details: None,
                     hardware_aaguid: hardware_aaguid.as_deref(),
                     org_domain: org_domain.as_deref(),
@@ -664,8 +665,11 @@ pub(crate) async fn device_token(
 mod tests {
     use super::*;
     use crate::crypto::webauthn_verify::AuthTime;
-    use crate::db::DeviceApproval;
-    use crate::test_utils::*;
+    use crate::db::{
+        self, AuditEventFilter, AuthorizeDeviceAuthParams, CreateSessionParams, DeviceApproval,
+        DeviceAuthStatus, OAuthClientType, SessionPurpose, TokenEndpointAuthMethod,
+    };
+    use crate::test_utils::{self, *};
 
     /// A public client (RFC 6749 §2.1) that identifies itself with
     /// `client_id` alone at both device-flow endpoints. It holds the shared
@@ -677,8 +681,8 @@ mod tests {
             &state.store,
             &owner.id,
             TestClientSpec {
-                application_type: crate::db::OAuthClientType::Native,
-                token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::None),
+                application_type: OAuthClientType::Native,
+                token_endpoint_auth_method: Some(TokenEndpointAuthMethod::None),
                 with_secret: false,
                 jwks: TestJwks::Shared,
                 ..Default::default()
@@ -912,7 +916,7 @@ mod tests {
 
         // Set expiration in the past
         let expires_at: Timestamp = "2020-01-01T00:00:00Z".parse().unwrap();
-        crate::db::create_device_auth_request(
+        db::create_device_auth_request(
             &state.store,
             &device_code_hash,
             user_code,
@@ -954,7 +958,7 @@ mod tests {
         let now = Timestamp::now();
         let expires_at = now.checked_add(Span::new().hours(1)).unwrap();
 
-        let id = crate::db::create_device_auth_request(
+        let id = db::create_device_auth_request(
             &state.store,
             &device_code_hash,
             user_code,
@@ -966,7 +970,7 @@ mod tests {
         .expect("Failed to create device auth request");
 
         // Mark as denied
-        crate::db::deny_device_auth(&state.store, &id)
+        db::deny_device_auth(&state.store, &id)
             .await
             .expect("Failed to update status");
 
@@ -1004,7 +1008,7 @@ mod tests {
         let expires_at = Timestamp::now()
             .checked_add(Span::new().hours(1))
             .expect("expiry");
-        let id = crate::db::create_device_auth_request(
+        let id = db::create_device_auth_request(
             &state.store,
             &hash_device_code(device_code),
             "GONE-CODE",
@@ -1017,9 +1021,9 @@ mod tests {
 
         let user = create_test_user(&state.store, "deleted-approver@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        crate::db::authorize_device_auth(
+        db::authorize_device_auth(
             &state.store,
-            crate::db::AuthorizeDeviceAuthParams {
+            AuthorizeDeviceAuthParams {
                 id: &id,
                 user_id: &user.id,
                 user_email: &user.email,
@@ -1032,7 +1036,7 @@ mod tests {
         .await
         .expect("authorize device");
 
-        crate::test_utils::remove_test_authenticator(&state.store, &auth_id).await;
+        test_utils::remove_test_authenticator(&state.store, &auth_id).await;
 
         let (status, body) = http_post_form(
             &app,
@@ -1086,7 +1090,7 @@ mod tests {
         let now = Timestamp::now();
         let expires_at = now.checked_add(Span::new().hours(1)).unwrap();
 
-        let id = crate::db::create_device_auth_request(
+        let id = db::create_device_auth_request(
             &state.store,
             &device_code_hash,
             user_code,
@@ -1101,9 +1105,9 @@ mod tests {
         let user = create_test_user(&state.store, "device-success@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
 
-        crate::db::authorize_device_auth(
+        db::authorize_device_auth(
             &state.store,
-            crate::db::AuthorizeDeviceAuthParams {
+            AuthorizeDeviceAuthParams {
                 id: &id,
                 user_id: &user.id,
                 user_email: &user.email,
@@ -1141,7 +1145,7 @@ mod tests {
         // The device-code grant records an oauth_token_issued audit event.
         let events = state
             .audit
-            .query_events(&crate::db::AuditEventFilter {
+            .query_events(&AuditEventFilter {
                 event_types: Some(vec!["oauth_token_issued".to_string()]),
                 ..Default::default()
             })
@@ -1337,7 +1341,7 @@ mod tests {
         let now = Timestamp::now();
         let expires_at = now.checked_add(Span::new().hours(1)).unwrap();
 
-        let id = crate::db::create_device_auth_request(
+        let id = db::create_device_auth_request(
             &state.store,
             &device_code_hash,
             user_code,
@@ -1351,9 +1355,9 @@ mod tests {
         let user = create_test_user(&state.store, "single-use@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
 
-        crate::db::authorize_device_auth(
+        db::authorize_device_auth(
             &state.store,
-            crate::db::AuthorizeDeviceAuthParams {
+            AuthorizeDeviceAuthParams {
                 id: &id,
                 user_id: &user.id,
                 user_email: &user.email,
@@ -1395,7 +1399,7 @@ mod tests {
         let now = Timestamp::now();
         let expires_at = now.checked_add(Span::new().hours(1)).unwrap();
 
-        let id = crate::db::create_device_auth_request(
+        let id = db::create_device_auth_request(
             &state.store,
             &device_code_hash,
             user_code,
@@ -1410,9 +1414,9 @@ mod tests {
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
 
         // Authorize then consume
-        crate::db::authorize_device_auth(
+        db::authorize_device_auth(
             &state.store,
-            crate::db::AuthorizeDeviceAuthParams {
+            AuthorizeDeviceAuthParams {
                 id: &id,
                 user_id: &user.id,
                 user_email: &user.email,
@@ -1425,7 +1429,7 @@ mod tests {
         .await
         .expect("authorize");
 
-        let _claim = crate::db::try_consume_device_auth(&state.store, &device_code_hash)
+        let _claim = db::try_consume_device_auth(&state.store, &device_code_hash)
             .await
             .expect("Consumption should succeed");
 
@@ -1454,7 +1458,7 @@ mod tests {
         let now = Timestamp::now();
         let expires_at = now.checked_add(Span::new().hours(1)).unwrap();
 
-        let id = crate::db::create_device_auth_request(
+        let id = db::create_device_auth_request(
             &state.store,
             &device_code_hash,
             user_code,
@@ -1468,9 +1472,9 @@ mod tests {
         let user = create_test_user(&state.store, "revoke@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
 
-        crate::db::authorize_device_auth(
+        db::authorize_device_auth(
             &state.store,
-            crate::db::AuthorizeDeviceAuthParams {
+            AuthorizeDeviceAuthParams {
                 id: &id,
                 user_id: &user.id,
                 user_email: &user.email,
@@ -1495,10 +1499,9 @@ mod tests {
             use aws_lc_rs::digest::{self, SHA256};
             URL_SAFE_NO_PAD.encode(digest::digest(&SHA256, token.as_bytes()).as_ref())
         };
-        let session =
-            crate::db::get_session_by_token_hash(&state.store, &token_hash, Timestamp::now())
-                .await
-                .expect("session lookup");
+        let session = db::get_session_by_token_hash(&state.store, &token_hash, Timestamp::now())
+            .await
+            .expect("session lookup");
         assert!(session.is_some(), "Session should exist before replay");
 
         // Replay — triggers revocation
@@ -1506,10 +1509,9 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
 
         // Session should now be revoked
-        let session =
-            crate::db::get_session_by_token_hash(&state.store, &token_hash, Timestamp::now())
-                .await
-                .expect("session lookup");
+        let session = db::get_session_by_token_hash(&state.store, &token_hash, Timestamp::now())
+            .await
+            .expect("session lookup");
         assert!(session.is_none(), "Session should be revoked after replay");
     }
 
@@ -1527,7 +1529,7 @@ mod tests {
         let now = Timestamp::now();
         let expires_at = now.checked_add(Span::new().hours(1)).unwrap();
 
-        let id = crate::db::create_device_auth_request(
+        let id = db::create_device_auth_request(
             &state.store,
             &device_code_hash,
             user_code,
@@ -1548,7 +1550,7 @@ mod tests {
             .expect("get")
             .expect("doc exists");
         let mut data = doc.data;
-        data.status = crate::db::DeviceAuthStatus::Consumed;
+        data.status = DeviceAuthStatus::Consumed;
         data.consumed_at = Some(now);
         // user_id remains None
         state.store.update(&id, &data).await.expect("update");
@@ -1593,7 +1595,7 @@ mod tests {
         let now = Timestamp::now();
         let expires_at = now.checked_add(Span::new().hours(1)).unwrap();
 
-        let id = crate::db::create_device_auth_request(
+        let id = db::create_device_auth_request(
             &state.store,
             &device_code_hash,
             user_code,
@@ -1607,9 +1609,9 @@ mod tests {
         let user = create_test_user(&state.store, &format!("{setup_label}@example.com")).await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
 
-        crate::db::authorize_device_auth(
+        db::authorize_device_auth(
             &state.store,
-            crate::db::AuthorizeDeviceAuthParams {
+            AuthorizeDeviceAuthParams {
                 id: &id,
                 user_id: &user.id,
                 user_email: &user.email,
@@ -1638,10 +1640,9 @@ mod tests {
             use aws_lc_rs::digest::{self, SHA256};
             URL_SAFE_NO_PAD.encode(digest::digest(&SHA256, token.as_bytes()).as_ref())
         };
-        let session =
-            crate::db::get_session_by_token_hash(&state.store, &token_hash, Timestamp::now())
-                .await
-                .expect("session lookup");
+        let session = db::get_session_by_token_hash(&state.store, &token_hash, Timestamp::now())
+            .await
+            .expect("session lookup");
         assert!(session.is_some(), "pre-existing session should exist");
 
         let body = device_poll_body(&device_code, &client_id);
@@ -1676,8 +1677,8 @@ mod tests {
         let hash_a = setup.device_code_hash.clone();
         let hash_b = setup.device_code_hash.clone();
         let (result_a, result_b) = tokio::join!(
-            async move { crate::db::try_consume_device_auth(&store_a, &hash_a).await },
-            async move { crate::db::try_consume_device_auth(&store_b, &hash_b).await },
+            async move { db::try_consume_device_auth(&store_a, &hash_a).await },
+            async move { db::try_consume_device_auth(&store_b, &hash_b).await },
         );
 
         let a_won = result_a.is_ok();
@@ -1712,15 +1713,15 @@ mod tests {
             use aws_lc_rs::digest::{self, SHA256};
             URL_SAFE_NO_PAD.encode(digest::digest(&SHA256, b"race-code-session-token").as_ref())
         };
-        crate::db::create_session(
+        db::create_session(
             &state.store,
-            &crate::db::CreateSessionParams {
+            &CreateSessionParams {
                 user_id: "handler@example.com",
                 user_email: "handler@example.com",
                 token_hash: &code_session_token_hash,
                 authenticator_id: None,
                 expires_at: Timestamp::now().checked_add(Span::new().hours(1)).unwrap(),
-                session_type: crate::db::SessionPurpose::OAuthAccessToken,
+                session_type: SessionPurpose::OAuthAccessToken,
                 authorization_details: None,
                 hardware_aaguid: None,
                 org_domain: None,
@@ -1764,13 +1765,10 @@ mod tests {
 
         // RFC 6749 §10.5: the session issued from the replayed device code
         // must be revoked by the race-loser handler path.
-        let code_session = crate::db::get_session_by_token_hash(
-            &state.store,
-            &code_session_token_hash,
-            Timestamp::now(),
-        )
-        .await
-        .expect("code-session lookup");
+        let code_session =
+            db::get_session_by_token_hash(&state.store, &code_session_token_hash, Timestamp::now())
+                .await
+                .expect("code-session lookup");
         assert!(
             code_session.is_none(),
             "race-loser must revoke the session issued from the replayed device code"
@@ -1780,7 +1778,7 @@ mod tests {
         // code) must survive — a replay of one code must not log the user out
         // of unrelated sessions.
         let pre_existing =
-            crate::db::get_session_by_token_hash(&state.store, &setup.token_hash, Timestamp::now())
+            db::get_session_by_token_hash(&state.store, &setup.token_hash, Timestamp::now())
                 .await
                 .expect("pre-existing session lookup");
         assert!(
@@ -1815,7 +1813,7 @@ mod tests {
         let future = Timestamp::now()
             .checked_add(Span::new().minutes(1))
             .expect("in range");
-        crate::db::update_device_auth_poll_time(&state.store, &setup.id, 0, future)
+        db::update_device_auth_poll_time(&state.store, &setup.id, 0, future)
             .await
             .expect("stamp last poll");
 
@@ -1826,10 +1824,9 @@ mod tests {
             error["error"], "invalid_grant",
             "a replay inside the poll interval must not be answered with slow_down"
         );
-        let revoked =
-            crate::db::get_session_by_token_hash(&state.store, &issued_hash, Timestamp::now())
-                .await
-                .expect("issued-session lookup");
+        let revoked = db::get_session_by_token_hash(&state.store, &issued_hash, Timestamp::now())
+            .await
+            .expect("issued-session lookup");
         assert!(
             revoked.is_none(),
             "the replay must revoke the token issued from the device code"
@@ -1845,7 +1842,7 @@ mod tests {
         let expires_at = Timestamp::now()
             .checked_add(Span::new().hours(1))
             .expect("in range");
-        let id = crate::db::create_device_auth_request(
+        let id = db::create_device_auth_request(
             &state.store,
             &hash_device_code(device_code),
             "PEND-SLOW",
@@ -1858,7 +1855,7 @@ mod tests {
         let future = Timestamp::now()
             .checked_add(Span::new().minutes(1))
             .expect("in range");
-        crate::db::update_device_auth_poll_time(&state.store, &id, 0, future)
+        db::update_device_auth_poll_time(&state.store, &id, 0, future)
             .await
             .expect("stamp last poll");
 
@@ -1884,7 +1881,7 @@ mod tests {
         let device_code_hash = hash_device_code(device_code);
         let now = Timestamp::now();
         let expires_at = now.checked_add(Span::new().hours(1)).unwrap();
-        let id = crate::db::create_device_auth_request(
+        let id = db::create_device_auth_request(
             &state.store,
             &device_code_hash,
             "DEAC-CODE",
@@ -1897,9 +1894,9 @@ mod tests {
 
         let user = create_test_user(&state.store, "device-deactivated@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        crate::db::authorize_device_auth(
+        db::authorize_device_auth(
             &state.store,
-            crate::db::AuthorizeDeviceAuthParams {
+            AuthorizeDeviceAuthParams {
                 id: &id,
                 user_id: &user.id,
                 user_email: &user.email,
@@ -1912,7 +1909,7 @@ mod tests {
         .await
         .expect("authorize device");
 
-        crate::db::update_user_active_status(&state.store, &user.id, false)
+        db::update_user_active_status(&state.store, &user.id, false)
             .await
             .expect("deactivate user");
 
@@ -1944,7 +1941,7 @@ mod tests {
         let expires_at = Timestamp::now()
             .checked_add(Span::new().hours(1))
             .expect("expiry");
-        let id = crate::db::create_device_auth_request(
+        let id = db::create_device_auth_request(
             &state.store,
             &hash_device_code(&device_code),
             "HWV-CODE",
@@ -1957,9 +1954,9 @@ mod tests {
 
         let user = create_test_user(&state.store, &format!("{label}@example.com")).await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        crate::db::authorize_device_auth(
+        db::authorize_device_auth(
             &state.store,
-            crate::db::AuthorizeDeviceAuthParams {
+            AuthorizeDeviceAuthParams {
                 id: &id,
                 user_id: &user.id,
                 user_email: &user.email,
@@ -2066,9 +2063,9 @@ mod tests {
         let user = create_test_user(&state.store, "native-app@example.com").await;
 
         for (app_type, allowed) in [
-            (crate::db::OAuthClientType::Native, true),
-            (crate::db::OAuthClientType::Web, false),
-            (crate::db::OAuthClientType::Service, false),
+            (OAuthClientType::Native, true),
+            (OAuthClientType::Web, false),
+            (OAuthClientType::Service, false),
         ] {
             let client = create_test_client(
                 &state.store,
@@ -2083,7 +2080,7 @@ mod tests {
                     // A public client, so the request identifies it with
                     // `client_id` alone and the outcome rests on the grant
                     // check.
-                    token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::None),
+                    token_endpoint_auth_method: Some(TokenEndpointAuthMethod::None),
                     with_secret: false,
                     ..Default::default()
                 },

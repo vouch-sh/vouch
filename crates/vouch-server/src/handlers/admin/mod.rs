@@ -25,10 +25,10 @@ pub(crate) use policies::*;
 pub(crate) use scim_tokens::*;
 pub(crate) use subdomain::*;
 
-use crate::AppState;
 use crate::db;
 use crate::db::{ScimScope, ScimScopeSet};
 use crate::error::ServiceError;
+use crate::{AppState, crypto};
 use aws_lc_rs::digest::{self, SHA256};
 use axum::http::StatusCode;
 use base64::Engine;
@@ -53,7 +53,7 @@ pub(crate) struct GeneratedScimToken {
 
 /// Generate a random SCIM token and its hash for storage.
 pub(crate) fn generate_scim_token() -> Result<GeneratedScimToken, ServiceError> {
-    let token_bytes = crate::crypto::generate_random_bytes(32).map_err(|_| {
+    let token_bytes = crypto::generate_random_bytes(32).map_err(|_| {
         ServiceError::api(
             StatusCode::INTERNAL_SERVER_ERROR,
             "rng_error",

@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! WebAuthn registration attestation validation.
 
-use crate::attestation::{extract_aaguid_from_attestation, validate_hardware_attestation};
+use crate::attestation::{self, extract_aaguid_from_attestation, validate_hardware_attestation};
+use crate::crypto::attestation_chain;
 use crate::error::ServiceError;
 use axum::http::StatusCode;
+use vouch_common::AaguidPolicy;
 
 /// Result of validating a registration attestation.
 #[derive(Debug)]
@@ -82,7 +84,7 @@ pub(crate) fn validate_registration_attestation(
     // rejected outright rather than repaired by dropping the offending
     // elements — filtering would let this layer accept a statement the
     // verification library on either path rejects.
-    let certs = match crate::attestation::extract_x5c_from_attestation(attestation_object) {
+    let certs = match attestation::extract_x5c_from_attestation(attestation_object) {
         Ok(Some(certs)) => certs,
         Ok(None) => {
             tracing::warn!(
@@ -117,20 +119,19 @@ pub(crate) fn validate_registration_attestation(
     let claimed_aaguid =
         extract_aaguid_from_attestation(attestation_object).filter(|a| a != ZERO_AAGUID);
 
-    let attestation = crate::crypto::attestation_chain::validate_attestation_chain(
-        &certs,
-        claimed_aaguid.as_deref(),
-    )
-    .map_err(|e| {
-        tracing::warn!("Rejected registration: x5c chain validation failed: {e}");
-        ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "attestation_chain_invalid",
-            "Attestation certificate chain could not be verified \
+    let attestation =
+        attestation_chain::validate_attestation_chain(&certs, claimed_aaguid.as_deref()).map_err(
+            |e| {
+                tracing::warn!("Rejected registration: x5c chain validation failed: {e}");
+                ServiceError::api(
+                    StatusCode::BAD_REQUEST,
+                    "attestation_chain_invalid",
+                    "Attestation certificate chain could not be verified \
              against trusted roots. Only genuine hardware \
              authenticators with valid attestation chains are accepted.",
-        )
-    })?;
+                )
+            },
+        )?;
 
     // The model identity comes from the verified certificate. A chain that
     // validates without the `id-fido-gen-ce-aaguid` extension proves the key
@@ -147,7 +148,7 @@ pub(crate) fn validate_registration_attestation(
     // When the policy is not `Any`, a missing AAGUID must be rejected —
     // otherwise an authenticator whose certificate does not name its model
     // would silently bypass the allowlist.
-    if !matches!(policy, vouch_common::AaguidPolicy::Any) {
+    if !matches!(policy, AaguidPolicy::Any) {
         match aaguid {
             Some(ref aaguid_str) if !policy.is_allowed(aaguid_str) => {
                 tracing::warn!(
@@ -205,6 +206,7 @@ mod tests {
     use super::*;
     use ciborium::Value;
     use std::collections::HashSet;
+    use vouch_common::AaguidPolicy;
 
     /// YubiKey 5 NFC AAGUID bytes.
     const YUBIKEY_5_NFC_AAGUID: [u8; 16] = [
@@ -270,7 +272,7 @@ mod tests {
     fn allowlist_of(aaguid: &str) -> vouch_common::AaguidPolicy {
         let mut set = HashSet::new();
         set.insert(aaguid.to_string());
-        vouch_common::AaguidPolicy::AllowList(set)
+        AaguidPolicy::AllowList(set)
     }
 
     fn error_code(err: &ServiceError) -> String {
@@ -305,19 +307,19 @@ mod tests {
     #[test]
     fn test_validate_rejects_software_passkey() {
         let att = build_attestation("none", None, None);
-        assert!(validate_registration_attestation(&att, &vouch_common::AaguidPolicy::Any).is_err());
+        assert!(validate_registration_attestation(&att, &AaguidPolicy::Any).is_err());
     }
 
     #[test]
     fn test_validate_rejects_platform_authenticator() {
         let att = build_attestation("apple", None, None);
-        assert!(validate_registration_attestation(&att, &vouch_common::AaguidPolicy::Any).is_err());
+        assert!(validate_registration_attestation(&att, &AaguidPolicy::Any).is_err());
     }
 
     #[test]
     fn test_validate_rejects_unknown_format() {
         let att = build_attestation("acme-custom", Some(YUBIKEY_5_NFC_AAGUID), None);
-        let err = validate_registration_attestation(&att, &vouch_common::AaguidPolicy::Any)
+        let err = validate_registration_attestation(&att, &AaguidPolicy::Any)
             .expect_err("an unrecognized attestation format must be rejected");
         assert!(
             error_code(&err).contains("unknown_attestation_format"),
@@ -340,7 +342,7 @@ mod tests {
         // Issue #1111: this registration used to be accepted, and its
         // client-chosen AAGUID went on to become the hardware_aaguid claim.
         let att = build_attestation("packed", Some(YUBIKEY_5_NFC_AAGUID), None);
-        let err = validate_registration_attestation(&att, &vouch_common::AaguidPolicy::Any)
+        let err = validate_registration_attestation(&att, &AaguidPolicy::Any)
             .expect_err("self-attestation must be rejected even with no AAGUID policy");
         assert!(
             error_code(&err).contains("attestation_cert_required"),
@@ -384,7 +386,7 @@ mod tests {
             Some(YUBIKEY_5_NFC_AAGUID),
             Some(vec![vec![0xDE, 0xAD, 0xBE, 0xEF]]),
         );
-        let err = validate_registration_attestation(&att, &vouch_common::AaguidPolicy::Any)
+        let err = validate_registration_attestation(&att, &AaguidPolicy::Any)
             .expect_err("an x5c chain that does not validate must be rejected");
         assert!(
             error_code(&err).contains("attestation_chain_invalid"),
@@ -420,7 +422,7 @@ mod tests {
         let mut att = Vec::new();
         ciborium::into_writer(&value, &mut att).expect("CBOR serialization");
 
-        let err = validate_registration_attestation(&att, &vouch_common::AaguidPolicy::Any)
+        let err = validate_registration_attestation(&att, &AaguidPolicy::Any)
             .expect_err("an x5c with a non-byte-string element must be rejected");
         assert!(
             error_code(&err).contains("attestation_chain_invalid"),
@@ -434,11 +436,8 @@ mod tests {
 
     #[test]
     fn test_real_chain_is_accepted_and_names_the_model() {
-        let validated = validate_registration_attestation(
-            &real_attestation(),
-            &vouch_common::AaguidPolicy::Any,
-        )
-        .expect("a genuine YubiKey attestation must be accepted");
+        let validated = validate_registration_attestation(&real_attestation(), &AaguidPolicy::Any)
+            .expect("a genuine YubiKey attestation must be accepted");
         assert_eq!(validated.aaguid.as_deref(), Some(FIXTURE_AAGUID));
         assert_eq!(validated.device_name, "YubiKey 5C Nano FIPS (Enterprise)");
     }
@@ -455,7 +454,7 @@ mod tests {
             "the fixture's authData AAGUID should now be all zeros"
         );
 
-        let validated = validate_registration_attestation(&att, &vouch_common::AaguidPolicy::Any)
+        let validated = validate_registration_attestation(&att, &AaguidPolicy::Any)
             .expect("a valid chain with no authData AAGUID is still acceptable");
         assert_eq!(validated.aaguid.as_deref(), Some(FIXTURE_AAGUID));
     }
@@ -475,11 +474,7 @@ mod tests {
     #[test]
     fn test_fips_only_permits_a_real_fips_key() {
         assert!(
-            validate_registration_attestation(
-                &real_attestation(),
-                &vouch_common::AaguidPolicy::FipsOnly
-            )
-            .is_ok()
+            validate_registration_attestation(&real_attestation(), &AaguidPolicy::FipsOnly).is_ok()
         );
     }
 

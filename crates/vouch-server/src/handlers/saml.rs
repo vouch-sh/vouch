@@ -18,9 +18,10 @@ use axum::{
 use serde::Deserialize;
 
 use crate::AppState;
-use crate::db::{self, ClientInfo};
+use crate::db::{self, ClientInfo, UpstreamLogin};
 use crate::handlers::enroll::{ErrorTemplate, complete_enrollment_after_identity};
-use crate::services::idp::IdentityResult;
+use crate::services::idp::saml::{metadata, response};
+use crate::services::idp::{ConfiguredIdp, IdentityResult};
 
 // ============================================================================
 // Request types
@@ -54,12 +55,12 @@ pub(crate) async fn metadata(State(state): State<Arc<AppState>>) -> impl IntoRes
         .idps
         .iter()
         .find_map(|i| match i {
-            crate::services::idp::ConfiguredIdp::Saml(p) => Some(p.sp_entity_id.clone()),
-            crate::services::idp::ConfiguredIdp::Oidc(_) => None,
+            ConfiguredIdp::Saml(p) => Some(p.sp_entity_id.clone()),
+            ConfiguredIdp::Oidc(_) => None,
         })
         .unwrap_or_else(|| config.base_url.to_string());
     let acs_url = format!("{}/saml/acs", config.base_url);
-    let xml = crate::services::idp::saml::metadata::generate_sp_metadata(&sp_entity_id, &acs_url);
+    let xml = metadata::generate_sp_metadata(&sp_entity_id, &acs_url);
     (
         [(header::CONTENT_TYPE, "application/samlmetadata+xml")],
         xml,
@@ -132,13 +133,13 @@ pub(crate) async fn acs(
     // multi-IdP support (rolling deploy compatibility).
     let saml_provider = if stored_state.provider_id.is_empty() {
         state.idps.iter().find_map(|i| match i {
-            crate::services::idp::ConfiguredIdp::Saml(p) => Some(p),
-            crate::services::idp::ConfiguredIdp::Oidc(_) => None,
+            ConfiguredIdp::Saml(p) => Some(p),
+            ConfiguredIdp::Oidc(_) => None,
         })
     } else {
         state.idp(&stored_state.provider_id).and_then(|i| match i {
-            crate::services::idp::ConfiguredIdp::Saml(p) => Some(p),
-            crate::services::idp::ConfiguredIdp::Oidc(_) => None,
+            ConfiguredIdp::Saml(p) => Some(p),
+            ConfiguredIdp::Oidc(_) => None,
         })
     };
     let Some(saml_provider) = saml_provider else {
@@ -153,7 +154,7 @@ pub(crate) async fn acs(
     };
 
     // Step 6: Validate the SAML response. The stored nonce is the AuthnRequest ID.
-    let assertion = match crate::services::idp::saml::response::validate_saml_response(
+    let assertion = match response::validate_saml_response(
         &form.saml_response,
         &stored_state.nonce,
         saml_provider,
@@ -229,12 +230,12 @@ fn saml_upstream_login(
     entity_id: &str,
     name_id: Option<&str>,
     name_id_format: Option<&str>,
-) -> crate::db::UpstreamLogin {
+) -> UpstreamLogin {
     let durable_subject = match (name_id, name_id_format) {
         (Some(id), Some(NAMEID_PERSISTENT)) => Some(id.to_string()),
         _ => None,
     };
-    crate::db::UpstreamLogin {
+    UpstreamLogin {
         issuer: entity_id.to_string(),
         durable_subject,
     }

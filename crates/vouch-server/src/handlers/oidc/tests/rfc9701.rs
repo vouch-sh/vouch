@@ -2,6 +2,8 @@
 //! RFC 9701 — JWT Token Introspection Responses.
 
 use super::helpers::*;
+use crate::crypto::alg::JwsAlgorithm;
+use crate::test_utils::TestOAuthClient;
 
 // ============================================================================
 // Helpers
@@ -11,14 +13,14 @@ use super::helpers::*;
 async fn create_test_client_with_introspection_jwt(
     state: &std::sync::Arc<crate::AppState>,
     user_id: &str,
-) -> crate::test_utils::TestOAuthClient {
+) -> TestOAuthClient {
     create_test_client(
         &state.store,
         user_id,
         TestClientSpec {
             name: "JWT Introspect App".to_string(),
-            id_token_signed_response_alg: crate::crypto::alg::JwsAlgorithm::Es256,
-            introspection_signed_response_alg: Some(crate::crypto::alg::JwsAlgorithm::Es256),
+            id_token_signed_response_alg: JwsAlgorithm::Es256,
+            introspection_signed_response_alg: Some(JwsAlgorithm::Es256),
             ..Default::default()
         },
     )

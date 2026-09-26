@@ -8,6 +8,7 @@
 )]
 
 use super::*;
+use crate::db::AuditEventFilter;
 
 // ========================================================================
 // RFC 7643 Section 4.2 — Group CRUD Positive Tests
@@ -1306,9 +1307,9 @@ async fn test_scim_operation_audit_event_carries_org_domain() {
 
     let events = state
         .audit
-        .query_events(&crate::db::AuditEventFilter {
+        .query_events(&AuditEventFilter {
             event_types: Some(vec!["scim_operation".to_string()]),
-            ..crate::db::AuditEventFilter::default()
+            ..AuditEventFilter::default()
         })
         .await
         .expect("query audit events");
@@ -1353,9 +1354,9 @@ async fn test_scim_create_and_delete_user_audit_events_never_carry_a_raw_email()
 
     let events = state
         .audit
-        .query_events(&crate::db::AuditEventFilter {
+        .query_events(&AuditEventFilter {
             event_types: Some(vec!["scim_operation".to_string()]),
-            ..crate::db::AuditEventFilter::default()
+            ..AuditEventFilter::default()
         })
         .await
         .expect("query audit events");
@@ -1390,9 +1391,9 @@ async fn test_scim_create_and_delete_user_audit_events_never_carry_a_raw_email()
 async fn scim_audit_rows(state: &crate::AppState) -> Vec<serde_json::Value> {
     state
         .audit
-        .query_events(&crate::db::AuditEventFilter {
+        .query_events(&AuditEventFilter {
             event_types: Some(vec!["scim_operation".to_string()]),
-            ..crate::db::AuditEventFilter::default()
+            ..AuditEventFilter::default()
         })
         .await
         .expect("query audit events")
@@ -1716,9 +1717,9 @@ async fn test_put_group_audits_a_replace() {
 
     let events = state
         .audit
-        .query_events(&crate::db::AuditEventFilter {
+        .query_events(&AuditEventFilter {
             event_types: Some(vec!["scim_operation".to_string()]),
-            ..crate::db::AuditEventFilter::default()
+            ..AuditEventFilter::default()
         })
         .await
         .expect("query audit events");

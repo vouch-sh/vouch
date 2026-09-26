@@ -9,6 +9,7 @@
 )]
 
 use super::*;
+use crate::db::{self, AuditEventFilter, ScimScope, ScimScopeSet};
 
 // ========================================================================
 // RFC 7643 Section 4.1 - User Resource Tests
@@ -266,7 +267,7 @@ async fn test_patch_user_deactivate_revokes_ssh_certificates() {
     let expires_at = jiff::Timestamp::now()
         .checked_add(jiff::Span::new().hours(8))
         .expect("future timestamp");
-    crate::db::record_ssh_certificate_issuance(
+    db::record_ssh_certificate_issuance(
         &state.store,
         42_000_003,
         &user_id,
@@ -277,7 +278,7 @@ async fn test_patch_user_deactivate_revokes_ssh_certificates() {
     .await
     .expect("record issuance");
     assert!(
-        crate::db::get_revoked_ssh_certificates(&state.store)
+        db::get_revoked_ssh_certificates(&state.store)
             .await
             .expect("list revoked")
             .is_empty(),
@@ -297,7 +298,7 @@ async fn test_patch_user_deactivate_revokes_ssh_certificates() {
     .await;
     assert_eq!(status, StatusCode::OK);
 
-    let revoked = crate::db::get_revoked_ssh_certificates(&state.store)
+    let revoked = db::get_revoked_ssh_certificates(&state.store)
         .await
         .expect("list revoked");
     assert_eq!(
@@ -337,7 +338,7 @@ async fn test_patch_user_active_round_trip_does_not_revoke() {
     let expires_at = jiff::Timestamp::now()
         .checked_add(jiff::Span::new().hours(8))
         .expect("future timestamp");
-    crate::db::record_ssh_certificate_issuance(
+    db::record_ssh_certificate_issuance(
         &state.store,
         42_000_077,
         &user_id,
@@ -348,7 +349,7 @@ async fn test_patch_user_active_round_trip_does_not_revoke() {
     .await
     .expect("record issuance");
     assert!(
-        crate::db::get_revoked_ssh_certificates(&state.store)
+        db::get_revoked_ssh_certificates(&state.store)
             .await
             .expect("list revoked")
             .is_empty(),
@@ -374,7 +375,7 @@ async fn test_patch_user_active_round_trip_does_not_revoke() {
         "final resource must remain active"
     );
 
-    let revoked = crate::db::get_revoked_ssh_certificates(&state.store)
+    let revoked = db::get_revoked_ssh_certificates(&state.store)
         .await
         .expect("list revoked");
     assert!(
@@ -386,9 +387,9 @@ async fn test_patch_user_active_round_trip_does_not_revoke() {
 
     let events = state
         .audit
-        .query_events(&crate::db::AuditEventFilter {
+        .query_events(&AuditEventFilter {
             event_types: Some(vec!["scim_operation".to_string()]),
-            ..crate::db::AuditEventFilter::default()
+            ..AuditEventFilter::default()
         })
         .await
         .expect("query audit events");
@@ -443,7 +444,7 @@ async fn test_patch_user_multi_op_deactivation_still_revokes() {
     let expires_at = jiff::Timestamp::now()
         .checked_add(jiff::Span::new().hours(8))
         .expect("future timestamp");
-    crate::db::record_ssh_certificate_issuance(
+    db::record_ssh_certificate_issuance(
         &state.store,
         42_000_078,
         &user_id,
@@ -454,7 +455,7 @@ async fn test_patch_user_multi_op_deactivation_still_revokes() {
     .await
     .expect("record issuance");
     assert!(
-        crate::db::get_revoked_ssh_certificates(&state.store)
+        db::get_revoked_ssh_certificates(&state.store)
             .await
             .expect("list revoked")
             .is_empty(),
@@ -476,7 +477,7 @@ async fn test_patch_user_multi_op_deactivation_still_revokes() {
     .await;
     assert_eq!(status, StatusCode::OK);
 
-    let revoked = crate::db::get_revoked_ssh_certificates(&state.store)
+    let revoked = db::get_revoked_ssh_certificates(&state.store)
         .await
         .expect("list revoked");
     assert_eq!(
@@ -1285,9 +1286,9 @@ async fn test_scim_delete_user_returns_404_when_target_vanishes_mid_delete() {
     // did not occur.
     let events = state
         .audit
-        .query_events(&crate::db::AuditEventFilter {
+        .query_events(&AuditEventFilter {
             event_types: Some(vec!["scim_operation".to_string()]),
-            ..crate::db::AuditEventFilter::default()
+            ..AuditEventFilter::default()
         })
         .await
         .expect("query audit events");
@@ -1341,7 +1342,7 @@ async fn test_scim_delete_user_refuses_to_remove_the_last_active_admin_without_r
     let expires_at = jiff::Timestamp::now()
         .checked_add(jiff::Span::new().hours(8))
         .expect("future timestamp");
-    crate::db::record_ssh_certificate_issuance(
+    db::record_ssh_certificate_issuance(
         &state.store,
         42_010_001,
         &admin.id,
@@ -1358,7 +1359,7 @@ async fn test_scim_delete_user_refuses_to_remove_the_last_active_admin_without_r
         &state.store,
         "attacker",
         admin.org_id.as_deref().expect("admin has org"),
-        crate::db::ScimScopeSet::from_scopes(vec![crate::db::ScimScope::UsersWrite]),
+        ScimScopeSet::from_scopes(vec![ScimScope::UsersWrite]),
     )
     .await;
     let auth_header = format!("Bearer {token}");
@@ -1366,7 +1367,7 @@ async fn test_scim_delete_user_refuses_to_remove_the_last_active_admin_without_r
     // Sanity: the admin is the sole active admin, has at least one live
     // session, and no SSH cert has been revoked yet.
     assert!(
-        crate::db::is_last_active_org_admin(&state.store, &admin.id)
+        db::is_last_active_org_admin(&state.store, &admin.id)
             .await
             .expect("count admins"),
         "setup: the org has exactly one active admin",
@@ -1381,7 +1382,7 @@ async fn test_scim_delete_user_refuses_to_remove_the_last_active_admin_without_r
         "setup: the admin has at least one session",
     );
     assert!(
-        crate::db::get_revoked_ssh_certificates(&state.store)
+        db::get_revoked_ssh_certificates(&state.store)
             .await
             .expect("list revoked")
             .is_empty(),
@@ -1413,14 +1414,14 @@ async fn test_scim_delete_user_refuses_to_remove_the_last_active_admin_without_r
     // The admin record itself survives: `revoke_user_access` would have
     // left `active`/`is_org_admin` untouched anyway, but more importantly
     // the delete never ran — the in-tx guard never fired.
-    let admin_after = crate::db::get_user_by_id(&state.store, &admin.id)
+    let admin_after = db::get_user_by_id(&state.store, &admin.id)
         .await
         .expect("fetch admin after")
         .expect("admin record still exists");
     assert!(admin_after.active, "admin record still active");
     assert!(admin_after.is_org_admin, "admin record still admin");
     assert!(
-        crate::db::is_last_active_org_admin(&state.store, &admin.id)
+        db::is_last_active_org_admin(&state.store, &admin.id)
             .await
             .expect("rerun floor"),
         "admin still the sole active admin after the refused delete",
@@ -1442,7 +1443,7 @@ async fn test_scim_delete_user_refuses_to_remove_the_last_active_admin_without_r
     // The live SSH cert must remain live — no `SshRevokedCertDoc` rows
     // may have been written by `revoke_user_credentials`.
     assert!(
-        crate::db::get_revoked_ssh_certificates(&state.store)
+        db::get_revoked_ssh_certificates(&state.store)
             .await
             .expect("list revoked after")
             .is_empty(),
@@ -1454,9 +1455,9 @@ async fn test_scim_delete_user_refuses_to_remove_the_last_active_admin_without_r
     // already committed; the floor refusal must not write such a row.
     let events = state
         .audit
-        .query_events(&crate::db::AuditEventFilter {
+        .query_events(&AuditEventFilter {
             event_types: Some(vec!["scim_operation".to_string()]),
-            ..crate::db::AuditEventFilter::default()
+            ..AuditEventFilter::default()
         })
         .await
         .expect("query audit events");
@@ -1531,7 +1532,7 @@ async fn test_scim_delete_user_removes_a_non_last_active_admin() {
     let expires_at = jiff::Timestamp::now()
         .checked_add(jiff::Span::new().hours(8))
         .expect("future timestamp");
-    crate::db::record_ssh_certificate_issuance(
+    db::record_ssh_certificate_issuance(
         &state.store,
         42_010_010,
         &admin1.id,
@@ -1541,7 +1542,7 @@ async fn test_scim_delete_user_removes_a_non_last_active_admin() {
     )
     .await
     .expect("record admin1 issuance");
-    crate::db::record_ssh_certificate_issuance(
+    db::record_ssh_certificate_issuance(
         &state.store,
         42_010_011,
         &admin2.id,
@@ -1565,13 +1566,13 @@ async fn test_scim_delete_user_removes_a_non_last_active_admin() {
     // Sanity: each admin is *not* the last active one (the other
     // still counts).
     assert!(
-        !crate::db::is_last_active_org_admin(&state.store, &admin1.id)
+        !db::is_last_active_org_admin(&state.store, &admin1.id)
             .await
             .expect("count admins for admin1"),
         "setup: admin1 has a second admin in the org",
     );
     assert!(
-        !crate::db::is_last_active_org_admin(&state.store, &admin2.id)
+        !db::is_last_active_org_admin(&state.store, &admin2.id)
             .await
             .expect("count admins for admin2"),
         "setup: admin2 has a second admin in the org",
@@ -1592,7 +1593,7 @@ async fn test_scim_delete_user_removes_a_non_last_active_admin() {
 
     // admin1's user doc is gone.
     assert!(
-        crate::db::get_user_by_id(&state.store, &admin1.id)
+        db::get_user_by_id(&state.store, &admin1.id)
             .await
             .expect("fetch admin1 after")
             .is_none(),
@@ -1612,7 +1613,7 @@ async fn test_scim_delete_user_removes_a_non_last_active_admin() {
     );
 
     // admin1's cert is in the revocation list; admin2's is not.
-    let revoked = crate::db::get_revoked_ssh_certificates(&state.store)
+    let revoked = db::get_revoked_ssh_certificates(&state.store)
         .await
         .expect("list revoked after");
     assert_eq!(
@@ -1631,14 +1632,14 @@ async fn test_scim_delete_user_removes_a_non_last_active_admin() {
     );
 
     // admin2 is now the sole remaining active admin.
-    let admin2_after = crate::db::get_user_by_id(&state.store, &admin2.id)
+    let admin2_after = db::get_user_by_id(&state.store, &admin2.id)
         .await
         .expect("fetch admin2 after")
         .expect("admin2 record still exists");
     assert!(admin2_after.active, "admin2 still active");
     assert!(admin2_after.is_org_admin, "admin2 still admin");
     assert!(
-        crate::db::is_last_active_org_admin(&state.store, &admin2.id)
+        db::is_last_active_org_admin(&state.store, &admin2.id)
             .await
             .expect("count admins after"),
         "admin2 is now the last active admin",
@@ -1647,9 +1648,9 @@ async fn test_scim_delete_user_removes_a_non_last_active_admin() {
     // The successful delete was logged as a `scim_operation` audit event.
     let events = state
         .audit
-        .query_events(&crate::db::AuditEventFilter {
+        .query_events(&AuditEventFilter {
             event_types: Some(vec!["scim_operation".to_string()]),
-            ..crate::db::AuditEventFilter::default()
+            ..AuditEventFilter::default()
         })
         .await
         .expect("query audit events");
@@ -1686,7 +1687,7 @@ async fn test_scim_patch_user_refuses_to_deactivate_the_last_active_admin_withou
     let expires_at = jiff::Timestamp::now()
         .checked_add(jiff::Span::new().hours(8))
         .expect("future timestamp");
-    crate::db::record_ssh_certificate_issuance(
+    db::record_ssh_certificate_issuance(
         &state.store,
         42_010_020,
         &admin.id,
@@ -1703,7 +1704,7 @@ async fn test_scim_patch_user_refuses_to_deactivate_the_last_active_admin_withou
         &state.store,
         "attacker",
         admin.org_id.as_deref().expect("admin has org"),
-        crate::db::ScimScopeSet::from_scopes(vec![crate::db::ScimScope::UsersWrite]),
+        ScimScopeSet::from_scopes(vec![ScimScope::UsersWrite]),
     )
     .await;
     let auth_header = format!("Bearer {token}");
@@ -1711,7 +1712,7 @@ async fn test_scim_patch_user_refuses_to_deactivate_the_last_active_admin_withou
     // Sanity: the admin is the sole active admin, has a session, and no
     // SSH cert has been revoked.
     assert!(
-        crate::db::is_last_active_org_admin(&state.store, &admin.id)
+        db::is_last_active_org_admin(&state.store, &admin.id)
             .await
             .expect("count admins"),
         "setup: the org has exactly one active admin",
@@ -1726,7 +1727,7 @@ async fn test_scim_patch_user_refuses_to_deactivate_the_last_active_admin_withou
         "setup: the admin has at least one session",
     );
     assert!(
-        crate::db::get_revoked_ssh_certificates(&state.store)
+        db::get_revoked_ssh_certificates(&state.store)
             .await
             .expect("list revoked")
             .is_empty(),
@@ -1767,14 +1768,14 @@ async fn test_scim_patch_user_refuses_to_deactivate_the_last_active_admin_withou
     );
 
     // The admin record is untouched: `active` is still true.
-    let admin_after = crate::db::get_user_by_id(&state.store, &admin.id)
+    let admin_after = db::get_user_by_id(&state.store, &admin.id)
         .await
         .expect("fetch admin after")
         .expect("admin record still exists");
     assert!(admin_after.active, "admin record still active");
     assert!(admin_after.is_org_admin, "admin record still admin");
     assert!(
-        crate::db::is_last_active_org_admin(&state.store, &admin.id)
+        db::is_last_active_org_admin(&state.store, &admin.id)
             .await
             .expect("rerun floor"),
         "admin still the sole active admin after the refused PATCH",
@@ -1791,7 +1792,7 @@ async fn test_scim_patch_user_refuses_to_deactivate_the_last_active_admin_withou
         "SCIM PATCH refusal must not delete any of the admin's sessions",
     );
     assert!(
-        crate::db::get_revoked_ssh_certificates(&state.store)
+        db::get_revoked_ssh_certificates(&state.store)
             .await
             .expect("list revoked after")
             .is_empty(),
@@ -1803,9 +1804,9 @@ async fn test_scim_patch_user_refuses_to_deactivate_the_last_active_admin_withou
     // record of a side effect that never committed.
     let events = state
         .audit
-        .query_events(&crate::db::AuditEventFilter {
+        .query_events(&AuditEventFilter {
             event_types: Some(vec!["scim_operation".to_string()]),
-            ..crate::db::AuditEventFilter::default()
+            ..AuditEventFilter::default()
         })
         .await
         .expect("query audit events");
@@ -1910,7 +1911,7 @@ async fn test_scim_patch_user_audits_when_in_tx_last_admin_refuses_after_revocat
     let expires_at = jiff::Timestamp::now()
         .checked_add(jiff::Span::new().hours(8))
         .expect("future timestamp");
-    crate::db::record_ssh_certificate_issuance(
+    db::record_ssh_certificate_issuance(
         &state.store,
         42_010_030,
         &admin1.id,
@@ -1920,7 +1921,7 @@ async fn test_scim_patch_user_audits_when_in_tx_last_admin_refuses_after_revocat
     )
     .await
     .expect("record admin1 issuance");
-    crate::db::record_ssh_certificate_issuance(
+    db::record_ssh_certificate_issuance(
         &state.store,
         42_010_031,
         &admin2.id,
@@ -1936,7 +1937,7 @@ async fn test_scim_patch_user_audits_when_in_tx_last_admin_refuses_after_revocat
         &state.store,
         "attacker",
         &org_id,
-        crate::db::ScimScopeSet::from_scopes(vec![crate::db::ScimScope::UsersWrite]),
+        ScimScopeSet::from_scopes(vec![ScimScope::UsersWrite]),
     )
     .await;
     let auth_header = format!("Bearer {token}");
@@ -1945,7 +1946,7 @@ async fn test_scim_patch_user_audits_when_in_tx_last_admin_refuses_after_revocat
     // so the advisory pre-check passes for admin1. admin1 has a live session
     // and no cert has been revoked yet.
     assert!(
-        !crate::db::is_last_active_org_admin(&state.store, &admin1.id)
+        !db::is_last_active_org_admin(&state.store, &admin1.id)
             .await
             .expect("count admins for admin1"),
         "setup: admin1 has a second active admin",
@@ -1957,7 +1958,7 @@ async fn test_scim_patch_user_audits_when_in_tx_last_admin_refuses_after_revocat
         .expect("count admin1 sessions");
     assert!(session_count_before >= 1, "setup: admin1 has a session");
     assert!(
-        crate::db::get_revoked_ssh_certificates(&state.store)
+        db::get_revoked_ssh_certificates(&state.store)
             .await
             .expect("list revoked")
             .is_empty(),
@@ -2011,7 +2012,7 @@ async fn test_scim_patch_user_audits_when_in_tx_last_admin_refuses_after_revocat
         session_count_after, 0,
         "SCIM PATCH revocation must delete the target's sessions before the floor refuses",
     );
-    let revoked = crate::db::get_revoked_ssh_certificates(&state.store)
+    let revoked = db::get_revoked_ssh_certificates(&state.store)
         .await
         .expect("list revoked after");
     assert_eq!(
@@ -2032,7 +2033,7 @@ async fn test_scim_patch_user_audits_when_in_tx_last_admin_refuses_after_revocat
     // admin1's record is untouched: the `active=false` write never committed,
     // so it stays active/admin and is now the floor's only live admin (admin2
     // was deactivated by the hook).
-    let admin1_after = crate::db::get_user_by_id(&state.store, &admin1.id)
+    let admin1_after = db::get_user_by_id(&state.store, &admin1.id)
         .await
         .expect("fetch admin1 after")
         .expect("admin1 record still exists");
@@ -2042,7 +2043,7 @@ async fn test_scim_patch_user_audits_when_in_tx_last_admin_refuses_after_revocat
     );
     assert!(admin1_after.is_org_admin, "admin1 still admin");
     assert!(
-        crate::db::is_last_active_org_admin(&state.store, &admin1.id)
+        db::is_last_active_org_admin(&state.store, &admin1.id)
             .await
             .expect("rerun floor"),
         "admin1 is the last active admin after admin2 was demoted by the hook",
@@ -2056,9 +2057,9 @@ async fn test_scim_patch_user_audits_when_in_tx_last_admin_refuses_after_revocat
     // string, so parse the event and its details rather than substring-match.
     let events = state
         .audit
-        .query_events(&crate::db::AuditEventFilter {
+        .query_events(&AuditEventFilter {
             event_types: Some(vec!["scim_operation".to_string()]),
-            ..crate::db::AuditEventFilter::default()
+            ..AuditEventFilter::default()
         })
         .await
         .expect("query audit events");
@@ -2085,7 +2086,7 @@ async fn test_scim_patch_user_audits_when_in_tx_last_admin_refuses_after_revocat
         hex::encode(digest::digest(&SHA256, token.as_bytes()))
     };
     let token_record =
-        crate::db::get_scim_token_by_hash(&state.store, &token_hash, jiff::Timestamp::now())
+        db::get_scim_token_by_hash(&state.store, &token_hash, jiff::Timestamp::now())
             .await
             .expect("look up token record")
             .expect("token record exists");
@@ -2182,7 +2183,7 @@ async fn test_scim_delete_user_audits_when_in_tx_last_admin_refuses_after_revoca
     let expires_at = jiff::Timestamp::now()
         .checked_add(jiff::Span::new().hours(8))
         .expect("future timestamp");
-    crate::db::record_ssh_certificate_issuance(
+    db::record_ssh_certificate_issuance(
         &state.store,
         42_010_040,
         &admin1.id,
@@ -2192,7 +2193,7 @@ async fn test_scim_delete_user_audits_when_in_tx_last_admin_refuses_after_revoca
     )
     .await
     .expect("record admin1 issuance");
-    crate::db::record_ssh_certificate_issuance(
+    db::record_ssh_certificate_issuance(
         &state.store,
         42_010_041,
         &admin2.id,
@@ -2207,7 +2208,7 @@ async fn test_scim_delete_user_audits_when_in_tx_last_admin_refuses_after_revoca
         &state.store,
         "attacker",
         &org_id,
-        crate::db::ScimScopeSet::from_scopes(vec![crate::db::ScimScope::UsersWrite]),
+        ScimScopeSet::from_scopes(vec![ScimScope::UsersWrite]),
     )
     .await;
     let auth_header = format!("Bearer {token}");
@@ -2215,7 +2216,7 @@ async fn test_scim_delete_user_audits_when_in_tx_last_admin_refuses_after_revoca
     // Sanity: the advisory pre-check passes for admin1 (2 active admins),
     // admin1 has a live session, and no cert is revoked yet.
     assert!(
-        !crate::db::is_last_active_org_admin(&state.store, &admin1.id)
+        !db::is_last_active_org_admin(&state.store, &admin1.id)
             .await
             .expect("count admins for admin1"),
         "setup: admin1 has a second active admin",
@@ -2227,7 +2228,7 @@ async fn test_scim_delete_user_audits_when_in_tx_last_admin_refuses_after_revoca
         .expect("count admin1 sessions");
     assert!(session_count_before >= 1, "setup: admin1 has a session");
     assert!(
-        crate::db::get_revoked_ssh_certificates(&state.store)
+        db::get_revoked_ssh_certificates(&state.store)
             .await
             .expect("list revoked")
             .is_empty(),
@@ -2274,7 +2275,7 @@ async fn test_scim_delete_user_audits_when_in_tx_last_admin_refuses_after_revoca
         session_count_after, 0,
         "SCIM delete revocation must delete the target's sessions before the floor refuses",
     );
-    let revoked = crate::db::get_revoked_ssh_certificates(&state.store)
+    let revoked = db::get_revoked_ssh_certificates(&state.store)
         .await
         .expect("list revoked after");
     assert_eq!(
@@ -2295,7 +2296,7 @@ async fn test_scim_delete_user_audits_when_in_tx_last_admin_refuses_after_revoca
     // admin1's record survives: the delete never committed (the floor returned
     // before the user-row delete and the org-row OCC), so admin1 stays
     // active/admin and is now the floor's only live admin.
-    let admin1_after = crate::db::get_user_by_id(&state.store, &admin1.id)
+    let admin1_after = db::get_user_by_id(&state.store, &admin1.id)
         .await
         .expect("fetch admin1 after")
         .expect("admin1 record still exists");
@@ -2305,7 +2306,7 @@ async fn test_scim_delete_user_audits_when_in_tx_last_admin_refuses_after_revoca
     );
     assert!(admin1_after.is_org_admin, "admin1 still admin");
     assert!(
-        crate::db::is_last_active_org_admin(&state.store, &admin1.id)
+        db::is_last_active_org_admin(&state.store, &admin1.id)
             .await
             .expect("rerun floor"),
         "admin1 is the last active admin after admin2 was demoted by the hook",
@@ -2317,9 +2318,9 @@ async fn test_scim_delete_user_audits_when_in_tx_last_admin_refuses_after_revoca
     // rather than substring-match.
     let events = state
         .audit
-        .query_events(&crate::db::AuditEventFilter {
+        .query_events(&AuditEventFilter {
             event_types: Some(vec!["scim_operation".to_string()]),
-            ..crate::db::AuditEventFilter::default()
+            ..AuditEventFilter::default()
         })
         .await
         .expect("query audit events");
@@ -2343,7 +2344,7 @@ async fn test_scim_delete_user_audits_when_in_tx_last_admin_refuses_after_revoca
         hex::encode(digest::digest(&SHA256, token.as_bytes()))
     };
     let token_record =
-        crate::db::get_scim_token_by_hash(&state.store, &token_hash, jiff::Timestamp::now())
+        db::get_scim_token_by_hash(&state.store, &token_hash, jiff::Timestamp::now())
             .await
             .expect("look up token record")
             .expect("token record exists");
@@ -2675,7 +2676,7 @@ async fn test_put_user_deactivation_revokes_access() {
     let expires_at = jiff::Timestamp::now()
         .checked_add(jiff::Span::new().hours(8))
         .expect("future timestamp");
-    crate::db::record_ssh_certificate_issuance(
+    db::record_ssh_certificate_issuance(
         &state.store,
         42_000_411,
         &user_id,
@@ -2696,7 +2697,7 @@ async fn test_put_user_deactivation_revokes_access() {
 
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["active"], false);
-    let revoked = crate::db::get_revoked_ssh_certificates(&state.store)
+    let revoked = db::get_revoked_ssh_certificates(&state.store)
         .await
         .expect("list revoked");
     assert_eq!(revoked.len(), 1, "a deactivating PUT revokes like PATCH");
@@ -2738,7 +2739,7 @@ async fn test_put_user_refuses_to_deactivate_the_last_active_admin() {
         &state.store,
         "put-last-admin",
         admin.org_id.as_deref().expect("admin has org"),
-        crate::db::ScimScopeSet::from_scopes(vec![crate::db::ScimScope::UsersWrite]),
+        ScimScopeSet::from_scopes(vec![ScimScope::UsersWrite]),
     )
     .await;
     let auth_header = format!("Bearer {token}");
@@ -2781,7 +2782,7 @@ async fn test_put_user_requires_users_write_scope() {
         &state.store,
         "read-only",
         "test-org",
-        crate::db::ScimScopeSet::from_scopes(vec![crate::db::ScimScope::UsersRead]),
+        ScimScopeSet::from_scopes(vec![ScimScope::UsersRead]),
     )
     .await;
 

@@ -30,6 +30,8 @@ use subtle::ConstantTimeEq;
 use axum::http::header;
 use jiff::Timestamp;
 
+use crate::handlers::oidc;
+use crate::services::auth::NoClientAuth;
 use crate::{
     AppState, db,
     error::OAuthErrorCode,
@@ -210,9 +212,7 @@ pub(crate) async fn complete_login(
         },
         TokenIssuanceProof {
             grant: GrantProof::CertificationBypass,
-            client_auth: ClientAuthProof::NoAuth(
-                crate::services::auth::NoClientAuth::internal_endpoint(),
-            ),
+            client_auth: ClientAuthProof::NoAuth(NoClientAuth::internal_endpoint()),
             sender_constraint: SenderConstraintProof::no_registered_client(),
         },
         arrival,
@@ -340,7 +340,7 @@ pub(crate) async fn deny_login(
         "Certification deny-login: returning access_denied"
     );
 
-    crate::handlers::oidc::oauth_error_response(
+    oidc::oauth_error_response(
         &state,
         &client,
         &pending.redirect_uri,
@@ -446,7 +446,9 @@ mod tests {
     )]
     use super::*;
     use crate::config::NonEmptySecret;
+    use crate::db::{self, CreatePendingOAuthParams, ResponseMode};
     use crate::handlers::browser_login::hmac_sha256_base64url;
+    use crate::test_utils::{self, TestOAuthClient};
 
     fn key(secret: &str) -> NonEmptySecret {
         NonEmptySecret::new(secret.to_string().into()).expect("non-empty test key")
@@ -518,16 +520,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_complete_login_returns_forbidden_with_wrong_token() {
-        let (app, state) = crate::test_utils::test_app_with_certification().await;
+        let (app, state) = test_utils::test_app_with_certification().await;
 
         let user =
-            crate::test_utils::create_test_user(&state.store, "cert-owner-forbidden@example.com")
-                .await;
-        let client = crate::test_utils::create_test_oauth_client(&state.store, &user.id).await;
+            test_utils::create_test_user(&state.store, "cert-owner-forbidden@example.com").await;
+        let client = test_utils::create_test_oauth_client(&state.store, &user.id).await;
 
-        let pending_id = crate::db::create_pending_oauth_authorization(
+        let pending_id = db::create_pending_oauth_authorization(
             &state.store,
-            crate::db::CreatePendingOAuthParams {
+            CreatePendingOAuthParams {
                 client_id: &client.client_id,
                 redirect_uri: "https://example.com/callback",
                 response_type: "code",
@@ -549,7 +550,7 @@ mod tests {
         .await
         .expect("Failed to create pending auth");
 
-        let resp = crate::test_utils::http_get_full(
+        let resp = test_utils::http_get_full(
             &app,
             &format!("/certification/complete-login?pending_auth={pending_id}&token=invaliddtoken"),
             &[],
@@ -561,15 +562,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_complete_login_redirects_to_authorize_with_valid_token() {
-        let (app, state) = crate::test_utils::test_app_with_certification().await;
+        let (app, state) = test_utils::test_app_with_certification().await;
 
-        let user =
-            crate::test_utils::create_test_user(&state.store, "cert-owner-valid@example.com").await;
-        let client = crate::test_utils::create_test_oauth_client(&state.store, &user.id).await;
+        let user = test_utils::create_test_user(&state.store, "cert-owner-valid@example.com").await;
+        let client = test_utils::create_test_oauth_client(&state.store, &user.id).await;
 
-        let pending_id = crate::db::create_pending_oauth_authorization(
+        let pending_id = db::create_pending_oauth_authorization(
             &state.store,
-            crate::db::CreatePendingOAuthParams {
+            CreatePendingOAuthParams {
                 client_id: &client.client_id,
                 redirect_uri: "https://example.com/callback",
                 response_type: "code",
@@ -599,7 +599,7 @@ mod tests {
             .clone();
         let token = hmac_sha256_base64url(&secret, &pending_id);
 
-        let resp = crate::test_utils::http_get_full(
+        let resp = test_utils::http_get_full(
             &app,
             &format!("/certification/complete-login?pending_auth={pending_id}&token={token}"),
             &[],
@@ -640,13 +640,10 @@ mod tests {
     // ── complete_login session-cache invalidation tests ───────────────
 
     /// Create a pending OAuth authorization bound to `client` and return its id.
-    async fn create_cert_pending(
-        state: &Arc<AppState>,
-        client: &crate::test_utils::TestOAuthClient,
-    ) -> String {
-        crate::db::create_pending_oauth_authorization(
+    async fn create_cert_pending(state: &Arc<AppState>, client: &TestOAuthClient) -> String {
+        db::create_pending_oauth_authorization(
             &state.store,
-            crate::db::CreatePendingOAuthParams {
+            CreatePendingOAuthParams {
                 client_id: &client.client_id,
                 redirect_uri: "https://example.com/callback",
                 response_type: "code",
@@ -684,7 +681,7 @@ mod tests {
             .expect("cert token set")
             .clone();
         let token = hmac_sha256_base64url(&secret, pending_id);
-        let resp = crate::test_utils::http_get_full(
+        let resp = test_utils::http_get_full(
             app,
             &format!("/certification/complete-login?pending_auth={pending_id}&token={token}"),
             &[],
@@ -761,14 +758,14 @@ mod tests {
     ///    stale entry and does not over-revoke the cert user's current session.
     #[tokio::test]
     async fn test_complete_login_invalidates_stale_session_cache_for_prior_cert_sessions() {
-        let (app, state) = crate::test_utils::test_app_with_certification().await;
+        let (app, state) = test_utils::test_app_with_certification().await;
 
         // The OAuth client the cert session authorizes against. Owned by an
         // unrelated user; the cert handler mints the shared cert-test@vouch.sh
         // user separately.
         let owner =
-            crate::test_utils::create_test_user(&state.store, "cert-cache-owner@example.com").await;
-        let client = crate::test_utils::create_test_oauth_client(&state.store, &owner.id).await;
+            test_utils::create_test_user(&state.store, "cert-cache-owner@example.com").await;
+        let client = test_utils::create_test_oauth_client(&state.store, &owner.id).await;
 
         // ── Module A: mint C1 and seed the cache ──────────────────────────
         let p1 = create_cert_pending(&state, &client).await;
@@ -777,7 +774,7 @@ mod tests {
         // Drain the redirect to `/oauth/authorize?pending_auth=P1` with C1.
         // This consumes P1, issues a code, and seeds SessionCache with
         // hash(C1) -> Session (the cache-miss-then-DB-hit-then-insert path).
-        let auth_a = crate::test_utils::http_get_full(
+        let auth_a = test_utils::http_get_full(
             &app,
             &format!("/oauth/authorize?pending_auth={}", urlencoding::encode(&p1)),
             &[("Cookie", &session_cookie_header(&c1))],
@@ -802,7 +799,7 @@ mod tests {
 
         // ── Probe: the OLD cookie C1 against a fresh P3 ────────────────────
         let p3 = create_cert_pending(&state, &client).await;
-        let stale = crate::test_utils::http_get_full(
+        let stale = test_utils::http_get_full(
             &app,
             &format!("/oauth/authorize?pending_auth={}", urlencoding::encode(&p3)),
             &[("Cookie", &session_cookie_header(&c1))],
@@ -834,7 +831,7 @@ mod tests {
 
         // ── Control: the fresh cookie C2 against a fresh P4 ────────────────
         let p4 = create_cert_pending(&state, &client).await;
-        let fresh = crate::test_utils::http_get_full(
+        let fresh = test_utils::http_get_full(
             &app,
             &format!("/oauth/authorize?pending_auth={}", urlencoding::encode(&p4)),
             &[("Cookie", &session_cookie_header(&c2))],
@@ -861,12 +858,12 @@ mod tests {
     async fn setup_deny_login_url(
         state: &Arc<AppState>,
         client_id: &str,
-        response_mode: crate::db::ResponseMode,
+        response_mode: ResponseMode,
         state_param: Option<&str>,
     ) -> String {
-        let pending_id = crate::db::create_pending_oauth_authorization(
+        let pending_id = db::create_pending_oauth_authorization(
             &state.store,
-            crate::db::CreatePendingOAuthParams {
+            CreatePendingOAuthParams {
                 client_id,
                 redirect_uri: "https://example.com/callback",
                 response_type: "code",
@@ -900,17 +897,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_deny_login_returns_forbidden_with_wrong_token() {
-        let (app, state) = crate::test_utils::test_app_with_certification().await;
+        let (app, state) = test_utils::test_app_with_certification().await;
 
         let user =
-            crate::test_utils::create_test_user(&state.store, "cert-deny-forbidden@example.com")
-                .await;
-        let client = crate::test_utils::create_test_oauth_client(&state.store, &user.id).await;
+            test_utils::create_test_user(&state.store, "cert-deny-forbidden@example.com").await;
+        let client = test_utils::create_test_oauth_client(&state.store, &user.id).await;
 
         // Create the pending auth directly so we control the (wrong) token.
-        let pending_id = crate::db::create_pending_oauth_authorization(
+        let pending_id = db::create_pending_oauth_authorization(
             &state.store,
-            crate::db::CreatePendingOAuthParams {
+            CreatePendingOAuthParams {
                 client_id: &client.client_id,
                 redirect_uri: "https://example.com/callback",
                 response_type: "code",
@@ -925,14 +921,14 @@ mod tests {
                 prompt: None,
                 dpop_jkt: None,
                 authorization_details: None,
-                response_mode: crate::db::ResponseMode::Query,
+                response_mode: ResponseMode::Query,
                 par_request_uri: None,
             },
         )
         .await
         .expect("Failed to create pending auth");
 
-        let resp = crate::test_utils::http_get_full(
+        let resp = test_utils::http_get_full(
             &app,
             &format!("/certification/deny-login?pending_auth={pending_id}&token=wrong-token"),
             &[],
@@ -948,23 +944,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_deny_login_returns_not_found_for_consumed_auth() {
-        let (app, state) = crate::test_utils::test_app_with_certification().await;
+        let (app, state) = test_utils::test_app_with_certification().await;
 
         let user =
-            crate::test_utils::create_test_user(&state.store, "cert-deny-consumed@example.com")
-                .await;
-        let client = crate::test_utils::create_test_oauth_client(&state.store, &user.id).await;
+            test_utils::create_test_user(&state.store, "cert-deny-consumed@example.com").await;
+        let client = test_utils::create_test_oauth_client(&state.store, &user.id).await;
 
-        let url = setup_deny_login_url(
-            &state,
-            &client.client_id,
-            crate::db::ResponseMode::Query,
-            None,
-        )
-        .await;
+        let url = setup_deny_login_url(&state, &client.client_id, ResponseMode::Query, None).await;
 
         // First call consumes the pending auth.
-        let resp1 = crate::test_utils::http_get_full(&app, &url, &[]).await;
+        let resp1 = test_utils::http_get_full(&app, &url, &[]).await;
         assert!(
             resp1.status.is_redirection(),
             "first deny-login should succeed, got {}",
@@ -972,7 +961,7 @@ mod tests {
         );
 
         // Second call must report the pending auth as gone.
-        let resp2 = crate::test_utils::http_get_full(&app, &url, &[]).await;
+        let resp2 = test_utils::http_get_full(&app, &url, &[]).await;
         assert_eq!(
             resp2.status,
             axum::http::StatusCode::NOT_FOUND,
@@ -985,22 +974,21 @@ mod tests {
         // OAuth 2.0 Form Post Response Mode: deny-login MUST return HTTP 200
         // with an auto-submitting HTML form carrying the error parameters —
         // NOT a 302 redirect with query params.
-        let (app, state) = crate::test_utils::test_app_with_certification().await;
+        let (app, state) = test_utils::test_app_with_certification().await;
 
         let user =
-            crate::test_utils::create_test_user(&state.store, "cert-deny-formpost@example.com")
-                .await;
-        let client = crate::test_utils::create_test_oauth_client(&state.store, &user.id).await;
+            test_utils::create_test_user(&state.store, "cert-deny-formpost@example.com").await;
+        let client = test_utils::create_test_oauth_client(&state.store, &user.id).await;
 
         let url = setup_deny_login_url(
             &state,
             &client.client_id,
-            crate::db::ResponseMode::FormPost,
+            ResponseMode::FormPost,
             Some("deny-state"),
         )
         .await;
 
-        let resp = crate::test_utils::http_get_full(&app, &url, &[]).await;
+        let resp = test_utils::http_get_full(&app, &url, &[]).await;
 
         // Must be 200 OK — not a redirect.
         assert_eq!(
@@ -1073,24 +1061,17 @@ mod tests {
     async fn test_deny_login_form_post_omits_state_when_absent() {
         // When no `state` was sent in the authorization request, the
         // form_post response must not include a `state` input.
-        let (app, state) = crate::test_utils::test_app_with_certification().await;
+        let (app, state) = test_utils::test_app_with_certification().await;
 
-        let user = crate::test_utils::create_test_user(
-            &state.store,
-            "cert-deny-formpost-nostate@example.com",
-        )
-        .await;
-        let client = crate::test_utils::create_test_oauth_client(&state.store, &user.id).await;
+        let user =
+            test_utils::create_test_user(&state.store, "cert-deny-formpost-nostate@example.com")
+                .await;
+        let client = test_utils::create_test_oauth_client(&state.store, &user.id).await;
 
-        let url = setup_deny_login_url(
-            &state,
-            &client.client_id,
-            crate::db::ResponseMode::FormPost,
-            None,
-        )
-        .await;
+        let url =
+            setup_deny_login_url(&state, &client.client_id, ResponseMode::FormPost, None).await;
 
-        let resp = crate::test_utils::http_get_full(&app, &url, &[]).await;
+        let resp = test_utils::http_get_full(&app, &url, &[]).await;
 
         assert_eq!(resp.status, axum::http::StatusCode::OK);
         assert!(
@@ -1107,21 +1088,20 @@ mod tests {
     async fn test_deny_login_query_returns_redirect_with_error() {
         // Query mode: deny-login MUST return a 302 redirect with error and
         // error_description encoded in the query string (RFC 6749 4.1.2.1).
-        let (app, state) = crate::test_utils::test_app_with_certification().await;
+        let (app, state) = test_utils::test_app_with_certification().await;
 
-        let user =
-            crate::test_utils::create_test_user(&state.store, "cert-deny-query@example.com").await;
-        let client = crate::test_utils::create_test_oauth_client(&state.store, &user.id).await;
+        let user = test_utils::create_test_user(&state.store, "cert-deny-query@example.com").await;
+        let client = test_utils::create_test_oauth_client(&state.store, &user.id).await;
 
         let url = setup_deny_login_url(
             &state,
             &client.client_id,
-            crate::db::ResponseMode::Query,
+            ResponseMode::Query,
             Some("q-state"),
         )
         .await;
 
-        let resp = crate::test_utils::http_get_full(&app, &url, &[]).await;
+        let resp = test_utils::http_get_full(&app, &url, &[]).await;
 
         assert!(
             resp.status.is_redirection(),
@@ -1166,21 +1146,20 @@ mod tests {
     async fn test_deny_login_jwt_returns_jarm_redirect() {
         // JARM mode: deny-login MUST return a redirect whose `response`
         // query parameter carries a signed JWT containing the error.
-        let (app, state) = crate::test_utils::test_app_with_certification().await;
+        let (app, state) = test_utils::test_app_with_certification().await;
 
-        let user =
-            crate::test_utils::create_test_user(&state.store, "cert-deny-jwt@example.com").await;
-        let client = crate::test_utils::create_test_oauth_client(&state.store, &user.id).await;
+        let user = test_utils::create_test_user(&state.store, "cert-deny-jwt@example.com").await;
+        let client = test_utils::create_test_oauth_client(&state.store, &user.id).await;
 
         let url = setup_deny_login_url(
             &state,
             &client.client_id,
-            crate::db::ResponseMode::Jwt,
+            ResponseMode::Jwt,
             Some("j-state"),
         )
         .await;
 
-        let resp = crate::test_utils::http_get_full(&app, &url, &[]).await;
+        let resp = test_utils::http_get_full(&app, &url, &[]).await;
 
         assert!(
             resp.status.is_redirection(),
@@ -1254,14 +1233,13 @@ mod tests {
     /// deny-login link is retryable rather than dead (404).
     #[tokio::test]
     async fn test_deny_login_client_lookup_failure_leaves_pending_unconsumed() {
-        let (app, state) = crate::test_utils::test_app_with_certification().await;
-        let user =
-            crate::test_utils::create_test_user(&state.store, "cert-deny-lookup@example.com").await;
-        let client = crate::test_utils::create_test_oauth_client(&state.store, &user.id).await;
+        let (app, state) = test_utils::test_app_with_certification().await;
+        let user = test_utils::create_test_user(&state.store, "cert-deny-lookup@example.com").await;
+        let client = test_utils::create_test_oauth_client(&state.store, &user.id).await;
         let url = setup_deny_login_url(
             &state,
             &client.client_id,
-            crate::db::ResponseMode::Query,
+            ResponseMode::Query,
             Some("lookup-fails"),
         )
         .await;
@@ -1272,22 +1250,22 @@ mod tests {
             .map(|(_, v)| v.into_owned())
             .expect("deny-login URL carries pending_auth");
 
-        crate::db::delete_oauth_client(&state.store, &client.app_id)
+        db::delete_oauth_client(&state.store, &client.app_id)
             .await
             .expect("delete OAuth client");
 
         for attempt in 1..=2 {
-            let resp = crate::test_utils::http_get_full(&app, &url, &[]).await;
+            let resp = test_utils::http_get_full(&app, &url, &[]).await;
             assert_eq!(
                 resp.status,
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 "attempt {attempt}: a failed lookup must be 500, not 404 from a burned claim"
             );
         }
-        let pending = crate::db::get_pending_oauth_authorization(
+        let pending = db::get_pending_oauth_authorization(
             &state.store,
             &pending_id,
-            crate::test_utils::test_arrival().timestamp(),
+            test_utils::test_arrival().timestamp(),
         )
         .await
         .expect("read pending")

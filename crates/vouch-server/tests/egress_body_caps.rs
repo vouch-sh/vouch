@@ -18,6 +18,9 @@
 //! currently empty and can only shrink: an exception that no longer matches a
 //! real call fails the test, so a stale entry cannot rot in place.
 
+// Own-crate items are imported with `use`; see `absolute-paths-allowed-crates` in `.clippy.toml`.
+#![deny(clippy::absolute_paths)]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 

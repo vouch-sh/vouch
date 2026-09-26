@@ -2,6 +2,7 @@
 //! RFC 7662 — Token Introspection tests.
 
 use super::helpers::*;
+use crate::db;
 
 // ========================================================================
 // RFC 7662 — Token Introspection
@@ -723,7 +724,7 @@ async fn test_introspection_returns_inactive_for_deactivated_user_with_session()
     // This simulates the scenario where session deletion fails after
     // user deactivation succeeds. Each operation commits independently
     // since there is no transaction wrapping both.
-    crate::db::update_user_active_status(&state.store, &user.id, false)
+    db::update_user_active_status(&state.store, &user.id, false)
         .await
         .expect("deactivate user");
 
@@ -774,10 +775,10 @@ async fn test_introspection_returns_active_for_reactivated_user() {
     let (access_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
 
     // Deactivate, then reactivate.
-    crate::db::update_user_active_status(&state.store, &user.id, false)
+    db::update_user_active_status(&state.store, &user.id, false)
         .await
         .expect("deactivate user");
-    crate::db::update_user_active_status(&state.store, &user.id, true)
+    db::update_user_active_status(&state.store, &user.id, true)
         .await
         .expect("reactivate user");
 

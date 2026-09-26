@@ -2,6 +2,11 @@
 //! RFC 9449 — DPoP (Demonstration of Proof of Possession) tests.
 
 use super::helpers::*;
+use crate::crypto::alg::JwsAlgorithm;
+use crate::crypto::kms_signer;
+use crate::db::{FapiProfile, TokenEndpointAuthMethod};
+use crate::services::oidc::dpop::SUPPORTED_ALGORITHMS;
+use crate::services::oidc::mtls;
 use std::collections::BTreeSet;
 
 // ========================================================================
@@ -144,7 +149,7 @@ async fn test_rfc9449_client_credentials_cnf_jkt_matches_proof_key() {
         &user.id,
         TestClientSpec {
             jwks: TestJwks::Custom(serde_json::json!({ "keys": [jwk] })),
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
             dpop_bound_access_tokens: true,
             grant_types: Some(vec!["client_credentials".to_string()]),
             ..Default::default()
@@ -865,8 +870,8 @@ async fn test_rfc9449_dpop_rs256_algorithm_rejected() {
 
     let key_pair = RsaKeyPair::generate(KeySize::Rsa2048).expect("RSA-2048 keygen");
     let spki_der = key_pair.public_key().as_der().expect("SPKI DER");
-    let (n_bytes, e_bytes) = crate::crypto::kms_signer::parse_spki_rsa(spki_der.as_ref())
-        .expect("parse RSA SPKI components");
+    let (n_bytes, e_bytes) =
+        kms_signer::parse_spki_rsa(spki_der.as_ref()).expect("parse RSA SPKI components");
 
     let jwk = serde_json::json!({
         "kty": "RSA",
@@ -1591,8 +1596,7 @@ async fn test_rfc9449_token_mtls_registered_client_without_cert_rejected() {
 
     // Build any cert just to derive a subject DN to register against.
     let registered_cert = make_test_cert_der("mtls-registered-client");
-    let parsed =
-        crate::services::oidc::mtls::parse_client_certificate(&registered_cert).expect("parse");
+    let parsed = mtls::parse_client_certificate(&registered_cert).expect("parse");
     let subject_dn = parsed.subject_dn.expect("subject DN");
 
     // Manually create an mtls-auth client (no cert-binding required).
@@ -1835,7 +1839,7 @@ async fn test_dpop_signing_algs_match_supported_algorithms() {
         .map(|v| v.as_str().expect("alg should be string").to_string())
         .collect();
 
-    let supported: BTreeSet<String> = crate::services::oidc::dpop::SUPPORTED_ALGORITHMS
+    let supported: BTreeSet<String> = SUPPORTED_ALGORITHMS
         .iter()
         .map(|alg| alg.as_str().to_string())
         .collect();
@@ -1847,7 +1851,7 @@ async fn test_dpop_signing_algs_match_supported_algorithms() {
 
     for alg in &discovered {
         assert!(
-            alg.parse::<crate::crypto::alg::JwsAlgorithm>().is_ok(),
+            alg.parse::<JwsAlgorithm>().is_ok(),
             "discovery advertises a DPoP algorithm JwsAlgorithm cannot parse: {alg}"
         );
     }
@@ -1877,7 +1881,7 @@ async fn test_token_endpoint_auth_signing_algs_match_client_assertion_algorithms
             .map(|v| v.as_str().expect("alg should be string").to_string())
             .collect();
 
-    let source: BTreeSet<String> = crate::db::FapiProfile::client_assertion_algorithms_union()
+    let source: BTreeSet<String> = FapiProfile::client_assertion_algorithms_union()
         .iter()
         .map(|alg| alg.as_str().to_string())
         .collect();
@@ -1890,7 +1894,7 @@ async fn test_token_endpoint_auth_signing_algs_match_client_assertion_algorithms
 
     for alg in &discovered {
         assert!(
-            alg.parse::<crate::crypto::alg::JwsAlgorithm>().is_ok(),
+            alg.parse::<JwsAlgorithm>().is_ok(),
             "discovery advertises a token endpoint auth algorithm JwsAlgorithm cannot parse: {alg}"
         );
     }

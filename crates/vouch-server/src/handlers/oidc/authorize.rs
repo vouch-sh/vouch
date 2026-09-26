@@ -14,12 +14,12 @@ use crate::AppState;
 use crate::arrival::ArrivalTime;
 use crate::assurance::ACR_AAL3;
 use crate::db::ResponseMode;
+use crate::db::par::REQUEST_URI_URN_PREFIX;
 use crate::db::{self, Authenticator, CreatePendingOAuthParams, OAuthClient, User};
-use crate::error::OAuthErrorCode;
+use crate::error::{OAuthErrorCode, ServiceError};
 use crate::handlers::extractors::{OAuthForm, OAuthQuery};
 use crate::impl_template_response;
 use crate::infra::i18n::Tr;
-use crate::services::oidc::ScopeSet;
 use crate::services::oidc::authorization::{
     AuthorizationCodeParams, AuthorizationSessionState, AuthorizeRequestParams,
     CodeChallengeMethod, Prompt, PromptSet, ValidatedAuthRequest, check_client_access,
@@ -28,6 +28,7 @@ use crate::services::oidc::authorization::{
 };
 use crate::services::oidc::jar::{QueryParamHints, fetch_request_object, validate_request_object};
 use crate::services::oidc::validated_client::ValidatedOAuthClient;
+use crate::services::oidc::{RESPONSE_TYPE_CODE, ScopeSet, fapi, jarm};
 use askama::Template;
 use axum::{
     extract::State,
@@ -54,9 +55,9 @@ pub(super) struct AuthorizeDeniedTemplate {
 /// `check_client_access` reports an org/scope restriction as an OAuth error
 /// whose description is the specific reason; anything else is a generic
 /// refusal. Shared by the two authenticated-user paths so they cannot drift.
-fn access_denied_message(e: crate::error::ServiceError) -> Tr<'static> {
+fn access_denied_message(e: ServiceError) -> Tr<'static> {
     match e {
-        crate::error::ServiceError::OAuth { description, .. } => {
+        ServiceError::OAuth { description, .. } => {
             Tr::new("authorize-denied-access-denied-detail").arg("detail", description)
         }
         _ => Tr::new("authorize-denied-no-access"),
@@ -261,9 +262,7 @@ impl AuthorizeResponseTarget {
             }),
             Err(rejection) => {
                 let (code, description) = match &rejection.error {
-                    crate::error::ServiceError::OAuth { code, description } => {
-                        (*code, description.clone())
-                    }
+                    ServiceError::OAuth { code, description } => (*code, description.clone()),
                     other => (OAuthErrorCode::ServerError, other.to_string()),
                 };
                 Err(oauth_error_response(
@@ -382,10 +381,7 @@ async fn run_security_pipeline(
 
     // FAPI PAR requirement: skip only for PAR flows (already satisfied).
     if !matches!(flow, AuthFlowKind::Par)
-        && let Err(e) = crate::services::oidc::fapi::validate_fapi_authorization_request(
-            &resolved.client,
-            false,
-        )
+        && let Err(e) = fapi::validate_fapi_authorization_request(&resolved.client, false)
     {
         return Err(resolved
             .error_redirect(
@@ -581,7 +577,7 @@ async fn authorize_inner(
             .into_response();
         }
 
-        if request_uri.starts_with(crate::db::par::REQUEST_URI_URN_PREFIX) {
+        if request_uri.starts_with(REQUEST_URI_URN_PREFIX) {
             // RFC 9126: PAR URN — must be reasonably sized.
             if request_uri.len() > 256 {
                 return AuthorizeDeniedTemplate {
@@ -708,9 +704,7 @@ async fn handle_direct_request(
         Ok(v) => v,
         Err(e) => {
             let (error_code, description) = match &e {
-                crate::error::ServiceError::OAuth { code, description } => {
-                    (*code, description.clone())
-                }
+                ServiceError::OAuth { code, description } => (*code, description.clone()),
                 _ => (OAuthErrorCode::ServerError, e.to_string()),
             };
             return resolved
@@ -818,9 +812,7 @@ async fn handle_jar_request(
         Ok(v) => v,
         Err(e) => {
             let (error_code, description) = match &e {
-                crate::error::ServiceError::OAuth { code, description } => {
-                    (*code, description.clone())
-                }
+                ServiceError::OAuth { code, description } => (*code, description.clone()),
                 _ => (OAuthErrorCode::ServerError, e.to_string()),
             };
             return resolved
@@ -996,9 +988,7 @@ async fn handle_par_request(
         Ok(v) => v,
         Err(e) => {
             let (error_code, description) = match &e {
-                crate::error::ServiceError::OAuth { code, description } => {
-                    (*code, description.clone())
-                }
+                ServiceError::OAuth { code, description } => (*code, description.clone()),
                 _ => (OAuthErrorCode::ServerError, e.to_string()),
             };
             return resolved
@@ -1061,9 +1051,7 @@ async fn handle_request_uri_fetch(
         Ok(v) => v,
         Err(e) => {
             let (error_code, description) = match &e {
-                crate::error::ServiceError::OAuth { code, description } => {
-                    (*code, description.clone())
-                }
+                ServiceError::OAuth { code, description } => (*code, description.clone()),
                 _ => (OAuthErrorCode::ServerError, e.to_string()),
             };
             return resolved
@@ -1114,9 +1102,7 @@ async fn fetch_and_resolve_request_uri(
     let oauth_client = lookup_and_check_active(state, client_id).await?;
 
     // Step 2: FAPI 2.0 clients must use PAR; URL request_uri is not permitted.
-    if let Err(e) =
-        crate::services::oidc::fapi::validate_fapi_authorization_request(&oauth_client, false)
-    {
+    if let Err(e) = fapi::validate_fapi_authorization_request(&oauth_client, false) {
         return Err(AuthorizeDeniedTemplate {
             client_name: oauth_client.name,
             error_message: Tr::new("authorize-denied-invalid-request")
@@ -1171,9 +1157,7 @@ async fn fetch_and_resolve_request_uri(
         Ok(params) => params,
         Err(e) => {
             let (error_code, description) = match &e {
-                crate::error::ServiceError::OAuth { code, description } => {
-                    (code.as_str(), description.clone())
-                }
+                ServiceError::OAuth { code, description } => (code.as_str(), description.clone()),
                 _ => ("invalid_request_object", e.to_string()),
             };
             return Err(AuthorizeDeniedTemplate {
@@ -1265,8 +1249,7 @@ async fn handle_pending_auth(
         .get(vouch_common::SESSION_COOKIE_NAME)
         .map(|c| c.value());
 
-    let auth_code_lifetime: i64 =
-        crate::services::oidc::fapi::auth_code_lifetime_seconds(&resolved.client);
+    let auth_code_lifetime: i64 = fapi::auth_code_lifetime_seconds(&resolved.client);
 
     match check_session_for_authorization(state, session_token, arrival).await {
         Ok(AuthorizationSessionState::Authenticated {
@@ -1675,7 +1658,7 @@ fn resolve_redirect_uri(
 /// (direct query param, PAR record, or JAR claim).
 async fn store_pending_and_redirect(
     state: &Arc<AppState>,
-    validated: crate::services::oidc::authorization::ValidatedAuthRequest,
+    validated: ValidatedAuthRequest,
     target: ErrorTarget<'_>,
     prompt_override: Option<Prompt>,
     par_request_uri: Option<&str>,
@@ -1695,7 +1678,7 @@ async fn store_pending_and_redirect(
     let pending_params = CreatePendingOAuthParams {
         client_id: validated.client_id(),
         redirect_uri: validated.redirect_uri(),
-        response_type: crate::services::oidc::RESPONSE_TYPE_CODE,
+        response_type: RESPONSE_TYPE_CODE,
         state: validated.state(),
         scope: Some(&scope_str),
         nonce: validated.nonce(),
@@ -2025,7 +2008,7 @@ async fn issue_code_after_reauth_check(
     };
 
     // Step 8: Issue authorization code.
-    let auth_code_lifetime = crate::services::oidc::fapi::auth_code_lifetime_seconds(oauth_client);
+    let auth_code_lifetime = fapi::auth_code_lifetime_seconds(oauth_client);
     let ad_value = validated.authorization_details_value();
     let code_params = AuthorizationCodeParams {
         client_id: validated.client_id(),
@@ -2074,13 +2057,8 @@ async fn issue_code_and_redirect(
     match issue_authorization_code(state, code_params).await {
         Ok(code) => match response_mode {
             ResponseMode::Jwt => {
-                match crate::services::oidc::jarm::build_jarm_success_jwt(
-                    state,
-                    oauth_client,
-                    code.as_str(),
-                    oauth_state,
-                )
-                .await
+                match jarm::build_jarm_success_jwt(state, oauth_client, code.as_str(), oauth_state)
+                    .await
                 {
                     Ok(jwt) => {
                         let url = build_jarm_redirect_url(redirect_uri, &jwt);
@@ -2152,7 +2130,8 @@ async fn issue_code_and_redirect(
 mod tests {
     use super::*;
     use crate::crypto::alg::JwsAlgorithm;
-    use crate::db::{AccessScope, FapiProfile, OAuthClientType, TokenEndpointAuthMethod};
+    use crate::db::{self, AccessScope, FapiProfile, OAuthClientType, TokenEndpointAuthMethod};
+    use crate::test_utils;
 
     fn make_client(redirect_uris: Vec<String>) -> OAuthClient {
         OAuthClient {
@@ -2241,7 +2220,7 @@ mod tests {
 
         // No RSA key is configured in the test state, so a client that asks
         // for RS256 JARM makes signing fail for real rather than by mocking.
-        let state = crate::test_utils::test_app_state().await;
+        let state = test_utils::test_app_state().await;
         let user = create_test_user(&state.store, "jarm-fail@example.com").await;
         let created = create_test_client(
             &state.store,
@@ -2252,7 +2231,7 @@ mod tests {
             },
         )
         .await;
-        let client = crate::db::get_oauth_client_by_id(&state.store, &created.app_id)
+        let client = db::get_oauth_client_by_id(&state.store, &created.app_id)
             .await
             .expect("db lookup")
             .expect("client exists");

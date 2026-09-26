@@ -20,6 +20,9 @@ use crate::infra::i18n::Tr;
 use crate::services::oidc::ResourceUri;
 
 use super::{validate_post_logout_redirect_uris, validate_redirect_uris};
+use crate::db::{self, ClientKeys};
+use crate::services::oidc::RESPONSE_TYPE_CODE;
+use vouch_common::protocol::GRANT_TYPE_AUTHORIZATION_CODE;
 
 /// A validation failure: a machine-readable code plus a human message.
 #[derive(Debug)]
@@ -247,7 +250,7 @@ pub(crate) struct ValidatedCreateApp<'a> {
     pub is_fapi: bool,
     /// RFC 7591 §2 key material: a parsed inline JWKS with a non-empty `keys`
     /// array, or a trimmed https JWKS URI. Never both.
-    pub keys: Option<crate::db::ClientKeys>,
+    pub keys: Option<ClientKeys>,
     /// Grants this application may use, derived from [`Self::app_type`] — the
     /// creation form has no grant-types input, so the type is the operator's
     /// statement of intent. Owned here because
@@ -328,7 +331,7 @@ pub(crate) fn validate_create_application<'a>(
     // A jwks_uri can't be inspected synchronously, so this only guards the
     // inline case; the same is true of validate_update_fapi.
     if is_fapi
-        && let Some(set) = keys.as_ref().and_then(crate::db::ClientKeys::inline)
+        && let Some(set) = keys.as_ref().and_then(ClientKeys::inline)
         && !set.has_fapi_allowed_key()
     {
         return Err(AppValidationError::FapiJwksNoAllowedAlgorithm);
@@ -341,9 +344,9 @@ pub(crate) fn validate_create_application<'a>(
         .collect();
     let response_types = if grant_types
         .iter()
-        .any(|g| g == vouch_common::protocol::GRANT_TYPE_AUTHORIZATION_CODE)
+        .any(|g| g == GRANT_TYPE_AUTHORIZATION_CODE)
     {
-        vec![crate::services::oidc::RESPONSE_TYPE_CODE.to_string()]
+        vec![RESPONSE_TYPE_CODE.to_string()]
     } else {
         Vec::new()
     };
@@ -368,8 +371,8 @@ pub(crate) fn validate_create_application<'a>(
 fn client_keys(
     jwks: Option<serde_json::Value>,
     jwks_uri: Option<&str>,
-) -> Result<Option<crate::db::ClientKeys>, AppValidationError> {
-    crate::db::ClientKeys::from_stored(jwks, jwks_uri.map(String::from))
+) -> Result<Option<ClientKeys>, AppValidationError> {
+    ClientKeys::from_stored(jwks, jwks_uri.map(String::from))
         .map_err(|_| AppValidationError::JwksMutuallyExclusive)
 }
 
@@ -400,7 +403,7 @@ pub(crate) struct ValidatedUpdateApp<'a> {
     pub access_scope: Option<AccessScope>,
     /// RFC 7591 §2 key material: a parsed inline JWKS with a non-empty `keys`
     /// array, or a trimmed https JWKS URI. Never both.
-    pub keys: Option<crate::db::ClientKeys>,
+    pub keys: Option<ClientKeys>,
     /// Redirect URIs from the request (`None` = field absent, `Some(&[])` = explicitly cleared).
     pub redirect_uris: Option<&'a [String]>,
     /// Post-logout redirect URIs (`None` = preserve existing, `Some(&[])` = explicitly clear).
@@ -550,10 +553,7 @@ pub(crate) fn validate_update_fapi(
     // Above the FAPI early return because the pin is not FAPI-specific: a
     // `client_secret_basic` client can register one.
     if let Some(alg) = client.request_object_signing_alg
-        && let Some(jwks) = validated
-            .keys
-            .as_ref()
-            .and_then(crate::db::ClientKeys::inline)
+        && let Some(jwks) = validated.keys.as_ref().and_then(ClientKeys::inline)
         && !jwks.has_key_for(alg)
     {
         return Err(AppValidationError::RequestObjectJwksNoKeyForAlg {
@@ -581,16 +581,8 @@ pub(crate) fn validate_update_fapi(
 
     // FAPI validation: require JWKS or JWKS URI (request or existing)
     if validated.keys.is_none()
-        && client
-            .keys
-            .as_ref()
-            .and_then(crate::db::ClientKeys::inline)
-            .is_none()
-        && client
-            .keys
-            .as_ref()
-            .and_then(crate::db::ClientKeys::uri)
-            .is_none()
+        && client.keys.as_ref().and_then(ClientKeys::inline).is_none()
+        && client.keys.as_ref().and_then(ClientKeys::uri).is_none()
     {
         return Err(AppValidationError::FapiMissingJwks);
     }
@@ -607,8 +599,8 @@ pub(crate) fn validate_update_fapi(
         && let Some(jwks) = validated
             .keys
             .as_ref()
-            .and_then(crate::db::ClientKeys::inline)
-            .or(client.keys.as_ref().and_then(crate::db::ClientKeys::inline))
+            .and_then(ClientKeys::inline)
+            .or(client.keys.as_ref().and_then(ClientKeys::inline))
         && !jwks.has_fapi_allowed_key()
     {
         return Err(AppValidationError::FapiJwksNoAllowedAlgorithm);
@@ -711,7 +703,7 @@ pub(crate) fn build_create_params<'a>(
 pub(crate) struct FapiUpdateFields<'a> {
     pub fapi_profile: FapiProfile,
     pub token_endpoint_auth_method: TokenEndpointAuthMethod,
-    pub keys: Option<&'a crate::db::ClientKeys>,
+    pub keys: Option<&'a ClientKeys>,
     pub dpop_bound_access_tokens: bool,
 }
 
@@ -777,7 +769,7 @@ pub(crate) fn compute_fapi_update_fields<'a>(
     // `validate_update_fapi`. A remote jwks_uri can't be inspected
     // synchronously, so this only guards the inline case.
     if token_endpoint_auth_method == TokenEndpointAuthMethod::SelfSignedTlsClientAuth
-        && let Some(jwks) = keys.and_then(crate::db::ClientKeys::inline)
+        && let Some(jwks) = keys.and_then(ClientKeys::inline)
         && !jwks.has_x5c()
     {
         return Err(AppValidationError::SelfSignedJwksMissingX5c);
@@ -836,7 +828,7 @@ fn parse_jwks(jwks_json: &str) -> Result<serde_json::Value, AppValidationError> 
     // — see db::JwkSet. Otherwise the application would be created/updated
     // here but permanently unable to authenticate once the runtime verifier
     // fails to parse the same document.
-    if crate::db::parse_jwks_set(&val).is_err() {
+    if db::parse_jwks_set(&val).is_err() {
         return Err(AppValidationError::JwksInvalidKeyShape);
     }
     Ok(val)
@@ -859,6 +851,8 @@ fn validate_jwks_uri(jwks_uri: Option<&str>) -> Result<(), AppValidationError> {
 )]
 mod tests {
     use super::*;
+    use crate::db::documents::oauth::OAuthClientDoc;
+    use crate::db::{self, ClientKeys, JwkSet, OAuthClient};
     use crate::test_utils::*;
 
     fn fapi_jwks_json() -> String {
@@ -944,7 +938,7 @@ mod tests {
         assert_eq!(params.fapi_profile, None);
         assert_eq!(params.dpop_bound_access_tokens, None);
         assert!(params.keys.is_none());
-        assert!(params.keys.and_then(crate::db::ClientKeys::uri).is_none());
+        assert!(params.keys.and_then(ClientKeys::uri).is_none());
     }
 
     #[test]
@@ -1037,7 +1031,7 @@ mod tests {
         assert_eq!(params.post_logout_redirect_uris, Some(post_logout.clone()));
     }
 
-    async fn fapi_test_client(state: &crate::AppState, email: &str) -> crate::db::OAuthClient {
+    async fn fapi_test_client(state: &crate::AppState, email: &str) -> OAuthClient {
         let user = create_test_user(&state.store, email).await;
         let created = create_test_client(
             &state.store,
@@ -1052,7 +1046,7 @@ mod tests {
             },
         )
         .await;
-        crate::db::get_oauth_client_by_id(&state.store, &created.app_id)
+        db::get_oauth_client_by_id(&state.store, &created.app_id)
             .await
             .expect("db lookup")
             .expect("client exists")
@@ -1061,10 +1055,7 @@ mod tests {
     /// A FAPI client whose stored JWKS predates the algorithm-usability
     /// guard: its only key is pinned to `alg: RS256`, unusable under
     /// `FAPI_ALLOWED`.
-    async fn stale_jwks_fapi_client(
-        state: &crate::AppState,
-        email: &str,
-    ) -> crate::db::OAuthClient {
+    async fn stale_jwks_fapi_client(state: &crate::AppState, email: &str) -> OAuthClient {
         let user = create_test_user(&state.store, email).await;
         let jwks = serde_json::json!({
             "keys": [{"kty": "RSA", "alg": "RS256", "n": "n", "e": "AQAB"}]
@@ -1082,7 +1073,7 @@ mod tests {
             },
         )
         .await;
-        crate::db::get_oauth_client_by_id(&state.store, &created.app_id)
+        db::get_oauth_client_by_id(&state.store, &created.app_id)
             .await
             .expect("db lookup")
             .expect("client exists")
@@ -1096,7 +1087,7 @@ mod tests {
     async fn type_invalid_shape_jwks_fapi_client(
         state: &crate::AppState,
         email: &str,
-    ) -> crate::db::OAuthClient {
+    ) -> OAuthClient {
         let user = create_test_user(&state.store, email).await;
         // The type-invalid key set goes straight to the document. It cannot be
         // registered any more — `ClientKeys` parses on the way in — so this
@@ -1119,12 +1110,12 @@ mod tests {
         .await;
         state
             .store
-            .modify::<crate::db::documents::oauth::OAuthClientDoc, _>(&created.app_id, |data| {
+            .modify::<OAuthClientDoc, _>(&created.app_id, |data| {
                 data.jwks = Some(serde_json::json!({"keys": [{"kty": "EC", "alg": true}]}));
             })
             .await
             .expect("write a pre-gate JWKS");
-        crate::db::get_oauth_client_by_id(&state.store, &created.app_id)
+        db::get_oauth_client_by_id(&state.store, &created.app_id)
             .await
             .expect("db lookup")
             .expect("client exists")
@@ -1134,7 +1125,7 @@ mod tests {
     // JWKS — the shape produced by authenticated dynamic registration (RFC
     // 7591) when the caller supplies `token_endpoint_auth_method=private_key_jwt`
     // + `jwks` without requesting a FAPI profile.
-    async fn non_fapi_pkjwt_client(state: &crate::AppState, email: &str) -> crate::db::OAuthClient {
+    async fn non_fapi_pkjwt_client(state: &crate::AppState, email: &str) -> OAuthClient {
         let user = create_test_user(&state.store, email).await;
         let created = create_test_client(
             &state.store,
@@ -1148,7 +1139,7 @@ mod tests {
             },
         )
         .await;
-        crate::db::get_oauth_client_by_id(&state.store, &created.app_id)
+        db::get_oauth_client_by_id(&state.store, &created.app_id)
             .await
             .expect("db lookup")
             .expect("client exists")
@@ -1158,10 +1149,7 @@ mod tests {
     // the shape produced by RFC 7591 dynamic registration when the caller
     // supplies that auth method plus a JWKS carrying its certificate,
     // without requesting a FAPI profile.
-    async fn non_fapi_self_signed_client(
-        state: &crate::AppState,
-        email: &str,
-    ) -> crate::db::OAuthClient {
+    async fn non_fapi_self_signed_client(state: &crate::AppState, email: &str) -> OAuthClient {
         let user = create_test_user(&state.store, email).await;
         let created = create_test_client(
             &state.store,
@@ -1177,7 +1165,7 @@ mod tests {
             },
         )
         .await;
-        crate::db::get_oauth_client_by_id(&state.store, &created.app_id)
+        db::get_oauth_client_by_id(&state.store, &created.app_id)
             .await
             .expect("db lookup")
             .expect("client exists")
@@ -1238,7 +1226,7 @@ mod tests {
         let state = test_app_state().await;
         let user = create_test_user(&state.store, "std-restate@example.com").await;
         let created = create_test_client(&state.store, &user.id, TestClientSpec::default()).await;
-        let client = crate::db::get_oauth_client_by_id(&state.store, &created.app_id)
+        let client = db::get_oauth_client_by_id(&state.store, &created.app_id)
             .await
             .expect("db lookup")
             .expect("client exists");
@@ -1260,7 +1248,7 @@ mod tests {
         let state = test_app_state().await;
         let user = create_test_user(&state.store, "fapi-enable@example.com").await;
         let created = create_test_client(&state.store, &user.id, TestClientSpec::default()).await;
-        let client = crate::db::get_oauth_client_by_id(&state.store, &created.app_id)
+        let client = db::get_oauth_client_by_id(&state.store, &created.app_id)
             .await
             .expect("db lookup")
             .expect("client exists");
@@ -1349,7 +1337,7 @@ mod tests {
         let state = test_app_state().await;
         let user = create_test_user(&state.store, "fapi-upgrade-rs256@example.com").await;
         let created = create_test_client(&state.store, &user.id, TestClientSpec::default()).await;
-        let client = crate::db::get_oauth_client_by_id(&state.store, &created.app_id)
+        let client = db::get_oauth_client_by_id(&state.store, &created.app_id)
             .await
             .expect("db lookup")
             .expect("client exists");
@@ -1376,7 +1364,7 @@ mod tests {
         let state = test_app_state().await;
         let user = create_test_user(&state.store, "fapi-upgrade-es256@example.com").await;
         let created = create_test_client(&state.store, &user.id, TestClientSpec::default()).await;
-        let client = crate::db::get_oauth_client_by_id(&state.store, &created.app_id)
+        let client = db::get_oauth_client_by_id(&state.store, &created.app_id)
             .await
             .expect("db lookup")
             .expect("client exists");
@@ -1402,7 +1390,7 @@ mod tests {
         let state = test_app_state().await;
         let user = create_test_user(&state.store, "fapi-upgrade-rsa-unpinned@example.com").await;
         let created = create_test_client(&state.store, &user.id, TestClientSpec::default()).await;
-        let client = crate::db::get_oauth_client_by_id(&state.store, &created.app_id)
+        let client = db::get_oauth_client_by_id(&state.store, &created.app_id)
             .await
             .expect("db lookup")
             .expect("client exists");
@@ -1428,7 +1416,7 @@ mod tests {
         let state = test_app_state().await;
         let user = create_test_user(&state.store, "fapi-upgrade-eddsa@example.com").await;
         let created = create_test_client(&state.store, &user.id, TestClientSpec::default()).await;
-        let client = crate::db::get_oauth_client_by_id(&state.store, &created.app_id)
+        let client = db::get_oauth_client_by_id(&state.store, &created.app_id)
             .await
             .expect("db lookup")
             .expect("client exists");
@@ -1574,7 +1562,7 @@ mod tests {
             },
         )
         .await;
-        let client = crate::db::get_oauth_client_by_id(&state.store, &created.app_id)
+        let client = db::get_oauth_client_by_id(&state.store, &created.app_id)
             .await
             .expect("db lookup")
             .expect("client exists");
@@ -1622,7 +1610,7 @@ mod tests {
             },
         )
         .await;
-        let client = crate::db::get_oauth_client_by_id(&state.store, &created.app_id)
+        let client = db::get_oauth_client_by_id(&state.store, &created.app_id)
             .await
             .expect("db lookup")
             .expect("client exists");
@@ -1772,8 +1760,8 @@ mod tests {
 
     /// Parses a test-fixture JWKS through the same typed representation the
     /// function under test now requires.
-    fn jwk_set(json: serde_json::Value) -> crate::db::JwkSet {
-        crate::db::parse_jwks_set(&json).expect("test fixture JWKS must parse")
+    fn jwk_set(json: serde_json::Value) -> JwkSet {
+        db::parse_jwks_set(&json).expect("test fixture JWKS must parse")
     }
 
     #[test]
@@ -1898,7 +1886,7 @@ mod tests {
         // rather than the previous loose check silently treating it as "no
         // usable key."
         let no_keys_field = serde_json::json!({});
-        assert!(crate::db::parse_jwks_set(&no_keys_field).is_err());
+        assert!(db::parse_jwks_set(&no_keys_field).is_err());
     }
 
     #[test]
@@ -1906,10 +1894,10 @@ mod tests {
         // A non-string "alg"/"use" must fail the typed parse instead of
         // being silently read as absent — the bug class this guard closes.
         let bad_alg = serde_json::json!({"keys": [{"kty": "EC", "alg": true}]});
-        assert!(crate::db::parse_jwks_set(&bad_alg).is_err());
+        assert!(db::parse_jwks_set(&bad_alg).is_err());
 
         let bad_use = serde_json::json!({"keys": [{"kty": "EC", "use": 123}]});
-        assert!(crate::db::parse_jwks_set(&bad_use).is_err());
+        assert!(db::parse_jwks_set(&bad_use).is_err());
     }
 
     // ========================================================================
@@ -1947,8 +1935,8 @@ mod tests {
             "existing JWKS must be preserved when fapi_profile is absent"
         );
         assert_eq!(
-            fields.keys.and_then(crate::db::ClientKeys::inline),
-            client.keys.as_ref().and_then(crate::db::ClientKeys::inline),
+            fields.keys.and_then(ClientKeys::inline),
+            client.keys.as_ref().and_then(ClientKeys::inline),
             "same JWKS value"
         );
         assert!(
@@ -1975,12 +1963,12 @@ mod tests {
             },
         )
         .await;
-        let client = crate::db::get_oauth_client_by_id(&state.store, &created.app_id)
+        let client = db::get_oauth_client_by_id(&state.store, &created.app_id)
             .await
             .expect("db lookup")
             .expect("client exists");
         assert_eq!(
-            client.keys.as_ref().and_then(crate::db::ClientKeys::uri),
+            client.keys.as_ref().and_then(ClientKeys::uri),
             Some("https://client.example/jwks.json"),
             "client must start with jwks_uri"
         );
@@ -1989,7 +1977,7 @@ mod tests {
         let fields = compute_fapi_update_fields(&validated, &client).expect("merge should succeed");
 
         assert_eq!(
-            fields.keys.and_then(crate::db::ClientKeys::uri),
+            fields.keys.and_then(ClientKeys::uri),
             Some("https://client.example/jwks.json"),
             "existing jwks_uri must be preserved when fapi_profile is absent"
         );
@@ -2084,7 +2072,7 @@ mod tests {
             },
         )
         .await;
-        let client = crate::db::get_oauth_client_by_id(&state.store, &created.app_id)
+        let client = db::get_oauth_client_by_id(&state.store, &created.app_id)
             .await
             .expect("db lookup")
             .expect("client exists");
@@ -2123,8 +2111,8 @@ mod tests {
             "existing JWKS must be preserved when re-confirming FAPI without JWKS"
         );
         assert_eq!(
-            fields.keys.and_then(crate::db::ClientKeys::inline),
-            client.keys.as_ref().and_then(crate::db::ClientKeys::inline),
+            fields.keys.and_then(ClientKeys::inline),
+            client.keys.as_ref().and_then(ClientKeys::inline),
             "same JWKS value"
         );
     }

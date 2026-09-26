@@ -2,6 +2,7 @@
 //! RFC 8707 — Resource Indicators tests.
 
 use super::helpers::*;
+use crate::db::{AccessScope, User};
 
 #[tokio::test]
 async fn test_rfc8707_invalid_resource_uri() {
@@ -209,7 +210,7 @@ async fn test_rfc8707_resource_in_token_exchange() {
 /// session, returning `(client, old_session, verifier, challenge)`.
 async fn rfc8707_client_with_resource_set(
     state: &std::sync::Arc<crate::AppState>,
-    user: &crate::db::User,
+    user: &User,
     auth_id: &str,
     resource_uris: Vec<String>,
 ) -> (TestOAuthClient, String, String, String) {
@@ -217,7 +218,7 @@ async fn rfc8707_client_with_resource_set(
         &state.store,
         &user.id,
         TestClientSpec {
-            access_scope: crate::db::AccessScope::Public,
+            access_scope: AccessScope::Public,
             org_id: None,
             resource_uris,
             ..Default::default()
@@ -373,7 +374,7 @@ async fn test_rfc8707_pending_path_rejects_unregistered_resource_needs_auth() {
         &state.store,
         &user.id,
         TestClientSpec {
-            access_scope: crate::db::AccessScope::Public,
+            access_scope: AccessScope::Public,
             org_id: None,
             resource_uris: vec!["https://api.example.com".to_string()],
             ..Default::default()
@@ -720,7 +721,7 @@ async fn test_rfc8707_pending_resume_retry_re_renders_invalid_target_not_session
         &state.store,
         &user.id,
         TestClientSpec {
-            access_scope: crate::db::AccessScope::Public,
+            access_scope: AccessScope::Public,
             org_id: None,
             resource_uris: vec!["https://api.example.com".to_string()],
             ..Default::default()
@@ -868,7 +869,7 @@ async fn test_rfc8707_pending_resume_retry_re_renders_access_denied_not_session_
         &state.store,
         &owner.id,
         TestClientSpec {
-            access_scope: crate::db::AccessScope::Personal,
+            access_scope: AccessScope::Personal,
             org_id: None,
             ..Default::default()
         },

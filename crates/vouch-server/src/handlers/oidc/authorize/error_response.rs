@@ -15,6 +15,7 @@
 //! obliged to discard.
 
 use super::*;
+use crate::services::oidc::jarm;
 
 /// Build an authorization redirect URL with the given query parameters.
 fn build_authorization_redirect(redirect_uri: &str, params: &[(&str, &str)]) -> Response {
@@ -94,15 +95,7 @@ pub(super) async fn oauth_error_redirect_jarm(
     description: &str,
     oauth_state: Option<&str>,
 ) -> Response {
-    match crate::services::oidc::jarm::build_jarm_error_jwt(
-        state,
-        client,
-        error,
-        Some(description),
-        oauth_state,
-    )
-    .await
-    {
+    match jarm::build_jarm_error_jwt(state, client, error, Some(description), oauth_state).await {
         Ok(jwt) => {
             let url = build_jarm_redirect_url(redirect_uri, &jwt);
             axum::response::Redirect::to(&url).into_response()

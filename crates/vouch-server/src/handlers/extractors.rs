@@ -13,8 +13,10 @@ use serde::Deserialize;
 use crate::AppState;
 use crate::arrival::ArrivalTime;
 use crate::db;
-use crate::error::ServiceError;
-use crate::handlers::session::{AuthContext, extract_org_admin, get_resource_auth_context};
+use crate::error::{OAuthErrorCode, OAuthErrorResponse, ServiceError};
+use crate::handlers::session::{self, AuthContext, extract_org_admin, get_resource_auth_context};
+use crate::infra::mtls_listener::PeerClientCert;
+use crate::services::oidc::mtls::{self, ClientCertificate};
 use axum_extra::extract::cookie::CookieJar;
 
 /// A validated UUID string. Rejects during deserialization if not valid.
@@ -142,7 +144,7 @@ fn deserialize_present_params<T: serde::de::DeserializeOwned>(encoded: &[u8]) ->
 /// Build the OAuth `invalid_request` envelope (RFC 6749 §5.2) for a request
 /// whose parameters could not be read.
 fn reject_oauth_params(description: String) -> axum::response::Response {
-    ServiceError::oauth(crate::error::OAuthErrorCode::InvalidRequest, description)
+    ServiceError::oauth(OAuthErrorCode::InvalidRequest, description)
         .into_oauth_response()
         .into_response()
 }
@@ -182,10 +184,8 @@ where
         if !is_form_urlencoded(req.headers()) {
             return Err((
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                axum::Json(crate::error::OAuthErrorResponse {
-                    error: crate::error::OAuthErrorCode::InvalidRequest
-                        .as_str()
-                        .to_string(),
+                axum::Json(OAuthErrorResponse {
+                    error: OAuthErrorCode::InvalidRequest.as_str().to_string(),
                     error_description: Some(
                         "Expected application/x-www-form-urlencoded request body".to_string(),
                     ),
@@ -269,7 +269,7 @@ where
 ///
 /// On the main (non-mTLS) port this always yields `None`.
 #[derive(Debug, Clone)]
-pub(crate) struct OptionalClientCert(pub Option<crate::services::oidc::mtls::ClientCertificate>);
+pub(crate) struct OptionalClientCert(pub Option<ClientCertificate>);
 
 impl FromRequestParts<Arc<AppState>> for OptionalClientCert {
     type Rejection = std::convert::Infallible;
@@ -280,10 +280,10 @@ impl FromRequestParts<Arc<AppState>> for OptionalClientCert {
     ) -> Result<Self, Self::Rejection> {
         let from_tls = parts
             .extensions
-            .get::<axum::extract::ConnectInfo<crate::infra::mtls_listener::PeerClientCert>>()
+            .get::<axum::extract::ConnectInfo<PeerClientCert>>()
             .and_then(|ci| {
                 let (leaf, intermediates) = ci.0.0.split_first()?;
-                let mut cert = crate::services::oidc::mtls::parse_client_certificate(leaf).ok()?;
+                let mut cert = mtls::parse_client_certificate(leaf).ok()?;
                 cert.intermediates = intermediates.to_vec();
                 Some(cert)
             });
@@ -325,15 +325,13 @@ impl FromRequestParts<Arc<AppState>> for SignedInSession {
         let Ok(arrival) = ArrivalTime::from_request_parts(parts, state).await else {
             return Err(StatusCode::INTERNAL_SERVER_ERROR.into_response());
         };
-        let Ok(session) =
-            crate::handlers::session::extract_session_from_cookie(state, &jar, arrival).await
-        else {
+        let Ok(session) = session::extract_session_from_cookie(state, &jar, arrival).await else {
             return Err(sign_in());
         };
 
         // Missing or deactivated users are unauthenticated — the active-account
         // invariant is enforced once, in `load_active_user`.
-        let Ok(user) = crate::handlers::session::load_active_user(state, &session.sub).await else {
+        let Ok(user) = session::load_active_user(state, &session.sub).await else {
             return Err(sign_in());
         };
 
@@ -464,6 +462,8 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for OrgAdmin {
 )]
 mod tests {
     use super::*;
+    use crate::services::oidc::mtls::ClientCertificate;
+    use crate::test_utils;
 
     #[test]
     fn test_valid_uuid_accepts_valid() {
@@ -542,13 +542,11 @@ mod tests {
 
     /// Run `OptionalClientCert` over a request carrying `chain` as the
     /// connection's presented certificates, or no `PeerClientCert` at all.
-    async fn extract_client_cert(
-        chain: Option<Vec<Vec<u8>>>,
-    ) -> Option<crate::services::oidc::mtls::ClientCertificate> {
+    async fn extract_client_cert(chain: Option<Vec<Vec<u8>>>) -> Option<ClientCertificate> {
         use crate::infra::mtls_listener::PeerClientCert;
         use axum::extract::ConnectInfo;
 
-        let state = crate::test_utils::test_app_state().await;
+        let state = test_utils::test_app_state().await;
         let mut request = http::Request::builder().body(()).unwrap();
         if let Some(chain) = chain {
             request
@@ -589,8 +587,8 @@ mod tests {
     /// leaf.
     #[tokio::test]
     async fn test_optional_client_cert_carries_intermediates() {
-        let leaf = crate::test_utils::make_test_cert_der("leaf.example.com");
-        let intermediate = crate::test_utils::make_test_cert_der("intermediate.example.com");
+        let leaf = test_utils::make_test_cert_der("leaf.example.com");
+        let intermediate = test_utils::make_test_cert_der("intermediate.example.com");
         let cert = extract_client_cert(Some(vec![leaf.clone(), intermediate.clone()]))
             .await
             .unwrap();

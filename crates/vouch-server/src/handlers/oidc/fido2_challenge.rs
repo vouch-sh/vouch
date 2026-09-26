@@ -34,6 +34,7 @@ use crate::handlers::oidc::client_auth::{
     ClientAuthFields, ClientAuthPresentation, ExtractedClientAuth, extract_client_auth,
     with_client_auth_challenge,
 };
+use crate::services::oidc::dpop;
 use crate::services::oidc::fido2_grant::Fido2ChallengeState;
 use crate::services::oidc::grant_type::OAuthGrantType;
 use crate::services::oidc::jwt_bearer::client_auth::authenticate_client_jwt;
@@ -247,7 +248,7 @@ pub(crate) async fn fido2_challenge(
     // very slow touch), the existing use_dpop_nonce retry path handles it.
     let dpop_nonce = db::generate_dpop_nonce(
         &state.store,
-        crate::services::oidc::dpop::nonce_validity_seconds(state.config().dpop_max_age_seconds),
+        dpop::nonce_validity_seconds(state.config().dpop_max_age_seconds),
     )
     .await;
 

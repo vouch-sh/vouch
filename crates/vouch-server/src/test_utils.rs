@@ -8,9 +8,6 @@
     clippy::expect_used,
     reason = "test code: panic on assertion failure is acceptable"
 )]
-// Own-crate items are imported with `use`; see `absolute-paths-allowed-crates` in `.clippy.toml`.
-#![deny(clippy::absolute_paths)]
-
 use arc_swap::ArcSwap;
 use axum::{
     Router,

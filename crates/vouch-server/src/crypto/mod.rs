@@ -5,9 +5,6 @@
 //! JWT signing/verification, SSH certificate authority, WebAuthn COSE verification,
 //! NitroTPM-attested KMS decryption, and encoding utilities.
 
-// Own-crate items are imported with `use`; see `absolute-paths-allowed-crates` in `.clippy.toml`.
-#![deny(clippy::absolute_paths)]
-
 pub mod alg;
 pub mod attestation_chain;
 pub mod ber;

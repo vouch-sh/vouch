@@ -8,6 +8,9 @@
 //! Reference: <https://www.rfc-editor.org/rfc/rfc7591>
 
 use super::helpers::*;
+use crate::crypto;
+use crate::db::{self, RegistrationSource};
+use crate::services::auth::NoClientAuth;
 
 // ========================================================================
 // Helper
@@ -187,8 +190,8 @@ async fn test_rfc7591_register_rejects_expired_token() {
     .await;
 
     // Delete the session to simulate revocation/expiry
-    let token_hash = crate::crypto::hash_token(&token);
-    crate::db::delete_session_by_token_hash(&state.store, &token_hash)
+    let token_hash = crypto::hash_token(&token);
+    db::delete_session_by_token_hash(&state.store, &token_hash)
         .await
         .expect("Failed to delete session");
 
@@ -863,7 +866,7 @@ async fn test_rfc7591_registered_client_persisted_in_db() {
     assert_eq!(db_client.name, "Persisted App");
     assert_eq!(
         db_client.registration_source,
-        Some(crate::db::RegistrationSource::Dynamic)
+        Some(RegistrationSource::Dynamic)
     );
     assert_eq!(db_client.software_id.as_deref(), Some("persist-test-sw"));
     assert_eq!(db_client.software_version.as_deref(), Some("2.0.0"));
@@ -1625,7 +1628,7 @@ async fn test_rfc7591_empty_optional_strings_are_not_stored() {
     let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
     let client_id = json["client_id"].as_str().expect("client_id");
 
-    let stored = crate::db::get_oauth_client_by_client_id(&state.store, client_id)
+    let stored = db::get_oauth_client_by_client_id(&state.store, client_id)
         .await
         .expect("lookup ok")
         .expect("client exists");
@@ -1672,7 +1675,7 @@ async fn test_rfc7591_empty_arrays_are_not_stored() {
     let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
     let client_id = json["client_id"].as_str().expect("client_id");
 
-    let stored = crate::db::get_oauth_client_by_client_id(&state.store, client_id)
+    let stored = db::get_oauth_client_by_client_id(&state.store, client_id)
         .await
         .expect("lookup ok")
         .expect("client exists");
@@ -2498,10 +2501,10 @@ async fn test_rfc7591_dpop_bound_token_with_replayed_nonce() {
     .await;
 
     // Delete the nonce so the request presents one the server does not hold.
-    let nonce = crate::db::generate_dpop_nonce(&state.store, 300)
+    let nonce = db::generate_dpop_nonce(&state.store, 300)
         .await
         .expect("generate nonce");
-    crate::db::delete_dpop_nonce(&state.store, &nonce)
+    db::delete_dpop_nonce(&state.store, &nonce)
         .await
         .expect("delete nonce");
 
@@ -2606,7 +2609,7 @@ async fn test_rfc7591_dpop_unknown_nonce_retry_flow_succeeds() {
     });
 
     // 1. Valid request with a fresh nonce → 201 Created (consumes the nonce).
-    let nonce = crate::db::generate_dpop_nonce(&state.store, 300)
+    let nonce = db::generate_dpop_nonce(&state.store, 300)
         .await
         .expect("generate nonce");
     let proof1 = create_dpop_proof(
@@ -2781,7 +2784,7 @@ async fn test_rfc7591_registered_auth_method_is_stored_and_enforced_as_requested
                  secret methods"
             );
             assert_eq!(
-                crate::services::auth::NoClientAuth::for_public_client(&stored).is_ok(),
+                NoClientAuth::for_public_client(&stored).is_ok(),
                 expected == db::TokenEndpointAuthMethod::None,
                 "declared={declared:?} method={method}: a no-auth proof exists only for none"
             );

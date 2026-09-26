@@ -327,6 +327,8 @@ pub(crate) async fn admin_revoke_scim_token(
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
+    use crate::db;
+    use crate::handlers::admin::MAX_SCIM_TOKEN_DESCRIPTION_CHARS;
     use crate::test_utils::*;
     use axum::http::StatusCode;
 
@@ -583,7 +585,7 @@ mod tests {
     #[tokio::test]
     async fn create_form_long_description_redirects_with_flash() {
         let (app, _state) = test_app().await;
-        let long = "x".repeat(crate::handlers::admin::MAX_SCIM_TOKEN_DESCRIPTION_CHARS + 1);
+        let long = "x".repeat(MAX_SCIM_TOKEN_DESCRIPTION_CHARS + 1);
 
         let resp = http_post_form_full(
             &app,
@@ -605,7 +607,7 @@ mod tests {
         let (admin, token) = create_test_org_admin(&state).await;
         let org_id = admin.org_id.expect("fixture admin belongs to an org");
         create_test_scim_token(&state.store, "doomed", &org_id).await;
-        let scim_tokens = crate::db::list_scim_tokens(&state.store, Some(&org_id))
+        let scim_tokens = db::list_scim_tokens(&state.store, Some(&org_id))
             .await
             .expect("list tokens");
         let token_id = &scim_tokens.first().expect("one seeded token").id;
@@ -621,7 +623,7 @@ mod tests {
 
         assert!(resp.status.is_redirection(), "body: {}", resp.body);
         assert_eq!(location(&resp), "/admin/scim-tokens");
-        let remaining = crate::db::list_scim_tokens(&state.store, Some(&org_id))
+        let remaining = db::list_scim_tokens(&state.store, Some(&org_id))
             .await
             .expect("list tokens");
         assert!(remaining.is_empty(), "the token must be gone");
@@ -654,7 +656,7 @@ mod tests {
         let (_admin, token) = create_test_org_admin(&state).await;
         let other_org = create_test_org(&state.store, "rival.example").await;
         create_test_scim_token(&state.store, "foreign", &other_org.id).await;
-        let foreign = crate::db::list_scim_tokens(&state.store, Some(&other_org.id))
+        let foreign = db::list_scim_tokens(&state.store, Some(&other_org.id))
             .await
             .expect("list tokens");
         let foreign_id = &foreign.first().expect("one seeded token").id;
@@ -669,7 +671,7 @@ mod tests {
         .await;
 
         assert!(resp.status.is_redirection(), "body: {}", resp.body);
-        let survivors = crate::db::list_scim_tokens(&state.store, Some(&other_org.id))
+        let survivors = db::list_scim_tokens(&state.store, Some(&other_org.id))
             .await
             .expect("list tokens");
         assert_eq!(survivors.len(), 1, "the foreign token must survive");

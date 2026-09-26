@@ -5,9 +5,6 @@
 //! - GeoLite2-Country for country code lookups
 //! - GeoLite2-ASN for autonomous system number and organization
 
-// Own-crate items are imported with `use`; see `absolute-paths-allowed-crates` in `.clippy.toml`.
-#![deny(clippy::absolute_paths)]
-
 use std::net::IpAddr;
 use std::sync::LazyLock;
 

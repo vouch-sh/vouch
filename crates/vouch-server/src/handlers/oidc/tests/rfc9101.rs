@@ -8,6 +8,8 @@
 //! Reference: <https://www.rfc-editor.org/rfc/rfc9101>
 
 use super::helpers::*;
+use crate::crypto::alg::JwsAlgorithm;
+use crate::db;
 use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, KeyPair};
 
 // ========================================================================
@@ -1125,7 +1127,7 @@ async fn test_rfc9101_client_signing_alg_es256_rejects_rs256_jwt() {
         &user.id,
         TestClientSpec {
             jwks: TestJwks::Custom(jwks_value),
-            request_object_signing_alg: Some(crate::crypto::alg::JwsAlgorithm::Es256),
+            request_object_signing_alg: Some(JwsAlgorithm::Es256),
             require_signed_request_object: Some(false),
             ..Default::default()
         },
@@ -1206,7 +1208,7 @@ async fn test_rfc9101_client_signing_alg_es256_accepts_es256_jwt() {
         &user.id,
         TestClientSpec {
             jwks: TestJwks::Custom(jwks_value),
-            request_object_signing_alg: Some(crate::crypto::alg::JwsAlgorithm::Es256),
+            request_object_signing_alg: Some(JwsAlgorithm::Es256),
             require_signed_request_object: Some(false),
             ..Default::default()
         },
@@ -2630,7 +2632,7 @@ async fn test_rfc9101_update_omitting_signing_alg_drops_the_commitment() {
          has no pinned algorithm to be incompatible with. Got {put_status}: {put_resp}"
     );
 
-    let stored = crate::db::get_oauth_client_by_client_id(&state.store, &client_id)
+    let stored = db::get_oauth_client_by_client_id(&state.store, &client_id)
         .await
         .expect("lookup ok")
         .expect("client exists");
@@ -2709,7 +2711,7 @@ async fn test_rfc9101_admin_update_rejects_jwks_without_key_for_pinned_alg() {
         register_working_jar_client(&app, &state, &session_token, "Admin JAR App").await;
 
     // The admin API is keyed by the stored document id, not the client_id.
-    let app_id = crate::db::get_oauth_client_by_client_id(&state.store, &client_id)
+    let app_id = db::get_oauth_client_by_client_id(&state.store, &client_id)
         .await
         .expect("lookup ok")
         .expect("client exists")
@@ -2759,7 +2761,7 @@ async fn test_rfc9101_admin_update_form_rejects_jwks_without_key_for_pinned_alg(
     let (client_id, _reg_token, _pkcs8) =
         register_working_jar_client(&app, &state, &session_token, "Admin JAR Form App").await;
 
-    let app_id = crate::db::get_oauth_client_by_client_id(&state.store, &client_id)
+    let app_id = db::get_oauth_client_by_client_id(&state.store, &client_id)
         .await
         .expect("lookup ok")
         .expect("client exists")

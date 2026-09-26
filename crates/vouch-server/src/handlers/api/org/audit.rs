@@ -23,11 +23,11 @@ use serde::{Deserialize, Serialize};
 use vouch_common::protocol;
 
 use super::ocsf::{self, RawOrValue};
-use crate::AppState;
 use crate::db::audit::{AuditEvent, AuditEventFilter, AuditEventKind};
 use crate::db::{self, ScimScope, ScimScopeSet};
 use crate::error::ServiceError;
 use crate::handlers::session::extract_org_admin;
+use crate::{AppState, http};
 
 /// Default and maximum page size. Larger than the admin UI's page (which
 /// optimizes for human scanning) since pollers want throughput.
@@ -155,7 +155,7 @@ async fn authenticate(
         ));
     };
 
-    if let Some(token) = crate::http::strip_auth_scheme(auth_header, protocol::AUTH_SCHEME_BEARER) {
+    if let Some(token) = http::strip_auth_scheme(auth_header, protocol::AUTH_SCHEME_BEARER) {
         let token_hash = hex::encode(digest::digest(&SHA256, token.as_bytes()));
         let token_record =
             db::get_scim_token_by_hash(&state.store, &token_hash, arrival.timestamp())
@@ -205,9 +205,8 @@ async fn authenticate(
     // doesn't match a known bearer scheme is a hard 401 here rather than
     // being allowed to fall through to that cookie fallback.
     //
-    let scheme_valid = crate::http::strip_auth_scheme(auth_header, protocol::AUTH_SCHEME_DPOP)
-        .is_some()
-        || crate::http::strip_auth_scheme(auth_header, protocol::AUTH_SCHEME_BEARER).is_some();
+    let scheme_valid = http::strip_auth_scheme(auth_header, protocol::AUTH_SCHEME_DPOP).is_some()
+        || http::strip_auth_scheme(auth_header, protocol::AUTH_SCHEME_BEARER).is_some();
     if !scheme_valid {
         return Err(ServiceError::api(
             StatusCode::UNAUTHORIZED,

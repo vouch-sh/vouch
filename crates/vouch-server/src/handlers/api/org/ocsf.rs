@@ -644,6 +644,8 @@ pub(crate) fn to_ocsf(event: &AuditEvent) -> OcsfEvent {
 )]
 mod tests {
     use super::*;
+    use crate::db::documents::audit::AdminMemberActionData;
+    use crate::db::{Refusal, ScimAuditData};
     use jiff::Timestamp;
 
     fn sample_event(kind: AuditEventKind, data: &str) -> AuditEvent {
@@ -770,7 +772,7 @@ mod tests {
     #[test]
     fn refused_admin_removal_reports_failure_status() {
         let data = |refusal| {
-            serde_json::to_string(&crate::db::documents::audit::AdminMemberActionData {
+            serde_json::to_string(&AdminMemberActionData {
                 action: "remove_user",
                 target_user_id: "u-target",
                 admin_user_id: "u-admin",
@@ -781,7 +783,7 @@ mod tests {
         };
         let refused = to_ocsf(&sample_event(
             AuditEventKind::AdminRemoveUser,
-            &data(Some(crate::db::Refusal::LastAdmin)),
+            &data(Some(Refusal::LastAdmin)),
         ));
         assert_eq!(refused.status_id.value(), StatusId::Failure.value());
         let removed = to_ocsf(&sample_event(AuditEventKind::AdminRemoveUser, &data(None)));
@@ -790,13 +792,13 @@ mod tests {
 
     #[test]
     fn refused_scim_delete_reports_failure_status() {
-        let data = serde_json::to_string(&crate::db::ScimAuditData {
+        let data = serde_json::to_string(&ScimAuditData {
             operation: "delete",
             resource_type: "User",
             resource_id: "u-target",
             actor_token_id: None,
             details: Some(r#"{"accessRevoked":true,"deleted":false}"#),
-            refusal: Some(crate::db::Refusal::LastAdmin),
+            refusal: Some(Refusal::LastAdmin),
         })
         .unwrap();
         let ocsf = to_ocsf(&sample_event(AuditEventKind::ScimOperation, &data));

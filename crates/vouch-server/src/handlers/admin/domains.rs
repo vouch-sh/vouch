@@ -505,7 +505,9 @@ pub(crate) async fn admin_remove_domain(
 mod tests {
     use axum::http::StatusCode;
 
+    use crate::db::documents::user::UserDoc;
     use crate::test_utils::*;
+    use crate::{crypto, db};
 
     /// End-to-end (HTTP) regression for the session-cache invalidation bug:
     /// removing a verified additional domain must evict the in-process
@@ -522,7 +524,7 @@ mod tests {
         // "added.example.com". Verified directly via db::mark_additional_domain_verified
         // (bypasses the DNS TXT lookup the admin_verify handler performs).
         let org = create_test_org(&state.store, "example.com").await;
-        crate::db::add_additional_domain(
+        db::add_additional_domain(
             &state.store,
             &org.id,
             "added.example.com",
@@ -531,7 +533,7 @@ mod tests {
         )
         .await
         .expect("add additional domain");
-        crate::db::mark_additional_domain_verified(&state.store, &org.id, "added.example.com")
+        db::mark_additional_domain_verified(&state.store, &org.id, "added.example.com")
             .await
             .expect("mark verified");
 
@@ -566,7 +568,7 @@ mod tests {
             },
         )
         .await;
-        let victim_hash = crate::crypto::hash_token(&victim_token);
+        let victim_hash = crypto::hash_token(&victim_token);
 
         // Peer on the primary domain — not matched; their cache Hit and DB row
         // must survive per-user invalidation (no over-invalidation).
@@ -582,7 +584,7 @@ mod tests {
             },
         )
         .await;
-        let peer_hash = crate::crypto::hash_token(&peer_token);
+        let peer_hash = crypto::hash_token(&peer_token);
 
         // Seed the per-process cache the way a prior request to this instance
         // would: a first lookup hits the DB and inserts the session as a Hit.
@@ -662,7 +664,7 @@ mod tests {
         // not demote membership).
         let victim_after = state
             .store
-            .get::<crate::db::documents::user::UserDoc>(&victim.id)
+            .get::<UserDoc>(&victim.id)
             .await
             .expect("get victim")
             .expect("victim exists");
