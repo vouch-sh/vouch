@@ -19,6 +19,7 @@
 /// overhead, so the policy count barely moves it (13 policies measured
 /// within a rounding error of 2). Orgs may author up to
 /// `MAX_CUSTOM_POLICIES`; this bounds how many run at once.
+use crate::infra::i18n::Tr;
 pub(crate) const MAX_ACTIVE_CUSTOM_POLICIES: usize = 10;
 
 /// Maximum number of active policies (preconfigured + custom combined).
@@ -86,47 +87,32 @@ impl PreconfiguredSlug {
     #[must_use]
     pub(crate) fn name(self) -> String {
         match self {
-            Self::DiskEncryption => {
-                crate::infra::i18n::Tr::new("admin-policies-name-disk-encryption").to_string()
-            }
-            Self::Firewall => {
-                crate::infra::i18n::Tr::new("admin-policies-name-firewall").to_string()
-            }
-            Self::ScreenLock => {
-                crate::infra::i18n::Tr::new("admin-policies-name-screen-lock").to_string()
-            }
+            Self::DiskEncryption => Tr::new("admin-policies-name-disk-encryption").to_string(),
+            Self::Firewall => Tr::new("admin-policies-name-firewall").to_string(),
+            Self::ScreenLock => Tr::new("admin-policies-name-screen-lock").to_string(),
             Self::EndpointProtection => {
-                crate::infra::i18n::Tr::new("admin-policies-name-endpoint-protection").to_string()
+                Tr::new("admin-policies-name-endpoint-protection").to_string()
             }
-            Self::MdmEnrollment => {
-                crate::infra::i18n::Tr::new("admin-policies-name-mdm-enrollment").to_string()
-            }
+            Self::MdmEnrollment => Tr::new("admin-policies-name-mdm-enrollment").to_string(),
             Self::PlatformIntegrity => {
-                crate::infra::i18n::Tr::new("admin-policies-name-platform-integrity").to_string()
+                Tr::new("admin-policies-name-platform-integrity").to_string()
             }
-            Self::OsRecency => {
-                crate::infra::i18n::Tr::new("admin-policies-name-os-recency").to_string()
-            }
+            Self::OsRecency => Tr::new("admin-policies-name-os-recency").to_string(),
             Self::IssuanceRateLimit => {
-                crate::infra::i18n::Tr::new("admin-policies-name-issuance-rate-limit").to_string()
+                Tr::new("admin-policies-name-issuance-rate-limit").to_string()
             }
             Self::ExchangeRateLimit => {
-                crate::infra::i18n::Tr::new("admin-policies-name-exchange-rate-limit").to_string()
+                Tr::new("admin-policies-name-exchange-rate-limit").to_string()
             }
-            Self::FailedLoginBurst => {
-                crate::infra::i18n::Tr::new("admin-policies-name-failed-login-burst").to_string()
-            }
+            Self::FailedLoginBurst => Tr::new("admin-policies-name-failed-login-burst").to_string(),
             Self::TokenExchangeStepUp => {
-                crate::infra::i18n::Tr::new("admin-policies-name-token-exchange-step-up")
-                    .to_string()
+                Tr::new("admin-policies-name-token-exchange-step-up").to_string()
             }
             Self::ExchangeIpConsistency => {
-                crate::infra::i18n::Tr::new("admin-policies-name-exchange-ip-consistency")
-                    .to_string()
+                Tr::new("admin-policies-name-exchange-ip-consistency").to_string()
             }
             Self::LogoutInvalidatesExchange => {
-                crate::infra::i18n::Tr::new("admin-policies-name-logout-invalidates-exchange")
-                    .to_string()
+                Tr::new("admin-policies-name-logout-invalidates-exchange").to_string()
             }
         }
     }
@@ -135,47 +121,32 @@ impl PreconfiguredSlug {
     #[must_use]
     pub(crate) fn description(self) -> String {
         match self {
-            Self::DiskEncryption => {
-                crate::infra::i18n::Tr::new("admin-policies-desc-disk-encryption").to_string()
-            }
-            Self::Firewall => {
-                crate::infra::i18n::Tr::new("admin-policies-desc-firewall").to_string()
-            }
-            Self::ScreenLock => {
-                crate::infra::i18n::Tr::new("admin-policies-desc-screen-lock").to_string()
-            }
+            Self::DiskEncryption => Tr::new("admin-policies-desc-disk-encryption").to_string(),
+            Self::Firewall => Tr::new("admin-policies-desc-firewall").to_string(),
+            Self::ScreenLock => Tr::new("admin-policies-desc-screen-lock").to_string(),
             Self::EndpointProtection => {
-                crate::infra::i18n::Tr::new("admin-policies-desc-endpoint-protection").to_string()
+                Tr::new("admin-policies-desc-endpoint-protection").to_string()
             }
-            Self::MdmEnrollment => {
-                crate::infra::i18n::Tr::new("admin-policies-desc-mdm-enrollment").to_string()
-            }
+            Self::MdmEnrollment => Tr::new("admin-policies-desc-mdm-enrollment").to_string(),
             Self::PlatformIntegrity => {
-                crate::infra::i18n::Tr::new("admin-policies-desc-platform-integrity").to_string()
+                Tr::new("admin-policies-desc-platform-integrity").to_string()
             }
-            Self::OsRecency => {
-                crate::infra::i18n::Tr::new("admin-policies-desc-os-recency").to_string()
-            }
+            Self::OsRecency => Tr::new("admin-policies-desc-os-recency").to_string(),
             Self::IssuanceRateLimit => {
-                crate::infra::i18n::Tr::new("admin-policies-desc-issuance-rate-limit").to_string()
+                Tr::new("admin-policies-desc-issuance-rate-limit").to_string()
             }
             Self::ExchangeRateLimit => {
-                crate::infra::i18n::Tr::new("admin-policies-desc-exchange-rate-limit").to_string()
+                Tr::new("admin-policies-desc-exchange-rate-limit").to_string()
             }
-            Self::FailedLoginBurst => {
-                crate::infra::i18n::Tr::new("admin-policies-desc-failed-login-burst").to_string()
-            }
+            Self::FailedLoginBurst => Tr::new("admin-policies-desc-failed-login-burst").to_string(),
             Self::TokenExchangeStepUp => {
-                crate::infra::i18n::Tr::new("admin-policies-desc-token-exchange-step-up")
-                    .to_string()
+                Tr::new("admin-policies-desc-token-exchange-step-up").to_string()
             }
             Self::ExchangeIpConsistency => {
-                crate::infra::i18n::Tr::new("admin-policies-desc-exchange-ip-consistency")
-                    .to_string()
+                Tr::new("admin-policies-desc-exchange-ip-consistency").to_string()
             }
             Self::LogoutInvalidatesExchange => {
-                crate::infra::i18n::Tr::new("admin-policies-desc-logout-invalidates-exchange")
-                    .to_string()
+                Tr::new("admin-policies-desc-logout-invalidates-exchange").to_string()
             }
         }
     }

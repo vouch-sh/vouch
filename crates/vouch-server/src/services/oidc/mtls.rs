@@ -602,6 +602,7 @@ pub(crate) fn verify_self_signed_tls_client_auth(
 )]
 mod tests {
     use super::*;
+    use crate::test_utils;
 
     /// Generate a self-signed test certificate with the given CN.
     fn make_test_cert(cn: &str) -> Vec<u8> {
@@ -2326,7 +2327,7 @@ mod tests {
 
     #[test]
     fn test_client_cert_trust_accepts_ca_bundle() {
-        let pem = crate::test_utils::test_client_ca().pem();
+        let pem = test_utils::test_client_ca().pem();
         assert!(ClientCertTrust::from_pem(pem.as_bytes()).is_ok());
     }
 }

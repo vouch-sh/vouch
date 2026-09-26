@@ -7,6 +7,8 @@
 )]
 
 use super::*;
+use crate::crypto::jwk::Jwk;
+use crate::crypto::keys::OidcSigningKey;
 use crate::db::Domain;
 use jsonwebtoken::Algorithm;
 
@@ -326,12 +328,12 @@ fn make_test_provider(base_url: &str) -> OidcProvider {
 /// `jsonwebtoken::jwk::JwkSet` deserializer. The EC key coordinates
 /// (x, y) and kid are taken directly from the signing key so that
 /// the JWKS matches the signature on JWTs the same key produces.
-fn make_ec_jwks_json(signing_key: &crate::crypto::keys::OidcSigningKey) -> String {
+fn make_ec_jwks_json(signing_key: &OidcSigningKey) -> String {
     let jwk = signing_key
         .public_key_jwk()
         .expect("public_key_jwk should succeed");
 
-    serde_json::json!({ "keys": [crate::crypto::jwk::Jwk::Ec(jwk)] }).to_string()
+    serde_json::json!({ "keys": [Jwk::Ec(jwk)] }).to_string()
 }
 
 /// Sign a JWT with the given custom claims using ES256.
@@ -339,17 +341,14 @@ fn make_ec_jwks_json(signing_key: &crate::crypto::keys::OidcSigningKey) -> Strin
 /// Claims must include the standard registered claims `iss`, `aud`, `exp`,
 /// and `iat`; the caller also sets `email`, `email_verified`, `nonce`, and
 /// `hd` as required by `verify_id_token`.
-async fn sign_test_jwt(
-    key: &crate::crypto::keys::OidcSigningKey,
-    claims: serde_json::Value,
-) -> String {
+async fn sign_test_jwt(key: &OidcSigningKey, claims: serde_json::Value) -> String {
     key.sign_jwt(&claims)
         .await
         .expect("sign_jwt should succeed")
 }
 
 /// Mount a JWKS endpoint on the mock server and return the signing key.
-async fn mount_jwks(server: &wiremock::MockServer, key: &crate::crypto::keys::OidcSigningKey) {
+async fn mount_jwks(server: &wiremock::MockServer, key: &OidcSigningKey) {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, ResponseTemplate};
 
@@ -857,7 +856,7 @@ async fn verify_id_token_happy_path() {
     let client_id = "test-client";
     let nonce = "test-nonce-abc";
 
-    let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
+    let key = OidcSigningKey::generate().unwrap();
     mount_jwks(&server, &key).await;
 
     let mut claims = base_claims(&issuer, client_id);
@@ -897,12 +896,9 @@ async fn verify_id_token_wrong_family_kid_duplicate_accepts_regardless_of_order(
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    let ec_key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
+    let ec_key = OidcSigningKey::generate().unwrap();
     let ec_kid = ec_key.public_key_jwk().unwrap().kid().unwrap().to_string();
-    let ec_jwk_json = serde_json::to_value(crate::crypto::jwk::Jwk::Ec(
-        ec_key.public_key_jwk().unwrap(),
-    ))
-    .unwrap();
+    let ec_jwk_json = serde_json::to_value(Jwk::Ec(ec_key.public_key_jwk().unwrap())).unwrap();
 
     for jwks_keys in [
         // Arm A: RSA (wrong family, same kid) FIRST — the ordering the
@@ -948,7 +944,7 @@ async fn verify_id_token_missing_sub_rejected() {
     let client_id = "test-client";
     let nonce = "test-nonce-abc";
 
-    let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
+    let key = OidcSigningKey::generate().unwrap();
     mount_jwks(&server, &key).await;
 
     let mut claims = base_claims(&issuer, client_id);
@@ -979,7 +975,7 @@ async fn verify_id_token_nonce_mismatch() {
     let issuer = server.uri();
     let client_id = "test-client";
 
-    let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
+    let key = OidcSigningKey::generate().unwrap();
     mount_jwks(&server, &key).await;
 
     let mut claims = base_claims(&issuer, client_id);
@@ -1010,7 +1006,7 @@ async fn verify_id_token_missing_nonce() {
     let issuer = server.uri();
     let client_id = "test-client";
 
-    let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
+    let key = OidcSigningKey::generate().unwrap();
     mount_jwks(&server, &key).await;
 
     // No nonce claim in the token
@@ -1040,7 +1036,7 @@ async fn verify_id_token_empty_nonce_bypass() {
     let issuer = server.uri();
     let client_id = "test-client";
 
-    let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
+    let key = OidcSigningKey::generate().unwrap();
     mount_jwks(&server, &key).await;
 
     // No nonce in token; empty expected_nonce signals device-code flow
@@ -1068,7 +1064,7 @@ async fn verify_id_token_email_not_verified() {
     let client_id = "test-client";
     let nonce = "test-nonce";
 
-    let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
+    let key = OidcSigningKey::generate().unwrap();
     mount_jwks(&server, &key).await;
 
     let mut claims = base_claims(&issuer, client_id);
@@ -1102,7 +1098,7 @@ async fn verify_id_token_domain_from_hd_claim() {
     let client_id = "test-client";
     let nonce = "test-nonce";
 
-    let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
+    let key = OidcSigningKey::generate().unwrap();
     mount_jwks(&server, &key).await;
 
     let mut claims = base_claims(google_issuer, client_id);
@@ -1141,7 +1137,7 @@ async fn verify_id_token_rejects_malformed_hd_claim() {
     let client_id = "test-client";
     let nonce = "test-nonce";
 
-    let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
+    let key = OidcSigningKey::generate().unwrap();
     mount_jwks(&server, &key).await;
 
     let mut claims = base_claims(google_issuer, client_id);
@@ -1177,7 +1173,7 @@ async fn verify_id_token_rejects_malformed_email_domain() {
     let client_id = "test-client";
     let nonce = "test-nonce";
 
-    let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
+    let key = OidcSigningKey::generate().unwrap();
     mount_jwks(&server, &key).await;
 
     let mut claims = base_claims(&issuer, client_id);
@@ -1208,7 +1204,7 @@ async fn verify_id_token_no_hd_claim_non_google_falls_back_to_email() {
     let client_id = "test-client";
     let nonce = "test-nonce";
 
-    let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
+    let key = OidcSigningKey::generate().unwrap();
     mount_jwks(&server, &key).await;
 
     let mut claims = base_claims(&issuer, client_id);
@@ -1245,7 +1241,7 @@ async fn verify_id_token_lowercases_mixed_case_hd_claim() {
     let client_id = "test-client";
     let nonce = "test-nonce";
 
-    let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
+    let key = OidcSigningKey::generate().unwrap();
     mount_jwks(&server, &key).await;
 
     let mut claims = base_claims(google_issuer, client_id);
@@ -1280,7 +1276,7 @@ async fn verify_id_token_lowercases_email_domain_fallback() {
     let client_id = "test-client";
     let nonce = "test-nonce";
 
-    let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
+    let key = OidcSigningKey::generate().unwrap();
     mount_jwks(&server, &key).await;
 
     let mut claims = base_claims(&issuer, client_id);
@@ -1313,7 +1309,7 @@ async fn verify_id_token_google_consumer_no_hd_returns_none() {
     let client_id = "test-client";
     let nonce = "test-nonce";
 
-    let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
+    let key = OidcSigningKey::generate().unwrap();
     mount_jwks(&server, &key).await;
 
     let mut claims = base_claims(google_issuer, client_id);
@@ -1353,7 +1349,7 @@ async fn verify_id_token_entra_tid_mismatch_rejected() {
     let client_id = "test-client";
     let nonce = "test-nonce";
 
-    let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
+    let key = OidcSigningKey::generate().unwrap();
     mount_jwks(&server, &key).await;
 
     let mut claims = base_claims(&entra_issuer, client_id);
@@ -1389,7 +1385,7 @@ async fn verify_id_token_entra_tid_matches_issuer_succeeds() {
     let client_id = "test-client";
     let nonce = "test-nonce";
 
-    let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
+    let key = OidcSigningKey::generate().unwrap();
     mount_jwks(&server, &key).await;
 
     let mut claims = base_claims(&entra_issuer, client_id);
@@ -1437,7 +1433,7 @@ async fn verify_id_token_entra_tenant_template_with_per_tenant_token_succeeds() 
     let client_id = "test-client";
     let nonce = "test-nonce";
 
-    let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
+    let key = OidcSigningKey::generate().unwrap();
     mount_jwks(&server, &key).await;
 
     // Token claims use the per-tenant issuer (as Entra actually issues them)
@@ -1481,7 +1477,7 @@ async fn verify_id_token_entra_tenant_template_tid_mismatch_rejected() {
     let client_id = "test-client";
     let nonce = "test-nonce";
 
-    let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
+    let key = OidcSigningKey::generate().unwrap();
     mount_jwks(&server, &key).await;
 
     let mut claims = base_claims(&token_iss, client_id);
@@ -1521,7 +1517,7 @@ async fn verify_id_token_entra_tenant_template_rejects_non_entra_issuer() {
     let client_id = "test-client";
     let nonce = "test-nonce";
 
-    let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
+    let key = OidcSigningKey::generate().unwrap();
     mount_jwks(&server, &key).await;
 
     let mut claims = base_claims(&token_iss, client_id);
@@ -1581,7 +1577,7 @@ async fn verify_id_token_entra_xms_edov_true_accepted_without_email_verified() {
     let client_id = "test-client";
     let nonce = "test-nonce";
 
-    let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
+    let key = OidcSigningKey::generate().unwrap();
     mount_jwks(&server, &key).await;
 
     let mut claims = base_claims(&token_iss, client_id);
@@ -1620,7 +1616,7 @@ async fn verify_id_token_entra_xms_edov_false_rejected_with_guidance() {
     let client_id = "test-client";
     let nonce = "test-nonce";
 
-    let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
+    let key = OidcSigningKey::generate().unwrap();
     mount_jwks(&server, &key).await;
 
     let mut claims = base_claims(&token_iss, client_id);
@@ -1664,7 +1660,7 @@ async fn verify_id_token_entra_missing_xms_edov_rejected_with_guidance() {
     let client_id = "test-client";
     let nonce = "test-nonce";
 
-    let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
+    let key = OidcSigningKey::generate().unwrap();
     mount_jwks(&server, &key).await;
 
     let mut claims = base_claims(&token_iss, client_id);
@@ -1706,7 +1702,7 @@ async fn verify_id_token_non_entra_xms_edov_does_not_override_email_verified() {
     let client_id = "test-client";
     let nonce = "test-nonce";
 
-    let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
+    let key = OidcSigningKey::generate().unwrap();
     mount_jwks(&server, &key).await;
 
     let mut claims = base_claims(&issuer, client_id);

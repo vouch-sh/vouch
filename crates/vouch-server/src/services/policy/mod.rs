@@ -39,12 +39,15 @@ pub(crate) use remediation::remediation_for_slug;
 
 use crate::arrival::ArrivalTime;
 use crate::db;
+use crate::db::documents::audit::PolicyDenialData;
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
+use crate::infra::i18n::Tr;
+use crate::infra::metrics;
 use dogwood_language::{
     Authorizer, Decision, Event, EventBuilder, LoweredPolicySet, ParsedPolicySet, Validator, Value,
 };
 use preconfigured::BASE_ALLOW;
-use vouch_common::posture::DevicePosture;
+use vouch_common::posture::{DevicePosture, POSTURE_TYPE};
 
 /// Outcome of one stateless policy-set evaluation (playground path; the
 /// enforcement path's decisions carry rule attribution via
@@ -143,7 +146,7 @@ fn lower_composed(text: &str) -> ServiceResult<LoweredPolicySet> {
         return Err(ServiceError::api(
             axum::http::StatusCode::BAD_REQUEST,
             "invalid_policy_expression",
-            crate::infra::i18n::Tr::new("admin-policies-err-empty").to_string(),
+            Tr::new("admin-policies-err-empty").to_string(),
         ));
     }
     let Some(policy_schema) = schema::policy_schema() else {
@@ -160,7 +163,7 @@ fn lower_composed(text: &str) -> ServiceResult<LoweredPolicySet> {
                 return Err(ServiceError::api(
                     axum::http::StatusCode::BAD_REQUEST,
                     "invalid_policy_expression",
-                    crate::infra::i18n::Tr::new("admin-policies-err-invalid")
+                    Tr::new("admin-policies-err-invalid")
                         .arg("detail", e.to_string())
                         .to_string(),
                 ));
@@ -173,7 +176,7 @@ fn lower_composed(text: &str) -> ServiceResult<LoweredPolicySet> {
         return Err(ServiceError::api(
             axum::http::StatusCode::BAD_REQUEST,
             "invalid_policy_expression",
-            crate::infra::i18n::Tr::new("admin-policies-err-invalid")
+            Tr::new("admin-policies-err-invalid")
                 .arg("detail", errors.join("; "))
                 .to_string(),
         ));
@@ -457,7 +460,7 @@ async fn record_denial(
         DecisionKind::IssueToken { .. } => "issue_token",
         DecisionKind::ExchangeToken { .. } => "exchange_token",
     };
-    let data = crate::db::documents::audit::PolicyDenialData {
+    let data = PolicyDenialData {
         action,
         policy,
         org_id,
@@ -504,19 +507,18 @@ fn deny_error(denying: Option<engine::DenyingPolicy>, os: Option<&str>) -> Servi
         Some(engine::DenyingPolicy::Preconfigured(slug)) => {
             (slug.name(), remediation_for_slug(slug, os))
         }
-        Some(engine::DenyingPolicy::Custom { name }) => (
-            name,
-            crate::infra::i18n::Tr::new("admin-policies-deny-generic").to_string(),
-        ),
+        Some(engine::DenyingPolicy::Custom { name }) => {
+            (name, Tr::new("admin-policies-deny-generic").to_string())
+        }
         None => (
-            crate::infra::i18n::Tr::new("admin-policies-deny-unattributed").to_string(),
-            crate::infra::i18n::Tr::new("admin-policies-deny-generic").to_string(),
+            Tr::new("admin-policies-deny-unattributed").to_string(),
+            Tr::new("admin-policies-deny-generic").to_string(),
         ),
     };
     tracing::debug!(policy = name, "policy denied");
     ServiceError::oauth(
         OAuthErrorCode::AccessDenied,
-        crate::infra::i18n::Tr::new("admin-policies-deny-message")
+        Tr::new("admin-policies-deny-message")
             .arg("policy", name.as_str())
             .arg("remediation", remediation.as_str())
             .to_string(),
@@ -576,7 +578,7 @@ async fn authorize_decision(
             // cardinality a function of how many policies have been written.
             let denying = engine::DenyingPolicy::Custom { name };
             let (metrics_label, audit_policy) = deny_attribution(&Some(denying.clone()));
-            crate::infra::metrics::record_policy_decision("deny", metrics_label);
+            metrics::record_policy_decision("deny", metrics_label);
             record_denial(state, org_id, user_id, user_email, &kind, &audit_policy).await;
             return Err(deny_error(Some(denying), os));
         }
@@ -623,19 +625,16 @@ async fn authorize_decision(
         tracing::error!(org_id, "policy decision failed: {msg}");
         ServiceError::Internal("policy engine unavailable".to_string())
     })?;
-    crate::infra::metrics::record_policy_decision_duration(
-        started.elapsed().as_secs_f64(),
-        needs_history,
-    );
+    metrics::record_policy_decision_duration(started.elapsed().as_secs_f64(), needs_history);
 
     match decision {
         engine::OrgDecision::Allow => {
-            crate::infra::metrics::record_policy_decision("allow", "none");
+            metrics::record_policy_decision("allow", "none");
             Ok(())
         }
         engine::OrgDecision::Deny(denying) => {
             let (metrics_label, audit_policy) = deny_attribution(&denying);
-            crate::infra::metrics::record_policy_decision("deny", metrics_label);
+            metrics::record_policy_decision("deny", metrics_label);
             record_denial(state, org_id, user_id, user_email, &kind, &audit_policy).await;
             Err(deny_error(denying, os))
         }
@@ -892,7 +891,7 @@ fn extract_device_posture(ad_value: Option<&serde_json::Value>) -> ServiceResult
 
     for entry in entries {
         let type_name = entry.get("type").and_then(serde_json::Value::as_str);
-        if type_name == Some(vouch_common::posture::POSTURE_TYPE) {
+        if type_name == Some(POSTURE_TYPE) {
             let mut posture: DevicePosture =
                 serde_json::from_value(entry.clone()).map_err(|e| {
                     tracing::warn!("Failed to deserialize device posture: {e}");

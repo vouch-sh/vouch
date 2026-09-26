@@ -24,7 +24,7 @@ use crate::AppState;
 use crate::arrival::ArrivalTime;
 use crate::assurance::HardwareVerification;
 use crate::crypto::jwt::JwtType;
-use crate::db::{self, AuthEventParams, AuthEventType, Principal};
+use crate::db::{self, AuthEventParams, AuthEventType, ClientInfo, Principal};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use crate::services::auth::{
     AuthenticatorLookupParams, ClientAuthProof, CreateOAuthTokenParams, GrantProof,
@@ -35,6 +35,7 @@ use crate::services::auth::{
 use crate::services::oidc::ScopeSet;
 use crate::services::oidc::authorization_details::AuthorizationDetails;
 use crate::services::oidc::validated_client::ValidatedOAuthClient;
+use crate::services::policy;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
@@ -216,7 +217,7 @@ pub struct Fido2AssertionParams<'a> {
     /// RFC 9396: Raw authorization_details JSON string.
     pub authorization_details: Option<&'a str>,
     /// Client metadata extracted from HTTP headers.
-    pub client_info: crate::db::ClientInfo,
+    pub client_info: ClientInfo,
 }
 
 /// Result of a successful FIDO2 assertion grant exchange.
@@ -456,7 +457,7 @@ pub(crate) async fn exchange_fido2_assertion(
     // policies (step-up recency on token exchange) treat login_success as
     // proof of a completed, policy-compliant hardware login.
     if let Some(ref org_id) = user.org_id
-        && let Err(denied) = crate::services::policy::evaluate_posture_policies(
+        && let Err(denied) = policy::evaluate_posture_policies(
             state,
             org_id,
             &user.id,

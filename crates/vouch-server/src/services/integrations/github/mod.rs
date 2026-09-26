@@ -240,6 +240,7 @@ impl<'a> GitHubService<'a> {
 )]
 mod tests {
     use super::*;
+    use crate::config::NonEmptySecret;
     use crate::test_utils;
     use secrecy::{ExposeSecret, SecretString};
 
@@ -286,8 +287,7 @@ mod tests {
         let state = test_utils::test_app_state().await;
         let mut config = (**state.config()).clone();
         config.github_app_client_id = Some("client-xyz".to_string());
-        config.github_app_client_secret =
-            crate::config::NonEmptySecret::new(SecretString::from("secret-xyz"));
+        config.github_app_client_secret = NonEmptySecret::new(SecretString::from("secret-xyz"));
 
         let service = GitHubService::new(
             &state.store,

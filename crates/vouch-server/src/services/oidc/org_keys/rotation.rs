@@ -13,6 +13,7 @@ use super::{KeyMaterial, ensure_key, generate_key_material, state_priority};
 use crate::AppState;
 use crate::crypto::alg::JwsAlgorithm;
 use crate::db::documents::organization::{OrgSigningKeyDoc, OrganizationDoc, SigningKeyState};
+use crate::db::pool::{self, RetryableError};
 use crate::db::store::StoreTransaction;
 use crate::db::{self};
 
@@ -56,11 +57,11 @@ pub(crate) enum OrgRotationError {
     Other(#[from] anyhow::Error),
 }
 
-impl crate::db::pool::RetryableError for OrgRotationError {
+impl RetryableError for OrgRotationError {
     fn is_retryable(&self) -> bool {
         match self {
             Self::OccConflict => true,
-            Self::Other(e) => crate::db::pool::is_retryable_db_error(e),
+            Self::Other(e) => pool::is_retryable_db_error(e),
         }
     }
 }
@@ -847,13 +848,13 @@ pub(crate) async fn org_key_panel(state: &AppState, org_id: &str) -> Result<OrgK
 mod tests {
     use jiff::{Span, Timestamp};
 
-    use super::super::test_support::{NO_OPERATOR, backdate, setup};
     use super::*;
     use crate::crypto::alg::JwsAlgorithm;
     use crate::db::documents::organization::SigningKeyState;
     use crate::db::{
-        OrgSigningKeyDoc, deterministic_org_key_id, get_org_signing_key, release_subdomain,
+        self, OrgSigningKeyDoc, deterministic_org_key_id, get_org_signing_key, release_subdomain,
     };
+    use crate::services::oidc::org_keys::test_support::{NO_OPERATOR, backdate, setup};
     use crate::services::oidc::resolve_org_keys;
 
     #[test]
@@ -974,7 +975,7 @@ mod tests {
 
         // The promoted key signs; the demoted key is Previous; a fresh Next
         // was restaged in the same transaction.
-        let org = crate::db::get_organization(&state.store, &org_id)
+        let org = db::get_organization(&state.store, &org_id)
             .await
             .unwrap()
             .unwrap();

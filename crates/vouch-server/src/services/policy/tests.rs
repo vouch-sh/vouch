@@ -12,7 +12,10 @@
 
 use super::preconfigured::BASE_ALLOW;
 use super::*;
-use crate::test_utils::test_arrival;
+use crate::db::AuditEventKind;
+use crate::db::audit::AuditEvent;
+use crate::db::documents::audit::GeoFields;
+use crate::test_utils::{self, test_arrival};
 use vouch_common::posture::{EdrAgent, MdmAgent, OperatingSystem, PostureTypeTag};
 
 fn sample_posture() -> DevicePosture {
@@ -833,8 +836,8 @@ fn test_base_allow_alone_allows() {
 // Per-principal history slicing invariant
 // ============================================================
 
-fn history_row(kind: &str, user_id: &str, secs_ago: i64, seq: u32) -> crate::db::audit::AuditEvent {
-    crate::db::audit::AuditEvent {
+fn history_row(kind: &str, user_id: &str, secs_ago: i64, seq: u32) -> AuditEvent {
+    AuditEvent {
         id: format!("row-{seq:04}"),
         event_type: kind.to_string(),
         user_id: Some(user_id.to_string()),
@@ -1024,7 +1027,7 @@ fn test_history_projection_matches_schema() {
 }
 
 /// The qualified Dogwood action an audit kind ingests as.
-fn dogwood_action_of(kind: &crate::db::AuditEventKind) -> &'static str {
+fn dogwood_action_of(kind: &AuditEventKind) -> &'static str {
     use crate::db::AuditEventKind as K;
     match kind {
         K::LoginSuccess | K::LoginFailed => "Vouch::Action::Login",
@@ -1365,7 +1368,7 @@ fn test_ingestion_reads_the_keys_writers_serialize() {
         token_expires_at: None,
     })
     .unwrap();
-    let row = crate::db::audit::AuditEvent {
+    let row = AuditEvent {
         id: "row-1".to_string(),
         event_type: "token_exchange".to_string(),
         user_id: Some("user-a".to_string()),
@@ -1393,10 +1396,10 @@ fn test_ingestion_reads_the_keys_writers_serialize() {
         details: None,
         client_ip: Some("10.1.2.3".to_string()),
         user_agent: None,
-        geo: crate::db::documents::audit::GeoFields::default(),
+        geo: GeoFields::default(),
     })
     .unwrap();
-    let row = crate::db::audit::AuditEvent {
+    let row = AuditEvent {
         id: "row-2".to_string(),
         event_type: "oauth_token_issued".to_string(),
         user_id: Some("user-a".to_string()),
@@ -1874,7 +1877,7 @@ async fn single_denial_audit_data(state: &crate::AppState, user_id: &str) -> ser
 /// see in the audit log.
 #[tokio::test]
 async fn test_authorize_decision_records_custom_policy_name_in_audit() {
-    let state = crate::test_utils::test_app_state().await;
+    let state = test_utils::test_app_state().await;
 
     // A custom posture policy that requires disk encryption. Minimal
     // posture does not have it, so this policy denies.
@@ -1926,7 +1929,7 @@ async fn test_authorize_decision_records_custom_policy_name_in_audit() {
 /// same value used for metrics (no cardinality concern).
 #[tokio::test]
 async fn test_authorize_decision_records_preconfigured_slug_in_audit() {
-    let state = crate::test_utils::test_app_state().await;
+    let state = test_utils::test_app_state().await;
 
     let slugs = vec!["disk_encryption".to_string()];
     let posture = minimal_posture();
@@ -1968,7 +1971,7 @@ async fn test_authorize_decision_records_preconfigured_slug_in_audit() {
 /// temporal policy that denies when there is no recent login in history.
 #[tokio::test]
 async fn test_authorize_decision_exchange_records_custom_policy_name_in_audit() {
-    let state = crate::test_utils::test_app_state().await;
+    let state = test_utils::test_app_state().await;
 
     let custom = vec![custom_policy(
         "Exchange Step-Up",
@@ -2018,7 +2021,7 @@ when temporal {
 /// audit-name fix (actual name, not "custom") compose correctly.
 #[tokio::test]
 async fn test_authorize_decision_multi_rule_custom_policy_name_in_audit() {
-    let state = crate::test_utils::test_app_state().await;
+    let state = test_utils::test_app_state().await;
 
     let multi_rule = format!(
         "{}\n{}",

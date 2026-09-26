@@ -22,6 +22,7 @@ use jiff::Timestamp;
 
 use super::{SamlProvider, c14n, signature::SignatureError};
 use crate::db::{Domain, DomainValidationError};
+use crate::email::Email;
 
 // ============================================================================
 // SAML namespace constants
@@ -693,7 +694,7 @@ fn extract_domain(
     // configured one is absent from this assertion.
     let raw = domain_attribute
         .and_then(|attr_name| find_saml_attribute(assertion, attr_name))
-        .or_else(|| crate::email::Email::domain_of(email));
+        .or_else(|| Email::domain_of(email));
     raw.as_deref().map(Domain::parse).transpose()
 }
 

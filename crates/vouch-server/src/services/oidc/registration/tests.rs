@@ -7,6 +7,10 @@
 )]
 
 use super::*;
+use crate::db::{self, ClientKeys, OAuthClientType};
+use crate::error::ServiceError;
+use crate::services::oidc::SUPPORTED_RESPONSE_TYPES;
+use crate::services::oidc::grant_type::OAuthGrantType;
 
 fn assert_oauth_error<T: std::fmt::Debug>(
     result: Result<T, ServiceError>,
@@ -22,9 +26,9 @@ fn assert_oauth_error<T: std::fmt::Debug>(
 /// The shared redirect-URI rule as it applies to a native client, which is the
 /// client kind these cases describe: `https`, loopback `http`, and a custom
 /// scheme are all registrable, and a fragment is not.
-fn validate_redirect_uri_for_native(uri: &str) -> Result<(), crate::error::ServiceError> {
-    crate::db::validate_redirect_uri(uri, crate::db::OAuthClientType::Native).map_err(|e| {
-        crate::error::ServiceError::oauth(
+fn validate_redirect_uri_for_native(uri: &str) -> Result<(), ServiceError> {
+    db::validate_redirect_uri(uri, OAuthClientType::Native).map_err(|e| {
+        ServiceError::oauth(
             OAuthErrorCode::InvalidRedirectUri,
             format!("Invalid redirect URI '{uri}': {e}"),
         )
@@ -827,9 +831,7 @@ fn test_allowed_grant_types_includes_expected() {
 fn registration_only_grants_are_not_dispatchable() {
     for grant in REGISTRATION_ONLY_GRANT_TYPES {
         assert!(
-            grant
-                .parse::<crate::services::oidc::grant_type::OAuthGrantType>()
-                .is_err(),
+            grant.parse::<OAuthGrantType>().is_err(),
             "{grant} is dispatched by the token endpoint; \
              remove it from REGISTRATION_ONLY_GRANT_TYPES"
         );
@@ -840,7 +842,7 @@ fn registration_only_grants_are_not_dispatchable() {
 #[test]
 fn test_allowed_response_types_includes_code() {
     assert!(
-        crate::services::oidc::SUPPORTED_RESPONSE_TYPES.contains(&"code"),
+        SUPPORTED_RESPONSE_TYPES.contains(&"code"),
         "'code' must be in the supported response types set"
     );
 }
@@ -864,7 +866,7 @@ fn test_implicit_grant_not_allowed() {
 #[test]
 fn test_token_response_type_not_allowed() {
     assert!(
-        !crate::services::oidc::SUPPORTED_RESPONSE_TYPES.contains(&"token"),
+        !SUPPORTED_RESPONSE_TYPES.contains(&"token"),
         "'token' response type must not be allowed (implicit flow)"
     );
 }
@@ -874,7 +876,7 @@ fn test_token_response_type_not_allowed() {
 #[test]
 fn test_id_token_response_type_not_allowed() {
     assert!(
-        !crate::services::oidc::SUPPORTED_RESPONSE_TYPES.contains(&"id_token"),
+        !SUPPORTED_RESPONSE_TYPES.contains(&"id_token"),
         "'id_token' response type must not be allowed (implicit flow)"
     );
 }
@@ -1187,7 +1189,7 @@ fn test_validate_redirect_uris_required_for_auth_code_empty() {
     let result = validate_redirect_uris(
         &mut req,
         AuthorizationCodeGrant::Present,
-        crate::db::OAuthClientType::Web,
+        OAuthClientType::Web,
     );
     assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
 }
@@ -1199,7 +1201,7 @@ fn test_validate_redirect_uris_not_required_without_auth_code() {
     let result = validate_redirect_uris(
         &mut req,
         AuthorizationCodeGrant::Absent,
-        crate::db::OAuthClientType::Web,
+        OAuthClientType::Web,
     );
     let uris = result.expect("Empty redirect_uris allowed without the authorization_code grant");
     assert!(uris.is_empty());
@@ -1215,7 +1217,7 @@ fn test_validate_redirect_uris_too_many() {
     let result = validate_redirect_uris(
         &mut req,
         AuthorizationCodeGrant::Absent,
-        crate::db::OAuthClientType::Web,
+        OAuthClientType::Web,
     );
     assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
 }
@@ -1230,7 +1232,7 @@ fn test_validate_redirect_uris_valid_uris_pass_through() {
     let result = validate_redirect_uris(
         &mut req,
         AuthorizationCodeGrant::Present,
-        crate::db::OAuthClientType::Web,
+        OAuthClientType::Web,
     );
     let uris = result.expect("Valid URIs must pass");
     assert_eq!(uris.len(), 2);
@@ -1243,7 +1245,7 @@ fn test_validate_redirect_uris_invalid_uri_rejected() {
     let result = validate_redirect_uris(
         &mut req,
         AuthorizationCodeGrant::Absent,
-        crate::db::OAuthClientType::Web,
+        OAuthClientType::Web,
     );
     assert_oauth_error(result, OAuthErrorCode::InvalidRedirectUri);
 }
@@ -1334,9 +1336,7 @@ fn test_validate_jwks_and_auth_method_private_key_jwt_with_jwks_uri_valid() {
     );
     assert_eq!(
         validated.keys,
-        Some(crate::db::ClientKeys::Uri(
-            "https://example.com/jwks.json".to_string()
-        ))
+        Some(ClientKeys::Uri("https://example.com/jwks.json".to_string()))
     );
 }
 
@@ -1351,10 +1351,7 @@ fn test_validate_jwks_and_auth_method_private_key_jwt_with_inline_jwks_valid() {
         validated.auth_method,
         TokenEndpointAuthMethod::PrivateKeyJwt
     );
-    assert!(matches!(
-        validated.keys,
-        Some(crate::db::ClientKeys::Inline(_))
-    ));
+    assert!(matches!(validated.keys, Some(ClientKeys::Inline(_))));
 }
 
 // RFC 7591 §2: token_endpoint_auth_method none registers a public client.

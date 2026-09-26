@@ -21,10 +21,11 @@ use crate::AppState;
 use crate::crypto::alg::JwsAlgorithm;
 use crate::crypto::{generate_random_bytes, hash_token};
 use crate::db::{
-    self, CreateOAuthClientParams, FapiProfile, OAuthClient, OAuthClientType, OAuthEventType,
-    RegistrationSource, TokenEndpointAuthMethod, UpdateClientRegistrationParams,
+    self, ClientKeys, CreateOAuthClientParams, FapiProfile, KeyType, OAuthClient, OAuthClientType,
+    OAuthEventType, RegistrationSource, TokenEndpointAuthMethod, UpdateClientRegistrationParams,
 };
 use crate::error::{OAuthErrorCode, ServiceError};
+use crate::services::oidc::SUPPORTED_RESPONSE_TYPES;
 use crate::services::oidc::grant_type::OAuthGrantType;
 use axum::http::StatusCode;
 use base64::Engine;
@@ -33,7 +34,7 @@ use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
-use vouch_common::protocol::GRANT_TYPE_AUTHORIZATION_CODE;
+use vouch_common::protocol::{GRANT_TYPE_AUTHORIZATION_CODE, GRANT_TYPE_CLIENT_CREDENTIALS};
 
 // ============================================================================
 // Allowed Grant and Response Types
@@ -499,10 +500,7 @@ pub async fn register_client(
         // conveys certificates via x5c instead (RFC 8705 §2.2.2), so this
         // check does not apply to them.
         if jwks_auth.auth_method == TokenEndpointAuthMethod::PrivateKeyJwt
-            && let Some(jwks) = jwks_auth
-                .keys
-                .as_ref()
-                .and_then(crate::db::ClientKeys::inline)
+            && let Some(jwks) = jwks_auth.keys.as_ref().and_then(ClientKeys::inline)
             && !jwks.has_fapi_allowed_key()
         {
             return Err(ServiceError::oauth(
@@ -694,12 +692,12 @@ pub async fn register_client(
         jwks: jwks_auth
             .keys
             .as_ref()
-            .and_then(crate::db::ClientKeys::inline)
+            .and_then(ClientKeys::inline)
             .and_then(|set| serde_json::to_value(set).ok()),
         jwks_uri: jwks_auth
             .keys
             .as_ref()
-            .and_then(crate::db::ClientKeys::uri)
+            .and_then(ClientKeys::uri)
             .map(String::from),
         software_id: request.software_id,
         software_version: request.software_version,
@@ -1007,7 +1005,7 @@ fn validate_request_object_signing(
     raw_alg: Option<&str>,
     raw_require_signed: Option<bool>,
     fapi_profile: FapiProfile,
-    keys: Option<&crate::db::ClientKeys>,
+    keys: Option<&ClientKeys>,
 ) -> Result<RequestObjectSigning, ServiceError> {
     let alg = match raw_alg {
         None => None,
@@ -1044,7 +1042,7 @@ fn validate_request_object_signing(
         // A remote jwks_uri can't be inspected synchronously, so the
         // per-algorithm check only guards the inline case.
         if let Some(alg) = alg
-            && let Some(jwks) = keys.and_then(crate::db::ClientKeys::inline)
+            && let Some(jwks) = keys.and_then(ClientKeys::inline)
             && !jwks.has_key_for(alg)
         {
             return Err(ServiceError::oauth(
@@ -1054,7 +1052,7 @@ fn validate_request_object_signing(
                      request_object_signing_alg '{alg}'; it needs a key of type \
                      {} whose alg (if declared) is '{alg}' and whose use (if \
                      declared) is 'sig'",
-                    crate::db::KeyType::for_alg(alg)
+                    KeyType::for_alg(alg)
                 ),
             ));
         }
@@ -1171,7 +1169,7 @@ fn validate_grant_and_response_types(
     let grant_types = request
         .grant_types
         .take()
-        .unwrap_or_else(|| vec![vouch_common::protocol::GRANT_TYPE_AUTHORIZATION_CODE.to_string()]);
+        .unwrap_or_else(|| vec![GRANT_TYPE_AUTHORIZATION_CODE.to_string()]);
     let response_types = request
         .response_types
         .take()
@@ -1191,7 +1189,7 @@ fn validate_grant_and_response_types(
         }
     }
     for rt in &response_types {
-        if !crate::services::oidc::SUPPORTED_RESPONSE_TYPES.contains(&rt.as_str()) {
+        if !SUPPORTED_RESPONSE_TYPES.contains(&rt.as_str()) {
             return Err(ServiceError::oauth(
                 OAuthErrorCode::InvalidClientMetadata,
                 format!("Unsupported response type: '{rt}'"),
@@ -1277,7 +1275,7 @@ fn validate_redirect_uris(
 #[derive(Debug)]
 struct ValidatedJwksAuth {
     /// RFC 7591 §2 key material, in whichever of the two forms was sent.
-    keys: Option<crate::db::ClientKeys>,
+    keys: Option<ClientKeys>,
     auth_method: TokenEndpointAuthMethod,
 }
 
@@ -1290,9 +1288,9 @@ struct ValidatedJwksAuth {
 /// Shared by both initial registration and the update path. Does not validate the
 /// relationship to `token_endpoint_auth_method` — that is handled by
 /// `validate_jwks_and_auth_method` for the initial registration path.
-fn validate_jwks_shape(keys: Option<&crate::db::ClientKeys>) -> Result<(), ServiceError> {
-    let jwks = keys.and_then(crate::db::ClientKeys::inline);
-    let jwks_uri = keys.and_then(crate::db::ClientKeys::uri);
+fn validate_jwks_shape(keys: Option<&ClientKeys>) -> Result<(), ServiceError> {
+    let jwks = keys.and_then(ClientKeys::inline);
+    let jwks_uri = keys.and_then(ClientKeys::uri);
     if let Some(jwks) = jwks {
         // A key set with no keys parses but can never authenticate anyone.
         // Everything else the old shape check covered — that this is an object
@@ -1327,7 +1325,7 @@ fn validate_jwks_and_auth_method(
     // Pairing the two parameters is the mutual-exclusion check: RFC 7591 §2
     // says they "MUST NOT both be present in the same request or response",
     // and `ClientKeys` is the only shape the rest of the code accepts.
-    let keys = crate::db::ClientKeys::from_stored(request.jwks.take(), request.jwks_uri.take())
+    let keys = ClientKeys::from_stored(request.jwks.take(), request.jwks_uri.take())
         .map_err(|e| ServiceError::oauth(OAuthErrorCode::InvalidClientMetadata, e.to_string()))?;
     validate_jwks_shape(keys.as_ref())?;
 
@@ -1361,7 +1359,7 @@ fn validate_jwks_and_auth_method(
     // inspected synchronously, so this only guards the inline case, same as
     // the FAPI algorithm-usability check.
     if auth_method == TokenEndpointAuthMethod::SelfSignedTlsClientAuth
-        && let Some(jwks) = keys.as_ref().and_then(crate::db::ClientKeys::inline)
+        && let Some(jwks) = keys.as_ref().and_then(ClientKeys::inline)
         && !jwks.has_x5c()
     {
         return Err(ServiceError::oauth(
@@ -1622,7 +1620,7 @@ fn determine_client_type(
     let has_client_credentials_only = grant_types.len() == 1
         && grant_types
             .first()
-            .is_some_and(|g| g == vouch_common::protocol::GRANT_TYPE_CLIENT_CREDENTIALS);
+            .is_some_and(|g| g == GRANT_TYPE_CLIENT_CREDENTIALS);
     let is_public = auth_method == TokenEndpointAuthMethod::None;
     // RFC 8252 §7: a native app receives its redirect either on the loopback
     // interface or through a private-use URI scheme, so either shape is the
@@ -1878,11 +1876,11 @@ pub async fn update_client_configuration(
 
     // Pairing the two parameters is the mutual-exclusion check (RFC 7591 §2);
     // the shape checks follow.
-    let keys = crate::db::ClientKeys::from_stored(
-        mutable_request.jwks.take(),
-        mutable_request.jwks_uri.take(),
-    )
-    .map_err(|e| ServiceError::oauth(OAuthErrorCode::InvalidClientMetadata, e.to_string()))?;
+    let keys =
+        ClientKeys::from_stored(mutable_request.jwks.take(), mutable_request.jwks_uri.take())
+            .map_err(|e| {
+                ServiceError::oauth(OAuthErrorCode::InvalidClientMetadata, e.to_string())
+            })?;
     validate_jwks_shape(keys.as_ref())?;
 
     // PUT is a full replacement, so re-check the auth-method/JWKS
@@ -1919,7 +1917,7 @@ pub async fn update_client_configuration(
     // method exists for non-FAPI clients too). A remote jwks_uri can't be
     // inspected synchronously, so this only guards the inline case.
     if client.token_endpoint_auth_method == TokenEndpointAuthMethod::SelfSignedTlsClientAuth
-        && let Some(jwks) = keys.as_ref().and_then(crate::db::ClientKeys::inline)
+        && let Some(jwks) = keys.as_ref().and_then(ClientKeys::inline)
         && !jwks.has_x5c()
     {
         return Err(ServiceError::oauth(
@@ -1940,7 +1938,7 @@ pub async fn update_client_configuration(
     // registration and the admin application API.
     if client.is_fapi()
         && client.token_endpoint_auth_method == TokenEndpointAuthMethod::PrivateKeyJwt
-        && let Some(jwks) = keys.as_ref().and_then(crate::db::ClientKeys::inline)
+        && let Some(jwks) = keys.as_ref().and_then(ClientKeys::inline)
         && !jwks.has_fapi_allowed_key()
     {
         return Err(ServiceError::oauth(
@@ -2296,12 +2294,12 @@ fn build_client_response(client: OAuthClient, base_url: &str) -> RegistrationRes
         jwks: client
             .keys
             .as_ref()
-            .and_then(crate::db::ClientKeys::inline)
+            .and_then(ClientKeys::inline)
             .and_then(|set| serde_json::to_value(set).ok()),
         jwks_uri: client
             .keys
             .as_ref()
-            .and_then(crate::db::ClientKeys::uri)
+            .and_then(ClientKeys::uri)
             .map(String::from),
         software_id: client.software_id,
         software_version: client.software_version,
@@ -2366,7 +2364,7 @@ fn metadata_string_array(metadata: &serde_json::Value, key: &str) -> Option<Vec<
 /// Only available when the `test-utils` feature is enabled.
 #[cfg(feature = "test-utils")]
 pub fn validate_redirect_uri_for_test(uri: &str) -> Result<(), ServiceError> {
-    db::validate_redirect_uri(uri, crate::db::OAuthClientType::Native).map_err(|e| {
+    db::validate_redirect_uri(uri, OAuthClientType::Native).map_err(|e| {
         ServiceError::oauth(
             OAuthErrorCode::InvalidRedirectUri,
             format!("Invalid redirect URI '{uri}': {e}"),

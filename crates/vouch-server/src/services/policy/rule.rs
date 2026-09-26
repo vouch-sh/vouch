@@ -459,6 +459,7 @@ fn quote_cedar_string(s: &str) -> Result<String, RuleError> {
 )]
 mod tests {
     use super::*;
+    use crate::services::policy;
 
     fn spec(value: serde_json::Value) -> RuleSpec {
         serde_json::from_value(value).expect("spec deserializes")
@@ -657,7 +658,7 @@ mod tests {
         );
         // The escaped text still validates — the quote cannot break out of
         // the string literal into policy syntax.
-        super::super::validate_policy_text(&text).unwrap();
+        policy::validate_policy_text(&text).unwrap();
 
         let err = generate(&device_spec(serde_json::json!({
             "kind": "field", "field": "parent_process",

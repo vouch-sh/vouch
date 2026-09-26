@@ -6,6 +6,8 @@
     reason = "test code: panic on assertion failure is acceptable"
 )]
 use super::*;
+use crate::services::idp::saml::signature::SignatureError;
+use crate::services::idp::saml::{SamlProvider, c14n};
 use crate::test_utils::test_arrival;
 
 // =========================================================================
@@ -1071,7 +1073,7 @@ pub(crate) fn build_signed_saml_response(
         .children()
         .find(|n| n.is_element())
         .unwrap();
-    let canonical_assertion = super::super::c14n::exclusive_c14n(assertion_node, &[]);
+    let canonical_assertion = c14n::exclusive_c14n(assertion_node, &[]);
 
     // Step 3: Compute SHA-256 digest over canonicalized assertion.
     let digest_bytes = digest::digest(&digest::SHA256, canonical_assertion.as_bytes());
@@ -1088,7 +1090,7 @@ pub(crate) fn build_signed_saml_response(
     // Parse and re-canonicalize to be safe.
     let doc_si = roxmltree::Document::parse(&signed_info_xml).unwrap();
     let signed_info_node = doc_si.root().children().find(|n| n.is_element()).unwrap();
-    let canonical_signed_info = super::super::c14n::exclusive_c14n(signed_info_node, &[]);
+    let canonical_signed_info = c14n::exclusive_c14n(signed_info_node, &[]);
 
     // Step 6: Sign the canonical SignedInfo with RSA-PKCS1-SHA256.
     let rng = aws_lc_rs::rand::SystemRandom::new();
@@ -1216,7 +1218,7 @@ fn build_response_signed_saml_response(
         .children()
         .find(|n| n.is_element())
         .unwrap();
-    let canonical_response = super::super::c14n::exclusive_c14n(response_node, &[]);
+    let canonical_response = c14n::exclusive_c14n(response_node, &[]);
 
     // Step 4: Compute SHA-256 digest over canonicalized Response.
     let digest_bytes = digest::digest(&digest::SHA256, canonical_response.as_bytes());
@@ -1231,7 +1233,7 @@ fn build_response_signed_saml_response(
     // Step 6: Canonicalize SignedInfo.
     let doc_si = roxmltree::Document::parse(&signed_info_xml).unwrap();
     let signed_info_node = doc_si.root().children().find(|n| n.is_element()).unwrap();
-    let canonical_signed_info = super::super::c14n::exclusive_c14n(signed_info_node, &[]);
+    let canonical_signed_info = c14n::exclusive_c14n(signed_info_node, &[]);
 
     // Step 7: Sign the canonical SignedInfo with RSA-PKCS1-SHA256.
     let rng = aws_lc_rs::rand::SystemRandom::new();
@@ -1260,9 +1262,9 @@ fn build_response_signed_saml_response(
 }
 
 /// Build a `SamlProvider` for the test IdP/SP configuration.
-pub(crate) fn test_provider(cert_der: Vec<u8>) -> super::super::SamlProvider {
+pub(crate) fn test_provider(cert_der: Vec<u8>) -> SamlProvider {
     use crate::services::idp::saml::IdpMetadata;
-    super::super::SamlProvider {
+    SamlProvider {
         id: "corp-saml".to_string(),
         idp_metadata: IdpMetadata {
             entity_id: "https://idp.example.com".to_string(),
@@ -1530,9 +1532,7 @@ fn validate_saml_response_tampered_email_fails_digest_check() {
     assert!(
         matches!(
             err,
-            ResponseError::SignatureInvalid(
-                super::super::signature::SignatureError::DigestMismatch
-            )
+            ResponseError::SignatureInvalid(SignatureError::DigestMismatch)
         ),
         "Expected DigestMismatch for tampered assertion, got: {err}"
     );

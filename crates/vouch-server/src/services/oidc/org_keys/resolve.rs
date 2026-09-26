@@ -166,10 +166,10 @@ pub async fn org_jwks(
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
-    use super::super::test_support::setup;
     use super::*;
     use crate::crypto::jwk::Jwk;
     use crate::db::get_org_signing_key;
+    use crate::services::oidc::org_keys::test_support::setup;
 
     #[tokio::test]
     async fn first_use_creates_current_and_next_and_signs_with_current() {

@@ -16,6 +16,7 @@ use super::{
     list_user_accessible_installations,
 };
 use crate::db::{self, User};
+use crate::services::integrations::github::GitHubApp;
 
 // ============================================================================
 // Installation Connection Types
@@ -89,7 +90,7 @@ impl GitHubService<'_> {
     /// the list in.
     async fn store_installation_repositories(
         &self,
-        app: &crate::services::integrations::github::GitHubApp,
+        app: &GitHubApp,
         installation_id: u64,
         repository_selection: &str,
     ) {
@@ -389,7 +390,8 @@ pub(crate) fn validate_org_admin(user: &User) -> GitHubResult<&str> {
 )]
 mod tests {
     use super::*;
-    use crate::test_utils;
+    use crate::db::CreateGitHubInstallationParams;
+    use crate::{db, test_utils};
 
     fn user_with(org_id: Option<&str>, is_admin: bool) -> User {
         User {
@@ -514,10 +516,9 @@ mod tests {
     #[tokio::test]
     async fn get_org_installations_returns_empty_when_none_linked() {
         let state = test_utils::test_app_state().await;
-        let org =
-            crate::db::create_organization(&state.store, "empty.example", Some("Empty"), None)
-                .await
-                .expect("create org");
+        let org = db::create_organization(&state.store, "empty.example", Some("Empty"), None)
+            .await
+            .expect("create org");
         let config = (**state.config()).clone();
 
         let service = GitHubService::new(
@@ -536,14 +537,13 @@ mod tests {
     #[tokio::test]
     async fn get_org_installations_returns_linked_logins() {
         let state = test_utils::test_app_state().await;
-        let org =
-            crate::db::create_organization(&state.store, "linked.example", Some("Linked"), None)
-                .await
-                .expect("create org");
+        let org = db::create_organization(&state.store, "linked.example", Some("Linked"), None)
+            .await
+            .expect("create org");
         let perms = HashMap::from([("contents".to_string(), "read".to_string())]);
-        crate::db::create_github_installation(
+        db::create_github_installation(
             &state.store,
-            &crate::db::CreateGitHubInstallationParams {
+            &CreateGitHubInstallationParams {
                 org_id: &org.id,
                 installation_id: 42,
                 github_account_login: "the-org",

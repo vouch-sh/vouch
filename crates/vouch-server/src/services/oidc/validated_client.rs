@@ -17,6 +17,7 @@ use std::ops::Deref;
 
 use crate::db::OAuthClient;
 use crate::error::{OAuthErrorCode, ServiceError};
+use crate::services::oidc::RESPONSE_TYPE_CODE;
 use crate::services::oidc::grant_type::OAuthGrantType;
 
 /// An [`OAuthClient`] checked against the operation it is about to perform.
@@ -68,11 +69,10 @@ impl ValidatedOAuthClient {
     /// RFC 6749 §4.1.2.1 `unauthorized_client`: "The client is not authorized
     /// to request an authorization code using this method."
     pub(crate) fn for_authorize(client: OAuthClient) -> Result<Self, Box<AuthorizeRejection>> {
-        let allowed = client.response_types.as_ref().is_none_or(|types| {
-            types
-                .iter()
-                .any(|rt| rt == crate::services::oidc::RESPONSE_TYPE_CODE)
-        });
+        let allowed = client
+            .response_types
+            .as_ref()
+            .is_none_or(|types| types.iter().any(|rt| rt == RESPONSE_TYPE_CODE));
         if allowed {
             Ok(Self { client })
         } else {
