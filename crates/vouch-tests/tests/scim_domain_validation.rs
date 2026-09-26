@@ -15,7 +15,7 @@
 )]
 
 use serde_json::json;
-use vouch_server::db::{RecheckOutcome, UNVERIFY_FAILURE_THRESHOLD, record_recheck_result};
+use vouch_server::db::{self, RecheckOutcome, UNVERIFY_FAILURE_THRESHOLD, record_recheck_result};
 use vouch_tests::TestHarness;
 
 async fn create_user(harness: &TestHarness, token: &str, email: &str) -> (u16, serde_json::Value) {
@@ -67,7 +67,7 @@ async fn verified_additional_domain_email_is_accepted() {
         .await
         .expect("create scim token");
 
-    vouch_server::db::add_additional_domain(
+    db::add_additional_domain(
         &harness.state.store,
         &org.id,
         "secondary-ok-alt.example.com",
@@ -76,7 +76,7 @@ async fn verified_additional_domain_email_is_accepted() {
     )
     .await
     .expect("add additional domain");
-    vouch_server::db::mark_additional_domain_verified(
+    db::mark_additional_domain_verified(
         &harness.state.store,
         &org.id,
         "secondary-ok-alt.example.com",
@@ -157,7 +157,7 @@ async fn mixed_case_domain_email_matching_verified_entry_is_accepted() {
         .create_scim_token("token", &org.id)
         .await
         .expect("create scim token");
-    vouch_server::db::add_additional_domain(
+    db::add_additional_domain(
         &harness.state.store,
         &org.id,
         "case-norm-alt.example.com",
@@ -166,13 +166,9 @@ async fn mixed_case_domain_email_matching_verified_entry_is_accepted() {
     )
     .await
     .expect("add additional domain");
-    vouch_server::db::mark_additional_domain_verified(
-        &harness.state.store,
-        &org.id,
-        "case-norm-alt.example.com",
-    )
-    .await
-    .expect("mark additional domain verified");
+    db::mark_additional_domain_verified(&harness.state.store, &org.id, "case-norm-alt.example.com")
+        .await
+        .expect("mark additional domain verified");
 
     // Mixed-case primary domain.
     let (status, body) = create_user(&harness, &token, "alice@Case-Norm.Example.COM").await;
@@ -204,7 +200,7 @@ async fn pending_additional_domain_email_is_rejected() {
         .await
         .expect("create scim token");
 
-    vouch_server::db::add_additional_domain(
+    db::add_additional_domain(
         &harness.state.store,
         &org.id,
         "pending-claim.example.com",
@@ -239,7 +235,7 @@ async fn domain_unverified_after_recheck_failures_email_is_rejected() {
         .await
         .expect("create scim token");
 
-    vouch_server::db::add_additional_domain(
+    db::add_additional_domain(
         &harness.state.store,
         &org.id,
         "flip-claim.example.com",
@@ -248,13 +244,9 @@ async fn domain_unverified_after_recheck_failures_email_is_rejected() {
     )
     .await
     .expect("add additional domain");
-    vouch_server::db::mark_additional_domain_verified(
-        &harness.state.store,
-        &org.id,
-        "flip-claim.example.com",
-    )
-    .await
-    .expect("mark additional domain verified");
+    db::mark_additional_domain_verified(&harness.state.store, &org.id, "flip-claim.example.com")
+        .await
+        .expect("mark additional domain verified");
 
     // Drive the entry through UNVERIFY_FAILURE_THRESHOLD consecutive
     // failed re-checks, exactly as the background re-verification task
@@ -407,7 +399,7 @@ async fn user_creation_rejected_after_domain_removed() {
         .await
         .expect("create scim token");
 
-    vouch_server::db::add_additional_domain(
+    db::add_additional_domain(
         &harness.state.store,
         &org.id,
         "toctou-removed-alt.example.com",
@@ -416,7 +408,7 @@ async fn user_creation_rejected_after_domain_removed() {
     )
     .await
     .expect("add additional domain");
-    vouch_server::db::mark_additional_domain_verified(
+    db::mark_additional_domain_verified(
         &harness.state.store,
         &org.id,
         "toctou-removed-alt.example.com",
@@ -426,7 +418,7 @@ async fn user_creation_rejected_after_domain_removed() {
 
     // Remove the domain before user creation. The in-transaction check
     // must see the removal and reject with 400.
-    vouch_server::db::remove_additional_domain(
+    db::remove_additional_domain(
         &harness.state.store,
         &harness.state.session_cache,
         &org.id,
@@ -461,7 +453,7 @@ async fn user_creation_succeeds_then_domain_removed() {
         .await
         .expect("create scim token");
 
-    vouch_server::db::add_additional_domain(
+    db::add_additional_domain(
         &harness.state.store,
         &org.id,
         "toctou-happy-alt.example.com",
@@ -470,7 +462,7 @@ async fn user_creation_succeeds_then_domain_removed() {
     )
     .await
     .expect("add additional domain");
-    vouch_server::db::mark_additional_domain_verified(
+    db::mark_additional_domain_verified(
         &harness.state.store,
         &org.id,
         "toctou-happy-alt.example.com",
@@ -488,7 +480,7 @@ async fn user_creation_succeeds_then_domain_removed() {
     // Remove the domain afterward. The already-created user remains valid
     // (existing users keep their org_id by design — this is about retention
     // of existing membership, not creation of new membership).
-    vouch_server::db::remove_additional_domain(
+    db::remove_additional_domain(
         &harness.state.store,
         &harness.state.session_cache,
         &org.id,

@@ -9,8 +9,6 @@
 //! 2. An in-flight request that was sent *before* the signal is still
 //!    answered (the connection is not cancelled mid-response).
 
-// Own-crate items are imported with `use`; see `absolute-paths-allowed-crates` in `.clippy.toml`.
-#![deny(clippy::absolute_paths)]
 #![cfg(unix)]
 #![expect(
     clippy::expect_used,

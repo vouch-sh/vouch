@@ -30,7 +30,7 @@ use jiff::{Span, Timestamp};
 use proptest::prelude::*;
 use vouch_server::crypto::alg::JwsAlgorithm;
 use vouch_server::crypto::jwk::Jwk;
-use vouch_server::db::{AuditEventFilter, SigningKeyState};
+use vouch_server::db::{AuditEvent, AuditEventFilter, Organization, SigningKeyState};
 use vouch_server::services::oidc::{
     Operator, RevokeOutcome, RotateOutcome, emergency_rotate_org_keys, org_jwks, resolve_org_keys,
     revoke_org_previous_keys, rotate_org_keys,
@@ -49,7 +49,7 @@ const ADMIN: Operator<'static> = Operator {
 /// Create an encrypted `AppState`, an org (`"acme.com"`), and claim the
 /// `"acme-com"` subdomain (derived from the registrable apex `acme.com`).
 /// Each call creates a fresh in-memory SQLite so tests are fully isolated.
-async fn setup_org() -> (Arc<vouch_server::AppState>, vouch_server::db::Organization) {
+async fn setup_org() -> (Arc<vouch_server::AppState>, Organization) {
     let state = test_utils::test_app_state_encrypted().await;
     let org = test_utils::create_test_org(&state.store, "acme.com").await;
     db::claim_subdomain(&state.store, &org.id, "acme-com")
@@ -65,10 +65,7 @@ async fn setup_org() -> (Arc<vouch_server::AppState>, vouch_server::db::Organiza
 
 /// Bootstrap the org's key set (Current + Next per algorithm) and return the
 /// Current ES256 kid for later comparisons.
-async fn bootstrap(
-    state: &Arc<vouch_server::AppState>,
-    org: &vouch_server::db::Organization,
-) -> String {
+async fn bootstrap(state: &Arc<vouch_server::AppState>, org: &Organization) -> String {
     let snap = resolve_org_keys(state, Some(org))
         .await
         .expect("resolve_org_keys")
@@ -135,10 +132,7 @@ fn kids(jwks: &[Jwk]) -> Vec<String> {
 }
 
 /// Query audit events of one type.
-async fn audit_events(
-    state: &vouch_server::AppState,
-    event_type: &str,
-) -> Vec<vouch_server::db::AuditEvent> {
+async fn audit_events(state: &vouch_server::AppState, event_type: &str) -> Vec<AuditEvent> {
     state
         .audit
         .query_events(&AuditEventFilter {

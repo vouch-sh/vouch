@@ -18,8 +18,6 @@
         reason = "tests construct their own instants; the lint targets request-serving code"
     )
 )]
-// Own-crate items are imported with `use`; see `absolute-paths-allowed-crates` in `.clippy.toml`.
-#![deny(clippy::absolute_paths)]
 
 // Prevent test-utils from being enabled in any release build of this
 // library. The feature exposes `test_utils` (helpers that bypass FIDO2

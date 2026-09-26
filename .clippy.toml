@@ -22,9 +22,9 @@ disallowed-methods = [
 # any path of more than two segments rooted at a crate; every external crate is
 # listed below so the lint reports only `crate::` and `vouch_*::` paths.
 #
-# The lint LEVEL is `allow` workspace-wide and raised to `deny` at the root of
-# each crate that has been migrated. A new external dependency named by an
-# absolute path in a migrated crate belongs in this list.
+# The lint is denied in `[workspace.lints.clippy]` (and in `fuzz/Cargo.toml`,
+# which is outside the workspace). A new external dependency named by an
+# absolute path belongs in this list.
 absolute-paths-max-segments = 2
 absolute-paths-allowed-crates = [
     "std",
@@ -72,6 +72,7 @@ absolute-paths-allowed-crates = [
     "jsonwebtoken",
     "keyring_core",
     "libc",
+    "libfuzzer_sys",
     "linux_keyutils_keyring_store",
     "maxminddb",
     "metrics",

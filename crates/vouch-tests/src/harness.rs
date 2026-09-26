@@ -11,6 +11,8 @@ use anyhow::Result;
 use vouch_cli::{HttpClient, TestHttpClient};
 use vouch_common::protocol;
 use vouch_server::crypto::webauthn_verify::AuthTime;
+use vouch_server::db::{AuthorizeDeviceAuthParams, User};
+use vouch_server::infra::router;
 use vouch_server::{AppState, db, test_utils};
 
 /// Unified test harness for integration tests.
@@ -42,8 +44,8 @@ impl TestHarness {
     /// endpoints.
     pub fn from_state(state: Arc<AppState>) -> Self {
         let config = state.config();
-        let router = vouch_server::infra::router::build_app(state.clone(), &config)
-            .expect("Failed to build test app router");
+        let router =
+            router::build_app(state.clone(), &config).expect("Failed to build test app router");
         let http_client = TestHttpClient::new(router.clone());
 
         Self {
@@ -70,7 +72,7 @@ impl TestHarness {
     /// # Errors
     ///
     /// Returns an error if user creation fails.
-    pub async fn create_user(&self, email: &str) -> Result<vouch_server::db::User> {
+    pub async fn create_user(&self, email: &str) -> Result<User> {
         let user = test_utils::create_test_user(&self.state.store, email).await;
         Ok(user)
     }
@@ -142,10 +144,7 @@ impl TestHarness {
     /// # Errors
     ///
     /// Returns an error if setup fails.
-    pub async fn create_authenticated_user(
-        &self,
-        email: &str,
-    ) -> Result<(vouch_server::db::User, String, String)> {
+    pub async fn create_authenticated_user(&self, email: &str) -> Result<(User, String, String)> {
         let user = self.create_user(email).await?;
         let auth_id = self.create_authenticator(&user.id).await?;
         let token = self.create_session(&user.id, email, &auth_id).await?;
@@ -172,7 +171,7 @@ impl TestHarness {
         email: &str,
         org_id: &str,
         is_admin: bool,
-    ) -> Result<vouch_server::db::User> {
+    ) -> Result<User> {
         let user =
             test_utils::create_test_user_in_org(&self.state.store, email, org_id, is_admin).await;
         Ok(user)
@@ -189,7 +188,7 @@ impl TestHarness {
         &self,
         email: &str,
         domain: &str,
-    ) -> Result<(vouch_server::db::User, db::Organization, String, String)> {
+    ) -> Result<(User, db::Organization, String, String)> {
         let org = self.create_org(domain).await?;
         let user = self.create_user_in_org(email, &org.id, true).await?;
         let auth_id = self.create_authenticator(&user.id).await?;
@@ -208,7 +207,7 @@ impl TestHarness {
         &self,
         email: &str,
         org_id: &str,
-    ) -> Result<(vouch_server::db::User, String, String)> {
+    ) -> Result<(User, String, String)> {
         let user = self.create_user_in_org(email, org_id, false).await?;
         let auth_id = self.create_authenticator(&user.id).await?;
         let token = self.create_session(&user.id, email, &auth_id).await?;
@@ -469,14 +468,14 @@ impl TestHarness {
         auth_id: &str,
     ) -> Result<()> {
         // Look up device auth request by user code
-        let request = vouch_server::db::get_device_auth_by_user_code(&self.state.store, user_code)
+        let request = db::get_device_auth_by_user_code(&self.state.store, user_code)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Device auth request not found"))?;
 
         // Authorize it as the browser assertion flow does.
-        vouch_server::db::authorize_device_auth(
+        db::authorize_device_auth(
             &self.state.store,
-            vouch_server::db::AuthorizeDeviceAuthParams {
+            AuthorizeDeviceAuthParams {
                 id: &request.id,
                 user_id,
                 user_email: email,

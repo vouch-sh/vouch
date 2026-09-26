@@ -27,6 +27,11 @@ single_use_lifetimes = "warn"
 # Configured in `.clippy.toml`, enabled only in vouch-server's crate roots.
 disallowed_methods = "allow"
 
+# Own-crate items are imported with `use`, not spelled inline as deep paths.
+# Configured in `.clippy.toml` (`absolute-paths-*`) so only `crate::` and
+# `vouch_*::` paths are reported.
+absolute_paths = "deny"
+
 # Panic-prevention lints
 # See: https://blog.reverberate.org/2025/02/03/no-panic-rust.html
 # See: https://github.com/trailofbits/claude-code-config/blob/main/claude-md-template.md#rust

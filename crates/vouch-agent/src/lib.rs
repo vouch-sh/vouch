@@ -28,9 +28,6 @@
 //! }
 //! ```
 
-// Own-crate items are imported with `use`; see `absolute-paths-allowed-crates` in `.clippy.toml`.
-#![deny(clippy::absolute_paths)]
-
 pub mod audit;
 #[cfg(unix)]
 pub mod client;

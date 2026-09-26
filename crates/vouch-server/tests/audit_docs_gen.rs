@@ -16,9 +16,6 @@
     clippy::expect_used,
     reason = "test code: panic on assertion failure is acceptable"
 )]
-// Own-crate items are imported with `use`; see `absolute-paths-allowed-crates` in `.clippy.toml`.
-#![deny(clippy::absolute_paths)]
-
 use vouch_server::db::{AuditEventGroup, AuditEventKind};
 use vouch_server::infra::i18n::I18nContext;
 

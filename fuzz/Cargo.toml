@@ -17,6 +17,11 @@ ciborium = "0.2.2"
 # Prevent this from joining the workspace
 [workspace]
 
+# Not a workspace member, so `[workspace.lints]` does not reach it. See
+# `absolute-paths-*` in the repository's `.clippy.toml`.
+[lints.clippy]
+absolute_paths = "deny"
+
 [[bin]]
 name = "fuzz_ber_parse"
 path = "fuzz_targets/fuzz_ber_parse.rs"

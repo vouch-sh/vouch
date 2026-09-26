@@ -4,8 +4,6 @@
 //! These tests verify signature base construction and signature verification
 //! against the exact examples from RFC 9421 Appendix B.
 
-// Own-crate items are imported with `use`; see `absolute-paths-allowed-crates` in `.clippy.toml`.
-#![deny(clippy::absolute_paths)]
 #![expect(
     clippy::unwrap_used,
     clippy::indexing_slicing,

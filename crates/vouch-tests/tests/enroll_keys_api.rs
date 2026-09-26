@@ -172,7 +172,7 @@ async fn rename_rejects_deactivated_user() {
         .expect("create authed user");
 
     // Deactivate WITHOUT deleting the session.
-    vouch_server::db::update_user_active_status(&harness.state.store, &user.id, false)
+    db::update_user_active_status(&harness.state.store, &user.id, false)
         .await
         .expect("deactivate user");
 
@@ -194,7 +194,7 @@ async fn rename_rejects_deactivated_user() {
 
     // The key name must be unchanged. Reactivate first so the read-back uses
     // a working session regardless of gates elsewhere on the cookie surface.
-    vouch_server::db::update_user_active_status(&harness.state.store, &user.id, true)
+    db::update_user_active_status(&harness.state.store, &user.id, true)
         .await
         .expect("reactivate user");
     let list = list_keys(&harness, &token).await;
@@ -597,7 +597,7 @@ async fn delete_rejects_deactivated_user() {
 
     // Deactivate WITHOUT deleting the session — the exact fixture the
     // deactivated-with-live-session siblings use.
-    vouch_server::db::update_user_active_status(&harness.state.store, &user.id, false)
+    db::update_user_active_status(&harness.state.store, &user.id, false)
         .await
         .expect("deactivate user");
 
