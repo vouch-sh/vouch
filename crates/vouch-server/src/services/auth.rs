@@ -31,7 +31,16 @@ use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::crypto::jwt::{self, TokenValidationContext};
+use crate::db::{
+    AuthCodeClaim, ChallengeStateClaim, ClientType, DeviceCodeClaim, JwtAssertionJtiClaim,
+    OAuthClient, OidcStateClaim,
+};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
+use crate::services::oidc::OAuthScope;
+use crate::services::oidc::fapi::{self, SenderConstraints};
+use crate::services::oidc::jwt_bearer::client_auth::JwtAuthSucceeded;
+use crate::services::oidc::token::{ClientSecretVerification, MtlsCertVerification};
 use vouch_common::protocol;
 
 /// Parameters for verifying authenticator ownership.
@@ -383,7 +392,7 @@ pub(crate) enum GrantProof {
     /// `authorization_code` grant. Carries a [`crate::db::AuthCodeClaim`]
     /// witness — proof that the authorization code was atomically consumed
     /// before this token issuance.
-    AuthorizationCode(crate::db::AuthCodeClaim),
+    AuthorizationCode(AuthCodeClaim),
 
     /// `client_credentials` grant — no grant-level replay primitive; the
     /// single-use guarantee is enforced entirely via [`ClientAuthProof`].
@@ -397,12 +406,12 @@ pub(crate) enum GrantProof {
     /// FIDO2 assertion grant. Carries a [`crate::db::ChallengeStateClaim`]
     /// witness — proof that the challenge state JWT was atomically marked
     /// consumed before this token issuance.
-    Fido2Assertion(crate::db::ChallengeStateClaim),
+    Fido2Assertion(ChallengeStateClaim),
 
     /// Device authorization grant (RFC 8628). Carries a [`crate::db::DeviceCodeClaim`]
     /// witness — proof that the device code was atomically transitioned to
     /// `Consumed` before this token issuance.
-    DeviceCode(crate::db::DeviceCodeClaim),
+    DeviceCode(DeviceCodeClaim),
 
     /// Enrollment bootstrap session — issued post-IdP authentication and
     /// pre-FIDO2 registration. `hardware_verified` is false here. Carries
@@ -411,18 +420,18 @@ pub(crate) enum GrantProof {
     /// before this token issuance, closing the read-vs-consume TOCTOU
     /// window that existed when callers used `get_oidc_state` +
     /// `delete_oidc_state` as separate steps.
-    EnrollmentBootstrap(crate::db::OidcStateClaim),
+    EnrollmentBootstrap(OidcStateClaim),
 
     /// Enrollment complete session — issued after WebAuthn registration.
     /// Carries a [`crate::db::ChallengeStateClaim`] witness — proof that
     /// the registration state JWT was atomically marked consumed before
     /// this token issuance.
-    EnrollmentComplete(crate::db::ChallengeStateClaim),
+    EnrollmentComplete(ChallengeStateClaim),
 
     /// Browser WebAuthn login. Carries a [`crate::db::ChallengeStateClaim`]
     /// witness — proof that the authentication state JWT was atomically
     /// marked consumed before this token issuance.
-    BrowserLogin(crate::db::ChallengeStateClaim),
+    BrowserLogin(ChallengeStateClaim),
 
     /// Certification test bypass (only available when
     /// `VOUCH_CERTIFICATION_TEST_TOKEN` is configured). Deliberately does
@@ -453,15 +462,12 @@ pub(crate) enum GrantProof {
 /// must supply both witnesses. Witnesses are consumed by drop.
 #[derive(Debug)]
 pub(crate) struct JwtClientAuthProof {
-    _auth: crate::services::oidc::jwt_bearer::client_auth::JwtAuthSucceeded,
-    _jti: Option<crate::db::JwtAssertionJtiClaim>,
+    _auth: JwtAuthSucceeded,
+    _jti: Option<JwtAssertionJtiClaim>,
 }
 
 impl JwtClientAuthProof {
-    pub(crate) fn new(
-        auth: crate::services::oidc::jwt_bearer::client_auth::JwtAuthSucceeded,
-        jti: Option<crate::db::JwtAssertionJtiClaim>,
-    ) -> Self {
+    pub(crate) fn new(auth: JwtAuthSucceeded, jti: Option<JwtAssertionJtiClaim>) -> Self {
         Self {
             _auth: auth,
             _jti: jti,
@@ -501,9 +507,9 @@ impl SenderConstraintProof {
     /// requirement is unmet.
     pub(crate) fn validate(
         client: &db::OAuthClient,
-        constraints: crate::services::oidc::fapi::SenderConstraints,
+        constraints: SenderConstraints,
     ) -> ServiceResult<Self> {
-        crate::services::oidc::fapi::validate_fapi_token_request(client, constraints)?;
+        fapi::validate_fapi_token_request(client, constraints)?;
 
         if client.dpop_bound_access_tokens && !constraints.dpop {
             return Err(ServiceError::oauth(
@@ -553,12 +559,12 @@ pub(crate) enum ClientAuthProof {
     /// `client_secret_basic` / `client_secret_post` (RFC 6749 §2.3.1).
     /// Carries the verification witness from
     /// [`crate::services::oidc::token::authenticate_client`].
-    ClientSecret(crate::services::oidc::token::ClientSecretVerification),
+    ClientSecret(ClientSecretVerification),
 
     /// `tls_client_auth` / `self_signed_tls_client_auth` (RFC 8705 §2).
     /// Carries the verification witness from
     /// [`crate::services::oidc::token::authenticate_client_mtls`].
-    MutualTls(crate::services::oidc::token::MtlsCertVerification),
+    MutualTls(MtlsCertVerification),
 
     /// No external client authentication was performed. Carries a
     /// [`NoClientAuth`] witness whose two named constructors document
@@ -596,14 +602,12 @@ impl NoClientAuth {
     /// (RFC 6749 §2.1 — `token_endpoint_auth_method = None`). Returns
     /// `Err` if the client is registered as confidential; in that case
     /// the caller must produce a real verification witness instead.
-    pub(crate) fn for_public_client(
-        client: &crate::db::OAuthClient,
-    ) -> Result<Self, crate::error::ServiceError> {
-        if client.client_type() == crate::db::ClientType::Public {
+    pub(crate) fn for_public_client(client: &OAuthClient) -> Result<Self, ServiceError> {
+        if client.client_type() == ClientType::Public {
             Ok(Self { _private: () })
         } else {
-            Err(crate::error::ServiceError::oauth(
-                crate::error::OAuthErrorCode::InvalidClient,
+            Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidClient,
                 "client authentication required",
             ))
         }
@@ -917,7 +921,7 @@ pub(crate) async fn create_oauth_access_token(
     let has_email_scope = params
         .scope
         .as_ref()
-        .is_some_and(|s| s.contains(crate::services::oidc::OAuthScope::Email));
+        .is_some_and(|s| s.contains(OAuthScope::Email));
 
     // RFC 9449 / RFC 8705: the binding decides the confirmation claim and the
     // advertised token type together.
@@ -1090,7 +1094,7 @@ pub(crate) struct ValidatedResourceToken {
     /// already been enforced by `extract_resource_token`.
     pub aud: String,
     /// Granted OAuth scope.
-    pub scope: Option<crate::services::oidc::ScopeSet>,
+    pub scope: Option<ScopeSet>,
     /// Authenticator ID from the server-side session record (not in JWT).
     ///
     /// Presence merely means a key is registered to the user — it does
@@ -1129,8 +1133,8 @@ pub(crate) fn decode_token(
     oidc_key: &OidcSigningKey,
     expected_issuer: &str,
 ) -> Option<DecodedToken> {
-    let ctx = crate::crypto::jwt::TokenValidationContext::new(oidc_key, expected_issuer);
-    let claims: AccessTokenClaims = crate::crypto::jwt::decode_es256_token(token, &ctx)?;
+    let ctx = TokenValidationContext::new(oidc_key, expected_issuer);
+    let claims: AccessTokenClaims = jwt::decode_es256_token(token, &ctx)?;
     Some(DecodedToken::AccessToken(claims))
 }
 
@@ -1230,6 +1234,7 @@ where
 )]
 mod tests {
     use super::*;
+    use crate::db;
 
     // WebAuthn L2 §7.2: the signCount check (step 21) runs only after the
     // signature verified (step 20), so a counter regression — and only a
@@ -1283,7 +1288,7 @@ mod tests {
         let expires_at = jiff::Timestamp::now()
             .checked_add(jiff::Span::new().hours(8))
             .expect("future timestamp");
-        crate::db::record_ssh_certificate_issuance(
+        db::record_ssh_certificate_issuance(
             &state.store,
             42_000_002,
             &user.id,
@@ -1299,7 +1304,7 @@ mod tests {
         let state_ref = &state;
         let outcome: Result<(), ()> =
             revoke_then_persist(&state, &user.id, "test", "test", || async {
-                let revoked = crate::db::get_revoked_ssh_certificates(&state_ref.store)
+                let revoked = db::get_revoked_ssh_certificates(&state_ref.store)
                     .await
                     .expect("list revoked");
                 flag.store(!revoked.is_empty(), Ordering::SeqCst);

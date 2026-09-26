@@ -7,8 +7,9 @@
 use crate::AppState;
 use crate::arrival::ArrivalTime;
 use crate::crypto::hash_token;
-use crate::db;
+use crate::db::{self, SessionPurpose};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
+use crate::infra::metrics;
 use crate::redact_email;
 use crate::services::auth::{
     ActorClaim, CreateOAuthTokenParams, MAX_DELEGATION_DEPTH, TokenBinding, TokenIssuanceProof,
@@ -18,6 +19,7 @@ use crate::services::oidc::ScopeSet;
 use crate::services::oidc::authorization_details::AuthorizationDetails;
 use crate::services::oidc::claims::OidcIdTokenClaimsBuilder;
 use crate::services::oidc::validated_client::ValidatedOAuthClient;
+use crate::services::policy;
 use jiff::Timestamp;
 use secrecy::{ExposeSecret, SecretString};
 use std::sync::Arc;
@@ -363,7 +365,7 @@ pub(crate) async fn exchange_token(
     // policies — step-up recency, IP consistency, logout-invalidates —
     // are enforced here, before any token is minted.
     if let Some(ref org_id) = subject_user.org_id {
-        crate::services::policy::evaluate_exchange_policies(
+        policy::evaluate_exchange_policies(
             state,
             org_id,
             &subject_user.id,
@@ -450,7 +452,7 @@ pub(crate) async fn exchange_token(
         // `Logout` audit event — survive `get_session_by_token_hash` and the
         // `active` check.
         if let Some(ref actor_org_id) = actor_user.org_id {
-            crate::services::policy::evaluate_actor_logout_policy(
+            policy::evaluate_actor_logout_policy(
                 state,
                 actor_org_id,
                 &actor_user.id,
@@ -633,7 +635,7 @@ pub(crate) async fn exchange_token(
             // hardware-verified tokens via exchange. The reconstruction drops
             // `auth_time` — the exchange runs no ceremony of its own.
             hardware_verification: subject_decoded.hardware_verification(),
-            session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
+            session_purpose: SessionPurpose::OAuthAccessToken,
             authorization_details: effective_ad_value.as_ref(),
             // Propagate the subject session's federation snapshot so the
             // exchanged session reports the original authenticator/org even
@@ -868,7 +870,7 @@ async fn issue_id_token(
         )
         .await;
 
-    crate::infra::metrics::record_credential_issuance("oidc");
+    metrics::record_credential_issuance("oidc");
 
     tracing::info!(
         "Issued OIDC ID token via exchange for {} (audience: {audience})",
@@ -972,6 +974,9 @@ fn cap_lifetime_by_subject_ttl(session_secs: u64, subject_exp: Option<i64>, now:
 )]
 mod tests {
     use super::*;
+    use crate::arrival::ArrivalTime;
+    use crate::crypto;
+    use crate::db::ClientInfo;
 
     #[test]
     fn test_calculate_granted_scope_with_available() {
@@ -1345,7 +1350,7 @@ mod tests {
         // ceiling in `issue_id_token` does not clamp `expires_in`.
         let expires_in = 60;
         let arrival_seconds: i64 = 1_700_000_000;
-        let arrival = crate::arrival::ArrivalTime::for_test_second(arrival_seconds);
+        let arrival = ArrivalTime::for_test_second(arrival_seconds);
 
         let result = issue_id_token(
             &state,
@@ -1358,7 +1363,7 @@ mod tests {
                 hardware_aaguid: None,
                 org_domain: None,
                 client_id: "token-exchange-client-id",
-                client_info: &crate::db::ClientInfo::default(),
+                client_info: &ClientInfo::default(),
             },
             arrival,
         )
@@ -1398,7 +1403,7 @@ mod tests {
 
         // The audit row's `expires_at` must equal the signed JWT's `exp` — the
         // row records the same lifetime as the token it describes.
-        let issued_token_hash = crate::crypto::hash_token(id_token);
+        let issued_token_hash = crypto::hash_token(id_token);
         let audit_rows = state
             .store
             .find_all::<TokenExchangeDoc>("subject_user_id", &user.id)

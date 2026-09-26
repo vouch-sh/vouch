@@ -9,7 +9,7 @@ use crate::AppState;
 use crate::arrival::ArrivalTime;
 use crate::crypto::hash_token;
 use crate::crypto::keys::OidcSigningKey;
-use crate::db;
+use crate::db::{self, ClientInfo};
 use crate::error::ServiceError;
 use crate::error::ServiceResult;
 use crate::redact_email;
@@ -58,7 +58,7 @@ pub struct IntrospectionResult {
     pub authorization_details: Option<serde_json::Value>,
     /// RFC 9449 §7: DPoP confirmation claim for sender-constrained tokens.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub cnf: Option<crate::services::oidc::dpop::CnfClaim>,
+    pub cnf: Option<CnfClaim>,
 }
 
 impl IntrospectionResult {
@@ -269,7 +269,7 @@ pub async fn revoke_token(
     state: &Arc<AppState>,
     token: &str,
     _token_type_hint: Option<&str>,
-    client_info: crate::db::ClientInfo,
+    client_info: ClientInfo,
     caller_client_id: &str,
 ) -> RevocationResult {
     // Try to decode to get email for audit logging

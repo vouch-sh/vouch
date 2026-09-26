@@ -13,7 +13,7 @@ use super::validate::{
 use crate::AppState;
 use crate::arrival::ArrivalTime;
 use crate::db::claim::ClaimError;
-use crate::db::{self, JwtAssertionJtiClaim, OAuthClient, TokenEndpointAuthMethod};
+use crate::db::{self, ClientKeys, JwtAssertionJtiClaim, OAuthClient, TokenEndpointAuthMethod};
 use crate::services::oidc::token::ClientAuthError;
 use jiff::{Timestamp, ToSpan};
 use std::sync::Arc;
@@ -366,15 +366,10 @@ async fn resolve_client_decoding_key(
     // to an uncached fetch rather than failing authentication. Reporting a
     // transient DB fault as `invalid_client` tells a client its credentials
     // are wrong and stops it retrying.
-    let jwks_cache = if client
-        .keys
-        .as_ref()
-        .and_then(crate::db::ClientKeys::uri)
-        .is_none()
-    {
+    let jwks_cache = if client.keys.as_ref().and_then(ClientKeys::uri).is_none() {
         None
     } else {
-        crate::db::get_jwks_cache(&state.store, &client.id)
+        db::get_jwks_cache(&state.store, &client.id)
             .await
             .map_err(|e| {
                 tracing::debug!(
@@ -394,8 +389,8 @@ async fn resolve_client_decoding_key(
     let jwks = resolve_client_jwks(
         &state.store,
         &client.id,
-        client.keys.as_ref().and_then(crate::db::ClientKeys::inline),
-        client.keys.as_ref().and_then(crate::db::ClientKeys::uri),
+        client.keys.as_ref().and_then(ClientKeys::inline),
+        client.keys.as_ref().and_then(ClientKeys::uri),
         jwks_cache.as_ref(),
         allow_loopback,
         &state.http_client,
@@ -413,7 +408,7 @@ async fn resolve_client_decoding_key(
     find_matching_key_with_refresh_client(
         &state.store,
         &client.id,
-        client.keys.as_ref().and_then(crate::db::ClientKeys::uri),
+        client.keys.as_ref().and_then(ClientKeys::uri),
         jwks_cache.as_ref(),
         allow_loopback,
         &state.http_client,
@@ -435,14 +430,17 @@ async fn resolve_client_decoding_key(
 )]
 mod tests {
     use super::*;
-    use crate::config::ServerConfig;
+    use crate::config::{BaseUrl, LogFormat, ServerConfig};
     use crate::crypto;
     use crate::crypto::alg::JwsAlgorithm;
+    use crate::crypto::document_crypto::{DocumentCrypto, PlaintextDocumentCrypto};
     use crate::crypto::keys::OidcSigningKey;
-    use crate::db::{self, Pool};
+    use crate::db::{self, ClientKeys, Pool};
+    use crate::services::oidc::jwt_bearer::validate::JwtAudience;
     use arc_swap::ArcSwap;
     use secrecy::SecretString;
     use std::sync::Arc;
+    use vouch_common::AaguidPolicy;
 
     /// Build a minimal `Arc<AppState>` backed by an in-memory SQLite database
     /// with migrations applied.
@@ -463,8 +461,7 @@ mod tests {
                 .expect("migrations"),
         }
 
-        let crypto_impl: Arc<dyn crate::crypto::document_crypto::DocumentCrypto> =
-            Arc::new(crate::crypto::document_crypto::PlaintextDocumentCrypto);
+        let crypto_impl: Arc<dyn DocumentCrypto> = Arc::new(PlaintextDocumentCrypto);
         let store = db::store::DocumentStore::new(pool.clone(), crypto_impl.clone());
         let audit = db::audit::AuditStore::new(pool.clone(), crypto_impl.clone());
 
@@ -476,7 +473,7 @@ mod tests {
             jwt_secret: SecretString::from("test_jwt_secret_must_be_at_least_32_characters_long"),
             session_hours: 8,
             idps: Vec::new(),
-            base_url: crate::config::BaseUrl::new("https://test.example.com"),
+            base_url: BaseUrl::new("https://test.example.com"),
             device_code_expires_seconds: 600,
             device_poll_interval_seconds: 5,
             allowed_domains: None,
@@ -521,8 +518,8 @@ mod tests {
             aws_partition: None,
             aws_use_fips_endpoint: None,
             jwt_assertion_max_lifetime_seconds: 300,
-            allowed_aaguids: vouch_common::AaguidPolicy::Any,
-            log_format: crate::config::LogFormat::Text,
+            allowed_aaguids: AaguidPolicy::Any,
+            log_format: LogFormat::Text,
             trusted_proxies: Vec::new(),
             metrics_bearer_token: None,
             certification_test_token: None,
@@ -717,9 +714,7 @@ mod tests {
         JwtAssertionClaims {
             iss: iss.to_string(),
             sub: sub.to_string(),
-            aud: super::super::validate::JwtAudience::Single(
-                "https://test.example.com".to_string(),
-            ),
+            aud: JwtAudience::Single("https://test.example.com".to_string()),
             exp: i64::MAX,
             iat: None,
             nbf: None,
@@ -772,7 +767,7 @@ mod tests {
         let kid = client
             .keys
             .as_ref()
-            .and_then(crate::db::ClientKeys::inline)
+            .and_then(ClientKeys::inline)
             .and_then(|set| set.keys.first())
             .and_then(|key| key.kid.as_deref())
             .expect("shared test JWKS has a kid")
@@ -832,7 +827,7 @@ mod tests {
     async fn dual_config_client_still_loads_the_jwks_cache() {
         let state = make_state().await;
         let (mut client, _kid) = make_client_with_jwks(&state).await;
-        client.keys = Some(crate::db::ClientKeys::Uri(
+        client.keys = Some(ClientKeys::Uri(
             "https://client.example/jwks.json".to_string(),
         ));
 
@@ -898,9 +893,7 @@ mod tests {
 
         // Sanity: the cache read now errors.
         assert!(
-            crate::db::get_jwks_cache(&state.store, &client.id)
-                .await
-                .is_err(),
+            db::get_jwks_cache(&state.store, &client.id).await.is_err(),
             "sanity: get_jwks_cache must error after dropping the documents table"
         );
 

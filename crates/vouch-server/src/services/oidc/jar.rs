@@ -15,10 +15,12 @@
 use crate::AppState;
 use crate::arrival::ArrivalTime;
 use crate::crypto::jwt::{Jws, JwsError};
-use crate::db::OAuthClient;
+use crate::db::{self, ClientKeys, OAuthClient};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use crate::infra::egress::{BodyError, read_capped_text};
+use crate::infra::ssrf;
 use crate::services::oidc::authorization::AuthorizeRequestParams;
+use crate::services::oidc::fapi;
 use crate::services::oidc::jwt_bearer::validate::{
     JwtAssertionHeader, JwtAudience, assertion_header_from, map_algorithm,
 };
@@ -196,12 +198,7 @@ pub async fn fetch_request_object(
     // private/link-local address. Loopback is permitted only in local
     // development (`allow_loopback`). Complements the HTTPS check, structural
     // validation, and any caller-side allowlist.
-    crate::infra::ssrf::assert_public_destination(
-        uri,
-        allow_loopback,
-        OAuthErrorCode::InvalidRequestUri,
-    )
-    .await?;
+    ssrf::assert_public_destination(uri, allow_loopback, OAuthErrorCode::InvalidRequestUri).await?;
 
     let response = http_client.get(uri).send().await.map_err(|e| {
         tracing::debug!("Failed to fetch Request Object from {uri}: {e}");
@@ -351,9 +348,7 @@ pub async fn validate_request_object(
 
     // 2b. FAPI 2.0: Validate algorithm is in the FAPI allowlist.
     // RS256 is excluded per FAPI 2.0 Section 5.4.1 — use PS256, ES256, or EdDSA.
-    if let Err(e) =
-        crate::services::oidc::fapi::validate_fapi_algorithm(client, assertion_header.alg)
-    {
+    if let Err(e) = fapi::validate_fapi_algorithm(client, assertion_header.alg) {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidRequestObject,
             e.oauth_description(),
@@ -369,15 +364,10 @@ pub async fn validate_request_object(
     // Gate on the URI, not on inline JWKS: a client configured with both still
     // reaches the kid-miss refresh path, where a `None` cache disables the
     // 10-second refresh interval.
-    let jwks_cache = if client
-        .keys
-        .as_ref()
-        .and_then(crate::db::ClientKeys::uri)
-        .is_none()
-    {
+    let jwks_cache = if client.keys.as_ref().and_then(ClientKeys::uri).is_none() {
         None
     } else {
-        crate::db::get_jwks_cache(&state.store, &client.id)
+        db::get_jwks_cache(&state.store, &client.id)
             .await
             .map_err(|e| {
                 tracing::debug!("JWKS cache lookup failed for Request Object: {e}");
@@ -394,8 +384,8 @@ pub async fn validate_request_object(
     let jwks = resolve_client_jwks(
         &state.store,
         &client.id,
-        client.keys.as_ref().and_then(crate::db::ClientKeys::inline),
-        client.keys.as_ref().and_then(crate::db::ClientKeys::uri),
+        client.keys.as_ref().and_then(ClientKeys::inline),
+        client.keys.as_ref().and_then(ClientKeys::uri),
         jwks_cache.as_ref(),
         allow_loopback,
         &state.http_client,
@@ -413,7 +403,7 @@ pub async fn validate_request_object(
     let decoding_key = find_matching_key_with_refresh_client(
         &state.store,
         &client.id,
-        client.keys.as_ref().and_then(crate::db::ClientKeys::uri),
+        client.keys.as_ref().and_then(ClientKeys::uri),
         jwks_cache.as_ref(),
         allow_loopback,
         &state.http_client,
@@ -696,7 +686,8 @@ fn validate_temporal_claims(
 mod tests {
     use super::*;
     use crate::crypto::alg::JwsAlgorithm;
-    use crate::test_utils::test_arrival;
+    use crate::services::oidc::fapi::STANDARD_CLOCK_SKEW_SECONDS;
+    use crate::test_utils::{self, test_arrival};
     use base64::Engine as _;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use jiff::Timestamp;
@@ -1052,7 +1043,7 @@ mod tests {
         // Manually check expiration (as validate_request_object would)
         let exp = token_data.claims.exp.unwrap();
         assert!(
-            exp < now - crate::services::oidc::fapi::STANDARD_CLOCK_SKEW_SECONDS,
+            exp < now - STANDARD_CLOCK_SKEW_SECONDS,
             "Expired token should be detected"
         );
     }
@@ -1295,7 +1286,7 @@ mod tests {
         use crate::db::{self, get_oauth_client_by_id};
         use crate::test_utils::{TestClientSpec, TestJwks, create_test_client, create_test_user};
 
-        let state = crate::test_utils::test_app_state().await;
+        let state = test_utils::test_app_state().await;
 
         let (encoding_key, jwks, kid) = test_es256_key_with_jwks();
 
@@ -1341,9 +1332,7 @@ mod tests {
 
         // Sanity: the cache read now errors.
         assert!(
-            crate::db::get_jwks_cache(&state.store, &client.id)
-                .await
-                .is_err(),
+            db::get_jwks_cache(&state.store, &client.id).await.is_err(),
             "sanity: get_jwks_cache must error after dropping the documents table"
         );
 

@@ -13,6 +13,8 @@ use crate::db::documents::user::UserDoc;
 use crate::db::{self, store::DocumentStore};
 use crate::error::ServiceError;
 use crate::infra::i18n::Tr;
+use crate::services::RecencyWindow;
+use crate::services::auth::ValidatedResourceToken;
 use vouch_common::{KeyInfo, ResourceLabel, lookup_device_model};
 
 /// Maximum session age (in seconds) for destructive key operations.
@@ -85,7 +87,7 @@ pub(crate) async fn consume_registration_state(
 /// hardware-verified, or when its FIDO2 assertion is older than
 /// [`KEY_DELETE_MAX_AGE_SECS`].
 pub(crate) fn require_recent_hardware_verification(
-    token: &crate::services::auth::ValidatedResourceToken,
+    token: &ValidatedResourceToken,
     arrival: ArrivalTime,
 ) -> Result<(), ServiceError> {
     if !token.hardware_verified {
@@ -127,7 +129,7 @@ pub(crate) fn require_fresh_timestamp(
     max_age_secs: i64,
     now: i64,
 ) -> Result<(), ServiceError> {
-    if crate::services::RecencyWindow::no_skew(max_age_secs).accepts_at(now, issued_at) {
+    if RecencyWindow::no_skew(max_age_secs).accepts_at(now, issued_at) {
         return Ok(());
     }
     Err(ServiceError::StepUpRequired {
@@ -396,6 +398,7 @@ pub(crate) async fn delete_key(
 )]
 mod tests {
     use super::*;
+    use crate::{db, test_utils};
 
     fn make_iat(seconds_ago: i64) -> i64 {
         jiff::Timestamp::now().as_second() - seconds_ago
@@ -445,12 +448,10 @@ mod tests {
     /// an oracle telling any authenticated caller which key ids are real.
     #[tokio::test]
     async fn rename_reports_another_users_key_as_not_found() {
-        let state = crate::test_utils::test_app_state().await;
-        let owner =
-            crate::test_utils::create_test_user(&state.store, "rename-owner@example.com").await;
-        let caller =
-            crate::test_utils::create_test_user(&state.store, "rename-caller@example.com").await;
-        let owned_key = crate::test_utils::create_test_authenticator(&state.store, &owner.id).await;
+        let state = test_utils::test_app_state().await;
+        let owner = test_utils::create_test_user(&state.store, "rename-owner@example.com").await;
+        let caller = test_utils::create_test_user(&state.store, "rename-caller@example.com").await;
+        let owned_key = test_utils::create_test_authenticator(&state.store, &owner.id).await;
         let absent_key = uuid::Uuid::now_v7().to_string();
 
         let foreign = rename_key(
@@ -483,7 +484,7 @@ mod tests {
     /// A key deleted after the ownership read is not reported as renamed.
     #[tokio::test]
     async fn rename_of_key_deleted_mid_rename_is_not_found() {
-        let state = crate::test_utils::build_test_app_state(Vec::new(), |store| {
+        let state = test_utils::build_test_app_state(Vec::new(), |store| {
             let writer = store.clone();
             store.set_modify_test_hook(std::sync::Arc::new(move |id: &str, attempt: u32| {
                 let writer = writer.clone();
@@ -496,9 +497,8 @@ mod tests {
             }));
         })
         .await;
-        let owner =
-            crate::test_utils::create_test_user(&state.store, "rename-race@example.com").await;
-        let key = crate::test_utils::create_test_authenticator(&state.store, &owner.id).await;
+        let owner = test_utils::create_test_user(&state.store, "rename-race@example.com").await;
+        let key = test_utils::create_test_authenticator(&state.store, &owner.id).await;
 
         let err = rename_key(
             &state.store,
@@ -520,12 +520,10 @@ mod tests {
     /// `last_key` branch that would itself be a distinguisher.
     #[tokio::test]
     async fn delete_reports_another_users_key_as_not_found() {
-        let state = crate::test_utils::test_app_state().await;
-        let owner =
-            crate::test_utils::create_test_user(&state.store, "delete-owner@example.com").await;
-        let caller =
-            crate::test_utils::create_test_user(&state.store, "delete-caller@example.com").await;
-        let owned_key = crate::test_utils::create_test_authenticator(&state.store, &owner.id).await;
+        let state = test_utils::test_app_state().await;
+        let owner = test_utils::create_test_user(&state.store, "delete-owner@example.com").await;
+        let caller = test_utils::create_test_user(&state.store, "delete-caller@example.com").await;
+        let owned_key = test_utils::create_test_authenticator(&state.store, &owner.id).await;
         let absent_key = uuid::Uuid::now_v7().to_string();
 
         let foreign = delete_key(&state.store, &caller.id, &owned_key)
@@ -546,7 +544,7 @@ mod tests {
 
         // The victim's key must still exist — a refused delete must not delete.
         assert!(
-            crate::db::get_authenticator_by_id(&state.store, &owned_key)
+            db::get_authenticator_by_id(&state.store, &owned_key)
                 .await
                 .unwrap()
                 .is_some(),

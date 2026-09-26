@@ -18,6 +18,8 @@ use std::collections::HashMap;
 use zeroize::Zeroizing;
 
 use crate::config::ServerConfig;
+use crate::crypto::pem;
+use crate::infra::egress;
 
 /// Maximum size of a GitHub API response body (1 MB).
 ///
@@ -56,8 +58,7 @@ impl RsaPrivateKeyDer {
     /// cat your-key.pem | base64 | tr -d '\n'
     /// ```
     pub(crate) fn from_pem(pem_or_base64: &str) -> Result<Self> {
-        let pem =
-            crate::crypto::pem::decode_base64_pem(pem_or_base64).context("Invalid key format")?;
+        let pem = pem::decode_base64_pem(pem_or_base64).context("Invalid key format")?;
 
         if !pem.contains("RSA PRIVATE KEY") {
             anyhow::bail!(
@@ -315,7 +316,7 @@ impl GitHubApp {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = crate::infra::egress::read_error_body(response).await;
+            let body = egress::read_error_body(response).await;
             bail!(
                 "GitHub API error ({}): {}",
                 status,
@@ -323,12 +324,9 @@ impl GitHubApp {
             );
         }
 
-        crate::infra::egress::read_capped_json::<InstallationDetails>(
-            response,
-            MAX_GITHUB_RESPONSE_SIZE,
-        )
-        .await
-        .context("Failed to read installation details response")
+        egress::read_capped_json::<InstallationDetails>(response, MAX_GITHUB_RESPONSE_SIZE)
+            .await
+            .context("Failed to read installation details response")
     }
 
     /// Get a scoped installation access token from GitHub.
@@ -368,7 +366,7 @@ impl GitHubApp {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = crate::infra::egress::read_error_body(response).await;
+            let body = egress::read_error_body(response).await;
             bail!(
                 "GitHub API error ({}): {}",
                 status,
@@ -377,7 +375,7 @@ impl GitHubApp {
         }
 
         let token_response: InstallationTokenResponse =
-            crate::infra::egress::read_capped_json(response, MAX_GITHUB_RESPONSE_SIZE)
+            egress::read_capped_json(response, MAX_GITHUB_RESPONSE_SIZE)
                 .await
                 .context("Failed to read installation token response")?;
 
@@ -428,7 +426,7 @@ impl GitHubApp {
 
             if !response.status().is_success() {
                 let status = response.status();
-                let body = crate::infra::egress::read_error_body(response).await;
+                let body = egress::read_error_body(response).await;
                 bail!(
                     "GitHub API error ({}): {}",
                     status,
@@ -437,7 +435,7 @@ impl GitHubApp {
             }
 
             let body: InstallationRepositoriesResponse =
-                crate::infra::egress::read_capped_json(response, MAX_GITHUB_RESPONSE_SIZE)
+                egress::read_capped_json(response, MAX_GITHUB_RESPONSE_SIZE)
                     .await
                     .context("Failed to read installation repositories response")?;
 
@@ -528,7 +526,7 @@ pub(crate) async fn list_user_accessible_installations(
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = crate::infra::egress::read_error_body(response).await;
+            let body = egress::read_error_body(response).await;
             bail!(
                 "GitHub API error ({}): {}",
                 status,
@@ -537,7 +535,7 @@ pub(crate) async fn list_user_accessible_installations(
         }
 
         let body: UserInstallationsResponse =
-            crate::infra::egress::read_capped_json(response, MAX_GITHUB_RESPONSE_SIZE)
+            egress::read_capped_json(response, MAX_GITHUB_RESPONSE_SIZE)
                 .await
                 .context("Failed to read user installations response")?;
 
@@ -587,7 +585,7 @@ pub(crate) async fn get_github_user(
 
     if !response.status().is_success() {
         let status = response.status();
-        let body = crate::infra::egress::read_error_body(response).await;
+        let body = egress::read_error_body(response).await;
         bail!(
             "GitHub API error ({}): {}",
             status,
@@ -595,7 +593,7 @@ pub(crate) async fn get_github_user(
         );
     }
 
-    crate::infra::egress::read_capped_json::<GitHubUser>(response, MAX_GITHUB_RESPONSE_SIZE)
+    egress::read_capped_json::<GitHubUser>(response, MAX_GITHUB_RESPONSE_SIZE)
         .await
         .context("Failed to read GitHub user response")
 }
@@ -664,7 +662,7 @@ pub(crate) async fn exchange_oauth_code(
 
     if !response.status().is_success() {
         let status = response.status();
-        let body = crate::infra::egress::read_error_body(response).await;
+        let body = egress::read_error_body(response).await;
         bail!(
             "GitHub OAuth error ({}): {}",
             status,
@@ -673,10 +671,9 @@ pub(crate) async fn exchange_oauth_code(
     }
 
     // GitHub may return 200 with an error in the body
-    let body: serde_json::Value =
-        crate::infra::egress::read_capped_json(response, MAX_GITHUB_RESPONSE_SIZE)
-            .await
-            .context("Failed to read OAuth token response")?;
+    let body: serde_json::Value = egress::read_capped_json(response, MAX_GITHUB_RESPONSE_SIZE)
+        .await
+        .context("Failed to read OAuth token response")?;
 
     if let Some(error) = body.get("error").and_then(|e| e.as_str()) {
         let description = body
@@ -717,7 +714,7 @@ pub(crate) async fn refresh_oauth_token(
 
     if !response.status().is_success() {
         let status = response.status();
-        let body = crate::infra::egress::read_error_body(response).await;
+        let body = egress::read_error_body(response).await;
         bail!(
             "GitHub OAuth refresh error ({}): {}",
             status,
@@ -726,10 +723,9 @@ pub(crate) async fn refresh_oauth_token(
     }
 
     // GitHub may return 200 with an error in the body
-    let body: serde_json::Value =
-        crate::infra::egress::read_capped_json(response, MAX_GITHUB_RESPONSE_SIZE)
-            .await
-            .context("Failed to read OAuth refresh response")?;
+    let body: serde_json::Value = egress::read_capped_json(response, MAX_GITHUB_RESPONSE_SIZE)
+        .await
+        .context("Failed to read OAuth refresh response")?;
 
     if let Some(error) = body.get("error").and_then(|e| e.as_str()) {
         let description = body
@@ -750,6 +746,7 @@ pub(crate) async fn refresh_oauth_token(
 )]
 mod tests {
     use super::*;
+    use crate::test_utils;
 
     // Test RSA key in PKCS#1 PEM format (as provided by GitHub App)
     const TEST_RSA_KEY_PKCS1_PEM: &str = r#"-----BEGIN RSA PRIVATE KEY-----
@@ -860,7 +857,7 @@ eyYRskrWOAtu0DuWJARLn74r5B4ze8s4DvUdPe781neRB1hMbXte6g==
     }
 
     fn test_config_with_app(app_id: Option<u64>, key: Option<&str>) -> ServerConfig {
-        let mut config = crate::test_utils::test_config();
+        let mut config = test_utils::test_config();
         config.github_app_id = app_id;
         config.github_app_key = key.map(|k| SecretString::from(k.to_string()));
         config

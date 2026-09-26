@@ -13,7 +13,9 @@ pub(crate) mod saml;
 pub(crate) use oidc::ConfiguredOidcProvider;
 pub(crate) use saml::SamlProvider;
 
-use crate::db::Domain;
+use crate::crypto;
+use crate::db::{Domain, UpstreamLogin};
+use crate::infra::csp::CspOrigin;
 
 /// Known identity provider for UI branding.
 #[derive(Debug)]
@@ -121,7 +123,7 @@ pub(crate) struct IdentityResult {
     /// [`crate::db::UpstreamLogin`]). `None` only when there is no IdP
     /// context at all; both OIDC and SAML always know at least the
     /// issuer, so this is `Some` for every real IdP login.
-    pub upstream: Option<crate::db::UpstreamLogin>,
+    pub upstream: Option<UpstreamLogin>,
 }
 
 /// How to send the user to the upstream IdP.
@@ -214,7 +216,7 @@ impl ConfiguredIdp {
     /// redirect or POST to during sign-in handoff. Always returns at least
     /// one origin in practice (empty `Vec` only if all URLs are malformed).
     #[must_use]
-    pub fn form_action_origins(&self) -> Vec<crate::infra::csp::CspOrigin> {
+    pub fn form_action_origins(&self) -> Vec<CspOrigin> {
         match self {
             Self::Oidc(p) => p.provider.form_action_origin().into_iter().collect(),
             Self::Saml(p) => p.form_action_origins(),
@@ -243,7 +245,7 @@ fn initiate_saml_auth(saml: &SamlProvider) -> Result<AuthRequest, anyhow::Error>
 
     let authn = saml::authn_request::build_authn_request(saml)
         .map_err(|e| anyhow::anyhow!("Failed to build SAML AuthnRequest: {e}"))?;
-    let state_key = URL_SAFE_NO_PAD.encode(crate::crypto::generate_random_bytes(32)?);
+    let state_key = URL_SAFE_NO_PAD.encode(crypto::generate_random_bytes(32)?);
     let parsed_sso = url::Url::parse(&authn.sso_url)
         .map_err(|e| anyhow::anyhow!("Invalid SAML SSO URL: {e}"))?;
     let scheme = parsed_sso.scheme();
@@ -290,6 +292,7 @@ mod tests {
     )]
 
     use super::*;
+    use crate::infra::csp::CspOrigin;
     use crate::test_utils::test_config;
 
     // =========================================================================
@@ -722,10 +725,7 @@ mod tests {
             Some("https://idp-b.example.com/sso/redirect"),
         );
         let origins = provider.form_action_origins();
-        let serialized: Vec<&str> = origins
-            .iter()
-            .map(crate::infra::csp::CspOrigin::as_str)
-            .collect();
+        let serialized: Vec<&str> = origins.iter().map(CspOrigin::as_str).collect();
         assert_eq!(origins.len(), 2);
         assert!(serialized.contains(&"https://idp-a.example.com"));
         assert!(serialized.contains(&"https://idp-b.example.com"));

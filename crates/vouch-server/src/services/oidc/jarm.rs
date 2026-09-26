@@ -14,6 +14,7 @@ use std::sync::Arc;
 use vouch_common::protocol;
 
 use crate::AppState;
+use crate::crypto::alg::JwsAlgorithm;
 use crate::db::OAuthClient;
 use crate::error::OAuthErrorCode;
 
@@ -52,8 +53,8 @@ struct JarmErrorClaims {
 /// explicitly registers with `authorization_signed_response_alg=RS256`.
 fn select_alg(_state: &AppState, client: &OAuthClient) -> &'static str {
     match client.authorization_signed_response_alg {
-        Some(crate::crypto::alg::JwsAlgorithm::Rs256) => "RS256",
-        Some(crate::crypto::alg::JwsAlgorithm::Es256) | None => protocol::JWS_ALG_ES256,
+        Some(JwsAlgorithm::Rs256) => "RS256",
+        Some(JwsAlgorithm::Es256) | None => protocol::JWS_ALG_ES256,
         // Validated at registration; only RS256 and ES256 are accepted for JARM.
         Some(_) => protocol::JWS_ALG_ES256,
     }

@@ -20,6 +20,7 @@ use crate::crypto::alg::JwsAlgorithm;
 use crate::crypto::jwk::Jwk;
 use crate::crypto::jwt::{HeaderAlg, Jws, JwsError};
 use crate::db::{self, store::DocumentStore};
+use crate::services::RecencyWindow;
 
 /// Nonce validity in seconds (5 minutes), before the JTI-retention cap below.
 const NONCE_VALIDITY_SECONDS: i64 = 300;
@@ -390,9 +391,7 @@ pub fn validate_dpop_claims(
     // (`floor(now) + 1 + max_age + skew`), so the replay record outlives
     // every second at which this floor-truncated freshness check would
     // still accept the proof (RFC 9449 §11.1's acceptance window).
-    if !crate::services::RecencyWindow::with_skew(max_age_seconds, PROOF_SKEW_SECONDS)
-        .accepts_at(now, claims.iat)
-    {
+    if !RecencyWindow::with_skew(max_age_seconds, PROOF_SKEW_SECONDS).accepts_at(now, claims.iat) {
         return Err(DpopError::Expired);
     }
 
@@ -734,6 +733,9 @@ mod rfc9449_vectors;
 )]
 mod tests {
     use super::*;
+    use crate::db::documents::dpop::DpopJtiDoc;
+    use crate::db::dpop;
+    use crate::db::store::DocumentStore;
     use crate::test_utils::test_arrival;
     use jiff::Timestamp;
 
@@ -1461,7 +1463,7 @@ mod tests {
     /// Mirrors `db/tests.rs::test_db` but returns only the store, so the
     /// integration test stays self-contained (no `test-utils` feature
     /// dependency) and compiles under plain `cargo test -p vouch-server`.
-    async fn resource_test_store() -> crate::db::store::DocumentStore {
+    async fn resource_test_store() -> DocumentStore {
         use std::sync::Arc;
 
         use crate::crypto::document_crypto::{DocumentCrypto, PlaintextDocumentCrypto};
@@ -1470,14 +1472,14 @@ mod tests {
         let pool = Pool::connect("sqlite::memory:", &PoolConfig::default())
             .await
             .expect("test db");
-        if let crate::db::Pool::Sqlite(p) = &pool {
+        if let Pool::Sqlite(p) = &pool {
             sqlx::migrate!("./migrations/sqlite")
                 .run(p)
                 .await
                 .expect("migrate");
         }
         let crypto: Arc<dyn DocumentCrypto> = Arc::new(PlaintextDocumentCrypto);
-        crate::db::store::DocumentStore::new(pool, crypto)
+        DocumentStore::new(pool, crypto)
     }
 
     // ========================================================================
@@ -1794,9 +1796,9 @@ mod tests {
         let now_after = jiff::Timestamp::now().as_second();
 
         // Read the committed JTI back by its deterministic document ID.
-        let id = crate::db::dpop::deterministic_dpop_jti_id(&validated.jti);
+        let id = dpop::deterministic_dpop_jti_id(&validated.jti);
         let doc = store
-            .get::<crate::db::documents::dpop::DpopJtiDoc>(&id)
+            .get::<DpopJtiDoc>(&id)
             .await
             .expect("read back JTI")
             .expect("validate_dpop_at_resource must commit the JTI");
@@ -1926,9 +1928,9 @@ mod tests {
         )
         .await
         .expect("rounded-up JTI commit succeeds");
-        let id = crate::db::dpop::deterministic_dpop_jti_id("floor-slack-rounded");
+        let id = dpop::deterministic_dpop_jti_id("floor-slack-rounded");
         let rounded_expires_at = store
-            .get::<crate::db::documents::dpop::DpopJtiDoc>(&id)
+            .get::<DpopJtiDoc>(&id)
             .await
             .expect("read back JTI")
             .expect("rounded-up JTI must be committed")
@@ -1958,9 +1960,9 @@ mod tests {
             check_and_store_dpop_jti_at_second(&store, "floor-slack-unrounded", now_sec, retention)
                 .await
                 .expect("un-rounded JTI commit succeeds");
-        let id = crate::db::dpop::deterministic_dpop_jti_id("floor-slack-unrounded");
+        let id = dpop::deterministic_dpop_jti_id("floor-slack-unrounded");
         let unrounded_expires_at = store
-            .get::<crate::db::documents::dpop::DpopJtiDoc>(&id)
+            .get::<DpopJtiDoc>(&id)
             .await
             .expect("read back JTI")
             .expect("un-rounded JTI must be committed")

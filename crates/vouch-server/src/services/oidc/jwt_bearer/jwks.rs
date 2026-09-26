@@ -8,8 +8,9 @@ use super::validate::JwtAssertionHeader;
 use crate::crypto::alg::JwsAlgorithm;
 use crate::db::documents::jwks_cache::JwksCacheDoc;
 use crate::db::store::DocumentStore;
-use crate::db::{JwkEntry, JwkSet, KeyType};
+use crate::db::{self, JwkEntry, JwkSet, KeyType};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
+use crate::infra::jwks;
 
 /// Resolve the JWKS for a client — from an inline key set or a fetched
 /// `jwks_uri`. The two are exclusive (RFC 7591 §2), so there is no precedence
@@ -64,21 +65,15 @@ async fn resolve_jwks_uri(
     // This path doesn't act on whether the resolution fetched — that
     // distinction only matters to the mTLS force-refetch retry gate
     // (services/oidc/token.rs).
-    let (value, _origin) = crate::infra::jwks::resolve_cached_jwks(
-        store,
-        parent_id,
-        uri,
-        cached,
-        allow_loopback,
-        http_client,
-    )
-    .await?;
+    let (value, _origin) =
+        jwks::resolve_cached_jwks(store, parent_id, uri, cached, allow_loopback, http_client)
+            .await?;
     parse_jwks_value(&value)
 }
 
 /// Parse a JWKS from a `serde_json::Value`.
 fn parse_jwks_value(value: &serde_json::Value) -> ServiceResult<JwkSet> {
-    crate::db::parse_jwks_set(value).map_err(|e| {
+    db::parse_jwks_set(value).map_err(|e| {
         tracing::debug!("Failed to parse JWKS value: {e}");
         ServiceError::oauth(OAuthErrorCode::InvalidClient, "Invalid JWKS format")
     })
@@ -235,9 +230,7 @@ pub async fn find_matching_key_with_refresh_client(
     // has already decided the cache is not to be trusted (the kid is missing
     // from it), so the TTL and the stale fallback must both be bypassed. The
     // 10-second rate limit above is what bounds the fetch rate here.
-    match crate::infra::jwks::fetch_and_cache(store, client_id, uri, allow_loopback, http_client)
-        .await
-    {
+    match jwks::fetch_and_cache(store, client_id, uri, allow_loopback, http_client).await {
         Ok(jwks_value) => match parse_jwks_value(&jwks_value) {
             Ok(fresh_jwks) => find_matching_key(&fresh_jwks, header),
             Err(e) => {
@@ -329,6 +322,8 @@ fn build_decoding_key_from_jwk(
 )]
 mod tests {
     use super::*;
+    use crate::crypto::jwk::EcJwk;
+    use crate::test_utils;
     use base64::Engine as _;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
@@ -843,8 +838,8 @@ mod tests {
     }
 
     /// Sign an ES256 JWT and return it with the public JWK that verifies it.
-    async fn es256_token_and_jwk() -> (String, crate::crypto::jwk::EcJwk) {
-        let key = crate::test_utils::make_test_oidc_key();
+    async fn es256_token_and_jwk() -> (String, EcJwk) {
+        let key = test_utils::make_test_oidc_key();
         let token = key
             .sign_jwt(&serde_json::json!({ "sub": "subject", "exp": 9_999_999_999i64 }))
             .await
@@ -1130,7 +1125,7 @@ mod tests {
     async fn test_find_matching_key_with_refresh_no_uri_returns_error_on_miss() {
         // When no JWKS URI is configured, a kid-miss must return an error without
         // any network call.
-        let state = crate::test_utils::test_app_state().await;
+        let state = test_utils::test_app_state().await;
         let http_client = reqwest::Client::new();
         let jwks = JwkSet { keys: vec![] }; // empty — no matching key
         let hdr = header(JwsAlgorithm::Es256, Some("unknown-kid"));
@@ -1158,7 +1153,7 @@ mod tests {
         // When cached_at is within the 10-second rate-limit window, force-refresh
         // is skipped and the original error is returned without any network call.
         use jiff::Timestamp;
-        let state = crate::test_utils::test_app_state().await;
+        let state = test_utils::test_app_state().await;
         let http_client = reqwest::Client::new();
         let jwks = JwkSet { keys: vec![] };
         let hdr = header(JwsAlgorithm::Es256, Some("missing-kid"));
@@ -1195,7 +1190,7 @@ mod tests {
         // enforces HTTPS and wiremock serves HTTP, the fetch fails gracefully and the
         // function falls back to the original error. This test verifies the refresh
         // attempt path is entered (not the rate-limit skip path).
-        let state = crate::test_utils::test_app_state().await;
+        let state = test_utils::test_app_state().await;
         let http_client = reqwest::Client::new();
         let stale_jwks = JwkSet { keys: vec![] };
         let hdr = header(JwsAlgorithm::Es256, Some("fresh-kid"));

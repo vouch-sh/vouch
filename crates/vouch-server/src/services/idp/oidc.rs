@@ -9,7 +9,11 @@ use serde::Deserialize;
 use url::Url;
 
 use super::IdentityResult;
-use crate::db::Domain;
+use crate::crypto;
+use crate::crypto::jwt::{Jws, JwsError};
+use crate::db::{Domain, UpstreamLogin};
+use crate::email::Email;
+use crate::infra::csp::CspOrigin;
 use crate::infra::egress::read_capped_json;
 
 /// Maximum size of an upstream IdP's OIDC discovery document (256 KB).
@@ -59,12 +63,12 @@ impl ConfiguredOidcProvider {
         use base64::Engine;
         use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
-        let state_bytes = crate::crypto::generate_random_bytes(32)?;
-        let nonce_bytes = crate::crypto::generate_random_bytes(32)?;
+        let state_bytes = crypto::generate_random_bytes(32)?;
+        let nonce_bytes = crypto::generate_random_bytes(32)?;
         let state_key = URL_SAFE_NO_PAD.encode(state_bytes);
         let nonce = URL_SAFE_NO_PAD.encode(nonce_bytes);
 
-        let verifier_bytes = crate::crypto::generate_random_bytes(32)?;
+        let verifier_bytes = crypto::generate_random_bytes(32)?;
         let code_verifier = URL_SAFE_NO_PAD.encode(verifier_bytes);
         let challenge_digest =
             aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, code_verifier.as_bytes());
@@ -114,8 +118,8 @@ impl OidcProvider {
     /// in practice this never happens because `fetch_discovery` rejects such
     /// inputs, but the type expresses the invariant.
     #[must_use]
-    pub fn form_action_origin(&self) -> Option<crate::infra::csp::CspOrigin> {
-        crate::infra::csp::CspOrigin::from_url(&self.authorization_endpoint)
+    pub fn form_action_origin(&self) -> Option<CspOrigin> {
+        CspOrigin::from_url(&self.authorization_endpoint)
     }
 }
 
@@ -377,14 +381,14 @@ pub(crate) async fn verify_id_token(
     // Parameters are not understood and supported by the recipient, then the
     // JWS is invalid." Vouch supports no `crit` extension, so a `crit`-bearing
     // ID token never yields a header at all.
-    let jws = crate::crypto::jwt::Jws::parse(id_token).map_err(|e| match e {
-        crate::crypto::jwt::JwsError::Critical => {
+    let jws = Jws::parse(id_token).map_err(|e| match e {
+        JwsError::Critical => {
             anyhow::anyhow!("ID token header carries an unsupported 'crit' extension")
         }
-        crate::crypto::jwt::JwsError::Malformed(reason) => {
+        JwsError::Malformed(reason) => {
             anyhow::anyhow!("Invalid ID token: {reason}")
         }
-        crate::crypto::jwt::JwsError::PrivateKey => {
+        JwsError::PrivateKey => {
             anyhow::anyhow!("ID token header JWK contains private key material")
         }
     })?;
@@ -531,7 +535,7 @@ pub(crate) async fn verify_id_token(
     let raw_domain = if is_google {
         claims.hd.clone()
     } else {
-        crate::email::Email::domain_of(&claims.email)
+        Email::domain_of(&claims.email)
     };
     let domain = raw_domain
         .as_deref()
@@ -550,7 +554,7 @@ pub(crate) async fn verify_id_token(
     // is the literal `{tenantid}` template, while `claims.iss` names the
     // concrete tenant — the identity must be pinned to the real tenant.
     Ok(IdentityResult {
-        upstream: Some(crate::db::UpstreamLogin {
+        upstream: Some(UpstreamLogin {
             issuer: claims.iss,
             durable_subject: Some(claims.sub),
         }),
