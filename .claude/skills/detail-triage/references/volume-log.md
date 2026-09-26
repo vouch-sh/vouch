@@ -32,6 +32,7 @@ judgement columns come from the batch's record in `.local/`.
 | 2026-09-22 | 0 | 0 | 3 | 0 | 0 | 1 of 3 dead-code | #1482, #1483 merge as-is; #1481 rebuilt with signed commits (unsigned rustfmt follow-up) | 0 | `github-identity-credential-pair-consistency` (rcr from 09-19) verified against tree and pulled |
 | 2026-09-24 | 1 | 1 | 0 | 0 | 1 | 1 of 1 | #1504 amended: comments trimmed, CLI-grant lookup refusals audited, five latent email siblings fixed | 0 (#1500 had no record) | 0 (instance) |
 | 2026-09-25 | 17 | 20 | 0 | 4 | 7 | 15 of 17 | proposed: #1549, #1532 as-is; 8 amend; #1541 and #1553 blocked; 7 superseded by class fixes (7592 token revocation, audit context, login-failure principal, helper URL); #1550 closed | not checkable (no records in container) | 0 (7 descriptions ready; `detail` CLI unavailable) |
+| 2026-09-26 | 2 | 2 | 0 | 1 | 2 | 1 of 2 | #1566 merge as-is; #1567 rebuilt on main (conflicts with #1561–#1571, `absolute_paths`) with an end-to-end listener test, superseded; #1546, #1547 closed as fixed by #1551 | 0 (neither was recorded residue) | 0 (both instances) |
 
 Batches before 2026-08-20 have no record, so only their counted columns exist:
 run the script. `escape-unaware-delimiter-normalization` exists on Detail's side
@@ -690,3 +691,55 @@ tell "I consumed it" from "someone revoked it".
 `detail-stats.py` runs in a cloud session only through a REST shim: GraphQL is
 refused there, and REST pagination links use `repositories/{id}` paths the
 proxy also refuses.
+
+## 2026-09-26
+
+| month | n | median age | p90 | <30d | >90d |
+|-------|---|-----------|-----|------|------|
+| 2026-09 | 140 | — | — | 72 | 47 |
+
+2 issues, 2 fix PRs. `detail-stats.py` was not run (no `gh` in the session),
+so n, `<30d` and `>90d` are the 09-25 row plus this batch's two one-day-old
+findings. Median and p90 were not recomputed.
+
+Both findings blame merges from 09-25 (Detail PR 1, PR≤3d 2), and both are
+defects the merged change exposed rather than wrote:
+
+- **#1564** (from #1558): `vouch setup github --configure` wrote the git
+  credential helper for a logged-out user. The guard matched
+  `e.to_string().contains("not authenticated")`, which never matched the
+  no-token reason. It had been dead since it was added. #1558 removed the
+  up-front config check that had kept logged-out users from reaching it.
+  Instance: the only other production substring match on one of our own
+  errors (`credential/ssh.rs`, "404"/"501") only decides whether a
+  best-effort notice is logged at debug. #1566 matches the typed
+  `CliError::NotAuthenticated`, is green and mergeable, and stands as written.
+- **#1565** (from #1538): the mTLS port answered every rate-limited request
+  with 500, and its audit rows recorded no `client_ip`. The listener supplies
+  only `ConnectInfo<PeerClientCert>`, but the rate limiter and `ClientInfo`
+  read `ConnectInfo<SocketAddr>`. The 500 dates from the listener's
+  introduction. It survived because the test harness injected both
+  extensions, and because the certification token that conformance runs set
+  also removes the rate limiter. Instance: the two readers of
+  `ConnectInfo<SocketAddr>` are the two #1567 fixes. #1567 conflicted with
+  the #1561–#1571 import refactor and would have failed the newly denied
+  `absolute_paths` lint, so it was rebuilt on main. The rebuild adds a test
+  that serves the application router through the real `MtlsListener` over
+  TLS. With `peer_ip_from_extensions`' fallback disabled, it fails with the
+  500.
+
+#1546 and #1547 from 09-25 were still open although #1551 fixed both.
+Its body said "Supersedes #1553 and #1554", naming the PRs, not the issues,
+so nothing closed them.
+
+### Process
+
+A test harness that builds request extensions by hand encodes an assumption
+about what the listener provides. When the assumption is wrong, every test
+built on it agrees with the bug. When a server has more than one listener,
+at least one test per listener should go through the real `Listener` and
+`Connected` impls.
+
+A class fix that closes issues should name each issue with `Closes #N`,
+not only the PRs it supersedes.
+
