@@ -6,6 +6,7 @@
 //! `vouch_cli::dns::init` so that the agent honors the same configuration.
 
 use anyhow::{Context, Result};
+use vouch_common::dns::{self, DOH_ENV_VAR};
 
 use crate::config::read_config;
 
@@ -18,8 +19,8 @@ use crate::config::read_config;
 ///
 /// Returns an error if the configured provider is invalid.
 pub fn init() -> Result<()> {
-    let env = std::env::var(vouch_common::dns::DOH_ENV_VAR).ok();
+    let env = std::env::var(DOH_ENV_VAR).ok();
     let config = read_config().ok().flatten();
-    vouch_common::dns::init_from(env.as_deref(), config.as_ref().and_then(|c| c.doh()))
+    dns::init_from(env.as_deref(), config.as_ref().and_then(|c| c.doh()))
         .context("invalid DNS-over-HTTPS configuration")
 }

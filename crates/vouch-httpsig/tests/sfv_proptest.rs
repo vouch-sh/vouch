@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Property-based tests for the SFV parser/serializer roundtrip.
 
+// Own-crate items are imported with `use`; see `absolute-paths-allowed-crates` in `.clippy.toml`.
+#![deny(clippy::absolute_paths)]
 #![expect(
     clippy::unwrap_used,
     clippy::let_underscore_must_use,

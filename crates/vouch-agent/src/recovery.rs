@@ -7,12 +7,15 @@
 //!
 //! This is best-effort: all errors are logged and never block startup.
 
+use crate::config;
+use crate::server;
 use crate::state::{AgentState, Session};
 
 use jiff::Timestamp;
 use secrecy::{ExposeSecret, SecretString};
 use std::sync::Arc;
 use tracing::{debug, info};
+use vouch_common::http;
 
 /// Try to recover a session from credentials persisted on disk.
 ///
@@ -43,7 +46,7 @@ async fn try_recover_inner(state: &Arc<AgentState>) -> Result<bool, Box<dyn std:
 
     // Reject insecure server URLs (unless explicitly allowed)
     if vouch_common::check_url_security(&server_url).is_insecure() {
-        if crate::server::allow_insecure() {
+        if server::allow_insecure() {
             tracing::warn!(
                 "Recovering session over insecure HTTP: {server_url}. VOUCH_ALLOW_INSECURE is set."
             );
@@ -58,8 +61,7 @@ async fn try_recover_inner(state: &Arc<AgentState>) -> Result<bool, Box<dyn std:
     debug!("Found persisted token, validating with server");
 
     // Validate token with the server
-    let client =
-        vouch_common::http::agent_client(&format!("vouch-agent/{}", env!("CARGO_PKG_VERSION")))?;
+    let client = http::agent_client(&format!("vouch-agent/{}", env!("CARGO_PKG_VERSION")))?;
 
     let response = client
         .get(format!("{server_url}/v1/auth/status"))
@@ -113,7 +115,7 @@ async fn try_recover_inner(state: &Arc<AgentState>) -> Result<bool, Box<dyn std:
 ///
 /// Returns `Some((token, server_url))` if both are present, `None` otherwise.
 fn read_credentials_from_config() -> Result<Option<(String, String)>, Box<dyn std::error::Error>> {
-    let config = match crate::config::read_config() {
+    let config = match config::read_config() {
         Ok(Some(c)) => c,
         Ok(None) => return Ok(None),
         Err(e) => {

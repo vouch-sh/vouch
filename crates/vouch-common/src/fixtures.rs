@@ -134,6 +134,7 @@ impl Fido2Fixture {
 )]
 mod tests {
     use super::*;
+    use crate::protocol::{CLIENT_DATA_TYPE_CREATE, CLIENT_DATA_TYPE_GET};
 
     #[test]
     fn test_fixture_serialization() {
@@ -147,10 +148,7 @@ mod tests {
             },
             registration: RegistrationFixture {
                 challenge_hex: "00".repeat(32),
-                client_data_json: format!(
-                    r#"{{"type":"{}"}}"#,
-                    crate::protocol::CLIENT_DATA_TYPE_CREATE
-                ),
+                client_data_json: format!(r#"{{"type":"{}"}}"#, CLIENT_DATA_TYPE_CREATE),
                 credential_id_hex: "01".repeat(32),
                 public_key_cose_hex: "a5".to_string(),
                 auth_data_hex: "00".repeat(37),
@@ -160,10 +158,7 @@ mod tests {
             },
             authentication: AuthenticationFixture {
                 challenge_hex: "ff".repeat(32),
-                client_data_json: format!(
-                    r#"{{"type":"{}"}}"#,
-                    crate::protocol::CLIENT_DATA_TYPE_GET
-                ),
+                client_data_json: format!(r#"{{"type":"{}"}}"#, CLIENT_DATA_TYPE_GET),
                 auth_data_hex: "00".repeat(37),
                 signature_hex: "3045".to_string(),
                 user_handle_hex: None,

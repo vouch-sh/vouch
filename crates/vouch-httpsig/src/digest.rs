@@ -10,6 +10,8 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 
 use crate::error::HttpSigError;
+use crate::sfv::parse;
+use crate::sfv::types::{SfvBareItem, SfvDictMember};
 
 /// Supported digest algorithms per RFC 9530.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,7 +94,7 @@ pub fn set_content_digest(
 /// Returns [`HttpSigError::DigestMismatch`] if any recognized algorithm doesn't match.
 /// Returns [`HttpSigError::SfvParse`] if the header cannot be parsed.
 pub fn verify_content_digest(header_value: &str, body: &[u8]) -> Result<(), HttpSigError> {
-    let dict = crate::sfv::parse::parse_dictionary(header_value)
+    let dict = parse::parse_dictionary(header_value)
         .map_err(|e| HttpSigError::SfvParse(format!("Content-Digest parse: {e}")))?;
 
     let mut found_recognized = false;
@@ -103,8 +105,8 @@ pub fn verify_content_digest(header_value: &str, body: &[u8]) -> Result<(), Http
         };
 
         let expected = match member {
-            crate::sfv::types::SfvDictMember::Item(item) => match &item.value {
-                crate::sfv::types::SfvBareItem::ByteSequence(bytes) => bytes,
+            SfvDictMember::Item(item) => match &item.value {
+                SfvBareItem::ByteSequence(bytes) => bytes,
                 _ => {
                     return Err(HttpSigError::SfvParse(format!(
                         "Content-Digest '{algo_name}' value must be a byte sequence"

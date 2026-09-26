@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Vouch agent daemon binary.
 
+// Own-crate items are imported with `use`; see `absolute-paths-allowed-crates` in `.clippy.toml`.
+#![deny(clippy::absolute_paths)]
+
 // Avoid musl's default allocator due to lackluster performance
 // https://nickb.dev/blog/default-musl-allocator-considered-harmful-to-performance
 #[cfg(target_env = "musl")]
@@ -14,6 +17,9 @@ use tokio::signal::unix::{SignalKind, signal};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 use vouch_agent::daemon;
+use vouch_agent::dns;
+use vouch_agent::expiry_monitor;
+use vouch_agent::i18n;
 use vouch_agent::recovery;
 use vouch_agent::server::AgentServer;
 use vouch_agent::socket::{prepare_vouch_dir, remove_socket};
@@ -24,6 +30,7 @@ use vouch_agent::state::AgentState;
     reason = "re-exported so dual-compiled submodules can use `crate::tr*!`"
 )]
 use vouch_agent::{tr, tr_args, tr_eprintln, tr_println};
+use vouch_common::paths;
 
 /// Vouch credential agent daemon.
 #[derive(Parser)]
@@ -60,7 +67,7 @@ fn main() -> ExitCode {
     // Relocate any legacy ~/.vouch/ files into the XDG base directories before
     // reading config or binding sockets. Runs before daemonization so the
     // one-time notice reaches the user's terminal rather than the daemon log.
-    vouch_common::paths::migrate_legacy_layout();
+    paths::migrate_legacy_layout();
 
     // `--status` and `--stop` are operator controls for an already-running
     // daemon, so they intentionally run before i18n init: a packaging bug
@@ -89,7 +96,7 @@ fn main() -> ExitCode {
         return stop_agent();
     }
 
-    if let Err(e) = vouch_agent::i18n::init() {
+    if let Err(e) = i18n::init() {
         eprintln!("Error initializing i18n: {e}");
         return ExitCode::FAILURE;
     }
@@ -158,7 +165,7 @@ fn main() -> ExitCode {
     // Initialize the process-wide DNS-over-HTTPS resolver from config + env
     // before any HTTP traffic. Validates the configuration eagerly; the
     // hickory resolver itself is built lazily on first use.
-    if let Err(e) = vouch_agent::dns::init() {
+    if let Err(e) = dns::init() {
         error!("DNS-over-HTTPS initialization failed: {e:#}");
         return ExitCode::FAILURE;
     }
@@ -205,7 +212,7 @@ async fn run_agent_server(enable_ssh_agent: bool) -> ExitCode {
     info!("Agent starting");
 
     // Spawn session expiry monitor (background task)
-    tokio::spawn(vouch_agent::expiry_monitor::run(Arc::clone(&state)));
+    tokio::spawn(expiry_monitor::run(Arc::clone(&state)));
 
     // Arm the signal handlers here, before either listener binds its socket
     // and before the waiter task below is first polled.

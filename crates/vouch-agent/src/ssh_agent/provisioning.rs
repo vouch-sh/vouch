@@ -7,9 +7,11 @@
 //! `vouch credential ssh` path and pushed to the agent over IPC. The agent only
 //! serves what it has in memory or can reload from disk.
 
+use crate::audit::{self, AuditEvent};
 use crate::error::{AgentError, Result};
 use std::sync::Arc;
 use tracing::{debug, info};
+use vouch_common::paths;
 
 use super::DEFAULT_KEY_NAME;
 use super::credentials::SshCredentials;
@@ -52,7 +54,7 @@ pub(super) async fn handle_sign_request(buf: &[u8], state: &Arc<AgentState>) -> 
     // Sign the data (returns encoded signature blob)
     let sig_blob = sign_data(&creds.private_key, &data)?;
 
-    crate::audit::log_event(crate::audit::AuditEvent::SshSigning);
+    audit::log_event(AuditEvent::SshSigning);
 
     build_sign_response(&sig_blob)
 }
@@ -71,7 +73,7 @@ async fn try_load_from_disk(state: &Arc<AgentState>) -> Option<SshCredentials> {
     state.get_session().await?;
 
     // Check for default key and cert files on disk
-    let home = vouch_common::paths::home_dir()?;
+    let home = paths::home_dir()?;
     let ssh_dir = home.join(".ssh");
     let key_path = ssh_dir.join(DEFAULT_KEY_NAME);
     let cert_path = ssh_dir.join(format!("{DEFAULT_KEY_NAME}-cert.pub"));
