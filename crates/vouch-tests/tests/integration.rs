@@ -445,10 +445,12 @@ mod auth_security {
 
 mod device_flow {
     use super::*;
+    use vouch_server::db::AuditEventFilter;
+    use vouch_server::test_utils::TestOAuthClient;
 
     /// A registered client for the device flow: both endpoints authenticate
     /// the caller (RFC 8628 §3.1 and §3.4).
-    async fn device_client(harness: &TestHarness) -> vouch_server::test_utils::TestOAuthClient {
+    async fn device_client(harness: &TestHarness) -> TestOAuthClient {
         let owner = harness
             .create_user("device-client-owner@example.com")
             .await
@@ -682,7 +684,7 @@ mod device_flow {
         let rows = harness
             .state
             .audit
-            .query_events(&vouch_server::db::AuditEventFilter {
+            .query_events(&AuditEventFilter {
                 event_types: Some(vec!["oauth_token_issued".to_string()]),
                 user_id: Some(user.id.clone()),
                 ..Default::default()
@@ -843,6 +845,7 @@ mod register_flow {
 
 mod keys {
     use super::*;
+    use vouch_server::db;
 
     /// Test that list keys returns user's keys.
     #[tokio::test]
@@ -1082,10 +1085,9 @@ mod keys {
             "losing delete must return 400 or 409, got {loser} (s1={s1} s2={s2})"
         );
 
-        let remaining =
-            vouch_server::db::get_authenticators_for_user(&harness.state.store, &user.id)
-                .await
-                .expect("Failed to query remaining authenticators");
+        let remaining = db::get_authenticators_for_user(&harness.state.store, &user.id)
+            .await
+            .expect("Failed to query remaining authenticators");
         assert_eq!(
             remaining.len(),
             1,
@@ -2576,6 +2578,7 @@ mod es256_flow {
 
 mod encoding_verification {
     use super::*;
+    use vouch_server::crypto::webauthn_verify::OriginPolicy;
     /// Verify MockFidoDevice data survives JSON round-trip
     #[tokio::test]
     async fn test_mock_device_data_survives_serialization() {
@@ -2797,8 +2800,7 @@ mod encoding_verification {
                 expected_origin: "https://test.local",
                 stored_counter: 0,
                 require_user_verification: true,
-                origin_policy:
-                    vouch_server::crypto::webauthn_verify::OriginPolicy::AllowLoopbackVariations,
+                origin_policy: OriginPolicy::AllowLoopbackVariations,
             },
             &verifier,
         );
@@ -2816,6 +2818,8 @@ mod httpsig {
     use vouch_cli::fapi::ClientKey;
     use vouch_cli::fapi::httpsig::ClientKeySigner;
     use vouch_httpsig::SignatureBuilder;
+    use vouch_server::crypto::alg::JwsAlgorithm;
+    use vouch_server::db::{self, OAuthClientType, TokenEndpointAuthMethod};
 
     /// Helper: create a user with an OAuth client that has JWKS containing
     /// the given ClientKey's public key, and a session bound to that client.
@@ -2835,14 +2839,12 @@ mod httpsig {
             &user.id,
             TestClientSpec {
                 name: "Test FAPI Client".to_string(),
-                application_type: vouch_server::db::OAuthClientType::Native,
+                application_type: OAuthClientType::Native,
                 redirect_uris: vec![],
-                token_endpoint_auth_method: Some(
-                    vouch_server::db::TokenEndpointAuthMethod::PrivateKeyJwt,
-                ),
+                token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
                 jwks: TestJwks::Custom(jwks),
                 dpop_bound_access_tokens: true,
-                id_token_signed_response_alg: vouch_server::crypto::alg::JwsAlgorithm::Es256,
+                id_token_signed_response_alg: JwsAlgorithm::Es256,
                 with_secret: false,
                 ..Default::default()
             },
@@ -2948,22 +2950,20 @@ mod httpsig {
             &user.id,
             TestClientSpec {
                 name: "Test FAPI Client".to_string(),
-                application_type: vouch_server::db::OAuthClientType::Native,
+                application_type: OAuthClientType::Native,
                 redirect_uris: vec![],
-                token_endpoint_auth_method: Some(
-                    vouch_server::db::TokenEndpointAuthMethod::PrivateKeyJwt,
-                ),
+                token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
                 jwks: TestJwks::None,
                 jwks_uri: Some("https://client.example/jwks.json".to_string()),
                 dpop_bound_access_tokens: true,
-                id_token_signed_response_alg: vouch_server::crypto::alg::JwsAlgorithm::Es256,
+                id_token_signed_response_alg: JwsAlgorithm::Es256,
                 with_secret: false,
                 ..Default::default()
             },
         )
         .await;
 
-        vouch_server::db::upsert_jwks_cache(&harness.state.store, &client.app_id, &jwks)
+        db::upsert_jwks_cache(&harness.state.store, &client.app_id, &jwks)
             .await
             .unwrap();
 

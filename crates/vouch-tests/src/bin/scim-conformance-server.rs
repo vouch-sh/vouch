@@ -14,6 +14,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::json;
+use vouch_server::config::NonEmptySecret;
+use vouch_server::test_utils;
 use vouch_tests::TestHarness;
 
 #[tokio::main]
@@ -24,13 +26,12 @@ async fn main() -> Result<()> {
     };
     let listen: SocketAddr = listen.parse().context("parse listen address")?;
 
-    let state = vouch_server::test_utils::test_app_state().await;
+    let state = test_utils::test_app_state().await;
     // The rate limiters are skipped only when a certification token is
     // configured; a conformance run sends a burst the general limiter would
     // refuse. The token affects the certification routes, not SCIM.
     let mut config = state.config().as_ref().clone();
-    config.certification_test_token =
-        vouch_server::config::NonEmptySecret::new("scim-conformance".to_string().into());
+    config.certification_test_token = NonEmptySecret::new("scim-conformance".to_string().into());
     state.config.store(Arc::new(config));
     let harness = TestHarness::from_state(state);
 

@@ -38,8 +38,10 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use vouch_server::db::{self, CreateAuthenticatorParams};
-use vouch_server::test_utils::build_client_assertion;
+use vouch_server::db::{self, CreateAuthenticatorParams, TokenEndpointAuthMethod};
+use vouch_server::test_utils::{
+    self, TestClientSpec, TestJwks, TestOAuthClient, build_client_assertion,
+};
 use vouch_tests::{IntegrationMockDevice, TestHarness};
 
 // ── Helpers ──────────────────────────────────────────────────────────────
@@ -134,19 +136,17 @@ async fn register_mock_device_in_db(
 async fn create_legitimate_client(
     harness: &TestHarness,
     user_id: &str,
-) -> (vouch_server::test_utils::TestOAuthClient, Vec<u8>) {
+) -> (TestOAuthClient, Vec<u8>) {
     let (pkcs8, jwk) = generate_es256_key();
-    let client = vouch_server::test_utils::create_test_client(
+    let client = test_utils::create_test_client(
         &harness.state.store,
         user_id,
-        vouch_server::test_utils::TestClientSpec {
+        TestClientSpec {
             name: "Legitimate FIDO2 Client".to_string(),
-            jwks: vouch_server::test_utils::TestJwks::Custom(serde_json::json!({
+            jwks: TestJwks::Custom(serde_json::json!({
                 "keys": [jwk]
             })),
-            token_endpoint_auth_method: Some(
-                vouch_server::db::TokenEndpointAuthMethod::PrivateKeyJwt,
-            ),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
             ..Default::default()
         },
     )

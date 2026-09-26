@@ -21,14 +21,14 @@ use vouch_tests::{IntegrationMockDevice, TestHarness};
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
+use vouch_server::db::TokenEndpointAuthMethod;
+use vouch_server::infra::metrics;
 /// Build a `private_key_jwt` client assertion (ES256 JWT) for the token endpoint.
 use vouch_server::test_utils::build_client_assertion;
+use vouch_server::test_utils::{self, TestOAuthClient};
 
 /// Create an OAuth client configured for `private_key_jwt` with inline JWKS.
-async fn create_jwt_client(
-    harness: &TestHarness,
-    user_id: &str,
-) -> (vouch_server::test_utils::TestOAuthClient, Vec<u8>) {
+async fn create_jwt_client(harness: &TestHarness, user_id: &str) -> (TestOAuthClient, Vec<u8>) {
     use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, KeyPair};
     use vouch_server::test_utils::{TestClientSpec, TestJwks};
 
@@ -55,15 +55,13 @@ async fn create_jwt_client(
         }]
     });
 
-    let client = vouch_server::test_utils::create_test_client(
+    let client = test_utils::create_test_client(
         &harness.state.store,
         user_id,
         TestClientSpec {
             name: "FIDO2 Grant Test Client".to_string(),
             jwks: TestJwks::Custom(jwks),
-            token_endpoint_auth_method: Some(
-                vouch_server::db::TokenEndpointAuthMethod::PrivateKeyJwt,
-            ),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
             ..Default::default()
         },
     )
@@ -105,7 +103,7 @@ async fn register_mock_device_in_db(
 /// client that will redeem it.
 async fn get_challenge(
     harness: &TestHarness,
-    client: &vouch_server::test_utils::TestOAuthClient,
+    client: &TestOAuthClient,
     pkcs8: &[u8],
 ) -> (Vec<u8>, String) {
     let client_assertion = build_client_assertion(
@@ -146,7 +144,7 @@ struct AssertionExchange<'a> {
     challenge: &'a [u8],
     state_jwt: &'a str,
     user_id: &'a str,
-    client: &'a vouch_server::test_utils::TestOAuthClient,
+    client: &'a TestOAuthClient,
     pkcs8: &'a [u8],
     authorization_details: Option<&'a str>,
 }
@@ -941,7 +939,7 @@ async fn custom_policy_denial_records_name_in_audit_and_error() {
     );
 
     // Step 6: Verify Prometheus metrics used the generic "custom" label.
-    let handle = vouch_server::infra::metrics::install_recorder().expect("prometheus recorder");
+    let handle = metrics::install_recorder().expect("prometheus recorder");
     let metrics_text = handle.render();
     assert!(
         metrics_text.contains("vouch_policy_decisions_total"),
@@ -1021,7 +1019,7 @@ async fn preconfigured_policy_denial_records_slug_in_audit_and_metrics() {
     );
 
     // Verify metrics use the slug too.
-    let handle = vouch_server::infra::metrics::install_recorder().expect("prometheus recorder");
+    let handle = metrics::install_recorder().expect("prometheus recorder");
     let metrics_text = handle.render();
     assert!(
         metrics_text.contains(r#"outcome="deny""#)

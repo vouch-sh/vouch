@@ -21,8 +21,8 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use vouch_server::db::{self, AuditEventKind, CreateAuthenticatorParams};
-use vouch_server::test_utils::build_client_assertion;
+use vouch_server::db::{self, AuditEventKind, CreateAuthenticatorParams, TokenEndpointAuthMethod};
+use vouch_server::test_utils::{self, TestOAuthClient, build_client_assertion};
 use vouch_tests::{IntegrationMockDevice, TestHarness};
 
 // ── Shared helpers ───────────────────────────────────────────────────────
@@ -291,10 +291,7 @@ async fn test_exchange_ip_consistency_denies_different_ip() {
 // The helpers below are duplicated from fido2_posture_e2e.rs (separate
 // test binaries cannot share modules without a support-crate refactor).
 
-async fn create_jwt_client(
-    harness: &TestHarness,
-    user_id: &str,
-) -> (vouch_server::test_utils::TestOAuthClient, Vec<u8>) {
+async fn create_jwt_client(harness: &TestHarness, user_id: &str) -> (TestOAuthClient, Vec<u8>) {
     use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, KeyPair};
     use vouch_server::test_utils::{TestClientSpec, TestJwks};
 
@@ -310,15 +307,13 @@ async fn create_jwt_client(
     let jwks = serde_json::json!({
         "keys": [{ "kty": "EC", "crv": "P-256", "alg": "ES256", "kid": "test-key-1", "x": x, "y": y }]
     });
-    let client = vouch_server::test_utils::create_test_client(
+    let client = test_utils::create_test_client(
         &harness.state.store,
         user_id,
         TestClientSpec {
             name: "Temporal E2E Client".to_string(),
             jwks: TestJwks::Custom(jwks),
-            token_endpoint_auth_method: Some(
-                vouch_server::db::TokenEndpointAuthMethod::PrivateKeyJwt,
-            ),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
             ..Default::default()
         },
     )
@@ -354,7 +349,7 @@ async fn register_mock_device_in_db(
 
 async fn get_challenge(
     harness: &TestHarness,
-    client: &vouch_server::test_utils::TestOAuthClient,
+    client: &TestOAuthClient,
     pkcs8: &[u8],
 ) -> (Vec<u8>, String) {
     let client_assertion = build_client_assertion(
@@ -388,7 +383,7 @@ async fn fido2_grant(
     harness: &TestHarness,
     device: &IntegrationMockDevice,
     user_id: &str,
-    client: &vouch_server::test_utils::TestOAuthClient,
+    client: &TestOAuthClient,
     pkcs8: &[u8],
 ) -> (u16, serde_json::Value) {
     signed_grant(harness, device, user_id, client, pkcs8, false).await
@@ -402,7 +397,7 @@ async fn signed_grant(
     harness: &TestHarness,
     device: &IntegrationMockDevice,
     user_handle: &str,
-    client: &vouch_server::test_utils::TestOAuthClient,
+    client: &TestOAuthClient,
     pkcs8: &[u8],
     tamper_signature: bool,
 ) -> (u16, serde_json::Value) {
@@ -458,7 +453,7 @@ async fn grant_scenario(
     TestHarness,
     db::User,
     IntegrationMockDevice,
-    vouch_server::test_utils::TestOAuthClient,
+    TestOAuthClient,
     Vec<u8>,
 ) {
     grant_scenario_on(TestHarness::new().await, slugs, domain, email).await
@@ -479,10 +474,10 @@ async fn unthrottled_grant_scenario(
     TestHarness,
     db::User,
     IntegrationMockDevice,
-    vouch_server::test_utils::TestOAuthClient,
+    TestOAuthClient,
     Vec<u8>,
 ) {
-    let (_, state) = vouch_server::test_utils::test_app_with_certification().await;
+    let (_, state) = test_utils::test_app_with_certification().await;
     grant_scenario_on(TestHarness::from_state(state), slugs, domain, email).await
 }
 
@@ -495,7 +490,7 @@ async fn grant_scenario_on(
     TestHarness,
     db::User,
     IntegrationMockDevice,
-    vouch_server::test_utils::TestOAuthClient,
+    TestOAuthClient,
     Vec<u8>,
 ) {
     let org = harness.create_org(domain).await.expect("create org");
@@ -678,11 +673,11 @@ struct LockoutScenario {
     harness: TestHarness,
     victim: db::User,
     victim_device: IntegrationMockDevice,
-    victim_client: vouch_server::test_utils::TestOAuthClient,
+    victim_client: TestOAuthClient,
     victim_pkcs8: Vec<u8>,
     attacker: db::User,
     attacker_device: IntegrationMockDevice,
-    attacker_client: vouch_server::test_utils::TestOAuthClient,
+    attacker_client: TestOAuthClient,
     attacker_pkcs8: Vec<u8>,
 }
 
@@ -901,7 +896,7 @@ async fn test_failed_login_burst_ignores_storage_faults() {
         .clone();
 
     // Each grant's lookup now fails at the storage layer.
-    vouch_server::test_utils::corrupt_document(&harness.state.store, &auth_id).await;
+    test_utils::corrupt_document(&harness.state.store, &auth_id).await;
     for i in 0..5 {
         let (status, json) = fido2_grant(&harness, &device, &user.id, &client, &pkcs8).await;
         assert_eq!(status, 500, "storage fault #{i} must be a 5xx: {json}");
@@ -918,7 +913,7 @@ async fn test_failed_login_burst_ignores_storage_faults() {
     );
 
     // Repair the record; the next grant must not be denied.
-    vouch_server::test_utils::remove_test_authenticator(&harness.state.store, &auth_id).await;
+    test_utils::remove_test_authenticator(&harness.state.store, &auth_id).await;
     register_mock_device_in_db(&harness, &user.id, &device).await;
     let (status, json) = fido2_grant(&harness, &device, &user.id, &client, &pkcs8).await;
     assert_eq!(

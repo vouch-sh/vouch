@@ -24,16 +24,14 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use vouch_server::db::{self, CreateAuthenticatorParams};
 use vouch_tests::{IntegrationMockDevice, TestHarness};
 
-use vouch_server::test_utils::build_client_assertion;
+use vouch_server::db::TokenEndpointAuthMethod;
+use vouch_server::test_utils::{self, TestOAuthClient, build_client_assertion};
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
 /// Build a `private_key_jwt` client assertion (ES256 JWT) for the token
 /// endpoint. Mirrors the helper in `fido2_posture_e2e.rs`.
-async fn create_jwt_client(
-    harness: &TestHarness,
-    user_id: &str,
-) -> (vouch_server::test_utils::TestOAuthClient, Vec<u8>) {
+async fn create_jwt_client(harness: &TestHarness, user_id: &str) -> (TestOAuthClient, Vec<u8>) {
     use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, KeyPair};
     use vouch_server::test_utils::{TestClientSpec, TestJwks};
 
@@ -59,15 +57,13 @@ async fn create_jwt_client(
         }]
     });
 
-    let client = vouch_server::test_utils::create_test_client(
+    let client = test_utils::create_test_client(
         &harness.state.store,
         user_id,
         TestClientSpec {
             name: "Registration Counter Test Client".to_string(),
             jwks: TestJwks::Custom(jwks),
-            token_endpoint_auth_method: Some(
-                vouch_server::db::TokenEndpointAuthMethod::PrivateKeyJwt,
-            ),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
             ..Default::default()
         },
     )
@@ -115,7 +111,7 @@ async fn register_mock_device_in_db_with_counter(
 /// client that will redeem it.
 async fn get_challenge(
     harness: &TestHarness,
-    client: &vouch_server::test_utils::TestOAuthClient,
+    client: &TestOAuthClient,
     pkcs8: &[u8],
 ) -> (Vec<u8>, String) {
     let client_assertion = build_client_assertion(
@@ -155,7 +151,7 @@ async fn exchange_fido2_assertion(
     challenge: &[u8],
     state_jwt: &str,
     user_id: &str,
-    client: &vouch_server::test_utils::TestOAuthClient,
+    client: &TestOAuthClient,
     pkcs8: &[u8],
 ) -> (u16, serde_json::Value) {
     exchange_fido2_assertion_with(
@@ -188,7 +184,7 @@ async fn exchange_fido2_assertion_with(
     challenge: &[u8],
     state_jwt: &str,
     user_id: &str,
-    client: &vouch_server::test_utils::TestOAuthClient,
+    client: &TestOAuthClient,
     pkcs8: &[u8],
     signature: Signature,
 ) -> (u16, serde_json::Value) {

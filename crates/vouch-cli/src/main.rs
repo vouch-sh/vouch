@@ -6,9 +6,6 @@
     clippy::print_stderr,
     reason = "stdout and stderr are this binary's user interface"
 )]
-// Own-crate items are imported with `use`; see `absolute-paths-allowed-crates` in `.clippy.toml`.
-#![deny(clippy::absolute_paths)]
-
 // Avoid musl's default allocator due to lackluster performance
 // https://nickb.dev/blog/default-musl-allocator-considered-harmful-to-performance
 #[cfg(target_env = "musl")]

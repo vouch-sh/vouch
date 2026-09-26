@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Shared types for vouch CLI and server.
 
-// Own-crate items are imported with `use`; see `absolute-paths-allowed-crates` in `.clippy.toml`.
-#![deny(clippy::absolute_paths)]
-
 pub mod aaguid;
 pub(crate) mod api;
 pub mod aws;
