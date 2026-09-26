@@ -696,11 +696,11 @@ proxy also refuses.
 
 | month | n | median age | p90 | <30d | >90d |
 |-------|---|-----------|-----|------|------|
-| 2026-09 | 140 | — | — | 72 | 47 |
+| 2026-09 | 140 | 14 | 194 | 72 | 47 |
 
-2 issues, 2 fix PRs. `detail-stats.py` was not run (no `gh` in the session),
-so n, `<30d` and `>90d` are the 09-25 row plus this batch's two one-day-old
-findings. Median and p90 were not recomputed.
+2 issues, 2 fix PRs. `detail-stats.py` ran through a REST shim that stands in
+for `gh` (see the 09-25 note), and its batch row matches the table: Detail PR
+1, PR≤3d 2.
 
 Both findings blame merges from 09-25 (Detail PR 1, PR≤3d 2), and both are
 defects the merged change exposed rather than wrote:
