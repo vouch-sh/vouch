@@ -16,6 +16,7 @@ use axum::http::request::Parts;
 use serde::Serialize;
 
 use crate::AppState;
+use crate::infra::mtls_listener;
 use crate::infra::rate_limit::resolve_client_ip;
 
 /// Maximum length for hostname values (RFC 1035: 253 chars).
@@ -109,10 +110,7 @@ impl FromRequestParts<Arc<AppState>> for ClientInfo {
         parts: &mut Parts,
         state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
-        let peer_ip = parts
-            .extensions
-            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-            .map(|ci| ci.0.ip().to_canonical());
+        let peer_ip = mtls_listener::peer_ip_from_extensions(&parts.extensions);
 
         let config = state.config.load();
         let client_ip = resolve_client_ip(peer_ip, &parts.headers, &config.trusted_proxies);

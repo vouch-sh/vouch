@@ -33,6 +33,8 @@ use tower_governor::GovernorLayer;
 use tower_governor::governor::GovernorConfigBuilder;
 use tower_governor::key_extractor::KeyExtractor;
 
+use crate::infra::mtls_listener;
+
 /// Key extractor that resolves the real client IP behind trusted proxies.
 ///
 /// Uses `resolve_client_ip()` to walk X-Forwarded-For when the TCP peer
@@ -64,10 +66,7 @@ impl KeyExtractor for TrustedProxyKeyExtractor {
         &self,
         req: &http::Request<T>,
     ) -> std::result::Result<Self::Key, tower_governor::GovernorError> {
-        let peer_ip = req
-            .extensions()
-            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-            .map(|ci| ci.0.ip().to_canonical());
+        let peer_ip = mtls_listener::peer_ip_from_extensions(req.extensions());
 
         resolve_client_ip(peer_ip, req.headers(), &self.trusted_cidrs)
             .ok_or(tower_governor::GovernorError::UnableToExtractKey)
