@@ -282,7 +282,7 @@ impl FromRequestParts<Arc<AppState>> for OptionalClientCert {
             .extensions
             .get::<axum::extract::ConnectInfo<crate::infra::mtls_listener::PeerClientCert>>()
             .and_then(|ci| {
-                let (leaf, intermediates) = ci.0.0.split_first()?;
+                let (leaf, intermediates) = ci.0.peer_chain_der.split_first()?;
                 let mut cert = crate::services::oidc::mtls::parse_client_certificate(leaf).ok()?;
                 cert.intermediates = intermediates.to_vec();
                 Some(cert)
@@ -551,9 +551,10 @@ mod tests {
         let state = crate::test_utils::test_app_state().await;
         let mut request = http::Request::builder().body(()).unwrap();
         if let Some(chain) = chain {
-            request
-                .extensions_mut()
-                .insert(ConnectInfo(PeerClientCert(chain)));
+            request.extensions_mut().insert(ConnectInfo(PeerClientCert {
+                peer_chain_der: chain,
+                peer_addr: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
+            }));
         }
         let (mut parts, _) = request.into_parts();
         let Ok(OptionalClientCert(cert)) =

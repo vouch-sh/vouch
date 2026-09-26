@@ -2276,14 +2276,15 @@ async fn par_post_full(
         .body(axum::body::Body::from(body.to_string()))
         .expect("Failed to build request");
     let (mut parts, body_inner) = request.into_parts();
-    parts
-        .extensions
-        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
-            [127, 0, 0, 1],
-            0,
-        ))));
+    // Simulate the real mTLS port: axum injects a single `ConnectInfo<T>` per
+    // connection — `ConnectInfo<PeerClientCert>` here — so no separate
+    // `ConnectInfo<SocketAddr>` is present. The peer address rides on
+    // `PeerClientCert.peer_addr` and is resolved via `peer_ip_from_extensions`.
     parts.extensions.insert(axum::extract::ConnectInfo(
-        crate::infra::mtls_listener::PeerClientCert(cert_der.into_iter().collect()),
+        crate::infra::mtls_listener::PeerClientCert {
+            peer_chain_der: cert_der.into_iter().collect(),
+            peer_addr: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
+        },
     ));
     let request = axum::http::Request::from_parts(parts, body_inner);
     let response = app

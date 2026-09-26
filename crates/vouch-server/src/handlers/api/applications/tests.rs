@@ -4441,3 +4441,112 @@ async fn application_api_audit_rows_record_transport() {
         assert_audit_rows_record_transport(&state, event_type, ua).await;
     }
 }
+
+// ========================================================================
+// mTLS port: peer IP without ConnectInfo<SocketAddr>
+// ========================================================================
+
+/// On the mTLS port axum's `into_make_service_with_connect_info::<PeerClientCert>()`
+/// injects only `ConnectInfo<PeerClientCert>` — there is no
+/// `ConnectInfo<SocketAddr>`. The `TrustedProxyKeyExtractor` (rate limiter) and
+/// the `ClientInfo` audit extractor must therefore resolve the peer IP from
+/// `PeerClientCert.peer_addr` via `peer_ip_from_extensions`. Before the fix the
+/// rate limiter found no key and returned HTTP 500 on every rate-limited mTLS
+/// request (`/oauth/token`, `/oauth/register`, `/oauth/revoke`,
+/// `/oauth/introspect`, `/api/v1/*`); this test pins the fix by asserting the
+/// handler runs (non-500) on the simulated mTLS port, and that the HTTPS-port
+/// control (which has `ConnectInfo<SocketAddr>`) is unchanged.
+#[tokio::test]
+async fn mtls_port_without_socketaddr_extension_does_not_500() {
+    use axum::body::Body;
+    use axum::extract::ConnectInfo;
+    use axum::http::Request;
+    use std::net::SocketAddr;
+    use tower::ServiceExt;
+
+    use crate::infra::mtls_listener::PeerClientCert;
+
+    // --- mTLS-port simulation: only ConnectInfo<PeerClientCert> present ---
+    // `test_config()` has `certification_test_token: None`, so the real
+    // auth rate limiter is installed on `/oauth/token`.
+    let (app, _state) = test_app().await;
+    let request = Request::builder()
+        .method("POST")
+        .uri("/oauth/token")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from("grant_type=client_credentials"))
+        .unwrap();
+    let (mut parts, body) = request.into_parts();
+    parts.extensions.insert(ConnectInfo(PeerClientCert {
+        peer_chain_der: Vec::new(),
+        peer_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+    }));
+    let request = Request::from_parts(parts, body);
+    let mtls_status = app.oneshot(request).await.unwrap().status();
+    assert_ne!(
+        mtls_status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "mTLS port (only ConnectInfo<PeerClientCert>): the rate limiter must \
+         resolve a key from PeerClientCert.peer_addr and hand off to the \
+         handler (non-500); got {mtls_status}"
+    );
+
+    // --- Control: HTTPS-port simulation — ConnectInfo<SocketAddr> present ---
+    let (app2, _state2) = test_app().await;
+    let request = Request::builder()
+        .method("POST")
+        .uri("/oauth/token")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from("grant_type=client_credentials"))
+        .unwrap();
+    let (mut parts, body) = request.into_parts();
+    parts
+        .extensions
+        .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 0))));
+    let request = Request::from_parts(parts, body);
+    let https_status = app2.oneshot(request).await.unwrap().status();
+    assert_ne!(
+        https_status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "HTTPS port (ConnectInfo<SocketAddr> present): expected handler to \
+         run (non-500), got {https_status}"
+    );
+}
+
+/// An audit row written on the simulated mTLS port — only
+/// `ConnectInfo<PeerClientCert>` injected, no `ConnectInfo<SocketAddr>` —
+/// records the peer IP carried by `PeerClientCert.peer_addr`. Before the fix
+/// commit 9c4231fc's `ClientInfo` extractor read only `ConnectInfo<SocketAddr>`
+/// (absent on the mTLS port), so every mTLS audit row carried
+/// `client_ip: null` despite the commit's "every audit row" scope.
+#[tokio::test]
+async fn mtls_port_audit_row_records_peer_cert_addr() {
+    let (app, state) = test_app().await;
+    let (app_id, token) = setup_user_with_app(&state, "mtls-audit-transport@example.com").await;
+    let auth = bearer(&token);
+    let ua = "vouch-mtls-audit/1.0";
+    let headers = [("Authorization", auth.as_str()), ("User-Agent", ua)];
+
+    // Simulated mTLS port: `http_post_json_with_cert` injects only
+    // `ConnectInfo<PeerClientCert{peer_addr: 127.0.0.1}>` — no
+    // `ConnectInfo<SocketAddr>`. No client cert is needed: the applications
+    // API authenticates via the bearer token.
+    let (status, body) = http_post_json_with_cert(
+        &app,
+        &format!("/api/v1/applications/{app_id}/secrets"),
+        "{}",
+        &headers,
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "add secret on mTLS port: {body}"
+    );
+
+    // `assert_audit_rows_record_transport` asserts `client_ip == "127.0.0.1"`
+    // and `user_agent == ua`; with the fallback broken, `client_ip` would be
+    // null and this would fail.
+    assert_audit_rows_record_transport(&state, "oauth_secret_added", ua).await;
+}

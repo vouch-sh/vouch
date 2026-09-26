@@ -959,9 +959,15 @@ impl TestClientCa {
     }
 }
 
-/// Build a request with an injected mTLS client certificate DER.
+/// Build a request that simulates the real mTLS port.
 ///
-/// Injects `ConnectInfo<PeerClientCert>` so `OptionalClientCert` extracts it.
+/// Injects only `ConnectInfo<PeerClientCert>` (carrying the peer `SocketAddr`)
+/// — the single connection extension axum's
+/// `into_make_service_with_connect_info::<PeerClientCert>()` inserts on the
+/// mTLS port — so `OptionalClientCert` extracts the cert and the rate limiter
+/// / `ClientInfo` extractors resolve the peer IP through `PeerClientCert`
+/// (`peer_ip_from_extensions`'s fallback path). Pass `None` for `cert_der` to
+/// simulate a connection where no client certificate was presented.
 fn build_test_request_with_cert(
     method: &str,
     uri: &str,
@@ -981,12 +987,18 @@ fn build_test_request_with_cert(
     };
     let request = req_builder.body(body).expect("Failed to build request");
     let (mut parts, body) = request.into_parts();
-    parts
-        .extensions
-        .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 0))));
-    parts
-        .extensions
-        .insert(ConnectInfo(PeerClientCert(cert_der.into_iter().collect())));
+    // Simulate the real mTLS port. axum's
+    // `into_make_service_with_connect_info::<PeerClientCert>()` injects exactly
+    // one `ConnectInfo<T>` per connection — `ConnectInfo<PeerClientCert>` — so
+    // the mTLS port has no separate `ConnectInfo<SocketAddr>`. The peer address
+    // rides on `PeerClientCert.peer_addr`, and the rate limiter / `ClientInfo`
+    // extractors resolve it via `peer_ip_from_extensions`. Injecting
+    // `ConnectInfo<SocketAddr>` here would mask the production mTLS condition
+    // (the prior harness did, hiding the `client_ip: null` / 500 regression).
+    parts.extensions.insert(ConnectInfo(PeerClientCert {
+        peer_chain_der: cert_der.into_iter().collect(),
+        peer_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+    }));
     Request::from_parts(parts, body)
 }
 

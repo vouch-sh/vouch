@@ -22,22 +22,70 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::TlsAcceptor;
 
-/// DER-encoded certificate chain the client presented in the TLS handshake,
-/// leaf first; empty when the client presented none.
+/// The mTLS connection's peer certificate chain and remote socket address.
 ///
-/// Injected as a connection extension via [`axum::extract::ConnectInfo`] so
-/// handlers can extract the client certificate for authentication. The
-/// intermediates travel with the leaf because `tls_client_auth` (RFC 8705
-/// §2.1) validates the chain at the application layer.
+/// Both travel in a single connection extension because axum's
+/// [`Router::into_make_service_with_connect_info::<T>`] inserts exactly one
+/// `ConnectInfo<T>` per connection. The mTLS listener is wired with
+/// `into_make_service_with_connect_info::<PeerClientCert>()`, so on the mTLS
+/// port `ConnectInfo<PeerClientCert>` is the *only* connection extension
+/// present — there is no separate `ConnectInfo<SocketAddr>`. The peer
+/// `SocketAddr` therefore rides along here so the rate limiter and the audit
+/// `ClientInfo` extractor (which read `ConnectInfo<SocketAddr>` on the
+/// HTTPS/plain ports) can fall back to it via [`peer_ip_from_extensions`].
+///
+/// `peer_chain_der` is the DER-encoded certificate chain the client presented
+/// in the TLS handshake, leaf first; empty when the client presented none.
+/// The intermediates travel with the leaf because `tls_client_auth`
+/// (RFC 8705 §2.1) validates the chain at the application layer.
+///
+/// [`Router::into_make_service_with_connect_info::<T>`]: axum::Router::into_make_service_with_connect_info
 #[derive(Clone, Debug)]
-pub(crate) struct PeerClientCert(pub Vec<Vec<u8>>);
+pub(crate) struct PeerClientCert {
+    /// DER-encoded client certificate chain, leaf first; empty if the client
+    /// presented none.
+    pub(crate) peer_chain_der: Vec<Vec<u8>>,
+    /// Remote socket address of the mTLS connection.
+    pub(crate) peer_addr: SocketAddr,
+}
 
 impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, MtlsListener>>
     for PeerClientCert
 {
     fn connect_info(stream: axum::serve::IncomingStream<'_, MtlsListener>) -> Self {
-        Self(stream.io().peer_chain_der.clone())
+        Self {
+            peer_chain_der: stream.io().peer_chain_der.clone(),
+            peer_addr: *stream.remote_addr(),
+        }
     }
+}
+
+/// Resolve the peer IP from a request's connection extensions.
+///
+/// On the main HTTPS/plain ports the connection's
+/// `ConnectInfo<SocketAddr>` extension is present and used directly. On the
+/// mTLS port axum only injects `ConnectInfo<PeerClientCert>`
+/// ([`Router::into_make_service_with_connect_info::<T>`] inserts a single
+/// `ConnectInfo<T>` per connection), so the peer `SocketAddr` rides on
+/// `PeerClientCert`; fall back to it when `ConnectInfo<SocketAddr>` is absent.
+/// This keeps rate-limit key extraction and audit `client_ip` resolution
+/// working on the mTLS port, where the direct TLS connection has no separate
+/// `ConnectInfo<SocketAddr>` extension.
+///
+/// Returns the canonicalized TCP peer IP; the caller applies the trusted-proxy
+/// `X-Forwarded-For` walk via [`resolve_client_ip`].
+///
+/// [`Router::into_make_service_with_connect_info::<T>`]: axum::Router::into_make_service_with_connect_info
+/// [`resolve_client_ip`]: crate::infra::rate_limit::resolve_client_ip
+pub(crate) fn peer_ip_from_extensions(
+    extensions: &axum::http::Extensions,
+) -> Option<std::net::IpAddr> {
+    if let Some(ci) = extensions.get::<axum::extract::ConnectInfo<std::net::SocketAddr>>() {
+        return Some(ci.0.ip().to_canonical());
+    }
+    extensions
+        .get::<axum::extract::ConnectInfo<PeerClientCert>>()
+        .map(|ci| ci.0.peer_addr.ip().to_canonical())
 }
 
 /// TLS stream with extracted peer certificate.
@@ -431,5 +479,67 @@ mod tests {
             Arc::ptr_eq(&swap.load_full(), &initial),
             "failed reload must not touch the swap"
         );
+    }
+
+    // ========================================================================
+    // peer_ip_from_extensions Tests
+    // ========================================================================
+
+    /// On the HTTPS/plain ports `ConnectInfo<SocketAddr>` is present and is the
+    /// canonical source of the peer IP.
+    #[test]
+    fn peer_ip_from_extensions_reads_socket_addr() {
+        let mut ext = http::Extensions::new();
+        ext.insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [203, 0, 113, 7],
+            5000,
+        ))));
+        assert_eq!(
+            peer_ip_from_extensions(&ext),
+            Some("203.0.113.7".parse().expect("valid IPv4")),
+        );
+    }
+
+    /// On the mTLS port only `ConnectInfo<PeerClientCert>` is injected; the peer
+    /// IP must still resolve from `PeerClientCert.peer_addr` (the fallback that
+    /// fixes the 500 / `client_ip: null` regression).
+    #[test]
+    fn peer_ip_from_extensions_falls_back_to_peer_client_cert() {
+        let mut ext = http::Extensions::new();
+        ext.insert(axum::extract::ConnectInfo(PeerClientCert {
+            peer_chain_der: Vec::new(),
+            peer_addr: std::net::SocketAddr::from(([198, 51, 100, 42], 8443)),
+        }));
+        assert_eq!(
+            peer_ip_from_extensions(&ext),
+            Some("198.51.100.42".parse().expect("valid IPv4")),
+        );
+    }
+
+    /// `ConnectInfo<SocketAddr>` wins when both extensions are present (the test
+    /// harness can inject both); `PeerClientCert` is only a fallback.
+    #[test]
+    fn peer_ip_from_extensions_prefers_socket_addr_over_peer_client_cert() {
+        let mut ext = http::Extensions::new();
+        ext.insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [203, 0, 113, 7],
+            5000,
+        ))));
+        ext.insert(axum::extract::ConnectInfo(PeerClientCert {
+            peer_chain_der: Vec::new(),
+            peer_addr: std::net::SocketAddr::from(([198, 51, 100, 42], 8443)),
+        }));
+        assert_eq!(
+            peer_ip_from_extensions(&ext),
+            Some("203.0.113.7".parse().expect("SocketAddr wins")),
+        );
+    }
+
+    /// No connection extension yields `None` — the rate limiter then fails key
+    /// extraction with `UnableToExtractKey` (the original 500 cause).
+    #[test]
+    fn peer_ip_from_extensions_returns_none_when_absent() {
+        let ext = http::Extensions::new();
+        assert_eq!(peer_ip_from_extensions(&ext), None);
     }
 }
