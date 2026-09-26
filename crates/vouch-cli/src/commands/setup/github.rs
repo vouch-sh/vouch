@@ -8,7 +8,10 @@ use vouch_cli::{tr, tr_println};
 use vouch_common::GitHubStatusResponse;
 
 use crate::commands::credential::github::check_status;
+use crate::exit_code::CliError;
 use crate::install_path::resolve_install_path;
+use crate::server_url::ServerUrl;
+use crate::{git_config, utils};
 
 /// Run the GitHub setup command.
 ///
@@ -19,11 +22,7 @@ use crate::install_path::resolve_install_path;
 /// # Arguments
 /// * `host` - The GitHub host to configure (default: "github.com")
 /// * `configure` - If true, automatically configure git; if false, just show instructions
-pub(crate) async fn run(
-    server: &crate::server_url::ServerUrl,
-    host: &str,
-    configure: bool,
-) -> Result<()> {
+pub(crate) async fn run(server: &ServerUrl, host: &str, configure: bool) -> Result<()> {
     tr_println!("setup-github-header");
     println!();
 
@@ -93,12 +92,10 @@ pub(crate) async fn run(
         }
 
         // Configure git
-        if !crate::git_config::set_global(&config_key, &helper_command)
+        if !git_config::set_global(&config_key, &helper_command)
             .with_context(|| tr!("setup-github-err-run-config"))?
         {
-            return Err(
-                crate::exit_code::CliError::ConfigError(tr!("setup-github-err-helper")).into(),
-            );
+            return Err(CliError::ConfigError(tr!("setup-github-err-helper")).into());
         }
 
         tr_println!(
@@ -129,7 +126,7 @@ pub(crate) async fn run(
 /// (`/Users/John Smith/.cargo/bin/vouch`), and single quotes make every other
 /// character literal to the shell.
 fn credential_helper_command(vouch_path: &std::path::Path) -> String {
-    let quoted_path = crate::utils::shell_single_quote(&vouch_path.display().to_string());
+    let quoted_path = utils::shell_single_quote(&vouch_path.display().to_string());
     format!("!{quoted_path} credential github")
 }
 
@@ -166,7 +163,7 @@ fn print_status(status: &GitHubStatusResponse) {
 /// warn before overwriting it.
 fn detect_existing_helper(host: &str) -> Option<String> {
     let config_key = format!("credential.https://{}.helper", host);
-    crate::git_config::get_global(&config_key).filter(|helper| !helper.contains("vouch"))
+    git_config::get_global(&config_key).filter(|helper| !helper.contains("vouch"))
 }
 
 #[cfg(test)]

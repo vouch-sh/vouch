@@ -6,17 +6,18 @@ use vouch_common::GitHubStatusResponse;
 
 use super::{LABEL_WIDTH, VALUE_INDENT};
 use crate::client::VouchClient;
-use crate::style;
+use crate::server_url::ServerUrl;
+use crate::{git_config, style};
 
 /// GitHub integration checker.
 pub(crate) struct GitHubIntegration {
-    server: crate::server_url::ServerUrl,
+    server: ServerUrl,
 }
 
 impl GitHubIntegration {
     /// Create a new GitHub integration checker.
     #[must_use]
-    pub(crate) fn new(server: &crate::server_url::ServerUrl) -> Self {
+    pub(crate) fn new(server: &ServerUrl) -> Self {
         Self {
             server: server.clone(),
         }
@@ -60,7 +61,7 @@ impl GitHubIntegration {
 }
 
 /// Check GitHub integration status.
-async fn check_github_status(server: &crate::server_url::ServerUrl) -> GitHubStatus {
+async fn check_github_status(server: &ServerUrl) -> GitHubStatus {
     let (local_configured, host) = check_git_credential_helper();
 
     // Try to get server status
@@ -151,7 +152,7 @@ fn check_git_credential_helper() -> (bool, Option<String>) {
     // Check common GitHub hosts
     for host in &["github.com", "ghe.com"] {
         let config_key = format!("credential.https://{}.helper", host);
-        if let Some(helper) = crate::git_config::get_global(&config_key)
+        if let Some(helper) = git_config::get_global(&config_key)
             && helper.contains("vouch")
         {
             return (true, Some((*host).to_string()));
@@ -162,9 +163,7 @@ fn check_git_credential_helper() -> (bool, Option<String>) {
 }
 
 /// Get GitHub status from server.
-async fn get_github_server_status(
-    server: &crate::server_url::ServerUrl,
-) -> Result<GitHubStatusResponse> {
+async fn get_github_server_status(server: &ServerUrl) -> Result<GitHubStatusResponse> {
     let client = VouchClient::new(server).await?;
     client
         .get_authenticated("/v1/credentials/github/status")

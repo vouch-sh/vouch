@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Session utilities for credential commands.
 
+use crate::commands::credential::ssh;
+use crate::commands::setup::codeartifact;
 use crate::config::Config;
+use crate::exit_code::CliError;
 use crate::server_url::{InsecureOptIn, ServerUrl};
 use anyhow::{Context, Result};
 use secrecy::SecretString;
 #[cfg(unix)]
 use vouch_agent::{AgentClient, AgentError};
+use vouch_cli::fapi::ClientKey;
 use vouch_cli::tr;
 use vouch_common::{SessionCookie, write_cookie};
 
@@ -24,7 +28,7 @@ pub(crate) struct ResolvedSession {
 /// session lacks a server URL.
 #[cfg(unix)]
 async fn try_agent_session() -> Option<(String, SecretString)> {
-    let mut agent = vouch_agent::AgentClient::connect().await.ok()?;
+    let mut agent = AgentClient::connect().await.ok()?;
     let session_info = agent.get_session().await.ok()?;
     let server_url = session_info.server_url?;
     let token = agent.get_token().await.ok()?;
@@ -34,7 +38,7 @@ async fn try_agent_session() -> Option<(String, SecretString)> {
 /// Try to get the authentication token from the agent.
 #[cfg(unix)]
 async fn try_agent_token() -> Option<SecretString> {
-    let mut agent = vouch_agent::AgentClient::connect().await.ok()?;
+    let mut agent = AgentClient::connect().await.ok()?;
     agent.get_token().await.ok()
 }
 
@@ -82,13 +86,13 @@ async fn stored_session() -> Result<(String, SecretString)> {
     let config = Config::load().context(tr!("err-failed-load-config"))?;
     let server = config
         .server_url()
-        .ok_or(crate::exit_code::CliError::ConfigError(
+        .ok_or(CliError::ConfigError(
             "not configured — run 'vouch enroll' first".to_string(),
         ))?
         .to_string();
     let token = config
         .token()
-        .ok_or(crate::exit_code::CliError::NotAuthenticated {
+        .ok_or(CliError::NotAuthenticated {
             reason: "no session token — run 'vouch login' to authenticate".to_string(),
         })?
         // Clone the secret string before config is dropped
@@ -113,11 +117,9 @@ pub(crate) async fn resolve_token() -> Result<SecretString> {
 
     // 2. Fall back to config file
     let config = Config::load().context(tr!("err-failed-load-config"))?;
-    let token = config
-        .token()
-        .ok_or(crate::exit_code::CliError::NotAuthenticated {
-            reason: "no session token — run 'vouch login' to authenticate".to_string(),
-        })?;
+    let token = config.token().ok_or(CliError::NotAuthenticated {
+        reason: "no session token — run 'vouch login' to authenticate".to_string(),
+    })?;
     Ok(token.clone())
 }
 
@@ -192,12 +194,12 @@ fn write_session_cookie_file(server: &str, token: &str, expires_at_ts: Option<ji
 ///
 /// Returns whether the agent stored the session successfully.
 pub(crate) async fn store_and_finalize(
-    server: &crate::server_url::ServerUrl,
+    server: &ServerUrl,
     token: &str,
     email: &str,
     expires_at_str: &str,
     expires_at_ts: Option<jiff::Timestamp>,
-    fapi_key: Option<vouch_cli::fapi::ClientKey>,
+    fapi_key: Option<ClientKey>,
 ) -> Result<bool> {
     // 1. Config save — fast local I/O, do first
     let mut config = Config::load()?;
@@ -225,8 +227,8 @@ pub(crate) async fn store_and_finalize(
 
     // 3. Auto-provision SSH certificate + refresh CodeArtifact in parallel
     let (_, ()) = tokio::join!(
-        crate::commands::credential::ssh::auto_provision(server, email, expires_at_str, fapi_key),
-        crate::commands::setup::codeartifact::auto_refresh_npmrc(server),
+        ssh::auto_provision(server, email, expires_at_str, fapi_key),
+        codeartifact::auto_refresh_npmrc(server),
     );
 
     Ok(agent_stored)
@@ -239,6 +241,7 @@ pub(crate) async fn store_and_finalize(
 )]
 mod tests {
     use super::*;
+    use crate::commands::credential::aws::test_support::ENV_LOCK;
     use crate::server_url::ServerUrlError;
 
     const ENV_VARS: [&str; 3] = ["XDG_CONFIG_HOME", "XDG_RUNTIME_DIR", "VOUCH_ALLOW_INSECURE"];
@@ -258,9 +261,7 @@ mod tests {
         env_opt_in: Option<&str>,
         opt_ins: &[InsecureOptIn],
     ) -> Vec<Result<String>> {
-        let _guard = crate::commands::credential::aws::test_support::ENV_LOCK
-            .lock()
-            .await;
+        let _guard = ENV_LOCK.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let prior: Vec<_> = ENV_VARS.iter().map(|k| (*k, std::env::var_os(k))).collect();
         // SAFETY: ENV_LOCK serialises env mutation in this test binary.
@@ -376,8 +377,8 @@ mod tests {
         let err = no_session.into_iter().next().unwrap().unwrap_err();
         assert!(
             matches!(
-                err.downcast_ref::<crate::exit_code::CliError>(),
-                Some(crate::exit_code::CliError::ConfigError(_))
+                err.downcast_ref::<CliError>(),
+                Some(CliError::ConfigError(_))
             ),
             "no session is still not-configured: {err:#}"
         );

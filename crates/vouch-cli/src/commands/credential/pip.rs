@@ -19,6 +19,7 @@ use vouch_cli::tr;
 
 use crate::integrations::aws::codeartifact::parse_codeartifact_url;
 use crate::server_url::{InsecureOptIn, ServerUrlError};
+use crate::session;
 
 /// Run the pip keyring credential helper.
 ///
@@ -57,7 +58,7 @@ async fn handle_get(url: &str, opt_in: InsecureOptIn) -> Result<()> {
         )
     })?;
 
-    let session = crate::session::resolve_session(opt_in).await.map_err(|e| {
+    let session = session::resolve_session(opt_in).await.map_err(|e| {
         if ServerUrlError::is_in(&e) {
             e
         } else {

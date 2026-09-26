@@ -15,6 +15,7 @@
 use super::error::FapiError;
 use super::key::{ClientKey, ClientKeyFile};
 use crate::tr;
+use vouch_common::paths;
 
 /// Keyring service name for vouch credentials.
 const SERVICE: &str = "vouch";
@@ -117,7 +118,7 @@ pub fn load_client_key() -> Option<ClientKey> {
     }
 
     // 2. Fall back to disk.
-    let key_path = vouch_common::paths::client_key_file()?;
+    let key_path = paths::client_key_file()?;
 
     if !key_path.exists() {
         tracing::debug!("No FAPI key on disk at {}", key_path.display());
@@ -162,7 +163,7 @@ pub fn load_or_create_client_key() -> anyhow::Result<ClientKey> {
         // If the key was loaded from disk (file still exists), migrate to keychain.
         // Verify the write by reading back — some platforms claim success but
         // don't actually persist the entry.
-        if let Some(key_path) = vouch_common::paths::client_key_file()
+        if let Some(key_path) = paths::client_key_file()
             && key_path.exists()
             && let Ok(key_file) = key.to_key_file()
             && save_to_keychain(&key_file).is_ok()
@@ -176,8 +177,7 @@ pub fn load_or_create_client_key() -> anyhow::Result<ClientKey> {
         return Ok(key);
     }
 
-    let key_path = vouch_common::paths::client_key_file()
-        .context(tr!("err-cannot-determine-data-directory"))?;
+    let key_path = paths::client_key_file().context(tr!("err-cannot-determine-data-directory"))?;
 
     // 2. Generate a new key.
     let key = ClientKey::generate().context(tr!("err-failed-generate-fapi-client-key"))?;

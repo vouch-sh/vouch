@@ -5,6 +5,7 @@ use std::io::ErrorKind;
 
 use super::{ConfiguredDetails, IntegrationCheck, IntegrationState};
 use crate::commands::setup::ssm::SSM_MARKER;
+use vouch_common::paths;
 
 /// SSM integration checker.
 pub(crate) struct SsmIntegration;
@@ -47,7 +48,7 @@ impl IntegrationCheck for SsmIntegration {
     }
 
     fn check(&self) -> IntegrationState {
-        let home = match vouch_common::paths::home_dir() {
+        let home = match paths::home_dir() {
             Some(h) => h,
             None => {
                 return IntegrationState::NotConfigured {

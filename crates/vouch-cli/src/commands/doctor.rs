@@ -1,12 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Doctor command - diagnostic checks for the Vouch environment.
 
+use crate::commands::setup::kubeconfig;
+use crate::server_url::ServerUrl;
 use anyhow::{Result, bail};
 #[cfg(not(target_os = "windows"))]
 use ctap_hid_fido2::{Cfg, FidoKeyHidFactory};
 use serde::Serialize;
 #[cfg(unix)]
 use vouch_agent::AgentClient;
+use vouch_cli::http::{self, CLOCK_SKEW_THRESHOLD_SECS};
+use vouch_common::dns::DohResolver;
+use vouch_common::{dns, paths};
 
 use crate::client::VouchClient;
 use crate::config::Config;
@@ -58,11 +63,7 @@ impl CheckResult {
 /// Returns an error if any checks fail, so the CLI exits with a non-zero code.
 /// When `quiet` is true, all output is suppressed (exit code only).
 /// When `json` is true, results are printed as JSON to stdout.
-pub(crate) async fn run(
-    server: &crate::server_url::ServerUrl,
-    quiet: bool,
-    json: bool,
-) -> Result<()> {
+pub(crate) async fn run(server: &ServerUrl, quiet: bool, json: bool) -> Result<()> {
     let suppress = quiet || json;
 
     if !suppress {
@@ -110,7 +111,7 @@ pub(crate) async fn run(
 
 /// Run every diagnostic check in order, printing progress as each one
 /// completes (unless `suppress` is set), and collect the results.
-async fn run_checks(server: &crate::server_url::ServerUrl, suppress: bool) -> Vec<CheckResult> {
+async fn run_checks(server: &ServerUrl, suppress: bool) -> Vec<CheckResult> {
     let mut checks: Vec<CheckResult> = Vec::new();
 
     // Check 1: YubiKey connectivity
@@ -154,7 +155,7 @@ async fn run_checks(server: &crate::server_url::ServerUrl, suppress: bool) -> Ve
     }
 
     // Check 3a: DNS-over-HTTPS resolution status.
-    if let Some(resolver) = vouch_common::dns::process_resolver() {
+    if let Some(resolver) = dns::process_resolver() {
         if !suppress {
             print!("{} ", tr!("doctor-check-doh-label"));
         }
@@ -278,13 +279,15 @@ fn check_yubikey() -> CheckResult {
 /// Check if the agent is running.
 #[cfg(unix)]
 async fn check_agent() -> CheckResult {
+    use vouch_agent::{daemon, socket};
+
     match AgentClient::connect().await {
         Ok(mut client) => {
             // Try to ping the agent
             match client.ping().await {
                 Ok(_) => {
                     // Try to read PID from pid file for extra diagnostic info
-                    let pid_info = vouch_agent::daemon::pid_file_path()
+                    let pid_info = daemon::pid_file_path()
                         .ok()
                         .and_then(|p| std::fs::read_to_string(p).ok())
                         .and_then(|s| s.trim().parse::<u32>().ok());
@@ -304,7 +307,7 @@ async fn check_agent() -> CheckResult {
         }
         Err(e) => {
             // Check if socket exists
-            if let Ok(socket_path) = vouch_agent::socket::socket_path()
+            if let Ok(socket_path) = socket::socket_path()
                 && socket_path.exists()
             {
                 return CheckResult::fail(
@@ -323,7 +326,7 @@ async fn check_agent() -> CheckResult {
 /// Returns `(reachability_result, Some(clock_skew_result))` when the request
 /// completes (skew can be computed from the `Date` header), or
 /// `(reachability_result, None)` when the request never produced a response.
-async fn check_server(server: &crate::server_url::ServerUrl) -> (CheckResult, Option<CheckResult>) {
+async fn check_server(server: &ServerUrl) -> (CheckResult, Option<CheckResult>) {
     let client = match VouchClient::unauthenticated(server) {
         Ok(c) => c,
         Err(e) => {
@@ -376,8 +379,8 @@ async fn check_server(server: &crate::server_url::ServerUrl) -> (CheckResult, Op
 /// the server response lacks a parseable `Date` header (rare — RFC 7231
 /// requires it on every response).
 fn build_clock_skew_result(headers: &reqwest::header::HeaderMap) -> Option<CheckResult> {
-    let (skew_secs, local_behind) = vouch_cli::http::compute_clock_skew(headers)?;
-    if skew_secs < vouch_cli::http::CLOCK_SKEW_THRESHOLD_SECS {
+    let (skew_secs, local_behind) = http::compute_clock_skew(headers)?;
+    if skew_secs < CLOCK_SKEW_THRESHOLD_SECS {
         return Some(CheckResult::pass(
             "clock_skew",
             tr_args!("doctor-clock-ok", secs = skew_secs),
@@ -401,7 +404,7 @@ fn build_clock_skew_result(headers: &reqwest::header::HeaderMap) -> Option<Check
 /// DNSSEC validation rides with DoH (always on), so a `[FAIL]` here may
 /// indicate either a network problem reaching the DoH provider or a
 /// DNSSEC-signed zone in the user's path that has broken signatures.
-async fn check_doh(resolver: &vouch_common::dns::DohResolver, server: &str) -> CheckResult {
+async fn check_doh(resolver: &DohResolver, server: &str) -> CheckResult {
     let label = format!(
         "DNS-over-HTTPS via {} ({}, DNSSEC)",
         resolver.label(),
@@ -487,7 +490,7 @@ async fn check_session() -> CheckResult {
 
 /// Check SSH configuration for Vouch integration.
 fn check_ssh_config() -> CheckResult {
-    let home = match vouch_common::paths::home_dir() {
+    let home = match paths::home_dir() {
         Some(h) => h,
         None => return CheckResult::fail("ssh", tr!("doctor-ssh-no-home")),
     };
@@ -525,7 +528,7 @@ fn check_ssh_config() -> CheckResult {
 
 /// Check EKS configuration for Vouch integration.
 fn check_eks_config() -> CheckResult {
-    let kubeconfig_path = match crate::commands::setup::kubeconfig::default_kubeconfig_path() {
+    let kubeconfig_path = match kubeconfig::default_kubeconfig_path() {
         Ok(p) => p,
         Err(_) => return CheckResult::fail("eks", tr!("doctor-eks-no-home")),
     };
@@ -555,7 +558,7 @@ fn check_ssm_config() -> CheckResult {
 
     let plugin_found = is_plugin_available();
 
-    let home = match vouch_common::paths::home_dir() {
+    let home = match paths::home_dir() {
         Some(h) => h,
         None => return CheckResult::fail("ssm", tr!("doctor-ssm-no-home")),
     };

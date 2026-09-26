@@ -27,6 +27,7 @@ use toml_edit::{Array, DocumentMut, Item, Table, Value};
 
 use crate::config::{Config, OpenAiFederation};
 use crate::install_path::resolve_install_path;
+use vouch_common::{fs, paths};
 
 /// Codex provider id Vouch registers itself under.
 const PROVIDER_ID: &str = "vouch";
@@ -82,7 +83,7 @@ pub(crate) async fn run(args: SetupArgs<'_>) -> Result<()> {
 fn configure_codex(vouch_path: &str, force: bool) -> Result<PathBuf> {
     use vouch_cli::{tr, tr_args};
 
-    let home = vouch_common::paths::home_dir().with_context(|| tr!("setup-err-no-home"))?;
+    let home = paths::home_dir().with_context(|| tr!("setup-err-no-home"))?;
     let codex_dir = home.join(".codex");
     let config_path = codex_dir.join("config.toml");
 
@@ -116,14 +117,12 @@ fn configure_codex(vouch_path: &str, force: bool) -> Result<PathBuf> {
             )
         })?;
     }
-    vouch_common::fs::atomic_write(&config_path, doc.to_string().as_bytes()).with_context(
-        || {
-            tr_args!(
-                "setup-openai-err-write",
-                path = config_path.display().to_string()
-            )
-        },
-    )?;
+    fs::atomic_write(&config_path, doc.to_string().as_bytes()).with_context(|| {
+        tr_args!(
+            "setup-openai-err-write",
+            path = config_path.display().to_string()
+        )
+    })?;
 
     Ok(config_path)
 }

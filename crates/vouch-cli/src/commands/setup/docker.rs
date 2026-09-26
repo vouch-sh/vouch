@@ -8,9 +8,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use vouch_cli::{tr, tr_args, tr_println};
 
+use crate::commands::credential::docker::{self, RegistryType};
 use crate::config::Config;
 use crate::install_path::resolve_install_path;
 use crate::integrations::aws::{ProfileOverride, resolve_vouch_profile};
+use crate::utils;
+use vouch_common::{fs, paths};
 
 /// Docker config.json structure (partial).
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -51,7 +54,7 @@ pub(crate) async fn run(
     let vouch_path = resolve_install_path();
 
     // Determine where to create the symlink
-    let symlink_path = crate::utils::vouch_helper_path("docker-credential-vouch")?;
+    let symlink_path = utils::vouch_helper_path("docker-credential-vouch")?;
 
     // The anchor lives in Vouch's own config, so record it on both paths —
     // the manual-instructions path still ends with Docker calling the helper,
@@ -122,12 +125,7 @@ fn anchor_registries_to_profile(registries: &[String], profile: Option<&str>) ->
 
     let ecr_registries: Vec<&String> = registries
         .iter()
-        .filter(|r| {
-            matches!(
-                crate::commands::credential::docker::detect_registry_type(r),
-                crate::commands::credential::docker::RegistryType::AwsEcr { .. }
-            )
-        })
+        .filter(|r| matches!(docker::detect_registry_type(r), RegistryType::AwsEcr { .. }))
         .collect();
 
     if ecr_registries.is_empty() {
@@ -164,7 +162,7 @@ fn create_credential_helper_symlink(
         "@echo off\r\n\"{}\" credential docker %1\r\n",
         vouch_path.display()
     );
-    crate::utils::create_symlink_with_fallback(vouch_path, symlink_path, &batch_content)
+    utils::create_symlink_with_fallback(vouch_path, symlink_path, &batch_content)
 }
 
 /// Path to the docker CLI's `config.json`.
@@ -173,7 +171,7 @@ fn create_credential_helper_symlink(
 /// — the docker docs call it "the location of your client configuration files"
 /// and its default is the `~/.docker` directory.
 fn docker_config_path() -> Result<std::path::PathBuf> {
-    let home = vouch_common::paths::home_dir();
+    let home = paths::home_dir();
     let env_dir = std::env::var_os("DOCKER_CONFIG").filter(|v| !v.is_empty());
     docker_config_path_from(env_dir.as_deref(), home.as_deref())
         .with_context(|| tr!("setup-err-no-home"))
@@ -236,7 +234,7 @@ fn configure_docker_config(registries: &[String]) -> Result<()> {
     // Write config atomically to avoid corruption if interrupted
     let json =
         serde_json::to_string_pretty(&config).with_context(|| tr!("setup-docker-err-serialize"))?;
-    vouch_common::fs::atomic_write(&docker_config_path, json.as_bytes()).with_context(|| {
+    fs::atomic_write(&docker_config_path, json.as_bytes()).with_context(|| {
         tr_args!(
             "setup-docker-err-write",
             path = docker_config_path.display().to_string()
@@ -267,18 +265,17 @@ fn print_example_config() {
 /// Check if Docker credential helper is configured.
 pub(crate) fn check_docker_config() -> DockerSetupStatus {
     // Check for symlink or batch file
-    let symlink_exists =
-        crate::utils::vouch_helper_path("docker-credential-vouch").is_ok_and(|p| {
-            #[cfg(unix)]
-            {
-                p.exists() || p.is_symlink()
-            }
-            #[cfg(windows)]
-            {
-                // On Windows, check for the .bat file
-                p.with_extension("bat").exists()
-            }
-        });
+    let symlink_exists = utils::vouch_helper_path("docker-credential-vouch").is_ok_and(|p| {
+        #[cfg(unix)]
+        {
+            p.exists() || p.is_symlink()
+        }
+        #[cfg(windows)]
+        {
+            // On Windows, check for the .bat file
+            p.with_extension("bat").exists()
+        }
+    });
 
     // Check Docker config
     let configured_registries = get_configured_registries().unwrap_or_default();

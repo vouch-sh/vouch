@@ -10,6 +10,7 @@ use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 use vouch_cli::{tr, tr_args};
+use vouch_common::paths;
 
 /// Ensure a directory exists with secure permissions (0o700 on Unix).
 ///
@@ -50,8 +51,7 @@ pub(crate) fn shell_single_quote(value: &str) -> String {
 /// keyring, vouch-pnpm-tokenhelper) live in the user's executable directory —
 /// `$XDG_BIN_HOME`, or `~/.local/bin` when that is unset.
 pub(crate) fn vouch_helper_path(name: &str) -> Result<PathBuf> {
-    let bin_dir = vouch_common::paths::executable_dir()
-        .context(tr!("err-could-not-determine-home-directory"))?;
+    let bin_dir = paths::executable_dir().context(tr!("err-could-not-determine-home-directory"))?;
     Ok(bin_dir.join(name))
 }
 
@@ -161,6 +161,8 @@ pub(crate) fn create_symlink_with_fallback(
 
     #[cfg(windows)]
     {
+        use vouch_common::fs::atomic_write;
+
         let bat_path = symlink_path.with_extension("bat");
 
         if bat_path.exists() {
@@ -172,9 +174,9 @@ pub(crate) fn create_symlink_with_fallback(
             })?;
         }
 
-        vouch_common::fs::atomic_write(&bat_path, windows_batch_content.as_bytes()).with_context(
-            || tr_args!("err-failed-create", value = bat_path.display().to_string()),
-        )?;
+        atomic_write(&bat_path, windows_batch_content.as_bytes()).with_context(|| {
+            tr_args!("err-failed-create", value = bat_path.display().to_string())
+        })?;
 
         crate::tr_println!("utils-created-file", path = bat_path.display().to_string());
 
@@ -232,7 +234,7 @@ mod tests {
         let path = vouch_helper_path("keyring")?;
         assert_eq!(
             path.parent().map(Path::to_path_buf),
-            vouch_common::paths::executable_dir(),
+            paths::executable_dir(),
             "got: {}",
             path.display()
         );

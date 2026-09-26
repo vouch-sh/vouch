@@ -18,12 +18,15 @@ use anyhow::{Context, Result};
 use secrecy::{ExposeSecret, SecretString};
 use vouch_cli::tr;
 
-use crate::commands::credential::aws::{StsRequest, exchange_for_sts_credentials};
+use crate::commands::credential::aws::{
+    StsRequest, detect_agent_source, exchange_for_sts_credentials,
+};
 use crate::commands::credential::cache;
 use crate::integrations::aws;
 use crate::integrations::aws::sigv4::{
     PresignedUrlParams, build_presigned_url, validate_sigv4_input,
 };
+use crate::server_url::ServerUrl;
 
 /// RDS auth tokens are valid for 15 minutes (900 seconds).
 const RDS_TOKEN_EXPIRES_SECONDS: u64 = 900;
@@ -36,7 +39,7 @@ const RDS_CACHE_VALIDITY_MINUTES: i64 = 14;
 /// Prints an RDS IAM auth token to stdout, compatible with
 /// `aws rds generate-db-auth-token` output.
 pub(crate) async fn run(
-    server: &crate::server_url::ServerUrl,
+    server: &ServerUrl,
     hostname: &str,
     port: u16,
     username: &str,
@@ -55,7 +58,7 @@ pub(crate) async fn run(
 /// If `region` is `None`, attempts to extract it from the RDS hostname
 /// before falling back to AWS profile/env detection.
 pub(crate) async fn fetch_rds_token(
-    server: &crate::server_url::ServerUrl,
+    server: &ServerUrl,
     hostname: &str,
     port: u16,
     username: &str,
@@ -73,7 +76,7 @@ pub(crate) async fn fetch_rds_token(
     // the cache key ensures agent and non-agent invocations never share a
     // cached entry, which would otherwise hand the agent credentials minted
     // without ReadOnlyAccess / `vouch:AccessType=ai` tags (issue #426).
-    let agent_source = crate::commands::credential::aws::detect_agent_source();
+    let agent_source = detect_agent_source();
     let agent_suffix = agent_source
         .as_deref()
         .map_or(String::new(), |src| format!(":agent:{src}"));
@@ -106,7 +109,7 @@ pub(crate) async fn fetch_rds_token(
 
 /// Generate an RDS IAM auth token.
 async fn generate_rds_token(
-    server: &crate::server_url::ServerUrl,
+    server: &ServerUrl,
     hostname: &str,
     port: u16,
     username: &str,

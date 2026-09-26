@@ -36,6 +36,7 @@ use vouch_common::jwk::JwkThumbprintKey;
 use zeroize::Zeroizing;
 
 use super::error::FapiError;
+use vouch_common::fs;
 
 /// ES256 client keypair with associated metadata.
 ///
@@ -211,7 +212,7 @@ impl ClientKey {
         let json = serde_json::to_vec_pretty(&key_file)
             .map_err(|e| FapiError::KeySave(format!("JSON serialization error: {e}")))?;
 
-        vouch_common::fs::atomic_write_secure(path, &json)
+        fs::atomic_write_secure(path, &json)
             .map_err(|e| FapiError::KeySave(format!("{}: {e}", path.display())))?;
 
         Ok(())

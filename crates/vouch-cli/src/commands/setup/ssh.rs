@@ -10,24 +10,27 @@ use vouch_cli::{tr, tr_args, tr_println};
 use vouch_common::SshCaPublicKeyResponse;
 
 use crate::client::VouchClient;
+use crate::exit_code::CliError;
+use crate::server_url::ServerUrl;
 use crate::utils::ensure_secure_dir;
 use vouch_common::fs::{atomic_write, atomic_write_secure};
+use vouch_common::paths;
 
 /// Get the SSH config path (~/.ssh/config).
 pub(crate) fn ssh_config_path() -> Result<PathBuf> {
-    let home = vouch_common::paths::home_dir().with_context(|| tr!("setup-err-no-home"))?;
+    let home = paths::home_dir().with_context(|| tr!("setup-err-no-home"))?;
     Ok(home.join(".ssh").join("config"))
 }
 
 /// Get the known hosts path (~/.ssh/known_hosts).
 fn known_hosts_path() -> Result<PathBuf> {
-    let home = vouch_common::paths::home_dir().with_context(|| tr!("setup-err-no-home"))?;
+    let home = paths::home_dir().with_context(|| tr!("setup-err-no-home"))?;
     Ok(home.join(".ssh").join("known_hosts"))
 }
 
 /// Get the CA public key path.
 fn ca_key_path(server: &str) -> Result<PathBuf> {
-    let home = vouch_common::paths::home_dir().with_context(|| tr!("setup-err-no-home"))?;
+    let home = paths::home_dir().with_context(|| tr!("setup-err-no-home"))?;
     // Sanitize server URL for filename: strip scheme, replace non-alphanumeric with underscores,
     // and collapse multiple underscores. e.g. "https://us.vouch.sh" → "vouch_ca_us_vouch_sh.pub"
     let safe_host = server
@@ -54,7 +57,7 @@ fn ca_key_path(server: &str) -> Result<PathBuf> {
 
 /// Get the default SSH key path (~/.ssh/id_ed25519_vouch).
 fn default_key_path() -> Result<PathBuf> {
-    let home = vouch_common::paths::home_dir().with_context(|| tr!("setup-err-no-home"))?;
+    let home = paths::home_dir().with_context(|| tr!("setup-err-no-home"))?;
     Ok(home.join(".ssh").join("id_ed25519_vouch"))
 }
 
@@ -66,7 +69,7 @@ fn default_key_path() -> Result<PathBuf> {
 /// 3. Optionally updates ~/.ssh/known_hosts to trust the CA for host verification
 /// 4. Optionally updates ~/.ssh/config to use the Vouch SSH agent
 /// 5. Shows instructions for SSH config
-pub(crate) async fn run(server: &crate::server_url::ServerUrl, hosts: Option<&str>) -> Result<()> {
+pub(crate) async fn run(server: &ServerUrl, hosts: Option<&str>) -> Result<()> {
     let client = VouchClient::new(server).await?;
 
     // Download CA public key
@@ -308,9 +311,7 @@ fn add_trusted_ca_to_known_hosts(ca_path: &std::path::Path, host_patterns: &str)
         .collect::<Vec<_>>()
         .join(" ");
     if ca_pub_key.is_empty() {
-        return Err(
-            crate::exit_code::CliError::ConfigError(tr!("setup-ssh-err-ca-invalid")).into(),
-        );
+        return Err(CliError::ConfigError(tr!("setup-ssh-err-ca-invalid")).into());
     }
 
     // Create entry

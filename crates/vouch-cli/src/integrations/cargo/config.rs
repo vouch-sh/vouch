@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use toml_edit::{Array, DocumentMut, Item, Table, Value};
 use vouch_cli::{tr, tr_args};
+use vouch_common::{fs, paths};
 
 /// Cargo config file parser and writer.
 ///
@@ -173,14 +174,12 @@ impl CargoConfig {
     /// Uses atomic write (temp file + rename) to prevent corruption
     /// if the process is interrupted mid-write.
     pub(crate) fn save(&self) -> Result<()> {
-        vouch_common::fs::atomic_write(&self.path, self.doc.to_string().as_bytes()).with_context(
-            || {
-                tr_args!(
-                    "err-failed-write-5",
-                    value = self.path.display().to_string()
-                )
-            },
-        )
+        fs::atomic_write(&self.path, self.doc.to_string().as_bytes()).with_context(|| {
+            tr_args!(
+                "err-failed-write-5",
+                value = self.path.display().to_string()
+            )
+        })
     }
 
     /// Get the path to this config file.
@@ -199,8 +198,7 @@ impl CargoConfig {
         }
 
         // Default to ~/.cargo/config.toml
-        let home = vouch_common::paths::home_dir()
-            .context(tr!("err-could-not-determine-home-directory"))?;
+        let home = paths::home_dir().context(tr!("err-could-not-determine-home-directory"))?;
         Ok(home.join(".cargo").join("config.toml"))
     }
 

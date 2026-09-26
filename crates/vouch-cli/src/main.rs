@@ -6,6 +6,8 @@
     clippy::print_stderr,
     reason = "stdout and stderr are this binary's user interface"
 )]
+// Own-crate items are imported with `use`; see `absolute-paths-allowed-crates` in `.clippy.toml`.
+#![deny(clippy::absolute_paths)]
 
 // Avoid musl's default allocator due to lackluster performance
 // https://nickb.dev/blog/default-musl-allocator-considered-harmful-to-performance
@@ -17,6 +19,11 @@ use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand};
 use std::process::ExitCode;
 use tracing_subscriber::EnvFilter;
+use vouch_cli::fapi::key_store;
+use vouch_cli::i18n;
+use vouch_common::paths;
+
+use crate::exit_code::CliError;
 // Bring the i18n macros into the binary crate root so submodules under the
 // `vouch` binary (e.g. `fido2/unix.rs`, which is compiled into both the lib
 // and the bin) can reference them as `crate::tr!` regardless of compilation
@@ -106,7 +113,7 @@ async fn check_git_remote_codecommit_invocation(argv0: &str) -> Result<bool> {
         let url = std::env::args().nth(2).unwrap_or_default();
 
         if remote_name.is_empty() || url.is_empty() {
-            return Err(crate::exit_code::CliError::ConfigError(
+            return Err(CliError::ConfigError(
                 "usage: git-remote-codecommit <remote-name> <url>\n\
                  This is a git remote helper. Use it via:\n  \
                  git clone codecommit://[profile@]repo-name\n  \
@@ -173,7 +180,7 @@ async fn check_pnpm_tokenhelper_invocation(argv0: &str) -> Result<bool> {
         let profile = flag("--profile");
 
         // Resolve session to get server URL
-        let session = crate::session::resolve_session(InsecureOptIn::Env)
+        let session = session::resolve_session(InsecureOptIn::Env)
             .await
             .map_err(|e| {
                 anyhow::anyhow!(tr_args!("err-vouch-pnpm-tokenhelper", e = e.to_string()))
@@ -538,7 +545,7 @@ async fn init_and_dispatch_helper_binaries(config: Option<&config::Config>) -> R
 
     // Register the platform-native keyring store. Non-fatal: keychain access
     // already falls back to file storage in fapi::key_store when unavailable.
-    if let Err(e) = vouch_cli::fapi::key_store::init_default_store() {
+    if let Err(e) = key_store::init_default_store() {
         tracing::debug!("Could not initialize keyring store: {e}");
     }
 
@@ -583,7 +590,7 @@ fn resolve_server_url(cli: &Cli, config: &config::Config) -> Result<server_url::
 async fn run() -> Result<()> {
     // Relocate any legacy ~/.vouch/ files into the XDG base directories before
     // the config is read. Idempotent and a no-op once migrated / for new installs.
-    vouch_common::paths::migrate_legacy_layout();
+    paths::migrate_legacy_layout();
 
     let config = config::Config::load();
 
@@ -594,8 +601,8 @@ async fn run() -> Result<()> {
     // Install the negotiated locale into the OnceLock before `Cli::parse()`
     // expands the `tr!()` calls embedded in the clap derive attributes. The
     // pre-scan honors `--lang` from argv since clap hasn't parsed it yet.
-    let preferred = vouch_cli::i18n::preresolve_lang_from_argv_and_env();
-    vouch_cli::i18n::init(preferred)?;
+    let preferred = i18n::preresolve_lang_from_argv_and_env();
+    i18n::init(preferred)?;
 
     // On Windows, a bare `vouch` prints help and exits 0: the winget
     // validation pipeline runs the portable exe with no arguments and flags
@@ -967,6 +974,7 @@ async fn run() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::credential::aws::test_support::ENV_LOCK;
 
     // -- VOUCH_ALLOW_INSECURE --
 
@@ -980,9 +988,7 @@ mod tests {
         reason = "env mutation under ENV_LOCK; the prior value is restored before asserting"
     )]
     async fn test_allow_insecure_env_values() {
-        let _guard = crate::commands::credential::aws::test_support::ENV_LOCK
-            .lock()
-            .await;
+        let _guard = ENV_LOCK.lock().await;
         let prior = std::env::var_os("VOUCH_ALLOW_INSECURE");
         let mut outcomes = Vec::new();
         for value in ["1", "true", "0", "false", "maybe"] {
@@ -1015,9 +1021,7 @@ mod tests {
     /// because clap also reads `VOUCH_ALLOW_INSECURE`.
     #[tokio::test]
     async fn test_allow_insecure_flag() {
-        let _guard = crate::commands::credential::aws::test_support::ENV_LOCK
-            .lock()
-            .await;
+        let _guard = ENV_LOCK.lock().await;
         let parsed = Cli::try_parse_from(["vouch", "--allow-insecure", "doctor"])
             .map(|cli| cli.allow_insecure)
             .ok();

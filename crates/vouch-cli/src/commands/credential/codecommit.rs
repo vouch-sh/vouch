@@ -24,8 +24,11 @@ use crate::integrations::aws::codecommit::{
     sign_request,
 };
 use crate::integrations::aws::sts::StsCredentials;
-use crate::integrations::aws::{ProfileOverride, resolve_vouch_profile, select_vouch_profile};
+use crate::integrations::aws::{
+    self, AwsConfig, ProfileOverride, resolve_vouch_profile, select_vouch_profile,
+};
 use crate::server_url::{InsecureOptIn, ServerUrlError};
+use crate::session;
 
 /// Run the git credential helper for CodeCommit.
 ///
@@ -95,9 +98,7 @@ async fn get_credential(profile: Option<&str>, opt_in: InsecureOptIn) -> Result<
     // another partition is guaranteed a 403. Decline with no output instead of
     // erroring: git then continues to any other configured credential helper,
     // which may legitimately serve this host.
-    if let Err(e) =
-        crate::integrations::aws::validate_region_for_role(region, &vouch_profile.role_arn)
-    {
+    if let Err(e) = aws::validate_region_for_role(region, &vouch_profile.role_arn) {
         vouch_cli::tr_eprintln!(
             "credential-codecommit-warn-partition-mismatch",
             error = e.to_string()
@@ -157,7 +158,7 @@ pub(crate) async fn run_remote_helper(
     // The endpoint above is built from `region` while credentials mint under
     // the role's partition; a cross-partition pair is guaranteed an opaque
     // 403 from CodeCommit at git time, so fail now with a clear message.
-    crate::integrations::aws::validate_region_for_role(&region, &vouch_profile.role_arn)?;
+    aws::validate_region_for_role(&region, &vouch_profile.role_arn)?;
     let creds = get_sts_credentials(&vouch_profile.role_arn, opt_in).await?;
     let signed = sign_request(&creds, &hostname, &path, &region);
 
@@ -178,7 +179,7 @@ pub(crate) async fn run_remote_helper(
 /// cache. The role is resolved by the caller so both CodeCommit flows can
 /// validate the target region's partition against it before signing anything.
 async fn get_sts_credentials(role_arn: &str, opt_in: InsecureOptIn) -> Result<StsCredentials> {
-    let session = crate::session::resolve_session(opt_in).await.map_err(|e| {
+    let session = session::resolve_session(opt_in).await.map_err(|e| {
         if ServerUrlError::is_in(&e) {
             e
         } else {
@@ -239,14 +240,14 @@ fn resolve_region(url_region: Option<&str>, profile: Option<&str>) -> Result<Str
         return Ok(region.to_string());
     }
 
-    if let Ok(aws_config) = crate::integrations::aws::AwsConfig::load() {
+    if let Ok(aws_config) = AwsConfig::load() {
         let env_profile = std::env::var("AWS_PROFILE").ok();
         if let Some(region) = select_region(&aws_config, profile, env_profile.as_deref()) {
             return Ok(region);
         }
     }
 
-    if let Some(r) = crate::integrations::aws::env_region() {
+    if let Some(r) = aws::env_region() {
         return Ok(r);
     }
 
@@ -269,7 +270,7 @@ fn resolve_region(url_region: Option<&str>, profile: Option<&str>) -> Result<Str
 /// when neither source names a region, leaving the caller to fall back to env
 /// vars and the `us-east-1` default.
 fn select_region(
-    config: &crate::integrations::aws::AwsConfig,
+    config: &AwsConfig,
     profile: Option<&str>,
     env_profile: Option<&str>,
 ) -> Option<String> {
@@ -321,10 +322,11 @@ fn exec_git_remote_http(remote_name: &str, signed_url: &str) -> Result<()> {
 
     #[cfg(unix)]
     {
+        use crate::exit_code::CliError;
         use std::os::unix::process::CommandExt;
         // exec replaces this process — only returns on error
         let err = cmd.exec();
-        Err(crate::exit_code::CliError::ConfigError(tr_args!(
+        Err(CliError::ConfigError(tr_args!(
             "credential-codecommit-err-exec-git",
             error = err.to_string()
         ))

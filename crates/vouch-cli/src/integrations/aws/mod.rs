@@ -21,7 +21,10 @@ pub(crate) use config::{AwsConfig, AwsProfile, CredentialProcessLine, VouchProfi
 
 use vouch_cli::{tr, tr_args};
 
+use crate::config::AwsOrgsConfig;
 use crate::exit_code::CliError;
+use vouch_common::aws::Partition;
+use vouch_common::env;
 
 /// Which override flag(s) the invoking command accepts.
 ///
@@ -196,8 +199,7 @@ fn find_region(region: Option<&str>, profile_name: Option<&str>) -> anyhow::Resu
 /// producing endpoints like `https://sts..amazonaws.com`. `AWS_DEFAULT_REGION`
 /// keeps its historical precedence over `AWS_REGION` here.
 pub(crate) fn env_region() -> Option<String> {
-    vouch_common::env::non_empty_env("AWS_DEFAULT_REGION")
-        .or_else(|| vouch_common::env::non_empty_env("AWS_REGION"))
+    env::non_empty_env("AWS_DEFAULT_REGION").or_else(|| env::non_empty_env("AWS_REGION"))
 }
 
 /// The error returned when no region could be determined from any source.
@@ -218,15 +220,12 @@ fn no_region_error() -> CliError {
 ///
 /// Returns a [`CliError::ConfigError`] when the partition inferred from
 /// `region` (via [`Partition::from_region`]) differs from `arn_partition`.
-fn validate_region_partition(
-    region: &str,
-    arn_partition: vouch_common::aws::Partition,
-) -> Result<(), crate::exit_code::CliError> {
-    let region_partition = vouch_common::aws::Partition::from_region(region);
+fn validate_region_partition(region: &str, arn_partition: Partition) -> Result<(), CliError> {
+    let region_partition = Partition::from_region(region);
     if region_partition == arn_partition {
         return Ok(());
     }
-    Err(crate::exit_code::CliError::ConfigError(tr_args!(
+    Err(CliError::ConfigError(tr_args!(
         "aws-err-region-partition-mismatch",
         region = region.to_string(),
         region_partition = region_partition.as_str().to_string(),
@@ -247,7 +246,7 @@ fn validate_region_partition(
 /// Returns a [`CliError::ConfigError`] when the ARN's partition cannot be
 /// parsed or the region belongs to a different partition.
 pub(crate) fn validate_region_for_role(region: &str, role_arn: &str) -> Result<(), CliError> {
-    let arn_partition = vouch_common::aws::Partition::from_arn(role_arn)
+    let arn_partition = Partition::from_arn(role_arn)
         .map_err(|_| CliError::ConfigError(tr!("aws-console-err-invalid-role-arn")))?;
     validate_region_partition(region, arn_partition)
 }
@@ -287,9 +286,8 @@ pub(crate) fn resolve_region(
 /// role ARN) would produce an invalid STS endpoint URL, since the DNS suffix
 /// is derived from the role ARN's partition.
 pub(crate) fn resolve_region_with_fallback(role_arn: &str) -> anyhow::Result<String> {
-    let arn_partition = vouch_common::aws::Partition::from_arn(role_arn).map_err(|_| {
-        crate::exit_code::CliError::ConfigError(tr!("aws-console-err-invalid-role-arn"))
-    })?;
+    let arn_partition = Partition::from_arn(role_arn)
+        .map_err(|_| CliError::ConfigError(tr!("aws-console-err-invalid-role-arn")))?;
 
     let profile_name = AwsConfig::load().ok().and_then(|config| {
         config
@@ -359,9 +357,8 @@ pub(crate) fn resolve_role_and_region(
         }
     };
 
-    let arn_partition = vouch_common::aws::Partition::from_arn(&role_arn).map_err(|_| {
-        crate::exit_code::CliError::ConfigError(tr!("aws-console-err-invalid-role-arn"))
-    })?;
+    let arn_partition = Partition::from_arn(&role_arn)
+        .map_err(|_| CliError::ConfigError(tr!("aws-console-err-invalid-role-arn")))?;
     let region_name = find_region(region, profile_name.as_deref())?.ok_or_else(no_region_error)?;
     validate_region_partition(&region_name, arn_partition)?;
 
@@ -430,10 +427,7 @@ impl IntegrationCheck for AwsIntegration {
 }
 
 /// Pure logic: classify the AWS integration state from parsed `~/.aws/config`.
-fn check_aws_status(
-    aws_config: &AwsConfig,
-    vouch_aws: Option<&crate::config::AwsOrgsConfig>,
-) -> AwsStatusKind {
+fn check_aws_status(aws_config: &AwsConfig, vouch_aws: Option<&AwsOrgsConfig>) -> AwsStatusKind {
     let org_count = vouch_aws.map_or(0, |a| a.organizations.len());
     let profiles: Vec<ProfileSummary> = aws_config
         .find_all_vouch_profiles()
@@ -1073,15 +1067,14 @@ credential_process = vouch credential aws --role arn:aws:iam::111:role/X
     /// Matching region+partition combinations are accepted for every partition.
     #[test]
     fn validate_region_partition_accepts_matching_partitions() {
-        validate_region_partition("us-east-1", vouch_common::aws::Partition::Aws).unwrap();
-        validate_region_partition("cn-north-1", vouch_common::aws::Partition::AwsCn).unwrap();
-        validate_region_partition("us-gov-west-1", vouch_common::aws::Partition::AwsUsGov).unwrap();
-        validate_region_partition("eusc-de-east-1", vouch_common::aws::Partition::AwsEusc).unwrap();
-        validate_region_partition("us-iso-east-1", vouch_common::aws::Partition::AwsIso).unwrap();
-        validate_region_partition("us-isob-east-1", vouch_common::aws::Partition::AwsIsoB).unwrap();
-        validate_region_partition("eu-isoe-west-1", vouch_common::aws::Partition::AwsIsoE).unwrap();
-        validate_region_partition("us-isof-south-1", vouch_common::aws::Partition::AwsIsoF)
-            .unwrap();
+        validate_region_partition("us-east-1", Partition::Aws).unwrap();
+        validate_region_partition("cn-north-1", Partition::AwsCn).unwrap();
+        validate_region_partition("us-gov-west-1", Partition::AwsUsGov).unwrap();
+        validate_region_partition("eusc-de-east-1", Partition::AwsEusc).unwrap();
+        validate_region_partition("us-iso-east-1", Partition::AwsIso).unwrap();
+        validate_region_partition("us-isob-east-1", Partition::AwsIsoB).unwrap();
+        validate_region_partition("eu-isoe-west-1", Partition::AwsIsoE).unwrap();
+        validate_region_partition("us-isof-south-1", Partition::AwsIsoF).unwrap();
     }
 
     /// The exact scenario from the bug report: commercial role ARN with a
@@ -1089,7 +1082,7 @@ credential_process = vouch credential aws --role arn:aws:iam::111:role/X
     /// partitions, and the remediation hint.
     #[test]
     fn validate_region_partition_rejects_china_region_with_commercial_arn() {
-        let err = validate_region_partition("cn-north-1", vouch_common::aws::Partition::Aws)
+        let err = validate_region_partition("cn-north-1", Partition::Aws)
             .expect_err("China region must not match commercial partition");
         let msg = err.to_string();
         assert!(
@@ -1109,7 +1102,7 @@ credential_process = vouch credential aws --role arn:aws:iam::111:role/X
     /// The reverse mismatch: China role ARN with a commercial region.
     #[test]
     fn validate_region_partition_rejects_commercial_region_with_china_arn() {
-        let err = validate_region_partition("us-east-1", vouch_common::aws::Partition::AwsCn)
+        let err = validate_region_partition("us-east-1", Partition::AwsCn)
             .expect_err("commercial region must not match China partition");
         let msg = err.to_string();
         assert!(msg.contains("us-east-1"), "{msg}");
@@ -1129,7 +1122,7 @@ credential_process = vouch credential aws --role arn:aws:iam::111:role/X
     /// table doesn't yet know about should not break credential issuance.
     #[test]
     fn validate_region_partition_accepts_unknown_region_for_commercial() {
-        validate_region_partition("us-unknown-99", vouch_common::aws::Partition::Aws)
+        validate_region_partition("us-unknown-99", Partition::Aws)
             .expect("unknown region defaults to commercial partition");
     }
 
@@ -1138,7 +1131,7 @@ credential_process = vouch credential aws --role arn:aws:iam::111:role/X
     /// partition.
     #[test]
     fn validate_region_partition_rejects_unknown_region_for_china() {
-        validate_region_partition("us-unknown-99", vouch_common::aws::Partition::AwsCn)
+        validate_region_partition("us-unknown-99", Partition::AwsCn)
             .expect_err("unknown region defaults to commercial, not China");
     }
 
@@ -1146,8 +1139,7 @@ credential_process = vouch credential aws --role arn:aws:iam::111:role/X
     /// same exit code as other configuration errors.
     #[test]
     fn validate_region_partition_error_is_cli_config_error() {
-        let err = validate_region_partition("cn-north-1", vouch_common::aws::Partition::Aws)
-            .expect_err("mismatch");
+        let err = validate_region_partition("cn-north-1", Partition::Aws).expect_err("mismatch");
         assert!(
             matches!(err, CliError::ConfigError(_)),
             "expected CliError::ConfigError, got: {err:?}"

@@ -7,6 +7,7 @@ use vouch_cli::tr;
 
 use super::CredentialType;
 use super::exec::{CodeArtifactOptions, RdsOptions, RedshiftOptions};
+use crate::server_url::ServerUrl;
 
 /// Shell format for environment variable output.
 #[derive(Clone, Debug, clap::ValueEnum)]
@@ -19,7 +20,7 @@ pub(crate) enum Shell {
 
 /// Run the env command - output shell-evaluable credential exports.
 pub(crate) async fn run(
-    server: &crate::server_url::ServerUrl,
+    server: &ServerUrl,
     credential_type: &CredentialType,
     shell: &Shell,
     role: Option<&str>,
@@ -47,7 +48,7 @@ pub(crate) async fn run(
 /// The minted `sk-ant-oat01-...` is an OAuth access token, so it is exported
 /// as a Bearer token (`ANTHROPIC_AUTH_TOKEN`), not an API key. It acts as a
 /// service account — the workload path, intended for CI/headless automation.
-async fn print_anthropic_env(server: &crate::server_url::ServerUrl, shell: &Shell) -> Result<()> {
+async fn print_anthropic_env(server: &ServerUrl, shell: &Shell) -> Result<()> {
     let token = super::credential::anthropic::get_token(server).await?;
     print_export(shell, "ANTHROPIC_AUTH_TOKEN", token.expose_secret());
     Ok(())
@@ -61,7 +62,7 @@ async fn print_anthropic_env(server: &crate::server_url::ServerUrl, shell: &Shel
 /// API-key variable name even though the minted token is an OAuth access
 /// token. Workload path: the token acts as a service account, intended
 /// for CI/headless automation.
-async fn print_openai_env(server: &crate::server_url::ServerUrl, shell: &Shell) -> Result<()> {
+async fn print_openai_env(server: &ServerUrl, shell: &Shell) -> Result<()> {
     let token = super::credential::openai::get_token(server).await?;
     print_export(shell, "OPENAI_API_KEY", token.expose_secret());
     Ok(())
@@ -73,11 +74,7 @@ async fn print_openai_env(server: &crate::server_url::ServerUrl, shell: &Shell) 
 /// the CloudTrail user-agent string.
 ///
 /// See: <https://hackingthe.cloud/aws/general-knowledge/aws_cli_tips_and_tricks/#modifying-the-cloudtrail-log-user-agent-with-aws_execution_env>
-async fn print_aws_env(
-    server: &crate::server_url::ServerUrl,
-    role_arn: &str,
-    shell: &Shell,
-) -> Result<()> {
+async fn print_aws_env(server: &ServerUrl, role_arn: &str, shell: &Shell) -> Result<()> {
     let creds = super::exec::fetch_aws_credentials(server, role_arn).await?;
 
     print_export(shell, "AWS_ACCESS_KEY_ID", &creds.access_key_id);
@@ -106,7 +103,7 @@ async fn print_aws_env(
 }
 
 /// Fetch GitHub token (cache-first) and print export statements.
-async fn print_github_env(server: &crate::server_url::ServerUrl, shell: &Shell) -> Result<()> {
+async fn print_github_env(server: &ServerUrl, shell: &Shell) -> Result<()> {
     let gh = super::exec::fetch_github_token_cached(server).await?;
 
     print_export(shell, "GITHUB_TOKEN", gh.token.expose_secret());
@@ -117,7 +114,7 @@ async fn print_github_env(server: &crate::server_url::ServerUrl, shell: &Shell) 
 
 /// Fetch CodeArtifact token and print export statement.
 async fn print_codeartifact_env(
-    server: &crate::server_url::ServerUrl,
+    server: &ServerUrl,
     opts: &CodeArtifactOptions<'_>,
     shell: &Shell,
 ) -> Result<()> {
@@ -134,7 +131,7 @@ async fn print_codeartifact_env(
 
 /// Fetch RDS IAM auth token and print PostgreSQL export statements.
 async fn print_rds_env(
-    server: &crate::server_url::ServerUrl,
+    server: &ServerUrl,
     role: Option<&str>,
     opts: &RdsOptions<'_>,
     shell: &Shell,
@@ -152,7 +149,7 @@ async fn print_rds_env(
 
 /// Fetch Redshift credentials and print PostgreSQL export statements.
 async fn print_redshift_env(
-    server: &crate::server_url::ServerUrl,
+    server: &ServerUrl,
     role: Option<&str>,
     opts: &RedshiftOptions<'_>,
     shell: &Shell,

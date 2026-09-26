@@ -13,6 +13,7 @@ use crate::integrations::{
     AwsIntegration, CargoIntegration, DockerIntegration, EksIntegration, GitHubIntegration,
     LABEL_WIDTH, SshIntegration, SsmIntegration, print_integration_status,
 };
+use crate::server_url::{InsecureOptIn, ServerUrl};
 use crate::style;
 use vouch_cli::{tr, tr_args};
 
@@ -89,8 +90,8 @@ pub(crate) fn print_shell(
 
 /// Run the status command.
 pub(crate) async fn run(
-    server: &crate::server_url::ServerUrl,
-    opt_in: crate::server_url::InsecureOptIn,
+    server: &ServerUrl,
+    opt_in: InsecureOptIn,
     mode: OutputFormat,
 ) -> Result<()> {
     // First, try to get status from the agent (Unix only)
@@ -141,8 +142,8 @@ fn report_unauthenticated(
 /// back to the config/server check.
 #[cfg(unix)]
 async fn agent_status(
-    server: &crate::server_url::ServerUrl,
-    opt_in: crate::server_url::InsecureOptIn,
+    server: &ServerUrl,
+    opt_in: InsecureOptIn,
     mode: OutputFormat,
 ) -> Result<bool> {
     match get_session_from_agent().await {
@@ -154,7 +155,7 @@ async fn agent_status(
             let agent_server = session
                 .server_url
                 .as_deref()
-                .map(|url| crate::server_url::ServerUrl::parse(url, opt_in.allowed()?))
+                .map(|url| ServerUrl::parse(url, opt_in.allowed()?))
                 .transpose()?;
             let effective_server = agent_server.as_ref().unwrap_or(server);
             match mode {
@@ -213,7 +214,7 @@ async fn agent_status(
 }
 
 /// Report status from the stored token and the server's /v1/auth/status.
-async fn server_status(server: &crate::server_url::ServerUrl, mode: OutputFormat) -> Result<()> {
+async fn server_status(server: &ServerUrl, mode: OutputFormat) -> Result<()> {
     let mut config = Config::load()?;
     config.set_server_url(server.as_str());
 
@@ -277,10 +278,7 @@ async fn server_status(server: &crate::server_url::ServerUrl, mode: OutputFormat
 }
 
 /// Print a human-readable report for a server-verified session (no agent).
-async fn print_server_session(
-    server: &crate::server_url::ServerUrl,
-    status: &SessionStatus,
-) -> Result<()> {
+async fn print_server_session(server: &ServerUrl, status: &SessionStatus) -> Result<()> {
     println!(
         "{} ({server})",
         style::bold_green(&tr!("status-authenticated"))
@@ -396,7 +394,7 @@ fn print_expiry(expires_in: u64) -> Result<()> {
 ///
 /// Starts the GitHub HTTP request early so network latency overlaps with
 /// local integration checks.
-async fn print_all_integrations(server: &crate::server_url::ServerUrl) {
+async fn print_all_integrations(server: &ServerUrl) {
     // Start GitHub check early (network call)
     let github = GitHubIntegration::new(server);
     let github_future = github.check_and_print();

@@ -9,10 +9,16 @@ use ssh_key::{
     Algorithm, LineEnding, PrivateKey, PublicKey, certificate::Certificate, rand_core::OsRng,
 };
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use vouch_agent::AgentClient;
 use vouch_cli::{tr, tr_args, tr_println};
 use vouch_common::{SshCertificateRequest, SshCertificateResponse};
 
 use crate::client::VouchClient;
+use crate::server_url::ServerUrl;
+use crate::utils;
+use vouch_cli::fapi::ClientKey;
+use vouch_common::{fs, paths};
 
 /// Default SSH key filename (without extension).
 const DEFAULT_KEY_NAME: &str = "id_ed25519_vouch";
@@ -36,8 +42,7 @@ impl KeypairAction {
 
 /// Get the SSH directory path (~/.ssh).
 pub(crate) fn ssh_dir() -> Result<PathBuf> {
-    let home =
-        vouch_common::paths::home_dir().context(tr!("err-could-not-determine-home-directory"))?;
+    let home = paths::home_dir().context(tr!("err-could-not-determine-home-directory"))?;
     Ok(home.join(".ssh"))
 }
 
@@ -83,7 +88,7 @@ pub(crate) fn ensure_keypair(key_path: &Path) -> Result<KeypairAction> {
     }
 
     // Ensure .ssh directory exists with secure permissions
-    crate::utils::ensure_secure_dir(&ssh_dir()?)?;
+    utils::ensure_secure_dir(&ssh_dir()?)?;
 
     // Generate new keypair
     let private_key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519)
@@ -96,7 +101,7 @@ pub(crate) fn ensure_keypair(key_path: &Path) -> Result<KeypairAction> {
             e = e.to_string()
         ))
     })?;
-    vouch_common::fs::atomic_write_secure(key_path, private_key_str.as_bytes())
+    fs::atomic_write_secure(key_path, private_key_str.as_bytes())
         .with_context(|| tr_args!("err-failed-write-5", value = key_path.display().to_string()))?;
 
     // Save public key (atomic)
@@ -107,7 +112,7 @@ pub(crate) fn ensure_keypair(key_path: &Path) -> Result<KeypairAction> {
             e = e.to_string()
         ))
     })?;
-    vouch_common::fs::atomic_write(&pub_path, format!("{pub_key_str}\n").as_bytes())
+    fs::atomic_write(&pub_path, format!("{pub_key_str}\n").as_bytes())
         .with_context(|| tr_args!("err-failed-write-5", value = pub_path.display().to_string()))?;
 
     Ok(KeypairAction::Generated(public_key.clone()))
@@ -230,10 +235,10 @@ fn check_existing_certificate(
 /// proof generation instead of reloading from the keychain. This avoids
 /// a storage round-trip that can fail on some platforms.
 pub(crate) async fn provision_ssh_certificate(
-    server: &crate::server_url::ServerUrl,
+    server: &ServerUrl,
     session_email: Option<&str>,
     key_path: Option<&str>,
-    fapi_key: Option<vouch_cli::fapi::ClientKey>,
+    fapi_key: Option<ClientKey>,
     force: bool,
 ) -> Result<SshProvisionResult> {
     // Determine key path
@@ -277,13 +282,14 @@ pub(crate) async fn provision_ssh_certificate(
 
     // Save certificate (atomic)
     let cert_path = PathBuf::from(format!("{}-cert.pub", key_path.display()));
-    vouch_common::fs::atomic_write(&cert_path, format!("{}\n", response.certificate).as_bytes())
-        .with_context(|| {
+    fs::atomic_write(&cert_path, format!("{}\n", response.certificate).as_bytes()).with_context(
+        || {
             tr_args!(
                 "err-failed-write-5",
                 value = cert_path.display().to_string()
             )
-        })?;
+        },
+    )?;
 
     Ok(SshProvisionResult {
         key_path,
@@ -299,20 +305,20 @@ pub(crate) async fn provision_ssh_certificate(
 /// are generated without reloading from the keychain.
 /// Returns `true` if provisioning succeeded.
 pub(crate) async fn auto_provision(
-    server: &crate::server_url::ServerUrl,
+    server: &ServerUrl,
     email: &str,
     #[cfg_attr(
         not(unix),
         expect(unused_variables, reason = "parameter consumed only under cfg(unix)")
     )]
     expires_at: &str,
-    fapi_key: Option<vouch_cli::fapi::ClientKey>,
+    fapi_key: Option<ClientKey>,
 ) -> bool {
     match provision_ssh_certificate(server, Some(email), None, fapi_key, false).await {
         Ok(result) => {
             // Store in agent with session linkage (Unix only)
             #[cfg(unix)]
-            if let Ok(mut agent) = vouch_agent::AgentClient::connect().await {
+            if let Ok(mut agent) = AgentClient::connect().await {
                 // Best-effort agent push; SSH cert is already on disk.
                 let _stored = agent
                     .store_ssh_credentials_with_session(
@@ -377,7 +383,7 @@ async fn agent_session_email(
 ) -> Option<String> {
     #[cfg(unix)]
     {
-        let mut agent = vouch_agent::AgentClient::connect().await.ok()?;
+        let mut agent = AgentClient::connect().await.ok()?;
         let info = agent.get_session().await.ok()?;
         (info.server_url.as_deref() == Some(server)).then_some(info.user_email)
     }
@@ -393,11 +399,7 @@ async fn agent_session_email(
 /// 1. Generates an SSH keypair if it doesn't exist
 /// 2. Requests a certificate from the Vouch server
 /// 3. Stores the certificate alongside the key
-pub(crate) async fn run(
-    server: &crate::server_url::ServerUrl,
-    key_path: Option<&str>,
-    force: bool,
-) -> Result<()> {
+pub(crate) async fn run(server: &ServerUrl, key_path: Option<&str>, force: bool) -> Result<()> {
     let session_email = agent_session_email(server.as_str()).await;
     let result =
         provision_ssh_certificate(server, session_email.as_deref(), key_path, None, force).await?;
@@ -409,7 +411,7 @@ pub(crate) async fn run(
         // The agent's lazy-load and background refresh handle session
         // association independently.
         #[cfg(unix)]
-        if let Ok(mut agent_client) = vouch_agent::AgentClient::connect().await {
+        if let Ok(mut agent_client) = AgentClient::connect().await {
             let key_str = result.key_path.to_string_lossy().to_string();
             let cert_str = result.cert_path.to_string_lossy().to_string();
             // Best-effort agent push; SSH cert is already on disk.
@@ -452,7 +454,7 @@ pub(crate) async fn run(
     // Try to store credentials in the agent (Unix only)
     #[cfg(unix)]
     {
-        if let Ok(mut agent_client) = vouch_agent::AgentClient::connect().await {
+        if let Ok(mut agent_client) = AgentClient::connect().await {
             let key_str = result.key_path.to_string_lossy().to_string();
             let cert_str = result.cert_path.to_string_lossy().to_string();
             if agent_client

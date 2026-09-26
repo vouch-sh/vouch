@@ -16,12 +16,15 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use vouch_cli::tr;
 
-use crate::commands::credential::aws::{StsRequest, exchange_for_sts_credentials};
+use crate::commands::credential::aws::{
+    StsRequest, detect_agent_source, exchange_for_sts_credentials,
+};
 use crate::commands::credential::cache;
 use crate::integrations::aws;
 use crate::integrations::aws::sigv4::{
     PresignedUrlParams, build_presigned_url, validate_sigv4_input,
 };
+use crate::server_url::ServerUrl;
 
 /// EKS presigned URL validity: 60 seconds (matches `aws eks get-token`).
 const EKS_TOKEN_EXPIRES_SECONDS: u64 = 60;
@@ -38,7 +41,7 @@ const EKS_EXPIRY_MARGIN_SECONDS: i64 = 15;
 /// Outputs a Kubernetes `ExecCredential` JSON to stdout for use as a
 /// kubeconfig exec-based credential plugin.
 pub(crate) async fn run(
-    server: &crate::server_url::ServerUrl,
+    server: &ServerUrl,
     cluster_name: &str,
     region: Option<&str>,
     role: Option<&str>,
@@ -51,7 +54,7 @@ pub(crate) async fn run(
     // the cache key ensures agent and non-agent invocations never share a
     // cached entry, which would otherwise hand the agent credentials minted
     // without ReadOnlyAccess / `vouch:AccessType=ai` tags (issue #426).
-    let agent_source = crate::commands::credential::aws::detect_agent_source();
+    let agent_source = detect_agent_source();
     let agent_suffix = agent_source
         .as_deref()
         .map_or(String::new(), |src| format!(":agent:{src}"));
@@ -81,7 +84,7 @@ pub(crate) async fn run(
 
 /// Generate a `k8s-aws-v1.` bearer token for EKS.
 async fn generate_eks_token(
-    server: &crate::server_url::ServerUrl,
+    server: &ServerUrl,
     cluster_name: &str,
     region: &str,
     role_arn: &str,

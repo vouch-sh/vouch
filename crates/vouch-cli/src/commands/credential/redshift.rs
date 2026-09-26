@@ -14,11 +14,16 @@ use anyhow::{Context, Result, bail};
 use secrecy::ExposeSecret;
 use vouch_cli::tr;
 
-use crate::commands::credential::aws::{StsRequest, exchange_for_sts_credentials};
+use crate::commands::credential::aws::{
+    StsRequest, detect_agent_source, exchange_for_sts_credentials,
+};
 use crate::commands::credential::cache;
 use crate::integrations::aws;
-use crate::integrations::aws::redshift::{get_cluster_credentials, get_serverless_credentials};
+use crate::integrations::aws::redshift::{
+    RedshiftCredentials, get_cluster_credentials, get_serverless_credentials,
+};
 use crate::integrations::aws::sigv4::validate_sigv4_input;
+use crate::server_url::ServerUrl;
 
 /// Default duration for Redshift temporary credentials (seconds).
 const DEFAULT_DURATION_SECONDS: u32 = 900;
@@ -39,7 +44,7 @@ pub(crate) enum RedshiftTarget<'a> {
 ///
 /// Outputs JSON with `DbUser`, `DbPassword`, and `Expiration` to stdout.
 pub(crate) async fn run(
-    server: &crate::server_url::ServerUrl,
+    server: &ServerUrl,
     target: RedshiftTarget<'_>,
     db_name: Option<&str>,
     region: Option<&str>,
@@ -64,7 +69,7 @@ pub(crate) async fn run(
     // the cache key ensures agent and non-agent invocations never share a
     // cached entry, which would otherwise hand the agent credentials minted
     // without ReadOnlyAccess / `vouch:AccessType=ai` tags (issue #426).
-    let agent_source = crate::commands::credential::aws::detect_agent_source();
+    let agent_source = detect_agent_source();
     let agent_suffix = agent_source
         .as_deref()
         .map_or(String::new(), |src| format!(":agent:{src}"));
@@ -112,13 +117,13 @@ pub(crate) async fn run(
 ///
 /// Routes to the provisioned cluster or serverless API based on `target`.
 pub(crate) async fn fetch_redshift_credentials(
-    server: &crate::server_url::ServerUrl,
+    server: &ServerUrl,
     target: &RedshiftTarget<'_>,
     db_name: Option<&str>,
     region: &str,
     role_arn: &str,
     agent_source: Option<&str>,
-) -> Result<crate::integrations::aws::redshift::RedshiftCredentials> {
+) -> Result<RedshiftCredentials> {
     let result = exchange_for_sts_credentials(StsRequest {
         server,
         role_arn,

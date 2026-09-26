@@ -6,6 +6,8 @@
 
 use std::fmt;
 
+use vouch_common::UrlSecurity;
+
 /// A validated, normalized Vouch server URL.
 ///
 /// Guarantees:
@@ -40,8 +42,8 @@ impl ServerUrl {
 
         // Check scheme security
         match vouch_common::check_url_security(url) {
-            vouch_common::UrlSecurity::Secure => {}
-            vouch_common::UrlSecurity::InsecureHttp { url: insecure_url } => {
+            UrlSecurity::Secure => {}
+            UrlSecurity::InsecureHttp { url: insecure_url } => {
                 if allow_insecure {
                     crate::tr_eprintln!("server-url-warn-insecure", url = insecure_url.as_str());
                     // Trailing blank line to set the warning apart visually.

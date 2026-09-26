@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
+use vouch_common::http::with_process_doh;
 use vouch_common::{ApiError, protocol};
 
 /// Total timeout for interactive CLI operations.
@@ -231,7 +232,7 @@ impl ReqwestClient {
             .timeout(INTERACTIVE_TOTAL)
             .connect_timeout(INTERACTIVE_CONNECT);
 
-        let client = vouch_common::http::with_process_doh(builder)
+        let client = with_process_doh(builder)
             .build()
             .context(tr!("err-failed-create-http-client"))?;
 

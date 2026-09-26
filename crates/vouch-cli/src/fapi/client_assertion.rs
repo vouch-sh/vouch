@@ -10,6 +10,7 @@ use serde::Serialize;
 
 use super::error::FapiError;
 use super::key::ClientKey;
+use vouch_common::protocol::CLIENT_ASSERTION_TYPE_JWT_BEARER;
 
 /// JWT claims for a `private_key_jwt` client assertion (RFC 7523 Section 3).
 #[derive(Debug, Serialize)]
@@ -49,7 +50,7 @@ impl std::fmt::Debug for ClientAssertion {
 impl ClientAssertion {
     /// The `client_assertion_type` value for `private_key_jwt` per RFC 7523
     /// §2.2. Shared with the server via [`vouch_common::protocol`].
-    pub const TYPE: &'static str = vouch_common::protocol::CLIENT_ASSERTION_TYPE_JWT_BEARER;
+    pub const TYPE: &'static str = CLIENT_ASSERTION_TYPE_JWT_BEARER;
 }
 
 /// Builder for `private_key_jwt` client assertions.

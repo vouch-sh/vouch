@@ -17,9 +17,15 @@ use inquire::{Confirm, InquireError, Select, Text};
 use vouch_cli::{tr, tr_args, tr_println};
 
 use crate::config::{AwsIdentityCenter, AwsOrganization, Config};
+use crate::exit_code::{self, CliError};
 use crate::install_path::resolve_install_path;
-use crate::integrations::aws::{AwsConfig, AwsProfile};
+use crate::integrations::aws::account_access::EntitledRole;
+use crate::integrations::aws::sso_admin::SsoInstance;
+use crate::integrations::aws::sts::StsCredentials;
+use crate::integrations::aws::{self, AwsConfig, AwsProfile, CredentialProcessLine, sts};
+use crate::server_url::ServerUrl;
 use crate::utils::ensure_secure_dir;
+use vouch_common::aws::Arn;
 
 /// Sanitize an account name into a valid AWS CLI profile name segment.
 ///
@@ -91,7 +97,7 @@ pub(crate) struct SetupAwsArgs<'a> {
     pub identity_center_application: Option<&'a str>,
     pub region: Option<&'a str>,
     pub discover: bool,
-    pub server: &'a crate::server_url::ServerUrl,
+    pub server: &'a ServerUrl,
 }
 
 /// Run the AWS setup command.
@@ -140,10 +146,7 @@ pub(crate) async fn run(args: SetupAwsArgs<'_>) -> Result<()> {
             if management_role.is_some() {
                 tr_println!("setup-aws-org-stored-no-profile");
             } else {
-                return Err(crate::exit_code::CliError::ConfigError(tr!(
-                    "setup-aws-err-role-required"
-                ))
-                .into());
+                return Err(CliError::ConfigError(tr!("setup-aws-err-role-required")).into());
             }
             return Ok(());
         }
@@ -156,7 +159,7 @@ pub(crate) async fn run(args: SetupAwsArgs<'_>) -> Result<()> {
 ///
 /// Establishes one organization per run, reusing the same helpers as the
 /// flag-based paths (`store_org` / `write_sts_profile` / `run_discover`).
-async fn run_wizard(server: &crate::server_url::ServerUrl) -> Result<()> {
+async fn run_wizard(server: &ServerUrl) -> Result<()> {
     tr_println!("setup-aws-wizard-intro");
 
     let single = tr!("setup-aws-wizard-mode-single");
@@ -221,7 +224,7 @@ fn wizard_management_chain() -> Result<()> {
 
 /// Identity Center: store the org + IdC anchor, show the audience reminder for
 /// the current issuer, and optionally run discovery.
-async fn wizard_identity_center(server: &crate::server_url::ServerUrl) -> Result<()> {
+async fn wizard_identity_center(server: &ServerUrl) -> Result<()> {
     let orgs = configured_orgs();
     let mgmt_default = orgs.first().map(|o| o.management_role.as_str());
     let Some(mgmt) = prompt_role_arn(&tr!("setup-aws-wizard-mgmt-role-prompt"), mgmt_default)?
@@ -291,7 +294,7 @@ fn prompt_role_arn(prompt: &str, default: Option<&str>) -> Result<Option<String>
         match text.prompt() {
             Ok(input) => {
                 let trimmed = input.trim();
-                if crate::integrations::aws::sts::parse_role_arn(trimmed).is_ok() {
+                if sts::parse_role_arn(trimmed).is_ok() {
                     return Ok(Some(trimmed.to_string()));
                 }
                 tr_println!("setup-aws-wizard-invalid-role-arn");
@@ -315,8 +318,7 @@ fn prompt_idc_application(prompt: &str, default: Option<&str>) -> Result<Option<
         match text.prompt() {
             Ok(input) => {
                 let trimmed = input.trim();
-                let is_sso =
-                    vouch_common::aws::Arn::parse(trimmed).is_ok_and(|a| a.service == "sso");
+                let is_sso = Arn::parse(trimmed).is_ok_and(|a| a.service == "sso");
                 if is_sso {
                     return Ok(Some(trimmed.to_string()));
                 }
@@ -361,7 +363,7 @@ fn wizard_input_error(e: &InquireError) -> anyhow::Error {
 /// Returns an empty list on any load error (the wizard still works, just without
 /// pre-filled values).
 fn configured_orgs() -> Vec<AwsOrganization> {
-    crate::config::Config::load()
+    Config::load()
         .ok()
         .and_then(|c| c.aws().map(|a| a.organizations.clone()))
         .unwrap_or_default()
@@ -379,15 +381,12 @@ fn store_org(
             region: rgn.to_string(),
         }),
         (Some(_), None) => {
-            return Err(crate::exit_code::CliError::ConfigError(tr!(
-                "setup-aws-err-region-required"
-            ))
-            .into());
+            return Err(CliError::ConfigError(tr!("setup-aws-err-region-required")).into());
         }
         _ => None,
     };
 
-    let mut config = crate::config::Config::load()?;
+    let mut config = Config::load()?;
     config.append_aws_org(AwsOrganization {
         management_role: management_role.to_string(),
         identity_center,
@@ -410,7 +409,7 @@ fn sts_credential_process(
     role_arn: &str,
     management_role: &str,
 ) -> String {
-    crate::integrations::aws::CredentialProcessLine::Role {
+    CredentialProcessLine::Role {
         role_arn: role_arn.to_string(),
         via: (management_role != role_arn).then(|| management_role.to_string()),
     }
@@ -633,7 +632,7 @@ fn existing_vends_same_idc_assignment(
 async fn run_discover(
     profile_prefix: Option<&str>,
     idc_application_arn: Option<&str>,
-    server: &crate::server_url::ServerUrl,
+    server: &ServerUrl,
 ) -> Result<()> {
     use crate::commands::credential::aws::{
         assume_management_role, exchange_idc_access_token, resolve_identity_center,
@@ -642,15 +641,14 @@ async fn run_discover(
     use vouch_common::http::credential_client;
 
     let vouch_config = Config::load()?;
-    let aws_cfg = vouch_config.aws().ok_or_else(|| {
-        crate::exit_code::CliError::ConfigError(tr!("aws-err-idc-not-configured"))
-    })?;
+    let aws_cfg = vouch_config
+        .aws()
+        .ok_or_else(|| CliError::ConfigError(tr!("aws-err-idc-not-configured")))?;
 
     // Resolve the IdC instance and its owning org together. Returns Err on
     // multi-instance ambiguity (no hint), Ok(None) when no org has IdC.
-    let (org, idc) = resolve_identity_center(aws_cfg, idc_application_arn)?.ok_or_else(|| {
-        crate::exit_code::CliError::ConfigError(tr!("aws-err-idc-not-configured"))
-    })?;
+    let (org, idc) = resolve_identity_center(aws_cfg, idc_application_arn)?
+        .ok_or_else(|| CliError::ConfigError(tr!("aws-err-idc-not-configured")))?;
     let management_role = &org.management_role;
 
     let http_client = credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
@@ -735,7 +733,7 @@ async fn run_discover(
                     aws_config.set_profile(&AwsProfile {
                         name: profile_name.clone(),
                         credential_process: Some(
-                            crate::integrations::aws::CredentialProcessLine::IdentityCenter {
+                            CredentialProcessLine::IdentityCenter {
                                 application_arn: Some(idc.application_arn.clone()),
                                 account: account.account_id.clone(),
                                 permission_set: role.role_name.clone(),
@@ -809,7 +807,7 @@ struct DiscoveryContext<'a> {
     /// for probe hops so CloudTrail shows one session identity per human.
     role_session_name: &'a str,
     user_email: Option<&'a str>,
-    creds: std::sync::Arc<crate::integrations::aws::sts::StsCredentials>,
+    creds: std::sync::Arc<StsCredentials>,
     vouch_path: &'a std::path::Path,
     profile_prefix: Option<&'a str>,
 }
@@ -866,7 +864,7 @@ async fn discover_entitlements(
     .await
     {
         Ok(user_id) => user_id,
-        Err(err) if crate::exit_code::aws_error_code_matches(&err, "ResourceNotFoundException") => {
+        Err(err) if exit_code::aws_error_code_matches(&err, "ResourceNotFoundException") => {
             tracing::debug!("entitlement discovery skipped: no Identity Center user for {email}");
             return Ok(BTreeSet::new());
         }
@@ -988,7 +986,7 @@ async fn discover_entitlements(
 ///
 /// Returns the role ARNs that were probed.
 async fn write_entitled_profiles<'a>(
-    roles: impl Iterator<Item = &'a crate::integrations::aws::account_access::EntitledRole>,
+    roles: impl Iterator<Item = &'a EntitledRole>,
     input: &DiscoveryContext<'_>,
     aws_config: &mut AwsConfig,
     created: &mut u32,
@@ -1033,7 +1031,7 @@ async fn write_entitled_profiles<'a>(
 /// name chosen for an earlier role in this pass is claimed to keep a later
 /// role whose name slugifies the same off it.
 fn plan_entitled_profiles<'a>(
-    roles: impl Iterator<Item = &'a crate::integrations::aws::account_access::EntitledRole>,
+    roles: impl Iterator<Item = &'a EntitledRole>,
     profile_prefix: Option<&str>,
     aws_config: &AwsConfig,
     skipped: &mut u32,
@@ -1114,10 +1112,7 @@ struct ProbeTarget {
 async fn probe_targets(
     input: &DiscoveryContext<'_>,
     targets: Vec<ProbeTarget>,
-) -> Vec<(
-    ProbeTarget,
-    Result<crate::integrations::aws::sts::StsCredentials>,
-)> {
+) -> Vec<(ProbeTarget, Result<StsCredentials>)> {
     use crate::integrations::aws::sts::{AssumeRoleRequest, assume_role};
 
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
@@ -1134,7 +1129,7 @@ async fn probe_targets(
                     .acquire_owned()
                     .await
                     .context("probe semaphore closed")?;
-                let region = crate::integrations::aws::resolve_region_with_fallback(&role_arn)?;
+                let region = aws::resolve_region_with_fallback(&role_arn)?;
                 assume_role(AssumeRoleRequest {
                     http_client: &http_client,
                     role_arn: &role_arn,
@@ -1180,7 +1175,7 @@ async fn probe_targets(
 fn report_probe_outcome(
     input: &DiscoveryContext<'_>,
     target: &ProbeTarget,
-    probe: &Result<crate::integrations::aws::sts::StsCredentials>,
+    probe: &Result<StsCredentials>,
 ) -> bool {
     let profile_name = target.profile_name.as_str();
     let role_arn = target.role_arn.as_str();
@@ -1203,7 +1198,7 @@ fn report_probe_outcome(
             );
             true
         }
-        (Disposition::Added, Err(err)) if crate::exit_code::aws_access_denied(err) => {
+        (Disposition::Added, Err(err)) if exit_code::aws_access_denied(err) => {
             tr_println!(
                 "setup-aws-entitlements-not-assumable-skipped",
                 profile = profile_name,
@@ -1213,7 +1208,7 @@ fn report_probe_outcome(
             tr_println!("setup-aws-entitlements-rerun-hint");
             false
         }
-        (Disposition::Existing, Err(err)) if crate::exit_code::aws_access_denied(err) => {
+        (Disposition::Existing, Err(err)) if exit_code::aws_access_denied(err) => {
             tr_println!(
                 "setup-aws-entitlements-existing-trust-missing",
                 profile = profile_name,
@@ -1610,10 +1605,7 @@ fn instance_id_from_application_arn(application_arn: &str) -> Option<&str> {
 /// The instance whose ID is embedded in the application ARN must be
 /// visible — never guess, even when only one instance is listed, so a
 /// stale `--idc-application` cannot resolve against the wrong org's store.
-fn resolve_identity_store(
-    instances: &[crate::integrations::aws::sso_admin::SsoInstance],
-    application_arn: &str,
-) -> Option<String> {
+fn resolve_identity_store(instances: &[SsoInstance], application_arn: &str) -> Option<String> {
     let embedded = instance_id_from_application_arn(application_arn)?;
     let mut matched = None;
     for instance in instances {
@@ -1635,11 +1627,8 @@ fn resolve_identity_store(
 /// digits, and the two must agree; anything else is rejected. Naming
 /// follows the permission-set scheme: `{prefix|vouch}-{account}-{role}`,
 /// falling back to the account ID when the account name sanitizes away.
-fn entitled_role_profile_name(
-    role: &crate::integrations::aws::account_access::EntitledRole,
-    profile_prefix: Option<&str>,
-) -> Option<String> {
-    let arn = crate::integrations::aws::sts::parse_role_arn(&role.role_arn).ok()?;
+fn entitled_role_profile_name(role: &EntitledRole, profile_prefix: Option<&str>) -> Option<String> {
+    let arn = sts::parse_role_arn(&role.role_arn).ok()?;
     if role.account.len() != 12 || !role.account.chars().all(|c| c.is_ascii_digit()) {
         return None;
     }
@@ -1717,7 +1706,7 @@ mod tests {
     fn test_discover_credential_process_embeds_idc_application() {
         let vouch_path = std::path::Path::new("/usr/local/bin/vouch");
 
-        let credential_process = crate::integrations::aws::CredentialProcessLine::IdentityCenter {
+        let credential_process = CredentialProcessLine::IdentityCenter {
             application_arn: Some(
                 "arn:aws:sso::123456789012:application/ssoins-abc/apl-xyz".to_string(),
             ),
@@ -2114,8 +2103,8 @@ mod tests {
         );
     }
 
-    fn instance(arn: &str, store: &str) -> crate::integrations::aws::sso_admin::SsoInstance {
-        crate::integrations::aws::sso_admin::SsoInstance {
+    fn instance(arn: &str, store: &str) -> SsoInstance {
+        SsoInstance {
             instance_arn: arn.to_string(),
             identity_store_id: store.to_string(),
         }
@@ -2164,12 +2153,8 @@ mod tests {
         );
     }
 
-    fn entitled(
-        role_arn: &str,
-        account: &str,
-        account_name: Option<&str>,
-    ) -> crate::integrations::aws::account_access::EntitledRole {
-        crate::integrations::aws::account_access::EntitledRole {
+    fn entitled(role_arn: &str, account: &str, account_name: Option<&str>) -> EntitledRole {
+        EntitledRole {
             role_arn: role_arn.to_string(),
             account: account.to_string(),
             account_name: account_name.map(str::to_string),

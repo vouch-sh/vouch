@@ -12,6 +12,7 @@ use secrecy::{ExposeSecret, SecretString};
 use zeroize::Zeroizing;
 
 use super::sts::StsCredentials;
+use crate::exit_code::CliError;
 
 /// Format timestamp for AWS `X-Amz-Date` header (`YYYYMMDDTHHMMSSZ`).
 #[must_use]
@@ -243,7 +244,7 @@ async fn send_signed_request(
         let response_body = response.text().await.unwrap_or_default();
         let code = header_code.or_else(|| parse_aws_error_code(&response_body));
         let truncated = truncate_error_body(&response_body, 500);
-        return Err(crate::exit_code::CliError::AwsApi {
+        return Err(CliError::AwsApi {
             service: service.to_string(),
             status,
             code,
