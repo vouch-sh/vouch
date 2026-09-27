@@ -157,6 +157,9 @@ explicitly.
 | SCIM, `/oauth/authorize`, SAML ACS | 64 KiB |
 | Enroll and login WebAuthn | 32 KiB |
 | GitHub webhook | 1 MiB |
+| TLS handshake | 10 seconds (connection closed) |
+| HTTP/1 request head, and idle keep-alive between requests | 30 seconds (connection closed) |
+| HTTP/2 keep-alive ping | every 20 seconds; closed if unacknowledged for 20 seconds |
 
 ## Server-side request forgery
 

@@ -49,6 +49,8 @@ governor = { workspace = true, features = ["std"] }
 hex = { workspace = true, features = ["std"] }
 hickory-resolver = { workspace = true, features = ["dnssec-aws-lc-rs", "https-aws-lc-rs", "system-config", "tokio", "webpki-roots"] }
 http = { workspace = true }
+hyper = { workspace = true, features = ["http1", "http2", "server"] }
+hyper-util = { workspace = true, features = ["service", "tokio"] }
 i18n-embed = { workspace = true, features = ["fluent-system", "rust-embed"] }
 idna = { workspace = true, features = ["compiled_data"] }
 ipnet = { workspace = true, features = ["std"] }

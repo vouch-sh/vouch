@@ -7556,6 +7556,8 @@ dependencies = [
  "hex",
  "hickory-resolver",
  "http",
+ "hyper",
+ "hyper-util",
  "i18n-embed",
  "idna",
  "ipnet",
