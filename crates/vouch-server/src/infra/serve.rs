@@ -17,6 +17,7 @@ use crate::config::ServerConfig;
 use crate::infra::s3_config;
 
 use super::accept::{self, ConnLimits, PlainHandshake, TlsHandshake};
+use super::mtls_listener::MtlsHandshake;
 use super::startup::ServerComponents;
 use crate::infra::tls;
 
@@ -53,15 +54,16 @@ pub async fn serve(components: ServerComponents, app: Router) -> Result<()> {
     let s3_parts = (s3_client, s3_source, initial_etag);
 
     // Run until shutdown; each mode returns its S3 polling handle (if any)
-    // so cleanup stays shared below.
-    let s3_poll_handle = if config.tls_configured() {
-        serve_tls(&config, &state, app, s3_parts).await?
+    // so cleanup stays shared below. A startup error (a port already in use)
+    // still runs the cleanup before it is returned.
+    let served = if config.tls_configured() {
+        serve_tls(&config, &state, app, s3_parts).await
     } else {
-        serve_plain(&config, &state, app, s3_parts).await?
+        serve_plain(&config, &state, app, s3_parts).await
     };
 
     // Clean up background tasks
-    if let Some(handle) = s3_poll_handle {
+    if let Ok(Some(handle)) = &served {
         tracing::info!("Shutting down S3 config polling task");
         handle.abort();
     }
@@ -77,6 +79,7 @@ pub async fn serve(components: ServerComponents, app: Router) -> Result<()> {
     // Flush pending OpenTelemetry spans before exit
     super::telemetry::shutdown_tracing();
 
+    served?;
     tracing::info!("Server shutdown complete");
     Ok(())
 }
@@ -107,6 +110,13 @@ fn start_s3_polling(
     ))
 }
 
+/// Listen addresses for TLS mode.
+struct TlsAddrs {
+    https: std::net::SocketAddr,
+    http_redirect: std::net::SocketAddr,
+    mtls: std::net::SocketAddr,
+}
+
 /// Run in TLS mode: HTTPS on 443, HTTP redirect on 80, mTLS listener,
 /// SIGHUP certificate hot reload. Blocks until shutdown.
 ///
@@ -118,18 +128,38 @@ async fn serve_tls(
     app: Router,
     s3_parts: S3ConfigParts,
 ) -> Result<Option<JoinHandle<()>>> {
+    let addrs = TlsAddrs {
+        https: "[::]:443".parse().context("Invalid HTTPS listen address")?,
+        http_redirect: "[::]:80".parse().context("Invalid HTTP listen address")?,
+        mtls: format!("[::]:{}", config.mtls_port)
+            .parse()
+            .context("Invalid mTLS listen address")?,
+    };
+    serve_tls_on(config, state, app, s3_parts, &addrs).await
+}
+
+async fn serve_tls_on(
+    config: &ServerConfig,
+    state: &Arc<AppState>,
+    app: Router,
+    s3_parts: S3ConfigParts,
+    addrs: &TlsAddrs,
+) -> Result<Option<JoinHandle<()>>> {
+    // Everything that can fail happens before anything is started, so an
+    // error here returns with no task running and no port held.
     let tls_config = tls::build_tls_config(config)?;
+    let (mtls_listener, mtls_config_swap) = bind_mtls_listener(config, addrs.mtls)
+        .await
+        .context("Failed to start mTLS listener")?;
+    let https_listener = tokio::net::TcpListener::bind(addrs.https)
+        .await
+        .with_context(|| format!("Failed to bind HTTPS listener on {}", addrs.https))?;
 
-    // TLS mode: always listen on 443 (HTTPS) and 80 (HTTP redirect)
-    let https_addr: std::net::SocketAddr =
-        "[::]:443".parse().context("Invalid HTTPS listen address")?;
-    let http_addr: std::net::SocketAddr =
-        "[::]:80".parse().context("Invalid HTTP listen address")?;
-
+    // Nothing below can fail.
     tracing::info!(
         "TLS enabled - listening on https://{} and http://{} (redirect)",
-        https_addr,
-        http_addr
+        addrs.https,
+        addrs.http_redirect
     );
     tracing::info!("Send SIGHUP to reload TLS certificates");
 
@@ -143,24 +173,14 @@ async fn serve_tls(
         shutdown_token_for_signal.cancel();
     });
 
-    // Start mTLS listener whenever TLS is configured (mTLS port always has a
-    // value). Started before the S3 polling task and SIGHUP handler so both
-    // can be handed the listener's config swap for certificate hot reload.
-    let mtls_port = config.mtls_port;
-    let mtls_addr: std::net::SocketAddr = format!("[::]:{mtls_port}")
-        .parse()
-        .context("Invalid mTLS listen address")?;
-
-    let (mtls_handle, mtls_config_swap): (Option<JoinHandle<()>>, _) =
-        match start_mtls_listener(config, mtls_addr, app.clone(), shutdown_token.clone()).await {
-            Ok((handle, swap)) => {
-                tracing::info!("mTLS listener started on port {}", mtls_port);
-                (Some(handle), swap)
-            }
-            Err(e) => {
-                return Err(e.context("Failed to start mTLS listener"));
-            }
-        };
+    let mtls_handle = tokio::spawn(accept::serve(
+        mtls_listener,
+        MtlsHandshake::new(mtls_config_swap.clone()),
+        app.clone(),
+        ConnLimits::DEFAULT,
+        shutdown_token.clone(),
+    ));
+    tracing::info!("mTLS listener started on port {}", addrs.mtls.port());
 
     // Start S3 config polling task if configured (with TLS config for hot reload)
     let s3_poll_handle = start_s3_polling(
@@ -170,17 +190,18 @@ async fn serve_tls(
         Some(mtls_config_swap.clone()),
     );
 
-    spawn_sighup_cert_reload(tls_config.clone(), mtls_config_swap, state.config.clone());
-
-    // Bind before spawning anything else that depends on the HTTPS port.
-    let https_listener = tokio::net::TcpListener::bind(https_addr)
-        .await
-        .with_context(|| format!("Failed to bind HTTPS listener on {https_addr}"))?;
+    spawn_sighup_cert_reload(
+        tls_config.clone(),
+        mtls_config_swap,
+        state.config.clone(),
+        shutdown_token.clone(),
+    );
 
     // Build HTTP redirect router (with state for Host validation)
     let redirect_app = crate::build_redirect_router(state.clone());
 
     // Spawn HTTP redirect server (port 80) - best effort, not fatal if fails
+    let http_addr = addrs.http_redirect;
     let token_for_http = shutdown_token.clone();
     let http_handle = tokio::spawn(async move {
         match tokio::net::TcpListener::bind(http_addr).await {
@@ -218,9 +239,7 @@ async fn serve_tls(
     let _http = http_handle.await;
 
     // Wait for mTLS listener to finish; ignore JoinError on shutdown.
-    if let Some(handle) = mtls_handle {
-        let _mtls = handle.await;
-    }
+    let _mtls = mtls_handle.await;
 
     Ok(s3_poll_handle)
 }
@@ -236,11 +255,12 @@ async fn serve_plain(
     app: Router,
     s3_parts: S3ConfigParts,
 ) -> Result<Option<JoinHandle<()>>> {
-    // Start S3 config polling task if configured (no TLS config to reload)
-    let s3_poll_handle = start_s3_polling(state, s3_parts, None, None);
-
+    // Bind before starting anything, so a port conflict leaves nothing running.
     let listener = tokio::net::TcpListener::bind(&config.listen_addr).await?;
     tracing::info!("Listening on http://{}", config.listen_addr);
+
+    // Start S3 config polling task if configured (no TLS config to reload)
+    let s3_poll_handle = start_s3_polling(state, s3_parts, None, None);
 
     let shutdown_token = CancellationToken::new();
     let token_for_signal = shutdown_token.clone();
@@ -268,6 +288,7 @@ fn spawn_sighup_cert_reload(
     tls_config: axum_server::tls_rustls::RustlsConfig,
     mtls_config: super::mtls_listener::MtlsConfigSwap,
     config: Arc<arc_swap::ArcSwap<ServerConfig>>,
+    shutdown: CancellationToken,
 ) {
     tokio::spawn(async move {
         let Ok(mut sighup) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
@@ -277,7 +298,10 @@ fn spawn_sighup_cert_reload(
         };
 
         loop {
-            sighup.recv().await;
+            tokio::select! {
+                () = shutdown.cancelled() => return,
+                _ = sighup.recv() => {}
+            }
             tracing::info!("Received SIGHUP, reloading TLS certificates...");
 
             // Read from current config (supports both env vars and S3 config)
@@ -330,41 +354,80 @@ async fn shutdown_signal() {
     }
 }
 
-/// Start the mTLS listener on a separate port.
+/// Bind the mTLS listener's port and build its TLS config, without starting
+/// it.
 ///
 /// Uses the same server TLS certificate as the main HTTPS listener,
 /// with a custom client cert verifier that accepts any certificate
 /// (including self-signed) and delegates validation to the application layer.
-async fn start_mtls_listener(
+/// The returned config handle is what certificate hot reload swaps.
+async fn bind_mtls_listener(
     config: &ServerConfig,
     addr: std::net::SocketAddr,
-    app: Router,
-    shutdown_token: CancellationToken,
-) -> anyhow::Result<(
-    tokio::task::JoinHandle<()>,
+) -> Result<(
+    tokio::net::TcpListener,
     super::mtls_listener::MtlsConfigSwap,
 )> {
-    use super::mtls_listener::{MtlsHandshake, build_mtls_server_config};
+    use super::mtls_listener::build_mtls_server_config;
 
     // Parse server cert/key for the mTLS listener (same identity)
     let (certs, key) = super::tls::parse_server_cert_and_key(config)?;
 
     let mtls_config = build_mtls_server_config(certs, key)?;
     let mtls_config_swap = std::sync::Arc::new(arc_swap::ArcSwap::from(mtls_config));
-    let swap_for_reload = mtls_config_swap.clone();
 
-    // Bind before spawning so the caller learns of port conflicts immediately.
     let tcp = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("Failed to bind mTLS listener on {addr}"))?;
 
-    let handle = tokio::spawn(accept::serve(
-        tcp,
-        MtlsHandshake::new(mtls_config_swap),
-        app,
-        ConnLimits::DEFAULT,
-        shutdown_token,
-    ));
+    Ok((tcp, mtls_config_swap))
+}
 
-    Ok((handle, swap_for_reload))
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
+mod tests {
+    use super::*;
+
+    use secrecy::SecretString;
+    use tokio::net::TcpListener;
+
+    use crate::test_utils::{TEST_TLS_CERT_PEM, TEST_TLS_KEY_PEM, test_app_state, test_config};
+
+    /// A TLS startup that fails to bind the HTTPS port must return with nothing
+    /// running. The mTLS listener used to be started first, so it kept serving
+    /// (and holding its port) after `serve_tls` had already returned the error.
+    #[tokio::test]
+    async fn failed_https_bind_leaves_nothing_running() {
+        let mut config = test_config();
+        config.tls_cert = Some(TEST_TLS_CERT_PEM.to_string());
+        config.tls_key = Some(SecretString::from(TEST_TLS_KEY_PEM));
+        let state = test_app_state().await;
+
+        let https_taken = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let mtls = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind")
+            .local_addr()
+            .expect("local addr");
+        let addrs = TlsAddrs {
+            https: https_taken.local_addr().expect("local addr"),
+            http_redirect: "127.0.0.1:0".parse().expect("addr"),
+            mtls,
+        };
+
+        let err = serve_tls_on(&config, &state, Router::new(), (None, None, None), &addrs)
+            .await
+            .expect_err("the HTTPS port is taken");
+        assert!(
+            format!("{err:#}").contains("Failed to bind HTTPS listener"),
+            "unexpected error: {err:#}"
+        );
+
+        TcpListener::bind(mtls)
+            .await
+            .expect("the mTLS port must be free once serve_tls has returned");
+    }
 }
