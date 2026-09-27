@@ -564,7 +564,11 @@ pub struct Args {
     pub db_idle_timeout_secs: u64,
 
     /// Connection acquire timeout in seconds.
-    #[arg(long, env = "VOUCH_DB_ACQUIRE_TIMEOUT_SECS", default_value = "5")]
+    ///
+    /// Together with an outbound call (at most 5s), this has to fit inside
+    /// the 10s request timeout, so a request that waits for a connection and
+    /// then fetches a client's JWKS still gets its own error, not a 408.
+    #[arg(long, env = "VOUCH_DB_ACQUIRE_TIMEOUT_SECS", default_value = "3")]
     pub db_acquire_timeout_secs: u64,
 
     /// Maximum number of entries in the session lookup cache.

@@ -62,7 +62,7 @@ impl Default for PoolConfig {
             max_connections: 25,
             min_connections: 2,
             idle_timeout_secs: 300,
-            acquire_timeout_secs: 5,
+            acquire_timeout_secs: 3,
         }
     }
 }
