@@ -90,7 +90,7 @@ rfc8941	consumes	producer,parser	Structured field values used by HTTP message si
 rfc9068	implements	authorization-server	JWT access token profile.
 rfc9101	implements	authorization-server	JWT-secured authorization requests.
 rfc9110	consumes	server	HTTP semantics for the server surface.
-rfc9113	reference	-	HTTP/2 framing is implemented by hyper and h2; cached for the connection preface (§3.4) the accept loop sniffs to pick HTTP/1 or HTTP/2.
+rfc9113	reference	-	HTTP/2 framing is implemented by hyper and h2; cached for the connection preface (§3.4) that hyper-util's auto builder detects and the accept-loop tests assert.
 rfc9116	reference	-	security.txt is a published file, not code behavior.
 rfc9126	implements	authorization-server	Pushed authorization requests.
 rfc9180	consumes	producer,recipient	HPKE document encryption.
