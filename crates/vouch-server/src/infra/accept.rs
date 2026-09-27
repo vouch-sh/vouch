@@ -19,6 +19,7 @@
 //! its TLS handshake occupies only its own task and never blocks `accept` for
 //! everyone else.
 
+use std::convert::Infallible;
 use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
@@ -28,14 +29,16 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use axum::Router;
+use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum_server::tls_rustls::RustlsConfig;
-use hyper::body::Incoming;
+use hyper::body::{Body as HttpBody, Frame, Incoming, SizeHint};
 use hyper::server::conn::{http1, http2};
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::service::TowerToHyperService;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
@@ -51,6 +54,11 @@ pub(crate) struct ConnLimits {
     /// and again as hyper's HTTP/1 header read timeout. hyper re-arms the
     /// latter before every request head, so it also closes a keep-alive
     /// connection that sits idle between requests for this long.
+    ///
+    /// HTTP/2 has no header timer in hyper, so an HTTP/2 connection with no
+    /// request in flight for this long is closed instead. That covers a
+    /// client that stops mid-request-head (a HEADERS frame whose
+    /// CONTINUATION never arrives) as well as one that simply idles.
     pub(crate) header_read: Duration,
     /// Interval between HTTP/2 keep-alive pings.
     pub(crate) h2_keep_alive_interval: Duration,
@@ -236,19 +244,33 @@ async fn serve_connection<H: Handshake>(
         },
     };
 
+    let activity = Activity::default();
+    let idle = activity.subscribe();
     let service =
         TowerToHyperService::new(tower::service_fn(move |req: hyper::Request<Incoming>| {
-            let mut req = req.map(axum::body::Body::new);
+            let mut req = req.map(Body::new);
             req.extensions_mut().insert(ConnectInfo(info.clone()));
-            app.clone().oneshot(req)
+            let in_flight = activity.begin();
+            let response = app.clone().oneshot(req);
+            async move {
+                let response = response.await?;
+                Ok::<_, Infallible>(response.map(|inner| TrackedBody {
+                    inner,
+                    _in_flight: in_flight,
+                }))
+            }
         }));
     let io = TokioIo::new(io);
 
     // The two hyper connection types share no trait carrying
     // `graceful_shutdown`, so the drive loop is spelled out per protocol.
-    macro_rules! drive {
-        ($conn:expr) => {{
-            let conn = $conn;
+    let result = match version {
+        Version::H1 => {
+            let mut builder = http1::Builder::new();
+            builder
+                .timer(TokioTimer::new())
+                .header_read_timeout(limits.header_read);
+            let conn = builder.serve_connection(io, service).with_upgrades();
             tokio::pin!(conn);
             tokio::select! {
                 result = conn.as_mut() => result,
@@ -257,16 +279,6 @@ async fn serve_connection<H: Handshake>(
                     conn.await
                 }
             }
-        }};
-    }
-
-    let result = match version {
-        Version::H1 => {
-            let mut builder = http1::Builder::new();
-            builder
-                .timer(TokioTimer::new())
-                .header_read_timeout(limits.header_read);
-            drive!(builder.serve_connection(io, service).with_upgrades())
         }
         Version::H2 => {
             let mut builder = http2::Builder::new(TokioExecutor::new());
@@ -274,11 +286,102 @@ async fn serve_connection<H: Handshake>(
                 .timer(TokioTimer::new())
                 .keep_alive_interval(limits.h2_keep_alive_interval)
                 .keep_alive_timeout(limits.h2_keep_alive_timeout);
-            drive!(builder.serve_connection(io, service))
+            let conn = builder.serve_connection(io, service);
+            tokio::pin!(conn);
+            // Keep-alive pings only catch dead peers; a live client answers
+            // them, so idleness is bounded here instead.
+            tokio::select! {
+                result = conn.as_mut() => result,
+                () = shutdown.cancelled() => {
+                    conn.as_mut().graceful_shutdown();
+                    conn.await
+                }
+                () = idle_for(idle, limits.header_read) => {
+                    tracing::debug!(remote_addr = %peer, "closing idle HTTP/2 connection");
+                    // Graceful shutdown sends GOAWAY and then waits for the
+                    // client to acknowledge a PING, which a stalling client
+                    // never does; give it one more idle period, then drop.
+                    conn.as_mut().graceful_shutdown();
+                    tokio::time::timeout(limits.header_read, conn)
+                        .await
+                        .unwrap_or(Ok(()))
+                }
+            }
         }
     };
     if let Err(err) = result {
         tracing::trace!(remote_addr = %peer, "connection error: {err:#}");
+    }
+}
+
+/// Count of requests in flight on one connection, from dispatch until the
+/// response body has been sent.
+#[derive(Clone, Default)]
+struct Activity(Arc<watch::Sender<usize>>);
+
+impl Activity {
+    fn begin(&self) -> InFlight {
+        self.0.send_modify(|n| *n = n.saturating_add(1));
+        InFlight(Arc::clone(&self.0))
+    }
+
+    fn subscribe(&self) -> watch::Receiver<usize> {
+        self.0.subscribe()
+    }
+}
+
+/// One in-flight request; dropping it ends the request.
+struct InFlight(Arc<watch::Sender<usize>>);
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.0.send_modify(|n| *n = n.saturating_sub(1));
+    }
+}
+
+/// Resolve once no request has been in flight for `idle`.
+async fn idle_for(mut in_flight: watch::Receiver<usize>, idle: Duration) {
+    loop {
+        let busy = *in_flight.borrow_and_update() > 0;
+        let changed = if busy {
+            in_flight.changed().await
+        } else {
+            tokio::select! {
+                () = tokio::time::sleep(idle) => return,
+                changed = in_flight.changed() => changed,
+            }
+        };
+        if changed.is_err() {
+            // Every sender is gone, so the connection is finishing on its own.
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
+/// A response body that keeps its request counted as in flight until hyper
+/// has finished sending it.
+struct TrackedBody {
+    inner: Body,
+    _in_flight: InFlight,
+}
+
+impl HttpBody for TrackedBody {
+    type Data = <Body as HttpBody>::Data;
+    type Error = <Body as HttpBody>::Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        Pin::new(&mut self.get_mut().inner).poll_frame(cx)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.inner.size_hint()
     }
 }
 
@@ -529,6 +632,73 @@ mod tests {
         // RFC 9113 §3.4: the server connection preface is a SETTINGS frame "that
         // MUST be the first frame the server sends in the HTTP/2 connection."
         assert_eq!(header.get(3), Some(&0x4), "first server frame: {header:?}");
+    }
+
+    /// Write the HTTP/2 client connection preface and an empty SETTINGS frame.
+    async fn open_h2(stream: &mut TcpStream) {
+        stream.write_all(H2_PREFACE).await.expect("write preface");
+        // Empty client SETTINGS frame: length 0, type 0x4, flags 0, stream 0.
+        stream
+            .write_all(&[0, 0, 0, 0x4, 0, 0, 0, 0, 0])
+            .await
+            .expect("write settings");
+    }
+
+    /// hyper has no header timer for HTTP/2 and a live client answers
+    /// keep-alive pings, so an HTTP/2 connection that never sends a request
+    /// must be closed by the idle limit.
+    #[tokio::test]
+    async fn idle_http2_connection_is_closed() {
+        let (addr, _shutdown, _server) = start(SHORT).await;
+        let mut stream = TcpStream::connect(addr).await.expect("connect");
+        open_h2(&mut stream).await;
+        read_until_closed(&mut stream)
+            .await
+            .expect("idle HTTP/2 client must be disconnected");
+    }
+
+    /// The HTTP/2 form of slowloris: a HEADERS frame without END_HEADERS,
+    /// whose CONTINUATION never arrives, dispatches no request and so leaves
+    /// the connection idle.
+    #[tokio::test]
+    async fn unfinished_http2_request_head_is_closed() {
+        let (addr, _shutdown, _server) = start(SHORT).await;
+        let mut stream = TcpStream::connect(addr).await.expect("connect");
+        open_h2(&mut stream).await;
+        // HEADERS frame: length 1, type 0x1, flags 0 (neither END_HEADERS nor
+        // END_STREAM), stream 1, payload 0x82 (HPACK indexed `:method: GET`).
+        stream
+            .write_all(&[0, 0, 1, 0x1, 0, 0, 0, 0, 1, 0x82])
+            .await
+            .expect("write headers");
+        read_until_closed(&mut stream)
+            .await
+            .expect("client stalled mid-request-head must be disconnected");
+    }
+
+    /// A request in flight keeps an HTTP/2 connection from counting as idle,
+    /// and the idle clock starts once it ends. The idle limit is zero, so only
+    /// the in-flight request can keep the wait pending: no clock is involved.
+    #[tokio::test]
+    async fn in_flight_request_defers_idle() {
+        let activity = Activity::default();
+        let request = activity.begin();
+        let waiting = idle_for(activity.subscribe(), Duration::ZERO);
+        tokio::pin!(waiting);
+
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        for _ in 0..3 {
+            assert!(
+                waiting.as_mut().poll(&mut cx).is_pending(),
+                "a connection with a request in flight must not go idle"
+            );
+            tokio::task::yield_now().await;
+        }
+
+        drop(request);
+        tokio::time::timeout(BOUND, waiting)
+            .await
+            .expect("the idle wait must end once no request is in flight");
     }
 
     /// Cancelling the token stops accepting and returns once the open
