@@ -26,12 +26,11 @@ pub(crate) const JWKS_CACHE_TTL_SECONDS: i64 = 3600;
 
 /// Per-request timeout for a JWKS fetch (seconds).
 ///
-/// Tighter than the shared client's `SERVER_TOTAL` budget because the token
-/// endpoint resolves this synchronously while authenticating a client, so a
-/// stalling `jwks_uri` host holds a request slot for as long as the fetch runs.
-/// Applied per-request rather than on the shared client, which serves callers
-/// with more headroom.
-const JWKS_FETCH_TIMEOUT_SECONDS: u64 = 10;
+/// The token endpoint resolves this synchronously while authenticating a
+/// client, so a stalling `jwks_uri` host holds a request slot for as long as
+/// the fetch runs. Kept explicit, rather than inherited from the shared
+/// client's `SERVER_TOTAL`, so loosening that budget never loosens this one.
+const JWKS_FETCH_TIMEOUT_SECONDS: u64 = 5;
 
 /// Read a JWKS response body under [`MAX_JWKS_RESPONSE_SIZE`], reporting
 /// failures in the token endpoint's vocabulary.

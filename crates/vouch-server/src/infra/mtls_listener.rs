@@ -1,45 +1,41 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! mTLS listener for RFC 8705 certificate-bound access tokens.
 //!
-//! Provides a custom axum [`Listener`] implementation that:
-//! 1. Accepts TCP connections
-//! 2. Performs TLS handshake with optional client certificate verification
-//! 3. Extracts the peer certificate chain DER for injection into request
-//!    extensions
+//! Provides the [`Handshake`] the shared accept loop ([`super::accept`]) runs
+//! for the mTLS port. It:
+//! 1. Performs the TLS handshake with optional client certificate verification
+//! 2. Extracts the peer certificate chain DER for injection into request
+//!    extensions as `ConnectInfo<PeerClientCert>`
 //!
 //! The mTLS listener runs on a separate port (default 8443) from the main
 //! HTTPS listener (443), matching RFC 8705's `mtls_endpoint_aliases` pattern.
 
 use std::io;
 use std::net::SocketAddr;
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
 
 use arc_swap::ArcSwap;
-use axum::serve::Listener;
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpStream;
 use tokio_rustls::TlsAcceptor;
+
+use super::accept::Handshake;
 
 /// The mTLS connection's peer certificate chain and remote socket address.
 ///
-/// Both travel in a single connection extension because axum's
-/// [`Router::into_make_service_with_connect_info::<T>`] inserts exactly one
-/// `ConnectInfo<T>` per connection. The mTLS listener is wired with
-/// `into_make_service_with_connect_info::<PeerClientCert>()`, so on the mTLS
-/// port `ConnectInfo<PeerClientCert>` is the *only* connection extension
-/// present — there is no separate `ConnectInfo<SocketAddr>`. The peer
-/// `SocketAddr` therefore rides along here so the rate limiter and the audit
-/// `ClientInfo` extractor (which read `ConnectInfo<SocketAddr>` on the
-/// HTTPS/plain ports) can fall back to it via [`connection_peer`].
+/// Both travel in a single connection extension because the accept loop
+/// inserts exactly one `ConnectInfo<T>` per connection, where `T` is the
+/// [`Handshake::Info`] of the listener. The mTLS listener's is
+/// `PeerClientCert`, so on the mTLS port `ConnectInfo<PeerClientCert>` is the
+/// *only* connection extension present — there is no separate
+/// `ConnectInfo<SocketAddr>`. The peer `SocketAddr` therefore rides along
+/// here so the rate limiter and the audit `ClientInfo` extractor (which read
+/// `ConnectInfo<SocketAddr>` on the HTTPS/plain ports) can fall back to it via
+/// [`connection_peer`].
 ///
 /// `peer_chain_der` is the DER-encoded certificate chain the client presented
 /// in the TLS handshake, leaf first; empty when the client presented none.
 /// The intermediates travel with the leaf because `tls_client_auth`
 /// (RFC 8705 §2.1) validates the chain at the application layer.
-///
-/// [`Router::into_make_service_with_connect_info::<T>`]: axum::Router::into_make_service_with_connect_info
 #[derive(Clone, Debug)]
 pub(crate) struct PeerClientCert {
     /// DER-encoded client certificate chain, leaf first; empty if the client
@@ -47,17 +43,6 @@ pub(crate) struct PeerClientCert {
     pub(crate) peer_chain_der: Vec<Vec<u8>>,
     /// Remote socket address of the mTLS connection.
     pub(crate) peer_addr: SocketAddr,
-}
-
-impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, MtlsListener>>
-    for PeerClientCert
-{
-    fn connect_info(stream: axum::serve::IncomingStream<'_, MtlsListener>) -> Self {
-        Self {
-            peer_chain_der: stream.io().peer_chain_der.clone(),
-            peer_addr: *stream.remote_addr(),
-        }
-    }
 }
 
 /// The TCP peer of a request, tagged by the listener that accepted it.
@@ -80,17 +65,15 @@ pub(crate) enum ConnectionPeer {
 /// Classify a request's peer from its connection extensions.
 ///
 /// On the main HTTPS/plain ports the connection's `ConnectInfo<SocketAddr>`
-/// extension is present. On the mTLS port axum only injects
-/// `ConnectInfo<PeerClientCert>`
-/// ([`Router::into_make_service_with_connect_info::<T>`] inserts a single
-/// `ConnectInfo<T>` per connection), so the peer `SocketAddr` rides on
-/// `PeerClientCert`. The IP is canonicalized.
+/// extension is present. On the mTLS port the accept loop only injects
+/// `ConnectInfo<PeerClientCert>` (it inserts a single `ConnectInfo<T>` per
+/// connection), so the peer `SocketAddr` rides on `PeerClientCert`. The IP
+/// is canonicalized.
 ///
 /// Callers resolve the client IP through
 /// [`client_ip_from_request`], which honors `X-Forwarded-For` only for
 /// [`ConnectionPeer::Tcp`].
 ///
-/// [`Router::into_make_service_with_connect_info::<T>`]: axum::Router::into_make_service_with_connect_info
 /// [`client_ip_from_request`]: crate::infra::rate_limit::client_ip_from_request
 pub(crate) fn connection_peer(extensions: &axum::http::Extensions) -> Option<ConnectionPeer> {
     if let Some(ci) = extensions.get::<axum::extract::ConnectInfo<std::net::SocketAddr>>() {
@@ -101,128 +84,55 @@ pub(crate) fn connection_peer(extensions: &axum::http::Extensions) -> Option<Con
         .map(|ci| ConnectionPeer::Mtls(ci.0.peer_addr.ip().to_canonical()))
 }
 
-/// TLS stream with extracted peer certificate.
-///
-/// Wraps `tokio_rustls::server::TlsStream<TcpStream>` and delegates
-/// `AsyncRead`/`AsyncWrite`. The peer certificate chain DER is extracted
-/// during the TLS handshake and stored for later injection.
-pub(crate) struct MtlsStream {
-    inner: tokio_rustls::server::TlsStream<TcpStream>,
-    /// DER-encoded client certificate chain, leaf first; empty if the client
-    /// presented none.
-    peer_chain_der: Vec<Vec<u8>>,
-}
-
-impl AsyncRead for MtlsStream {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.get_mut().inner).poll_read(cx, buf)
-    }
-}
-
-impl AsyncWrite for MtlsStream {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
-    }
-
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
-    }
-}
-
 /// Shared handle to the mTLS listener's rustls config.
 ///
-/// The listener snapshots this on every accept (`load_full`), so storing a
+/// The handshake snapshots this on every connection (`load_full`), so storing a
 /// rebuilt config makes new handshakes pick up rotated certificates without
 /// restarting the listener.
 pub(crate) type MtlsConfigSwap = Arc<ArcSwap<rustls::ServerConfig>>;
 
-/// Custom listener for mTLS: TLS with client certificate verification.
+/// TLS handshake for the mTLS port, with optional client certificate
+/// verification.
 ///
-/// Bound to a separate port from the main HTTPS listener. Client
-/// certificate verification is configured via `WebPkiClientVerifier`
-/// trusting our Client Certificate CA.
-pub(crate) struct MtlsListener {
-    tcp: TcpListener,
+/// Certificate verification is delegated to the application layer (see
+/// [`build_mtls_server_config`]); this only records the chain the client
+/// presented.
+pub(crate) struct MtlsHandshake {
     tls_config: MtlsConfigSwap,
 }
 
-impl MtlsListener {
-    /// Create a new mTLS listener.
-    ///
-    /// # Arguments
-    /// * `tcp` - Bound TCP listener
-    /// * `tls_config` - Rustls config with client cert verifier (wrapped
-    ///   in `ArcSwap` for hot reload)
-    pub(crate) fn new(tcp: TcpListener, tls_config: MtlsConfigSwap) -> Self {
-        Self { tcp, tls_config }
+impl MtlsHandshake {
+    /// `tls_config` is the rustls config with client cert verifier, wrapped in
+    /// `ArcSwap` for hot reload.
+    pub(crate) fn new(tls_config: MtlsConfigSwap) -> Self {
+        Self { tls_config }
     }
 }
 
-impl Listener for MtlsListener {
-    type Io = MtlsStream;
-    type Addr = SocketAddr;
+impl Handshake for MtlsHandshake {
+    type Io = tokio_rustls::server::TlsStream<TcpStream>;
+    type Info = PeerClientCert;
 
-    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
-        loop {
-            // Accept TCP connection
-            let (tcp_stream, remote_addr) = match self.tcp.accept().await {
-                Ok(conn) => conn,
-                Err(e) => {
-                    tracing::debug!("mTLS TCP accept error: {e}");
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                    continue;
-                }
-            };
-
-            // Set TCP_NODELAY
-            if let Err(e) = tcp_stream.set_nodelay(true) {
-                tracing::trace!("Failed to set TCP_NODELAY on mTLS connection: {e:#}");
-            }
-
-            // Perform TLS handshake
-            let tls_config = self.tls_config.load_full();
-            let acceptor = TlsAcceptor::from(tls_config);
-            let tls_stream = match acceptor.accept(tcp_stream).await {
-                Ok(stream) => stream,
-                Err(e) => {
-                    tracing::debug!(
-                        remote_addr = %remote_addr,
-                        "mTLS handshake failed: {e}"
-                    );
-                    continue;
-                }
-            };
-
-            let peer_chain_der = tls_stream
-                .get_ref()
-                .1
-                .peer_certificates()
-                .map(|certs| certs.iter().map(|cert| cert.to_vec()).collect())
-                .unwrap_or_default();
-
-            let stream = MtlsStream {
-                inner: tls_stream,
+    async fn handshake(
+        &self,
+        tcp: TcpStream,
+        peer_addr: SocketAddr,
+    ) -> io::Result<(Self::Io, PeerClientCert)> {
+        let acceptor = TlsAcceptor::from(self.tls_config.load_full());
+        let tls_stream = acceptor.accept(tcp).await?;
+        let peer_chain_der = tls_stream
+            .get_ref()
+            .1
+            .peer_certificates()
+            .map(|certs| certs.iter().map(|cert| cert.to_vec()).collect())
+            .unwrap_or_default();
+        Ok((
+            tls_stream,
+            PeerClientCert {
                 peer_chain_der,
-            };
-
-            return (stream, remote_addr);
-        }
-    }
-
-    fn local_addr(&self) -> io::Result<Self::Addr> {
-        self.tcp.local_addr()
+                peer_addr,
+            },
+        ))
     }
 }
 
@@ -364,9 +274,12 @@ impl rustls::server::danger::ClientCertVerifier for AcceptAnyClientCert {
 )]
 mod tests {
     use super::*;
+    use crate::infra::accept::{self, ConnLimits};
     use crate::infra::router::build_app;
     use crate::infra::tls;
     use crate::test_utils;
+    use tokio::net::TcpListener;
+    use tokio_util::sync::CancellationToken;
 
     /// Build a self-signed server cert and PKCS#8 key for testing.
     ///
@@ -615,11 +528,12 @@ mod tests {
         }
     }
 
-    /// Serve `app` through the real `MtlsListener` and `Connected` impl, as
+    /// Serve `app` through the real accept loop and `MtlsHandshake`, as
     /// `serve.rs` wires the mTLS port, on an ephemeral loopback port.
     async fn serve_over_mtls(
         app: axum::Router,
-    ) -> (SocketAddr, tokio::task::JoinHandle<io::Result<()>>) {
+        limits: ConnLimits,
+    ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
         let (cert_der, pkcs8_der) = make_self_signed_server_cert();
         let server_cert = rustls::pki_types::CertificateDer::from(cert_der);
         let server_key = rustls::pki_types::PrivateKeyDer::Pkcs8(pkcs8_der.into());
@@ -629,13 +543,13 @@ mod tests {
 
         let tcp = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = tcp.local_addr().expect("local addr");
-        let server = tokio::spawn(async move {
-            axum::serve(
-                MtlsListener::new(tcp, swap),
-                app.into_make_service_with_connect_info::<PeerClientCert>(),
-            )
-            .await
-        });
+        let server = tokio::spawn(accept::serve(
+            tcp,
+            MtlsHandshake::new(swap),
+            app,
+            limits,
+            CancellationToken::new(),
+        ));
         (addr, server)
     }
 
@@ -683,8 +597,8 @@ mod tests {
         response.split_whitespace().nth(1).unwrap_or_default()
     }
 
-    /// The application router served through the real `MtlsListener` and
-    /// `Connected` impl, as `serve.rs` wires the mTLS port, must get a
+    /// The application router served through the real accept loop and
+    /// `MtlsHandshake`, as `serve.rs` wires the mTLS port, must get a
     /// rate-limited request past the limiter to its handler.
     ///
     /// The other tests in this crate build `ConnectInfo<PeerClientCert>` by
@@ -697,7 +611,7 @@ mod tests {
         // `test_config()` leaves `certification_test_token` unset, so the auth
         // rate limiter is installed on `/oauth/token`, as in production.
         let (app, _state) = test_utils::test_app().await;
-        let (addr, server) = serve_over_mtls(app).await;
+        let (addr, server) = serve_over_mtls(app, ConnLimits::DEFAULT).await;
 
         let response = post_token_over_mtls(addr, "").await;
         server.abort();
@@ -726,7 +640,7 @@ mod tests {
         config.trusted_proxies = vec!["127.0.0.0/8".parse().expect("valid CIDR")];
         state.config.store(Arc::new(config.clone()));
         let app = build_app(state, &config).expect("build app");
-        let (addr, server) = serve_over_mtls(app).await;
+        let (addr, server) = serve_over_mtls(app, ConnLimits::DEFAULT).await;
 
         // `build_auth_rate_limiter` allows a burst of 8; four more requests
         // leave margin for the 2/s refill during the run.
@@ -742,6 +656,93 @@ mod tests {
             statuses.iter().any(|s| s == "429"),
             "rotating X-Forwarded-For on the mTLS port must not reset the per-IP rate limit; \
              statuses: {statuses:?}"
+        );
+    }
+
+    /// The HTTPS listener's `TlsHandshake` supplies `ConnectInfo<SocketAddr>`,
+    /// so a rate-limited request reaches its handler there too.
+    #[tokio::test]
+    async fn https_listener_serves_rate_limited_route_end_to_end() {
+        let (app, _state) = test_utils::test_app().await;
+        let (cert_der, pkcs8_der) = make_self_signed_server_cert();
+        let server_cert = rustls::pki_types::CertificateDer::from(cert_der);
+        let server_key = rustls::pki_types::PrivateKeyDer::Pkcs8(pkcs8_der.into());
+        let server_config =
+            build_mtls_server_config(vec![server_cert], server_key).expect("config");
+        let tls = axum_server::tls_rustls::RustlsConfig::from_config(server_config);
+
+        let tcp = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = tcp.local_addr().expect("local addr");
+        let server = tokio::spawn(accept::serve(
+            tcp,
+            accept::TlsHandshake(tls),
+            app,
+            ConnLimits::DEFAULT,
+            CancellationToken::new(),
+        ));
+
+        let response = post_token_over_mtls(addr, "").await;
+        server.abort();
+
+        let status = status_of(&response);
+        assert!(
+            status.starts_with('4') && status != "429",
+            "the token handler must refuse the request (4xx); a 500 means the rate limiter \
+             found no client IP. Response:\n{response}"
+        );
+    }
+
+    /// A client that opens a TCP connection and never starts the TLS handshake
+    /// must not block other clients from connecting.
+    ///
+    /// The handshake timeout is set far beyond the test's own bound, so the
+    /// second request can only succeed if the stalled handshake runs in its
+    /// own task rather than inside `accept`.
+    #[tokio::test]
+    async fn stalled_handshake_does_not_block_other_clients() {
+        let (app, _state) = test_utils::test_app().await;
+        let limits = ConnLimits {
+            handshake: std::time::Duration::from_secs(3600),
+            ..ConnLimits::DEFAULT
+        };
+        let (addr, server) = serve_over_mtls(app, limits).await;
+
+        let _stalled = TcpStream::connect(addr).await.expect("connect");
+        let response = post_token_over_mtls(addr, "").await;
+        server.abort();
+
+        assert!(
+            status_of(&response).starts_with('4'),
+            "a request must be served while another client stalls its handshake; \
+             response:\n{response}"
+        );
+    }
+
+    /// A client that never completes the TLS handshake is disconnected once
+    /// the handshake timeout expires.
+    #[tokio::test]
+    async fn stalled_handshake_is_closed_after_timeout() {
+        use tokio::io::AsyncReadExt;
+
+        let (app, _state) = test_utils::test_app().await;
+        let limits = ConnLimits {
+            handshake: std::time::Duration::from_millis(300),
+            ..ConnLimits::DEFAULT
+        };
+        let (addr, server) = serve_over_mtls(app, limits).await;
+
+        let mut stalled = TcpStream::connect(addr).await.expect("connect");
+        let mut received = Vec::new();
+        let closed = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            stalled.read_to_end(&mut received),
+        )
+        .await;
+        server.abort();
+
+        assert!(
+            closed.is_ok(),
+            "stalled handshake must be closed by the server"
         );
     }
 }

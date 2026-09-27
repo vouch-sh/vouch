@@ -460,7 +460,7 @@ impl GitHubApp {
     /// Get a reference to the HTTP client.
     ///
     /// This client is configured with `vouch_common::http::server_client()`
-    /// timeouts (15s total, 5s connect).
+    /// timeouts (5s total, 3s connect).
     #[must_use]
     pub fn http_client(&self) -> &reqwest::Client {
         &self.http_client

@@ -56,14 +56,23 @@ pub struct PoolConfig {
     pub acquire_timeout_secs: u64,
 }
 
+impl PoolConfig {
+    /// Defaults for every field, and the source of the `VOUCH_DB_*` flag
+    /// defaults in `config::Args`.
+    pub const DEFAULT: Self = Self {
+        max_connections: 25,
+        min_connections: 2,
+        idle_timeout_secs: 300,
+        // Together with an outbound call (at most 5s), this has to fit inside
+        // the 10s request timeout, so a request that waits for a connection
+        // and then fetches a client's JWKS still gets its own error, not a 408.
+        acquire_timeout_secs: 3,
+    };
+}
+
 impl Default for PoolConfig {
     fn default() -> Self {
-        Self {
-            max_connections: 25,
-            min_connections: 2,
-            idle_timeout_secs: 300,
-            acquire_timeout_secs: 5,
-        }
+        Self::DEFAULT
     }
 }
 

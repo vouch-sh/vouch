@@ -552,19 +552,19 @@ pub struct Args {
     pub mtls_client_ca_certs: Option<String>,
 
     /// Maximum number of database connections in the pool.
-    #[arg(long, env = "VOUCH_DB_MAX_CONNECTIONS", default_value = "25")]
+    #[arg(long, env = "VOUCH_DB_MAX_CONNECTIONS", default_value_t = PoolConfig::DEFAULT.max_connections)]
     pub db_max_connections: u32,
 
     /// Minimum number of idle database connections in the pool.
-    #[arg(long, env = "VOUCH_DB_MIN_CONNECTIONS", default_value = "2")]
+    #[arg(long, env = "VOUCH_DB_MIN_CONNECTIONS", default_value_t = PoolConfig::DEFAULT.min_connections)]
     pub db_min_connections: u32,
 
     /// Idle connection timeout in seconds.
-    #[arg(long, env = "VOUCH_DB_IDLE_TIMEOUT_SECS", default_value = "300")]
+    #[arg(long, env = "VOUCH_DB_IDLE_TIMEOUT_SECS", default_value_t = PoolConfig::DEFAULT.idle_timeout_secs)]
     pub db_idle_timeout_secs: u64,
 
     /// Connection acquire timeout in seconds.
-    #[arg(long, env = "VOUCH_DB_ACQUIRE_TIMEOUT_SECS", default_value = "5")]
+    #[arg(long, env = "VOUCH_DB_ACQUIRE_TIMEOUT_SECS", default_value_t = PoolConfig::DEFAULT.acquire_timeout_secs)]
     pub db_acquire_timeout_secs: u64,
 
     /// Maximum number of entries in the session lookup cache.
@@ -2140,5 +2140,38 @@ mod tests {
         endpoints.insert("us-east-1".to_string(), "postgres://x/postgres".to_string());
         let err = resolve_dsql_endpoints(&endpoints, None, Some("us-west-2")).unwrap_err();
         assert!(err.to_string().contains("not found"), "got: {err}");
+    }
+
+    /// Every flag default is written once, in code; the operator reference
+    /// repeats it, so a default that changes in code must change there too.
+    #[test]
+    fn documented_env_defaults_match_args() {
+        let doc = include_str!("../../../docs/src/reference/environment-variables.md");
+        let mut mismatches = Vec::new();
+        for arg in Args::command().get_arguments() {
+            let Some(env) = arg.get_env().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let [default] = arg.get_default_values() else {
+                continue;
+            };
+            let default = default.to_string_lossy();
+            // The reference writes an empty default as prose ("_(empty)_").
+            if default.is_empty() {
+                continue;
+            }
+            let row_start = format!("| `{env}` |");
+            let Some(row) = doc.lines().find(|line| line.starts_with(&row_start)) else {
+                continue;
+            };
+            let documented = row.split('|').nth(3).map(str::trim).unwrap_or_default();
+            if documented != format!("`{default}`") {
+                mismatches.push(format!("{env}: code `{default}`, docs {documented}"));
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "stale defaults in environment-variables.md: {mismatches:#?}"
+        );
     }
 }

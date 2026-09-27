@@ -8,8 +8,6 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use axum::Router;
-use axum::serve::ListenerExt;
-use axum_server::accept::NoDelayAcceptor;
 use tokio::signal;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -18,6 +16,7 @@ use crate::AppState;
 use crate::config::ServerConfig;
 use crate::infra::s3_config;
 
+use super::accept::{self, ConnLimits, PlainHandshake, TlsHandshake};
 use super::startup::ServerComponents;
 use crate::infra::tls;
 
@@ -173,17 +172,10 @@ async fn serve_tls(
 
     spawn_sighup_cert_reload(tls_config.clone(), mtls_config_swap, state.config.clone());
 
-    // Create handle for graceful shutdown of HTTPS server
-    let handle = axum_server::Handle::new();
-    let handle_for_shutdown = handle.clone();
-
-    // Spawn HTTPS shutdown handler (uses cancellation token)
-    let token_for_https = shutdown_token.clone();
-    tokio::spawn(async move {
-        token_for_https.cancelled().await;
-        tracing::info!("Initiating graceful shutdown (30s timeout)");
-        handle_for_shutdown.graceful_shutdown(Some(std::time::Duration::from_secs(30)));
-    });
+    // Bind before spawning anything else that depends on the HTTPS port.
+    let https_listener = tokio::net::TcpListener::bind(https_addr)
+        .await
+        .with_context(|| format!("Failed to bind HTTPS listener on {https_addr}"))?;
 
     // Build HTTP redirect router (with state for Host validation)
     let redirect_app = crate::build_redirect_router(state.clone());
@@ -193,19 +185,14 @@ async fn serve_tls(
     let http_handle = tokio::spawn(async move {
         match tokio::net::TcpListener::bind(http_addr).await {
             Ok(listener) => {
-                let listener = listener.tap_io(|tcp| {
-                    if let Err(err) = tcp.set_nodelay(true) {
-                        tracing::trace!(
-                            "failed to set TCP_NODELAY on incoming connection: {err:#}"
-                        );
-                    }
-                });
-                if let Err(e) = axum::serve(listener, redirect_app)
-                    .with_graceful_shutdown(token_for_http.cancelled_owned())
-                    .await
-                {
-                    tracing::error!("HTTP redirect server error: {e}");
-                }
+                accept::serve(
+                    listener,
+                    PlainHandshake,
+                    redirect_app,
+                    ConnLimits::DEFAULT,
+                    token_for_http,
+                )
+                .await;
             }
             Err(e) => {
                 tracing::warn!(
@@ -218,11 +205,14 @@ async fn serve_tls(
     });
 
     // Run HTTPS server (port 443) - this blocks until shutdown
-    axum_server::bind_rustls(https_addr, tls_config)
-        .map(|acceptor| acceptor.acceptor(NoDelayAcceptor::new()))
-        .handle(handle)
-        .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
-        .await?;
+    accept::serve(
+        https_listener,
+        TlsHandshake(tls_config),
+        app,
+        ConnLimits::DEFAULT,
+        shutdown_token,
+    )
+    .await;
 
     // Wait for HTTP redirect server to finish; ignore JoinError on shutdown.
     let _http = http_handle.await;
@@ -252,17 +242,20 @@ async fn serve_plain(
     let listener = tokio::net::TcpListener::bind(&config.listen_addr).await?;
     tracing::info!("Listening on http://{}", config.listen_addr);
 
-    let listener = listener.tap_io(|tcp| {
-        if let Err(err) = tcp.set_nodelay(true) {
-            tracing::trace!("failed to set TCP_NODELAY on incoming connection: {err:#}");
-        }
+    let shutdown_token = CancellationToken::new();
+    let token_for_signal = shutdown_token.clone();
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        token_for_signal.cancel();
     });
-    axum::serve(
+    accept::serve(
         listener,
-        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        PlainHandshake,
+        app,
+        ConnLimits::DEFAULT,
+        shutdown_token,
     )
-    .with_graceful_shutdown(shutdown_signal())
-    .await?;
+    .await;
 
     Ok(s3_poll_handle)
 }
@@ -351,7 +344,7 @@ async fn start_mtls_listener(
     tokio::task::JoinHandle<()>,
     super::mtls_listener::MtlsConfigSwap,
 )> {
-    use super::mtls_listener::{MtlsListener, PeerClientCert, build_mtls_server_config};
+    use super::mtls_listener::{MtlsHandshake, build_mtls_server_config};
 
     // Parse server cert/key for the mTLS listener (same identity)
     let (certs, key) = super::tls::parse_server_cert_and_key(config)?;
@@ -365,18 +358,13 @@ async fn start_mtls_listener(
         .await
         .with_context(|| format!("Failed to bind mTLS listener on {addr}"))?;
 
-    let handle = tokio::spawn(async move {
-        let listener = MtlsListener::new(tcp, mtls_config_swap);
-        if let Err(e) = axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<PeerClientCert>(),
-        )
-        .with_graceful_shutdown(shutdown_token.cancelled_owned())
-        .await
-        {
-            tracing::error!("mTLS server error: {e}");
-        }
-    });
+    let handle = tokio::spawn(accept::serve(
+        tcp,
+        MtlsHandshake::new(mtls_config_swap),
+        app,
+        ConnLimits::DEFAULT,
+        shutdown_token,
+    ));
 
     Ok((handle, swap_for_reload))
 }

@@ -127,11 +127,21 @@ HTTP redirect without otherwise failing.
 
 ## Timeouts and body limits
 
-Vouch applies a **30-second** global request timeout and a **256 KiB** global body limit, with
+Vouch applies a **10-second** global request timeout and a **256 KiB** global body limit, with
 tighter per-route limits (8 KiB for credential issuance, 64 KiB for SCIM and SAML ACS). Set your
-proxy's timeouts at or above 30 seconds so that Vouch, not the proxy, produces the timeout
+proxy's timeouts at or above 10 seconds so that Vouch, not the proxy, produces the timeout
 response; and do not set a body limit below Vouch's, or you will convert precise 413s into opaque
 proxy errors.
+
+The request timeout only starts once a request has arrived. Before that, every listener closes a
+connection that has not finished its TLS handshake within **5 seconds**, has not started sending a
+request within **10 seconds**, or has not completed an HTTP/1 request head within **10 seconds** of
+it starting to arrive. The last limit also runs between requests, so an idle keep-alive connection
+is closed after 10 seconds. An HTTP/2 connection is closed once it has had no request in flight for
+10 seconds, which also covers a client that stops partway through a request's headers. A proxy that pools keep-alive
+connections to Vouch (for example nginx with `keepalive` in an `upstream` block) must close idle
+upstream connections sooner than that (`keepalive_timeout` below 10 seconds in nginx), or it can
+send a request on a connection just as Vouch closes it and answer the client with a 502.
 
 ## Example configurations
 
@@ -218,5 +228,6 @@ Either way:
 
 - [ ] Health checks target `/health/ready`, not `/health`
 - [ ] `VOUCH_BASE_URL` is the public URL clients use
-- [ ] Proxy timeouts are at least 30 seconds
+- [ ] Proxy timeouts are at least 10 seconds
+- [ ] A proxy that pools upstream keep-alive connections closes idle ones in under 10 seconds
 - [ ] Audit events at `/admin/audit` show real client IPs

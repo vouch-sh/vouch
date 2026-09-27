@@ -217,7 +217,7 @@ These optional variables configure download links displayed in the server UI.
 | `VOUCH_DB_MAX_CONNECTIONS` | No | `25` | Maximum size of the connection pool. Multiply by your instance count when sizing PostgreSQL's `max_connections`. |
 | `VOUCH_DB_MIN_CONNECTIONS` | No | `2` | Minimum idle connections kept open. |
 | `VOUCH_DB_IDLE_TIMEOUT_SECS` | No | `300` | How long an idle connection is kept before being closed. |
-| `VOUCH_DB_ACQUIRE_TIMEOUT_SECS` | No | `5` | How long a request waits for a free connection before failing. |
+| `VOUCH_DB_ACQUIRE_TIMEOUT_SECS` | No | `3` | How long a request waits for a free connection before failing. Keep it under 5 so it plus an outbound call (up to 5 seconds) fits inside the 10-second request timeout. |
 | `DSQL_USER` | No | `admin` | **Not `VOUCH_`-prefixed.** Database username for Aurora DSQL when the connection URL carries none. |
 
 ## Authenticator Policy
