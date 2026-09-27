@@ -130,8 +130,25 @@ stream {
 }
 ```
 
-With passthrough there is no `X-Forwarded-For`: Vouch sees the client's real address as the TCP
-peer, so leave `VOUCH_TRUSTED_PROXIES` unset.
+With passthrough there is no `X-Forwarded-For`, so leave `VOUCH_TRUSTED_PROXIES` unset: it cannot
+recover a client address that never reached Vouch.
+
+nginx opens its own connection to Vouch, so the TCP peer Vouch sees is **nginx**, not the client.
+Every user shares one rate-limit bucket, and audit events record nginx's address. To keep the
+client's address, either put an AWS NLB with client IP preservation in front instead (see below),
+or have nginx connect from the client's address:
+
+```nginx
+proxy_bind $remote_addr transparent;
+```
+
+nginx documents that this "usually" needs worker processes running as superuser (on Linux they
+inherit `CAP_NET_RAW` instead, since 1.13.8), and that "it is also necessary to configure kernel
+routing table to intercept network traffic from the proxied server" — replies from Vouch must route
+back through the nginx host.
+
+Do not enable nginx's `proxy_protocol` directive. Vouch does not accept the PROXY protocol, so it
+reads the header as the start of a TLS handshake and every connection fails.
 
 ### nginx (TLS terminated at the proxy)
 
