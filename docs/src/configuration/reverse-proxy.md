@@ -6,8 +6,9 @@ work correctly, and the one setting whose absence degrades security silently.
 
 ## Terminate TLS in Vouch where you can
 
-The recommended topology is **TCP passthrough with TLS terminated inside Vouch**, not TLS
-terminated at the proxy.
+The recommended topology is **TCP passthrough with TLS terminated inside Vouch**, through a load
+balancer that keeps the client's address (see [Supported topologies](#supported-topologies)), not
+TLS terminated at the proxy.
 
 Vouch pins a BCP 195 cipher suite list, prefers hybrid post-quantum key exchange, and hosts the
 mTLS listener used for certificate-bound tokens. Terminating at the proxy replaces all of that with
@@ -17,6 +18,24 @@ client certificate never reaches Vouch.
 Terminate at the proxy only when something else forces it — a corporate WAF requirement, or a
 managed load balancer that cannot pass TCP through, such as an AWS Application Load Balancer. If
 you do, everything below still applies.
+
+## Supported topologies
+
+Vouch supports two:
+
+- **Pass-through that keeps the client's address**: an L4 load balancer that forwards the TCP
+  connection with the client's own source address, such as an AWS NLB with client IP preservation
+  (see below). Vouch terminates TLS and serves the mTLS port itself.
+- **TLS terminated at an HTTP proxy**, which reports the client's address in `X-Forwarded-For` for
+  `VOUCH_TRUSTED_PROXIES` to read. This gives up certificate-bound tokens.
+
+A TCP proxy that opens its own connection to Vouch is **not supported**: nginx `stream`, HAProxy in
+`mode tcp`, and an Istio or Envoy gateway with TLS `PASSTHROUGH`. Vouch then sees the proxy as
+every request's client, so all users share one rate-limit bucket and audit events record the
+proxy's address. With TLS opaque to the proxy there is no `X-Forwarded-For`; these proxies convey
+the client's address only through the PROXY protocol, which Vouch does not accept. Do not enable
+it on the proxy either: Vouch reads the PROXY header as the start of a TLS handshake and every
+connection fails.
 
 ## Trusted proxies
 
@@ -115,23 +134,6 @@ response; and do not set a body limit below Vouch's, or you will convert precise
 proxy errors.
 
 ## Example configurations
-
-### nginx (TLS passthrough — recommended)
-
-```nginx
-stream {
-    upstream vouch {
-        server 10.0.1.10:443;
-    }
-    server {
-        listen 443;
-        proxy_pass vouch;
-    }
-}
-```
-
-With passthrough there is no `X-Forwarded-For`: Vouch sees the client's real address as the TCP
-peer, so leave `VOUCH_TRUSTED_PROXIES` unset.
 
 ### nginx (TLS terminated at the proxy)
 
