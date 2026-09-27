@@ -1167,7 +1167,7 @@ async fn test_rfc7591_rejects_fapi_without_private_key_jwt() {
 // FAPI 2.0 JWKS algorithm usability — a client that registers as FAPI 2.0
 // with a JWKS containing no key usable under ES256/PS256/EdDSA would be
 // unable to authenticate at the token endpoint from the moment it's created.
-// See JwkSet::has_fapi_allowed_key.
+// See JwkSet::has_client_assertion_key.
 // ========================================================================
 
 #[tokio::test]
@@ -1393,6 +1393,41 @@ async fn test_rfc7591_accepts_non_fapi_registration_with_rs256_only_jwks() {
         StatusCode::CREATED,
         "RS256 must remain unrestricted for a non-FAPI registration: {body}"
     );
+}
+
+// RFC 7591 §3.2.2: "invalid_client_metadata  The value of one of the client
+// metadata fields is invalid and the server has rejected this request."
+// A standard-profile private_key_jwt client whose only key is an encryption
+// key can never sign a client assertion, so registration refuses it just as
+// the RFC 7592 PUT does (test_rfc7592_put_rejects_unusable_jwks_for_non_fapi_private_key_jwt_client).
+#[tokio::test]
+async fn test_rfc7591_rejects_non_fapi_registration_with_enc_only_jwks() {
+    let (app, state) = test_app().await;
+    let auth = bearer_token_unique(&state, "nonfapi-enc-only").await;
+
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "token_endpoint_auth_method": "private_key_jwt",
+        "jwks": {
+            "keys": [{"kty": "EC", "crv": "P-256", "use": "enc"}]
+        }
+    });
+
+    let (status, body) = http_post_json(
+        &app,
+        "/oauth/register",
+        &body.to_string(),
+        &[("Authorization", &auth)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an encryption-only JWKS cannot authenticate a private_key_jwt client: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_client_metadata");
 }
 
 #[tokio::test]

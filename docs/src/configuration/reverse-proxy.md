@@ -30,6 +30,9 @@ VOUCH_TRUSTED_PROXIES=10.0.0.0/8,172.16.0.0/12
 how Vouch decides a request's client IP, which in turn drives **rate limiting** and the client IP
 recorded on **audit events**.
 
+It applies to the HTTPS port only. On the mTLS port (8443) Vouch terminates TLS itself, so no proxy
+can add a header there, and `X-Forwarded-For` is always ignored: the client IP is the TCP peer.
+
 **When it is unset** (the default), `X-Forwarded-For` is ignored completely and the TCP peer
 address is used as the client IP. Behind a proxy, that peer address is the proxy. Every user
 therefore shares a single rate-limit bucket, and every audit event records the load balancer's

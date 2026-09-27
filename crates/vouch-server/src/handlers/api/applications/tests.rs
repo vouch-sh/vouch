@@ -4453,7 +4453,7 @@ async fn application_api_audit_rows_record_transport() {
 /// injects only `ConnectInfo<PeerClientCert>` — there is no
 /// `ConnectInfo<SocketAddr>`. The `TrustedProxyKeyExtractor` (rate limiter) and
 /// the `ClientInfo` audit extractor must therefore resolve the peer IP from
-/// `PeerClientCert.peer_addr` via `peer_ip_from_extensions`. Before the fix the
+/// `PeerClientCert.peer_addr` via `connection_peer`. Before the fix the
 /// rate limiter found no key and returned HTTP 500 on every rate-limited mTLS
 /// request (`/oauth/token`, `/oauth/register`, `/oauth/revoke`,
 /// `/oauth/introspect`, `/api/v1/*`); this test pins the fix by asserting the

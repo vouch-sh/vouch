@@ -33,6 +33,7 @@ judgement columns come from the batch's record in `.local/`.
 | 2026-09-24 | 1 | 1 | 0 | 0 | 1 | 1 of 1 | #1504 amended: comments trimmed, CLI-grant lookup refusals audited, five latent email siblings fixed | 0 (#1500 had no record) | 0 (instance) |
 | 2026-09-25 | 17 | 20 | 0 | 4 | 7 | 15 of 17 | proposed: #1549, #1532 as-is; 8 amend; #1541 and #1553 blocked; 7 superseded by class fixes (7592 token revocation, audit context, login-failure principal, helper URL); #1550 closed | not checkable (no records in container) | 0 (7 descriptions ready; `detail` CLI unavailable) |
 | 2026-09-26 | 2 | 2 | 0 | 1 | 2 | 1 of 2 | #1566 merge as-is; #1567 rebuilt on main (conflicts with #1561–#1571, `absolute_paths`) with an end-to-end listener test, superseded; #1546, #1547 closed as fixed by #1551 | 0 (neither was recorded residue) | 0 (both instances) |
+| 2026-09-27 | 2 | 2 | 0 | 0 | 2 | 2 of 2 | #1579 amended into a four-path class fix (RFC 7591 create sibling, profile-taking `has_client_assertion_key`); #1580 rebuilt without its env var (mTLS port never walks X-Forwarded-For); both superseded | 0 | 0 (type-level guardrail; `detail` CLI unavailable) |
 
 Batches before 2026-08-20 have no record, so only their counted columns exist:
 run the script. `escape-unaware-delimiter-normalization` exists on Detail's side
@@ -743,3 +744,40 @@ at least one test per listener should go through the real `Listener` and
 A class fix that closes issues should name each issue with `Closes #N`,
 not only the PRs it supersedes.
 
+## 2026-09-27
+
+| month | n | median age | p90 | <30d | >90d |
+|-------|---|-----------|-----|------|------|
+| 2026-09 | 142 | 11 | 194 | 74 | 47 |
+
+2 issues, 2 fix PRs, both CI-green. Both findings blame merges from 09-26
+(Detail PR 0, PR≤3d 2), and both are defects in logic those merges added.
+
+- **#1577** (from #1576): a standard-profile `private_key_jwt` update accepted
+  an inline JWKS with no usable signing key. #1579's guard was right but
+  covered three of the four write paths: RFC 7591 registration still checked
+  usability only for FAPI clients, and returned 201 for an encryption-only
+  JWKS (reproduced on #1579's head). The root was a profile-less predicate,
+  `has_fapi_allowed_key()`, that a standard-profile path could only skip.
+  Class fix: `has_client_assertion_key(profile)` at all four write paths, over
+  the allowlist the token endpoint verifies against. Residue: a new write path
+  can still omit the check altogether.
+- **#1578** (from #1573): the mTLS port walked `X-Forwarded-For` for a direct
+  client inside `VOUCH_TRUSTED_PROXIES`, so it could choose its own rate-limit
+  bucket and audit `client_ip`. #1580 added `VOUCH_MTLS_TRUSTED_PROXIES` for "an
+  L4 proxy that appends X-Forwarded-For". None can: Vouch terminates TLS on
+  that port, so a passthrough proxy relays ciphertext, and a terminating proxy
+  would present its own client certificate. The variable's only reachable
+  effect was to reopen the bypass. Rebuilt with no config change: the peer is
+  tagged by listener (`ConnectionPeer`), and `client_ip_from_request` is the one
+  crate-visible path to a client IP. The regression test goes through the real
+  `MtlsListener`, per the 09-26 lesson.
+
+### Process
+
+A fix that adds operator configuration needs the deployment it serves to
+exist. Check the stated use case against how the listener works before
+reviewing the code.
+
+A predicate that bakes in one profile's allowlist makes the other profile's
+check something a caller has to remember. Pass the profile.

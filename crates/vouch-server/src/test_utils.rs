@@ -974,7 +974,7 @@ impl TestClientCa {
 /// `into_make_service_with_connect_info::<PeerClientCert>()` inserts on the
 /// mTLS port — so `OptionalClientCert` extracts the cert and the rate limiter
 /// / `ClientInfo` extractors resolve the peer IP through `PeerClientCert`
-/// (`peer_ip_from_extensions`'s fallback path). Pass `None` for `cert_der` to
+/// (`connection_peer`'s fallback path). Pass `None` for `cert_der` to
 /// simulate a connection where no client certificate was presented.
 fn build_test_request_with_cert(
     method: &str,
@@ -1000,7 +1000,7 @@ fn build_test_request_with_cert(
     // one `ConnectInfo<T>` per connection — `ConnectInfo<PeerClientCert>` — so
     // the mTLS port has no separate `ConnectInfo<SocketAddr>`. The peer address
     // rides on `PeerClientCert.peer_addr`, and the rate limiter / `ClientInfo`
-    // extractors resolve it via `peer_ip_from_extensions`. Injecting
+    // extractors resolve it via `connection_peer`. Injecting
     // `ConnectInfo<SocketAddr>` here would mask the production mTLS condition
     // (the prior harness did, hiding the `client_ip: null` / 500 regression).
     parts.extensions.insert(ConnectInfo(PeerClientCert {

@@ -16,8 +16,7 @@ use axum::http::request::Parts;
 use serde::Serialize;
 
 use crate::AppState;
-use crate::infra::mtls_listener;
-use crate::infra::rate_limit::resolve_client_ip;
+use crate::infra::rate_limit::client_ip_from_request;
 
 /// Maximum length for hostname values (RFC 1035: 253 chars).
 const MAX_HOSTNAME_LEN: usize = 253;
@@ -26,10 +25,10 @@ const MAX_CLIENT_HEADER_LEN: usize = 256;
 
 /// Client information extracted from the request.
 ///
-/// `client_ip` comes from the TCP socket (`ConnectInfo<SocketAddr>`), or from
-/// `X-Forwarded-For` only when the peer is a configured trusted proxy. This
-/// prevents IP spoofing via `X-Forwarded-For` when the server is exposed
-/// directly without a trusted reverse proxy.
+/// `client_ip` comes from the TCP peer, or from `X-Forwarded-For` only when a
+/// request on the HTTPS/plain port arrived from a configured trusted proxy —
+/// never on the mTLS port (see [`client_ip_from_request`]). This prevents IP
+/// spoofing via `X-Forwarded-For` when the server is exposed directly.
 ///
 /// Serialized flat into auth-event audit rows, so the field names are the
 /// stored JSON keys.
@@ -110,10 +109,9 @@ impl FromRequestParts<Arc<AppState>> for ClientInfo {
         parts: &mut Parts,
         state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
-        let peer_ip = mtls_listener::peer_ip_from_extensions(&parts.extensions);
-
         let config = state.config.load();
-        let client_ip = resolve_client_ip(peer_ip, &parts.headers, &config.trusted_proxies);
+        let client_ip =
+            client_ip_from_request(&parts.extensions, &parts.headers, &config.trusted_proxies);
 
         Ok(Self {
             client_ip,
@@ -274,5 +272,35 @@ mod tests {
 
         let info = ClientInfo::from_headers(&headers);
         assert_eq!(info.client_version.as_deref(), Some("1.2.3-beta+build.456"));
+    }
+
+    /// The audit `client_ip` on the mTLS port is the TLS peer, whatever
+    /// `X-Forwarded-For` says: Vouch terminates TLS there, so the header can
+    /// only have come from the client.
+    #[tokio::test]
+    async fn test_mtls_port_client_ip_ignores_forwarded_for() {
+        use crate::infra::mtls_listener::PeerClientCert;
+        use crate::test_utils::test_app_state;
+
+        let state = test_app_state().await;
+        let mut config = (**state.config()).clone();
+        config.trusted_proxies = vec!["10.0.0.0/8".parse().unwrap()];
+        state.config.store(Arc::new(config));
+
+        let request = axum::http::Request::builder()
+            .header("x-forwarded-for", "1.2.3.4")
+            .extension(axum::extract::ConnectInfo(PeerClientCert {
+                peer_chain_der: Vec::new(),
+                peer_addr: std::net::SocketAddr::from(([10, 0, 0, 50], 8443)),
+            }))
+            .body(())
+            .unwrap();
+        let (mut parts, ()) = request.into_parts();
+
+        let info = ClientInfo::from_request_parts(&mut parts, &state).await;
+        assert_eq!(
+            info.ok().and_then(|i| i.client_ip),
+            Some("10.0.0.50".parse().unwrap())
+        );
     }
 }

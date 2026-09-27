@@ -32,7 +32,7 @@ use tokio_rustls::TlsAcceptor;
 /// present — there is no separate `ConnectInfo<SocketAddr>`. The peer
 /// `SocketAddr` therefore rides along here so the rate limiter and the audit
 /// `ClientInfo` extractor (which read `ConnectInfo<SocketAddr>` on the
-/// HTTPS/plain ports) can fall back to it via [`peer_ip_from_extensions`].
+/// HTTPS/plain ports) can fall back to it via [`connection_peer`].
 ///
 /// `peer_chain_der` is the DER-encoded certificate chain the client presented
 /// in the TLS handshake, leaf first; empty when the client presented none.
@@ -60,32 +60,45 @@ impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, Mtls
     }
 }
 
-/// Resolve the peer IP from a request's connection extensions.
+/// The TCP peer of a request, tagged by the listener that accepted it.
 ///
-/// On the main HTTPS/plain ports the connection's
-/// `ConnectInfo<SocketAddr>` extension is present and used directly. On the
-/// mTLS port axum only injects `ConnectInfo<PeerClientCert>`
+/// The tag decides whether `X-Forwarded-For` may be consulted, so it travels
+/// with the address rather than being recomputed by each reader.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ConnectionPeer {
+    /// Accepted by the HTTPS/plain listener, which may sit behind a
+    /// TLS-terminating reverse proxy listed in `VOUCH_TRUSTED_PROXIES`.
+    Tcp(std::net::IpAddr),
+    /// Accepted by the mTLS listener. Vouch terminates TLS on this port
+    /// itself, so the peer is the TLS client: a TCP passthrough proxy relays
+    /// ciphertext and cannot add a header, and a proxy that terminated TLS
+    /// would present its own client certificate. Any `X-Forwarded-For` here
+    /// was written by the client.
+    Mtls(std::net::IpAddr),
+}
+
+/// Classify a request's peer from its connection extensions.
+///
+/// On the main HTTPS/plain ports the connection's `ConnectInfo<SocketAddr>`
+/// extension is present. On the mTLS port axum only injects
+/// `ConnectInfo<PeerClientCert>`
 /// ([`Router::into_make_service_with_connect_info::<T>`] inserts a single
 /// `ConnectInfo<T>` per connection), so the peer `SocketAddr` rides on
-/// `PeerClientCert`; fall back to it when `ConnectInfo<SocketAddr>` is absent.
-/// This keeps rate-limit key extraction and audit `client_ip` resolution
-/// working on the mTLS port, where the direct TLS connection has no separate
-/// `ConnectInfo<SocketAddr>` extension.
+/// `PeerClientCert`. The IP is canonicalized.
 ///
-/// Returns the canonicalized TCP peer IP; the caller applies the trusted-proxy
-/// `X-Forwarded-For` walk via [`resolve_client_ip`].
+/// Callers resolve the client IP through
+/// [`client_ip_from_request`], which honors `X-Forwarded-For` only for
+/// [`ConnectionPeer::Tcp`].
 ///
 /// [`Router::into_make_service_with_connect_info::<T>`]: axum::Router::into_make_service_with_connect_info
-/// [`resolve_client_ip`]: crate::infra::rate_limit::resolve_client_ip
-pub(crate) fn peer_ip_from_extensions(
-    extensions: &axum::http::Extensions,
-) -> Option<std::net::IpAddr> {
+/// [`client_ip_from_request`]: crate::infra::rate_limit::client_ip_from_request
+pub(crate) fn connection_peer(extensions: &axum::http::Extensions) -> Option<ConnectionPeer> {
     if let Some(ci) = extensions.get::<axum::extract::ConnectInfo<std::net::SocketAddr>>() {
-        return Some(ci.0.ip().to_canonical());
+        return Some(ConnectionPeer::Tcp(ci.0.ip().to_canonical()));
     }
     extensions
         .get::<axum::extract::ConnectInfo<PeerClientCert>>()
-        .map(|ci| ci.0.peer_addr.ip().to_canonical())
+        .map(|ci| ConnectionPeer::Mtls(ci.0.peer_addr.ip().to_canonical()))
 }
 
 /// TLS stream with extracted peer certificate.
@@ -351,6 +364,7 @@ impl rustls::server::danger::ClientCertVerifier for AcceptAnyClientCert {
 )]
 mod tests {
     use super::*;
+    use crate::infra::router::build_app;
     use crate::infra::tls;
     use crate::test_utils;
 
@@ -484,44 +498,47 @@ mod tests {
     }
 
     // ========================================================================
-    // peer_ip_from_extensions Tests
+    // connection_peer Tests
     // ========================================================================
 
-    /// On the HTTPS/plain ports `ConnectInfo<SocketAddr>` is present and is the
-    /// canonical source of the peer IP.
+    /// On the HTTPS/plain ports `ConnectInfo<SocketAddr>` is present and the
+    /// peer is tagged `Tcp`.
     #[test]
-    fn peer_ip_from_extensions_reads_socket_addr() {
+    fn connection_peer_reads_socket_addr_as_tcp() {
         let mut ext = http::Extensions::new();
         ext.insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
             [203, 0, 113, 7],
             5000,
         ))));
         assert_eq!(
-            peer_ip_from_extensions(&ext),
-            Some("203.0.113.7".parse().expect("valid IPv4")),
+            connection_peer(&ext),
+            Some(ConnectionPeer::Tcp(
+                "203.0.113.7".parse().expect("valid IPv4")
+            )),
         );
     }
 
     /// On the mTLS port only `ConnectInfo<PeerClientCert>` is injected; the peer
-    /// IP must still resolve from `PeerClientCert.peer_addr` (the fallback that
-    /// fixes the 500 / `client_ip: null` regression).
+    /// resolves from `PeerClientCert.peer_addr` and is tagged `Mtls`.
     #[test]
-    fn peer_ip_from_extensions_falls_back_to_peer_client_cert() {
+    fn connection_peer_reads_peer_client_cert_as_mtls() {
         let mut ext = http::Extensions::new();
         ext.insert(axum::extract::ConnectInfo(PeerClientCert {
             peer_chain_der: Vec::new(),
             peer_addr: std::net::SocketAddr::from(([198, 51, 100, 42], 8443)),
         }));
         assert_eq!(
-            peer_ip_from_extensions(&ext),
-            Some("198.51.100.42".parse().expect("valid IPv4")),
+            connection_peer(&ext),
+            Some(ConnectionPeer::Mtls(
+                "198.51.100.42".parse().expect("valid IPv4")
+            )),
         );
     }
 
     /// `ConnectInfo<SocketAddr>` wins when both extensions are present (the test
     /// harness can inject both); `PeerClientCert` is only a fallback.
     #[test]
-    fn peer_ip_from_extensions_prefers_socket_addr_over_peer_client_cert() {
+    fn connection_peer_prefers_socket_addr_over_peer_client_cert() {
         let mut ext = http::Extensions::new();
         ext.insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
             [203, 0, 113, 7],
@@ -532,17 +549,19 @@ mod tests {
             peer_addr: std::net::SocketAddr::from(([198, 51, 100, 42], 8443)),
         }));
         assert_eq!(
-            peer_ip_from_extensions(&ext),
-            Some("203.0.113.7".parse().expect("SocketAddr wins")),
+            connection_peer(&ext),
+            Some(ConnectionPeer::Tcp(
+                "203.0.113.7".parse().expect("SocketAddr wins")
+            )),
         );
     }
 
     /// No connection extension yields `None` — the rate limiter then fails key
     /// extraction with `UnableToExtractKey` (the original 500 cause).
     #[test]
-    fn peer_ip_from_extensions_returns_none_when_absent() {
+    fn connection_peer_returns_none_when_absent() {
         let ext = http::Extensions::new();
-        assert_eq!(peer_ip_from_extensions(&ext), None);
+        assert_eq!(connection_peer(&ext), None);
     }
 
     /// Client-side verifier for the end-to-end test below: the test server's
@@ -596,19 +615,11 @@ mod tests {
         }
     }
 
-    /// The application router served through the real `MtlsListener` and
-    /// `Connected` impl, as `serve.rs` wires the mTLS port, must get a
-    /// rate-limited request past the limiter to its handler.
-    ///
-    /// The other tests in this crate build `ConnectInfo<PeerClientCert>` by
-    /// hand, so they cannot notice when the listener stops supplying what the
-    /// router reads. That is how the mTLS port answered every rate-limited
-    /// request with 500 while the suite passed: the harness also injected a
-    /// `ConnectInfo<SocketAddr>` the real listener never provides.
-    #[tokio::test]
-    async fn mtls_listener_serves_rate_limited_route_end_to_end() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
+    /// Serve `app` through the real `MtlsListener` and `Connected` impl, as
+    /// `serve.rs` wires the mTLS port, on an ephemeral loopback port.
+    async fn serve_over_mtls(
+        app: axum::Router,
+    ) -> (SocketAddr, tokio::task::JoinHandle<io::Result<()>>) {
         let (cert_der, pkcs8_der) = make_self_signed_server_cert();
         let server_cert = rustls::pki_types::CertificateDer::from(cert_der);
         let server_key = rustls::pki_types::PrivateKeyDer::Pkcs8(pkcs8_der.into());
@@ -616,9 +627,6 @@ mod tests {
             build_mtls_server_config(vec![server_cert], server_key).expect("config");
         let swap: MtlsConfigSwap = Arc::new(ArcSwap::from(server_config));
 
-        // `test_config()` leaves `certification_test_token` unset, so the auth
-        // rate limiter is installed on `/oauth/token`, as in production.
-        let (app, _state) = test_utils::test_app().await;
         let tcp = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = tcp.local_addr().expect("local addr");
         let server = tokio::spawn(async move {
@@ -628,6 +636,14 @@ mod tests {
             )
             .await
         });
+        (addr, server)
+    }
+
+    /// POST an unauthenticated `client_credentials` token request over a fresh
+    /// TLS connection, with `extra_headers` appended, and return the HTTP
+    /// status code.
+    async fn post_token_over_mtls(addr: SocketAddr, extra_headers: &str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let provider = Arc::new(tls::bcp195_crypto_provider());
         let client_config = rustls::ClientConfig::builder_with_provider(provider.clone())
@@ -649,7 +665,7 @@ mod tests {
             let body = "grant_type=client_credentials";
             let request = format!(
                 "POST /oauth/token HTTP/1.1\r\nHost: localhost\r\n\
-                 Content-Type: application/x-www-form-urlencoded\r\n\
+                 Content-Type: application/x-www-form-urlencoded\r\n{extra_headers}\
                  Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             );
@@ -658,17 +674,74 @@ mod tests {
             tls.read_to_end(&mut response).await.expect("read");
             String::from_utf8_lossy(&response).into_owned()
         };
-        let response = tokio::time::timeout(std::time::Duration::from_secs(30), exchange)
+        tokio::time::timeout(std::time::Duration::from_secs(30), exchange)
             .await
-            .expect("mTLS exchange timed out");
+            .expect("mTLS exchange timed out")
+    }
+
+    fn status_of(response: &str) -> &str {
+        response.split_whitespace().nth(1).unwrap_or_default()
+    }
+
+    /// The application router served through the real `MtlsListener` and
+    /// `Connected` impl, as `serve.rs` wires the mTLS port, must get a
+    /// rate-limited request past the limiter to its handler.
+    ///
+    /// The other tests in this crate build `ConnectInfo<PeerClientCert>` by
+    /// hand, so they cannot notice when the listener stops supplying what the
+    /// router reads. That is how the mTLS port answered every rate-limited
+    /// request with 500 while the suite passed: the harness also injected a
+    /// `ConnectInfo<SocketAddr>` the real listener never provides.
+    #[tokio::test]
+    async fn mtls_listener_serves_rate_limited_route_end_to_end() {
+        // `test_config()` leaves `certification_test_token` unset, so the auth
+        // rate limiter is installed on `/oauth/token`, as in production.
+        let (app, _state) = test_utils::test_app().await;
+        let (addr, server) = serve_over_mtls(app).await;
+
+        let response = post_token_over_mtls(addr, "").await;
         server.abort();
 
-        let status = response.split_whitespace().nth(1).unwrap_or_default();
+        let status = status_of(&response);
         assert!(
-            status.starts_with('4'),
+            status.starts_with('4') && status != "429",
             "a client_credentials request with no client authentication must reach the \
              token handler and be refused there (4xx); a 500 means the rate limiter found \
              no client IP on the mTLS port. Response:\n{response}"
+        );
+    }
+
+    /// A direct mTLS client cannot pick its own rate-limit bucket with
+    /// `X-Forwarded-For`, even when its address falls inside
+    /// `VOUCH_TRUSTED_PROXIES`.
+    ///
+    /// Vouch terminates TLS on this port, so no proxy can have written the
+    /// header. Here the loopback client sits inside a trusted `127.0.0.0/8`
+    /// and rotates the header on every request: were it honored, each value
+    /// would be a fresh bucket and none of the requests would be limited.
+    #[tokio::test]
+    async fn mtls_listener_ignores_forwarded_for_from_trusted_range() {
+        let state = test_utils::test_app_state().await;
+        let mut config = (**state.config()).clone();
+        config.trusted_proxies = vec!["127.0.0.0/8".parse().expect("valid CIDR")];
+        state.config.store(Arc::new(config.clone()));
+        let app = build_app(state, &config).expect("build app");
+        let (addr, server) = serve_over_mtls(app).await;
+
+        // `build_auth_rate_limiter` allows a burst of 8; four more requests
+        // leave margin for the 2/s refill during the run.
+        let mut statuses = Vec::new();
+        for i in 0..12 {
+            let xff = format!("X-Forwarded-For: 203.0.113.{i}\r\n");
+            let response = post_token_over_mtls(addr, &xff).await;
+            statuses.push(status_of(&response).to_string());
+        }
+        server.abort();
+
+        assert!(
+            statuses.iter().any(|s| s == "429"),
+            "rotating X-Forwarded-For on the mTLS port must not reset the per-IP rate limit; \
+             statuses: {statuses:?}"
         );
     }
 }

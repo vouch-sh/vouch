@@ -37,9 +37,8 @@ use crate::infra::mtls_listener;
 
 /// Key extractor that resolves the real client IP behind trusted proxies.
 ///
-/// Uses `resolve_client_ip()` to walk X-Forwarded-For when the TCP peer
-/// is in the trusted CIDR set. Falls back to the TCP peer IP when no
-/// trusted proxies are configured or the peer is not trusted.
+/// Keys on [`client_ip_from_request`]: the TCP peer IP, or on the HTTPS/plain
+/// port the X-Forwarded-For client when the peer is a trusted proxy.
 #[derive(Debug, Clone)]
 pub struct TrustedProxyKeyExtractor {
     trusted_cidrs: Arc<[IpNet]>,
@@ -66,9 +65,7 @@ impl KeyExtractor for TrustedProxyKeyExtractor {
         &self,
         req: &http::Request<T>,
     ) -> std::result::Result<Self::Key, tower_governor::GovernorError> {
-        let peer_ip = mtls_listener::peer_ip_from_extensions(req.extensions());
-
-        resolve_client_ip(peer_ip, req.headers(), &self.trusted_cidrs)
+        client_ip_from_request(req.extensions(), req.headers(), &self.trusted_cidrs)
             .ok_or(tower_governor::GovernorError::UnableToExtractKey)
     }
 
@@ -155,6 +152,32 @@ pub fn build_general_rate_limiter(trusted_cidrs: &[IpNet]) -> Result<RateLimitLa
     Ok(GovernorLayer::new(build_config(1, 20, trusted_cidrs)?))
 }
 
+/// Resolve the client IP of a request, accounting for trusted reverse proxies.
+///
+/// The only crate-visible way to turn a request into a client IP: both the
+/// rate-limit key and the audit `client_ip` come from here, so they cannot
+/// disagree about which listener may carry a trusted `X-Forwarded-For`.
+///
+/// On the mTLS port the peer IP is returned as-is. `VOUCH_TRUSTED_PROXIES`
+/// describes the HTTPS port's reverse proxies, and no proxy can add a header
+/// to a TLS session Vouch terminates itself (see [`ConnectionPeer::Mtls`]).
+/// Walking the header there would let a direct mTLS client whose address
+/// falls inside that CIDR choose its own rate-limit bucket and audit address.
+///
+/// [`ConnectionPeer::Mtls`]: mtls_listener::ConnectionPeer::Mtls
+pub(crate) fn client_ip_from_request(
+    extensions: &axum::http::Extensions,
+    headers: &HeaderMap,
+    trusted_cidrs: &[IpNet],
+) -> Option<IpAddr> {
+    match mtls_listener::connection_peer(extensions)? {
+        mtls_listener::ConnectionPeer::Tcp(peer) => {
+            resolve_client_ip(Some(peer), headers, trusted_cidrs)
+        }
+        mtls_listener::ConnectionPeer::Mtls(peer) => Some(peer),
+    }
+}
+
 /// Resolve the real client IP address, accounting for trusted reverse proxies.
 ///
 /// When `trusted_cidrs` is empty, returns the TCP peer IP directly (safe for
@@ -165,7 +188,7 @@ pub fn build_general_rate_limiter(trusted_cidrs: &[IpNet]) -> Result<RateLimitLa
 /// trusted, `X-Forwarded-For` is ignored entirely (fail closed).
 ///
 /// This implements the "rightmost-trusted" algorithm per RFC 7239.
-pub(crate) fn resolve_client_ip(
+fn resolve_client_ip(
     peer_ip: Option<IpAddr>,
     headers: &HeaderMap,
     trusted_cidrs: &[IpNet],
@@ -341,5 +364,55 @@ mod tests {
         let trusted = cidrs(&["10.0.0.0/8"]);
         let headers = HeaderMap::new();
         assert_eq!(resolve_client_ip(None, &headers, &trusted), None);
+    }
+
+    // ========================================================================
+    // client_ip_from_request Tests
+    // ========================================================================
+
+    fn forwarded_for(value: &'static str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", HeaderValue::from_static(value));
+        headers
+    }
+
+    #[test]
+    fn test_client_ip_from_request_tcp_peer_walks_forwarded_for() {
+        let mut ext = http::Extensions::new();
+        ext.insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [10, 0, 0, 5],
+            443,
+        ))));
+        assert_eq!(
+            client_ip_from_request(
+                &ext,
+                &forwarded_for("203.0.113.50"),
+                &cidrs(&["10.0.0.0/8"])
+            ),
+            Some("203.0.113.50".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn test_client_ip_from_request_mtls_peer_ignores_forwarded_for() {
+        let mut ext = http::Extensions::new();
+        ext.insert(axum::extract::ConnectInfo(mtls_listener::PeerClientCert {
+            peer_chain_der: Vec::new(),
+            peer_addr: std::net::SocketAddr::from(([10, 0, 0, 50], 8443)),
+        }));
+        assert_eq!(
+            client_ip_from_request(&ext, &forwarded_for("1.2.3.4"), &cidrs(&["10.0.0.0/8"])),
+            Some("10.0.0.50".parse().unwrap()),
+            "a direct mTLS client inside VOUCH_TRUSTED_PROXIES must not choose its own address"
+        );
+    }
+
+    #[test]
+    fn test_client_ip_from_request_no_connection_info_returns_none() {
+        let ext = http::Extensions::new();
+        assert_eq!(
+            client_ip_from_request(&ext, &forwarded_for("1.2.3.4"), &cidrs(&["10.0.0.0/8"])),
+            None
+        );
     }
 }
