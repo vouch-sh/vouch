@@ -228,16 +228,19 @@ fn parse_log_format(s: &str) -> Result<LogFormat> {
 }
 
 /// Parse a comma-separated list of CIDR networks.
-fn parse_trusted_proxies(s: &str) -> Result<Vec<IpNet>> {
+///
+/// `env_name` labels the originating env var in error messages (e.g.
+/// `VOUCH_TRUSTED_PROXIES`, `VOUCH_MTLS_TRUSTED_PROXIES`).
+fn parse_trusted_proxies(s: &str, env_name: &str) -> Result<Vec<IpNet>> {
     if s.trim().is_empty() {
         return Ok(Vec::new());
     }
     s.split(',')
         .map(|cidr| {
             let trimmed = cidr.trim();
-            trimmed.parse::<IpNet>().map_err(|e| {
-                anyhow::anyhow!("Invalid CIDR in VOUCH_TRUSTED_PROXIES '{}': {}", trimmed, e)
-            })
+            trimmed
+                .parse::<IpNet>()
+                .map_err(|e| anyhow::anyhow!("Invalid CIDR in {env_name} '{trimmed}': {e}"))
         })
         .collect()
 }
@@ -520,8 +523,30 @@ pub struct Args {
     /// When set, the server parses X-Forwarded-For rightmost-first and stops
     /// at the first IP not in the trusted CIDRs. When unset, the TCP peer IP
     /// is used directly (safe for direct exposure without a reverse proxy).
+    ///
+    /// Applies to the HTTPS/plain listener only; the mTLS listener has its
+    /// own `VOUCH_MTLS_TRUSTED_PROXIES` so a direct mTLS client whose peer IP
+    /// lands in this CIDR cannot forge its `client_ip` / rate-limit bucket.
     #[arg(long, env = "VOUCH_TRUSTED_PROXIES", default_value = "")]
     pub trusted_proxies: String,
+
+    /// Trusted proxy CIDRs for the mTLS listener's X-Forwarded-For parsing
+    /// (comma-separated).
+    ///
+    /// The mTLS listener uses this list *instead of* `VOUCH_TRUSTED_PROXIES`
+    /// so a direct mTLS client whose TCP peer IP falls inside the HTTPS
+    /// port's trusted CIDR is not honored as a reverse proxy on the mTLS
+    /// port (which would let it forge its `client_ip` and rate-limit bucket
+    /// key via a client-supplied `X-Forwarded-For`).
+    ///
+    /// Leave unset for direct-mTLS deployments (no proxy in front of the mTLS
+    /// listener): the verified mTLS peer IP is always the rate-limit /
+    /// audit key. Set to the L4/TCP proxy's CIDR only when an L4 proxy (nginx
+    /// `stream`, Envoy TCP, HAProxy in TCP mode) fronts the mTLS listener —
+    /// it preserves the client cert while its own IP becomes the TCP peer,
+    /// and legitimately appends to `X-Forwarded-For`.
+    #[arg(long, env = "VOUCH_MTLS_TRUSTED_PROXIES", default_value = "")]
+    pub mtls_trusted_proxies: String,
 
     /// Bearer token for /metrics endpoint. If unset, /metrics is disabled.
     #[arg(long, env = "VOUCH_METRICS_BEARER_TOKEN")]
@@ -905,7 +930,17 @@ pub struct ServerConfig {
     /// Log output format: `text` or `json`.
     pub log_format: LogFormat,
     /// Trusted proxy CIDRs for X-Forwarded-For parsing.
+    ///
+    /// Consulted for requests on the HTTPS/plain listener only.
     pub trusted_proxies: Vec<IpNet>,
+    /// Trusted proxy CIDRs for the mTLS listener's X-Forwarded-For parsing.
+    ///
+    /// Distinct from `trusted_proxies` so a direct mTLS client whose peer IP
+    /// lands in the HTTPS port's `VOUCH_TRUSTED_PROXIES` CIDR is not honored
+    /// as a reverse proxy on the mTLS port. Empty for direct-mTLS
+    /// deployments; set to the L4 proxy's CIDR when an L4/TCP proxy fronts
+    /// the mTLS listener.
+    pub mtls_trusted_proxies: Vec<IpNet>,
     /// Bearer token for /metrics endpoint access control.
     /// If `None`, the /metrics endpoint is not exposed.
     pub metrics_bearer_token: Option<NonEmptySecret>,
@@ -1043,7 +1078,10 @@ impl ServerConfig {
         let log_format = parse_log_format(&args.log_format)?;
 
         // Parse trusted proxies
-        let trusted_proxies = parse_trusted_proxies(&args.trusted_proxies)?;
+        let trusted_proxies =
+            parse_trusted_proxies(&args.trusted_proxies, "VOUCH_TRUSTED_PROXIES")?;
+        let mtls_trusted_proxies =
+            parse_trusted_proxies(&args.mtls_trusted_proxies, "VOUCH_MTLS_TRUSTED_PROXIES")?;
 
         // Parse unified IdP list (OIDC + SAML).
         let idps = parse_idps(args.idps.as_deref())?;
@@ -1111,6 +1149,7 @@ impl ServerConfig {
             allowed_aaguids,
             log_format,
             trusted_proxies,
+            mtls_trusted_proxies,
             // `NonEmptySecret` treats `VAR=""` as unset: each of these three
             // switches a feature on by being present and then keys it, so an
             // empty value would enable the feature under a publicly-known key.
@@ -1397,7 +1436,8 @@ pub fn resolve_dsql_endpoints(
 mod tests {
     use crate::config::{
         Args, BaseUrl, IdpConfig, NonEmptySecret, SamlProviderConfig, ServerConfig,
-        bootstrap_overlay_args, resolve_dsql_endpoints, validate_provider_slug,
+        bootstrap_overlay_args, parse_trusted_proxies, resolve_dsql_endpoints,
+        validate_provider_slug,
     };
     use crate::infra::bootstrap::Bootstrap;
     use crate::test_utils::test_config;
@@ -2140,5 +2180,85 @@ mod tests {
         endpoints.insert("us-east-1".to_string(), "postgres://x/postgres".to_string());
         let err = resolve_dsql_endpoints(&endpoints, None, Some("us-west-2")).unwrap_err();
         assert!(err.to_string().contains("not found"), "got: {err}");
+    }
+
+    // ========================================================================
+    // parse_trusted_proxies / VOUCH_TRUSTED_PROXIES / VOUCH_MTLS_TRUSTED_PROXIES
+    // ========================================================================
+
+    #[test]
+    fn parse_trusted_proxies_invalid_cidr_reports_env_name() {
+        // The error must name the offending env var so an operator debugging
+        // an mTLS-port misconfiguration sees `VOUCH_MTLS_TRUSTED_PROXIES`,
+        // not the HTTPS port's `VOUCH_TRUSTED_PROXIES`.
+        let https_err = parse_trusted_proxies("not-a-cidr", "VOUCH_TRUSTED_PROXIES").unwrap_err();
+        assert!(
+            https_err.to_string().contains("VOUCH_TRUSTED_PROXIES"),
+            "got: {https_err}"
+        );
+        assert!(!https_err.to_string().contains("VOUCH_MTLS_TRUSTED_PROXIES"));
+
+        let mtls_err =
+            parse_trusted_proxies("not-a-cidr", "VOUCH_MTLS_TRUSTED_PROXIES").unwrap_err();
+        assert!(
+            mtls_err.to_string().contains("VOUCH_MTLS_TRUSTED_PROXIES"),
+            "got: {mtls_err}"
+        );
+        assert!(!mtls_err.to_string().contains("VOUCH_TRUSTED_PROXIES"));
+    }
+
+    #[test]
+    fn from_args_parses_distinct_trusted_and_mtls_trusted_proxies() {
+        // The HTTPS port's `--trusted-proxies` and the mTLS port's
+        // `--mtls-trusted-proxies` must populate independent fields so the
+        // mTLS listener can be given an empty trusted set (direct-mTLS) while
+        // the HTTPS listener honors its reverse proxy.
+        let args = Args::try_parse_from([
+            "vouch-server",
+            "--trusted-proxies=10.0.0.0/8",
+            "--mtls-trusted-proxies=127.0.0.6/32",
+        ])
+        .expect("parse with trusted and mtls-trusted proxies");
+        let config = ServerConfig::from_args(args, None).expect("config builds");
+        assert_eq!(
+            config.trusted_proxies,
+            vec!["10.0.0.0/8".parse().unwrap()],
+            "HTTPS-port trusted_proxies must come from --trusted-proxies"
+        );
+        assert_eq!(
+            config.mtls_trusted_proxies,
+            vec!["127.0.0.6/32".parse().unwrap()],
+            "mTLS-port mtls_trusted_proxies must come from --mtls-trusted-proxies, independent \
+             of --trusted-proxies"
+        );
+    }
+
+    #[test]
+    fn from_args_mtls_trusted_proxies_defaults_empty() {
+        // Default must be empty: a direct-mTLS deployment (no L4 proxy in
+        // front of the mTLS listener) must resolve client IP as the verified
+        // peer IP, never via X-Forwarded-For.
+        let args = Args::try_parse_from(["vouch-server", "--trusted-proxies=10.0.0.0/8"])
+            .expect("parse with only trusted-proxies");
+        let config = ServerConfig::from_args(args, None).expect("config builds");
+        assert!(
+            config.mtls_trusted_proxies.is_empty(),
+            "VOUCH_MTLS_TRUSTED_PROXIES must default to empty (direct mTLS)"
+        );
+    }
+
+    #[test]
+    fn from_args_invalid_mtls_trusted_proxies_is_rejected() {
+        let args = Args::try_parse_from(["vouch-server", "--mtls-trusted-proxies=not-a-cidr"])
+            .expect("clap parses the string; validation is in from_args");
+        // `ServerConfig` is not `Debug`, so pull the error out via `.err()`
+        // (Option::expect does not require `T: Debug`).
+        let err = ServerConfig::from_args(args, None)
+            .err()
+            .expect("invalid mTLS trusted CIDR must be rejected by from_args");
+        assert!(
+            err.to_string().contains("VOUCH_MTLS_TRUSTED_PROXIES"),
+            "invalid mTLS trusted proxies must be rejected with the mTLS env-var name: {err}"
+        );
     }
 }

@@ -833,6 +833,25 @@ fn log_startup_summary(config: &config::ServerConfig) {
         );
     }
 
+    if !config.mtls_trusted_proxies.is_empty() {
+        let cidrs: Vec<String> = config
+            .mtls_trusted_proxies
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        tracing::warn!(
+            "mTLS trusted proxies configured: {} -- X-Forwarded-For will be parsed for \
+             client IP on the mTLS listener",
+            cidrs.join(", "),
+        );
+    } else {
+        tracing::info!(
+            "mTLS listener: no trusted proxies configured -- direct mTLS peer IP is used as \
+             the rate-limit / audit client_ip (set VOUCH_MTLS_TRUSTED_PROXIES only when an \
+             L4/TCP proxy fronts the mTLS listener)"
+        );
+    }
+
     let pool_cfg = &config.pool_config;
     tracing::info!(
         "Database pool: max_connections={}, min_connections={}, idle_timeout={}s, acquire_timeout={}s",

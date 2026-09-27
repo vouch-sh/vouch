@@ -88,6 +88,26 @@ pub(crate) fn peer_ip_from_extensions(
         .map(|ci| ci.0.peer_addr.ip().to_canonical())
 }
 
+/// Whether the request arrived on the mTLS listener.
+///
+/// The mTLS port injects `ConnectInfo<PeerClientCert>` as its single
+/// connection extension; the HTTPS/plain ports inject
+/// `ConnectInfo<SocketAddr>` instead (see [`peer_ip_from_extensions`]).
+/// Presence of `ConnectInfo<PeerClientCert>` therefore identifies an
+/// mTLS-port request without inspecting headers.
+///
+/// The rate-limit key extractor and the audit `ClientInfo` extractor use this
+/// to select the mTLS listener's own (empty-able) `trusted_proxies` set
+/// instead of the HTTPS port's, so a direct mTLS client whose TCP peer IP
+/// falls inside the HTTPS port's `VOUCH_TRUSTED_PROXIES` CIDR cannot forge
+/// its rate-limit bucket key or audit `client_ip` via a client-supplied
+/// `X-Forwarded-For`.
+pub(crate) fn is_mtls_port_request(extensions: &axum::http::Extensions) -> bool {
+    extensions
+        .get::<axum::extract::ConnectInfo<PeerClientCert>>()
+        .is_some()
+}
+
 /// TLS stream with extracted peer certificate.
 ///
 /// Wraps `tokio_rustls::server::TlsStream<TcpStream>` and delegates
@@ -545,6 +565,46 @@ mod tests {
         assert_eq!(peer_ip_from_extensions(&ext), None);
     }
 
+    // ========================================================================
+    // is_mtls_port_request Tests
+    // ========================================================================
+
+    /// `ConnectInfo<PeerClientCert>` present (and no `ConnectInfo<SocketAddr>`)
+    /// identifies an mTLS-port request, as axum's
+    /// `into_make_service_with_connect_info::<PeerClientCert>()` injects on the
+    /// mTLS listener.
+    #[test]
+    fn is_mtls_port_request_true_for_peer_client_cert() {
+        let mut ext = http::Extensions::new();
+        ext.insert(axum::extract::ConnectInfo(PeerClientCert {
+            peer_chain_der: Vec::new(),
+            peer_addr: std::net::SocketAddr::from(([198, 51, 100, 42], 8443)),
+        }));
+        assert!(is_mtls_port_request(&ext));
+    }
+
+    /// `ConnectInfo<SocketAddr>` present (and no `ConnectInfo<PeerClientCert>`)
+    /// identifies an HTTPS/plain-port request, as axum's
+    /// `into_make_service_with_connect_info::<SocketAddr>()` injects on the
+    /// HTTPS listener.
+    #[test]
+    fn is_mtls_port_request_false_for_socket_addr() {
+        let mut ext = http::Extensions::new();
+        ext.insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [203, 0, 113, 7],
+            443,
+        ))));
+        assert!(!is_mtls_port_request(&ext));
+    }
+
+    /// No connection extension is neither port shape; the rate limiter and
+    /// audit extractor both treat this as "not mTLS" and fail / fall back.
+    #[test]
+    fn is_mtls_port_request_false_when_absent() {
+        let ext = http::Extensions::new();
+        assert!(!is_mtls_port_request(&ext));
+    }
+
     /// Client-side verifier for the end-to-end test below: the test server's
     /// certificate is self-signed and CN-only, so name and chain checks are
     /// skipped, while handshake signatures are still verified.
@@ -669,6 +729,128 @@ mod tests {
             "a client_credentials request with no client authentication must reach the \
              token handler and be refused there (4xx); a 500 means the rate limiter found \
              no client IP on the mTLS port. Response:\n{response}"
+        );
+    }
+
+    /// A direct mTLS client whose TCP peer IP falls inside the operator's
+    /// `VOUCH_TRUSTED_PROXIES` CIDR cannot evade the per-IP rate limit on
+    /// `/oauth/token` by rotating `X-Forwarded-For`.
+    ///
+    /// Before the fix the `TrustedProxyKeyExtractor` consulted the single
+    /// server-wide `trusted_proxies` set on the mTLS port, so each distinct
+    /// `X-Forwarded-For` value became a fresh GCRA bucket (burst=8) — an
+    /// attacker rotated the header to get `8*N` immediate attempts at a
+    /// `client_secret`. After the fix the mTLS port consults its own
+    /// (empty-by-default) `mtls_trusted_proxies` set, so every request from
+    /// one peer IP shares a single bucket keyed on the verified mTLS peer
+    /// IP. This test sends `burst + extra` requests with a *distinct* XFF
+    /// value each from one peer IP and asserts the bucket is exhausted
+    /// (at least one 429) — which the buggy code never produced, because
+    /// every XFF value was a fresh bucket well within its burst.
+    #[tokio::test]
+    async fn mtls_port_rate_limit_not_bypassed_by_xff_rotation() {
+        use crate::infra::router::build_app;
+        use crate::test_utils::test_app_state;
+        use axum::body::Body;
+        use ipnet::IpNet;
+        use std::net::SocketAddr;
+        use std::sync::Arc;
+        use tower::ServiceExt;
+
+        fn cidrs(strs: &[&str]) -> Vec<IpNet> {
+            strs.iter()
+                .map(|s| s.parse().expect("valid CIDR"))
+                .collect()
+        }
+
+        let state = test_app_state().await;
+        // HTTPS port is reverse-proxied by a fleet inside 10.0.0.0/8; the
+        // mTLS port is a direct TLS endpoint (no L4 proxy in front).
+        let mut config = (**state.config()).clone();
+        config.trusted_proxies = cidrs(&["10.0.0.0/8"]);
+        config.mtls_trusted_proxies = Vec::new();
+        state.config.store(Arc::new(config.clone()));
+        let app = build_app(state, &config).expect("build app");
+
+        // The attacker is a direct mTLS client whose peer IP (10.0.0.150)
+        // falls inside `VOUCH_TRUSTED_PROXIES`. Each request carries a
+        // distinct X-Forwarded-For value to try to spin up fresh buckets.
+        let peer_addr: SocketAddr = "10.0.0.150:8443".parse().expect("valid peer addr");
+        // `build_auth_rate_limiter` uses burst_size = 8. Send burst + 4 so
+        // the bucket is well past exhausted even with a little GCRA refill.
+        let total = 8 + 4;
+        let mut reached_handler = 0u32;
+        let mut rate_limited = 0u32;
+        let mut server_error = 0u32;
+        for i in 0..total {
+            let request = http::Request::builder()
+                .method("POST")
+                .uri("/oauth/token")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .header("x-forwarded-for", format!("1.2.3.{i}"))
+                .extension(axum::extract::ConnectInfo(PeerClientCert {
+                    peer_chain_der: Vec::new(),
+                    peer_addr,
+                }))
+                .body(Body::from("grant_type=client_credentials"))
+                .expect("build request");
+            let status = app
+                .clone()
+                .oneshot(request)
+                .await
+                .expect("oneshot succeeds")
+                .status();
+            match status.as_u16() {
+                429 => rate_limited += 1,
+                500 => server_error += 1,
+                _ => reached_handler += 1,
+            }
+        }
+
+        assert_eq!(
+            server_error, 0,
+            "no mTLS-port request should hit a 500 — the limiter must resolve a key from the \
+             verified peer IP"
+        );
+        assert!(
+            rate_limited >= 1,
+            "rotating X-Forwarded-For must NOT reset the per-IP rate-limit bucket on the mTLS \
+             port: expected at least one 429 after {total} requests (burst=8) from one peer IP \
+             with a distinct XFF value each, got {rate_limited} 429 / {reached_handler} reached \
+             the handler. Before the fix every XFF value was a fresh bucket and 0 requests \
+             were rate-limited."
+        );
+
+        // Control: a different peer IP has a fresh bucket and reaches the
+        // handler immediately, confirming the limiter is keyed on the peer
+        // IP (not a global block).
+        let fresh_peer: SocketAddr = "10.0.0.199:8443".parse().expect("valid peer addr");
+        let request = http::Request::builder()
+            .method("POST")
+            .uri("/oauth/token")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .header("x-forwarded-for", "9.9.9.9")
+            .extension(axum::extract::ConnectInfo(PeerClientCert {
+                peer_chain_der: Vec::new(),
+                peer_addr: fresh_peer,
+            }))
+            .body(Body::from("grant_type=client_credentials"))
+            .expect("build request");
+        let fresh_status = app
+            .clone()
+            .oneshot(request)
+            .await
+            .expect("oneshot")
+            .status();
+        assert_ne!(
+            fresh_status.as_u16(),
+            429,
+            "a fresh peer IP must not inherit the first peer's exhausted bucket"
+        );
+        assert_ne!(
+            fresh_status.as_u16(),
+            500,
+            "the control request must reach the handler, not 500"
         );
     }
 }

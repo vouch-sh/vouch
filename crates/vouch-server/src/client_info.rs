@@ -113,7 +113,21 @@ impl FromRequestParts<Arc<AppState>> for ClientInfo {
         let peer_ip = mtls_listener::peer_ip_from_extensions(&parts.extensions);
 
         let config = state.config.load();
-        let client_ip = resolve_client_ip(peer_ip, &parts.headers, &config.trusted_proxies);
+        // mTLS-port requests resolve `client_ip` against the mTLS listener's
+        // own trusted set (`VOUCH_MTLS_TRUSTED_PROXIES`, empty for direct-mTLS
+        // deployments), not the HTTPS port's `VOUCH_TRUSTED_PROXIES`. A direct
+        // mTLS client whose TCP peer IP falls inside the HTTPS port's trusted
+        // CIDR would otherwise be treated as a trusted reverse proxy and have
+        // its client-supplied `X-Forwarded-For` honored as the audit
+        // `client_ip`, breaking audit attribution. See
+        // `TrustedProxyKeyExtractor::extract` for the rate-limit side of the
+        // same guard.
+        let trusted = if mtls_listener::is_mtls_port_request(&parts.extensions) {
+            &config.mtls_trusted_proxies
+        } else {
+            &config.trusted_proxies
+        };
+        let client_ip = resolve_client_ip(peer_ip, &parts.headers, trusted);
 
         Ok(Self {
             client_ip,
@@ -141,6 +155,7 @@ fn extract_validated_header(headers: &HeaderMap, name: &str, max_len: usize) -> 
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
+    clippy::expect_used,
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
@@ -274,5 +289,152 @@ mod tests {
 
         let info = ClientInfo::from_headers(&headers);
         assert_eq!(info.client_version.as_deref(), Some("1.2.3-beta+build.456"));
+    }
+
+    // ========================================================================
+    // ClientInfo extractor: mTLS-port vs. HTTPS-port trusted-set selection
+    // ========================================================================
+    //
+    // `ClientInfo::from_request_parts` resolves `client_ip` through
+    // `resolve_client_ip`. It must use the mTLS listener's own
+    // (`VOUCH_MTLS_TRUSTED_PROXIES`, empty for direct-mTLS) trusted set for
+    // mTLS-port requests, and the HTTPS port's (`VOUCH_TRUSTED_PROXIES`)
+    // set for HTTPS-port requests — the audit-side mirror of the
+    // `TrustedProxyKeyExtractor` guard. Otherwise a direct mTLS client
+    // whose peer IP lands in the HTTPS port's trusted CIDR could forge the
+    // audit `client_ip` to any value via `X-Forwarded-For`.
+
+    use crate::infra::mtls_listener::PeerClientCert;
+    use crate::test_utils::test_app_state;
+    use axum::extract::FromRequestParts;
+    use axum::http::Request;
+    use axum::http::request::Parts;
+    use ipnet::IpNet;
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    fn cidrs(strs: &[&str]) -> Vec<IpNet> {
+        strs.iter().map(|s| s.parse().unwrap()).collect()
+    }
+
+    /// Build `Parts` carrying only the given connection extension plus an
+    /// `X-Forwarded-For` header, matching one port's connection shape.
+    fn parts_with(extension: impl Clone + Send + Sync + 'static, xff: &str) -> Parts {
+        let request = Request::builder()
+            .header("x-forwarded-for", xff)
+            .body(())
+            .expect("build request");
+        let (mut parts, ()) = request.into_parts();
+        parts.extensions.insert(extension);
+        parts
+    }
+
+    /// Direct mTLS deployment: `trusted_proxies=10.0.0.0/8` (HTTPS port,
+    /// reverse-proxied), `mtls_trusted_proxies` empty. A direct mTLS client
+    /// at `10.0.0.50` supplying `X-Forwarded-For: 1.2.3.4` must record the
+    /// verified mTLS peer IP as `client_ip`, not the forged XFF value.
+    #[tokio::test]
+    async fn mtls_port_client_info_records_verified_peer_not_xff() {
+        let state = test_app_state().await;
+        let mut config = (**state.config()).clone();
+        config.trusted_proxies = cidrs(&["10.0.0.0/8"]);
+        config.mtls_trusted_proxies = Vec::new();
+        state.config.store(Arc::new(config));
+
+        let cert = PeerClientCert {
+            peer_chain_der: Vec::new(),
+            peer_addr: SocketAddr::from(([10, 0, 0, 50], 8443)),
+        };
+        let mut parts = parts_with(axum::extract::ConnectInfo(cert), "1.2.3.4");
+
+        let info = ClientInfo::from_request_parts(&mut parts, &state)
+            .await
+            .expect("ClientInfo extraction is infallible");
+        assert_eq!(
+            info.client_ip(),
+            Some("10.0.0.50".parse().unwrap()),
+            "mTLS-port audit client_ip must be the verified peer IP, not a forged XFF entry"
+        );
+    }
+
+    /// L4-proxied mTLS deployment: `mtls_trusted_proxies=10.0.0.0/8` (an L4
+    /// proxy at 10.0.0.5 fronts the mTLS listener). The mTLS-port audit
+    /// extractor must walk `X-Forwarded-For` and record the real client IP.
+    #[tokio::test]
+    async fn mtls_port_client_info_honors_xff_when_mtls_trusted_proxies_set() {
+        let state = test_app_state().await;
+        let mut config = (**state.config()).clone();
+        config.trusted_proxies = Vec::new();
+        config.mtls_trusted_proxies = cidrs(&["10.0.0.0/8"]);
+        state.config.store(Arc::new(config));
+
+        let cert = PeerClientCert {
+            peer_chain_der: Vec::new(),
+            peer_addr: SocketAddr::from(([10, 0, 0, 5], 8443)),
+        };
+        let mut parts = parts_with(axum::extract::ConnectInfo(cert), "203.0.113.9");
+
+        let info = ClientInfo::from_request_parts(&mut parts, &state)
+            .await
+            .expect("ClientInfo extraction is infallible");
+        assert_eq!(
+            info.client_ip(),
+            Some("203.0.113.9".parse().unwrap()),
+            "L4-proxied mTLS deployment must walk XFF using the mTLS trusted set for audit"
+        );
+    }
+
+    /// HTTPS port unchanged: an HTTPS-port request whose peer is in
+    /// `trusted_proxies` and whose XFF names an untrusted client records that
+    /// XFF entry as `client_ip` — the long-standing reverse-proxy behavior.
+    /// Pins that the mTLS-port split does not regress the HTTPS listener's
+    /// audit attribution.
+    #[tokio::test]
+    async fn https_port_client_info_honors_xff_when_peer_in_trusted_proxies() {
+        let state = test_app_state().await;
+        let mut config = (**state.config()).clone();
+        config.trusted_proxies = cidrs(&["10.0.0.0/8"]);
+        config.mtls_trusted_proxies = cidrs(&["127.0.0.6/32"]); // must NOT leak to HTTPS
+        state.config.store(Arc::new(config));
+
+        let mut parts = parts_with(
+            axum::extract::ConnectInfo(SocketAddr::from(([10, 0, 0, 5], 443))),
+            "203.0.113.50",
+        );
+
+        let info = ClientInfo::from_request_parts(&mut parts, &state)
+            .await
+            .expect("ClientInfo extraction is infallible");
+        assert_eq!(
+            info.client_ip(),
+            Some("203.0.113.50".parse().unwrap()),
+            "HTTPS-port audit client_ip must honor XFF via trusted_proxies"
+        );
+    }
+
+    /// The mTLS trusted set must not leak into the HTTPS port: an HTTPS-port
+    /// request whose peer is in `mtls_trusted_proxies` but NOT in
+    /// `trusted_proxies` ignores XFF and records the peer IP.
+    #[tokio::test]
+    async fn https_port_client_info_ignores_mtls_trusted_set() {
+        let state = test_app_state().await;
+        let mut config = (**state.config()).clone();
+        config.trusted_proxies = Vec::new();
+        config.mtls_trusted_proxies = cidrs(&["10.0.0.0/8"]);
+        state.config.store(Arc::new(config));
+
+        let mut parts = parts_with(
+            axum::extract::ConnectInfo(SocketAddr::from(([10, 0, 0, 50], 443))),
+            "1.2.3.4",
+        );
+
+        let info = ClientInfo::from_request_parts(&mut parts, &state)
+            .await
+            .expect("ClientInfo extraction is infallible");
+        assert_eq!(
+            info.client_ip(),
+            Some("10.0.0.50".parse().unwrap()),
+            "HTTPS-port audit client_ip must not consult the mTLS trusted set"
+        );
     }
 }

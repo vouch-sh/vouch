@@ -521,6 +521,7 @@ mod tests {
             allowed_aaguids: AaguidPolicy::Any,
             log_format: LogFormat::Text,
             trusted_proxies: Vec::new(),
+            mtls_trusted_proxies: Vec::new(),
             metrics_bearer_token: None,
             certification_test_token: None,
             extra_ca_certs: None,
