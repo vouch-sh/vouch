@@ -2282,7 +2282,7 @@ async fn par_post_full(
     // Simulate the real mTLS port: axum injects a single `ConnectInfo<T>` per
     // connection — `ConnectInfo<PeerClientCert>` here — so no separate
     // `ConnectInfo<SocketAddr>` is present. The peer address rides on
-    // `PeerClientCert.peer_addr` and is resolved via `peer_ip_from_extensions`.
+    // `PeerClientCert.peer_addr` and is resolved via `connection_peer`.
     parts
         .extensions
         .insert(axum::extract::ConnectInfo(PeerClientCert {
