@@ -12,7 +12,7 @@
 //!
 //! ```text
 //! accept → set_nodelay → spawn → [PROXY header, #1583] → handshake (timeout)
-//!        → protocol sniff (timeout) → hyper HTTP/1 or HTTP/2 (TokioTimer)
+//!        → hyper-util auto HTTP/1 or HTTP/2 (TokioTimer, idle limit)
 //! ```
 //!
 //! The task is spawned before any per-connection I/O, so a client that stalls
@@ -33,10 +33,10 @@ use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum_server::tls_rustls::RustlsConfig;
 use hyper::body::{Body as HttpBody, Frame, Incoming, SizeHint};
-use hyper::server::conn::{http1, http2};
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
+use hyper_util::server::conn::auto;
 use hyper_util::service::TowerToHyperService;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 use tokio::task::JoinSet;
@@ -50,15 +50,13 @@ pub(crate) struct ConnLimits {
     /// From TCP accept to a finished [`Handshake`] (the TLS handshake on the
     /// HTTPS and mTLS listeners).
     pub(crate) handshake: Duration,
-    /// For the first bytes of the connection to arrive (the protocol sniff),
-    /// and again as hyper's HTTP/1 header read timeout. hyper re-arms the
-    /// latter before every request head, so it also closes a keep-alive
-    /// connection that sits idle between requests for this long.
+    /// hyper's HTTP/1 header read timeout, and the idle limit: a connection
+    /// with no request in flight for this long is closed.
     ///
-    /// HTTP/2 has no header timer in hyper, so an HTTP/2 connection with no
-    /// request in flight for this long is closed instead. That covers a
-    /// client that stops mid-request-head (a HEADERS frame whose
-    /// CONTINUATION never arrives) as well as one that simply idles.
+    /// The idle limit covers what hyper leaves unbounded: hyper-util's
+    /// protocol detection before the first bytes arrive, and HTTP/2, which
+    /// has no header timer (a HEADERS frame whose CONTINUATION never arrives,
+    /// or a client that simply idles while answering keep-alive pings).
     pub(crate) header_read: Duration,
     /// Interval between HTTP/2 keep-alive pings.
     pub(crate) h2_keep_alive_interval: Duration,
@@ -206,10 +204,6 @@ async fn handle_accept_error(err: io::Error) {
     tokio::time::sleep(Duration::from_secs(1)).await;
 }
 
-fn timed_out(what: &str) -> io::Error {
-    io::Error::new(io::ErrorKind::TimedOut, format!("{what} timed out"))
-}
-
 /// Drive one connection from handshake to close.
 async fn serve_connection<H: Handshake>(
     tcp: TcpStream,
@@ -219,26 +213,20 @@ async fn serve_connection<H: Handshake>(
     limits: ConnLimits,
     shutdown: CancellationToken,
 ) {
-    // Everything before hyper takes over is bounded here: hyper's own timers
-    // only start once it owns the stream.
-    let setup = async {
-        // A PROXY protocol v2 header read (#1583) belongs here, ahead of the
-        // handshake and under its own timeout; it replaces `peer` with the
-        // header's source address.
-        let (io, info) = tokio::time::timeout(limits.handshake, handshake.handshake(tcp, peer))
-            .await
-            .map_err(|_| timed_out("handshake"))??;
-        let (io, version) = tokio::time::timeout(limits.header_read, sniff_version(io))
-            .await
-            .map_err(|_| timed_out("first read"))??;
-        Ok::<_, io::Error>((io, info, version))
-    };
-    let (io, info, version) = tokio::select! {
+    // A PROXY protocol v2 header read (#1583) belongs here, ahead of the
+    // handshake and under its own timeout; it replaces `peer` with the
+    // header's source address.
+    let handshake = tokio::time::timeout(limits.handshake, handshake.handshake(tcp, peer));
+    let (io, info) = tokio::select! {
         () = shutdown.cancelled() => return,
-        setup = setup => match setup {
-            Ok(ready) => ready,
-            Err(err) => {
-                tracing::debug!(remote_addr = %peer, "connection closed before HTTP: {err}");
+        handshake = handshake => match handshake {
+            Ok(Ok(ready)) => ready,
+            Ok(Err(err)) => {
+                tracing::debug!(remote_addr = %peer, "handshake failed: {err}");
+                return;
+            }
+            Err(_) => {
+                tracing::debug!(remote_addr = %peer, "handshake timed out");
                 return;
             }
         },
@@ -260,53 +248,34 @@ async fn serve_connection<H: Handshake>(
                 }))
             }
         }));
-    let io = TokioIo::new(io);
 
-    // The two hyper connection types share no trait carrying
-    // `graceful_shutdown`, so the drive loop is spelled out per protocol.
-    let result = match version {
-        Version::H1 => {
-            let mut builder = http1::Builder::new();
-            builder
-                .timer(TokioTimer::new())
-                .header_read_timeout(limits.header_read);
-            let conn = builder.serve_connection(io, service).with_upgrades();
-            tokio::pin!(conn);
-            tokio::select! {
-                result = conn.as_mut() => result,
-                () = shutdown.cancelled() => {
-                    conn.as_mut().graceful_shutdown();
-                    conn.await
-                }
-            }
+    let mut builder = auto::Builder::new(TokioExecutor::new());
+    builder
+        .http1()
+        .timer(TokioTimer::new())
+        .header_read_timeout(limits.header_read);
+    builder
+        .http2()
+        .timer(TokioTimer::new())
+        .keep_alive_interval(limits.h2_keep_alive_interval)
+        .keep_alive_timeout(limits.h2_keep_alive_timeout);
+    let conn = builder.serve_connection_with_upgrades(TokioIo::new(io), service);
+    tokio::pin!(conn);
+    let result = tokio::select! {
+        result = conn.as_mut() => result,
+        () = shutdown.cancelled() => {
+            conn.as_mut().graceful_shutdown();
+            conn.await
         }
-        Version::H2 => {
-            let mut builder = http2::Builder::new(TokioExecutor::new());
-            builder
-                .timer(TokioTimer::new())
-                .keep_alive_interval(limits.h2_keep_alive_interval)
-                .keep_alive_timeout(limits.h2_keep_alive_timeout);
-            let conn = builder.serve_connection(io, service);
-            tokio::pin!(conn);
-            // Keep-alive pings only catch dead peers; a live client answers
-            // them, so idleness is bounded here instead.
-            tokio::select! {
-                result = conn.as_mut() => result,
-                () = shutdown.cancelled() => {
-                    conn.as_mut().graceful_shutdown();
-                    conn.await
-                }
-                () = idle_for(idle, limits.header_read) => {
-                    tracing::debug!(remote_addr = %peer, "closing idle HTTP/2 connection");
-                    // Graceful shutdown sends GOAWAY and then waits for the
-                    // client to acknowledge a PING, which a stalling client
-                    // never does; give it one more idle period, then drop.
-                    conn.as_mut().graceful_shutdown();
-                    tokio::time::timeout(limits.header_read, conn)
-                        .await
-                        .unwrap_or(Ok(()))
-                }
-            }
+        () = idle_for(idle, limits.header_read) => {
+            tracing::debug!(remote_addr = %peer, "closing idle connection");
+            // HTTP/2 graceful shutdown sends GOAWAY and then waits for the
+            // client to acknowledge a PING, which a stalling client never
+            // does; give it one more idle period, then drop.
+            conn.as_mut().graceful_shutdown();
+            tokio::time::timeout(limits.header_read, conn)
+                .await
+                .unwrap_or(Ok(()))
         }
     };
     if let Err(err) = result {
@@ -385,106 +354,6 @@ impl HttpBody for TrackedBody {
     }
 }
 
-/// The HTTP/2 connection preface (RFC 9113 §3.4).
-const H2_PREFACE: &[u8; 24] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Version {
-    H1,
-    H2,
-}
-
-/// Read until the bytes either diverge from the HTTP/2 preface (HTTP/1) or
-/// complete it (HTTP/2), and hand back a stream that replays them.
-///
-/// `hyper_util`'s auto builder does the same detection but without a timeout,
-/// and runs it even when restricted to one protocol, so the version is decided
-/// here where the caller can bound it.
-async fn sniff_version<I: AsyncRead + Unpin>(mut io: I) -> io::Result<(Rewind<I>, Version)> {
-    let mut buf = [0u8; H2_PREFACE.len()];
-    let mut filled = 0usize;
-    let version = loop {
-        let Some(unfilled) = buf.get_mut(filled..).filter(|rest| !rest.is_empty()) else {
-            break Version::H2;
-        };
-        let read = io.read(unfilled).await?;
-        if read == 0 {
-            return Err(io::ErrorKind::UnexpectedEof.into());
-        }
-        filled = filled.saturating_add(read);
-        if buf.get(..filled) != H2_PREFACE.get(..filled) {
-            break Version::H1;
-        }
-    };
-    let prefix = buf.get(..filled).unwrap_or_default().to_vec();
-    Ok((
-        Rewind {
-            prefix,
-            pos: 0,
-            inner: io,
-        },
-        version,
-    ))
-}
-
-/// A stream that yields `prefix` before reading from `inner`.
-struct Rewind<I> {
-    prefix: Vec<u8>,
-    pos: usize,
-    inner: I,
-}
-
-impl<I: AsyncRead + Unpin> AsyncRead for Rewind<I> {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        let this = self.get_mut();
-        if let Some(rest) = this.prefix.get(this.pos..)
-            && !rest.is_empty()
-        {
-            let len = rest.len().min(buf.remaining());
-            if let Some(chunk) = rest.get(..len) {
-                buf.put_slice(chunk);
-                this.pos = this.pos.saturating_add(len);
-            }
-            return Poll::Ready(Ok(()));
-        }
-        Pin::new(&mut this.inner).poll_read(cx, buf)
-    }
-}
-
-impl<I: AsyncWrite + Unpin> AsyncWrite for Rewind<I> {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
-    }
-
-    fn poll_write_vectored(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        bufs: &[io::IoSlice<'_>],
-    ) -> Poll<io::Result<usize>> {
-        Pin::new(&mut self.get_mut().inner).poll_write_vectored(cx, bufs)
-    }
-
-    fn is_write_vectored(&self) -> bool {
-        self.inner.is_write_vectored()
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
-    }
-
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
-    }
-}
-
 #[cfg(test)]
 #[expect(
     clippy::expect_used,
@@ -494,7 +363,10 @@ mod tests {
     use super::*;
 
     use axum::routing::get;
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// The HTTP/2 client connection preface (RFC 9113 §3.4).
+    const H2_PREFACE: &[u8; 24] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 
     /// Short limits so the timeout tests finish quickly; the drain is long
     /// enough that no test depends on it expiring.
@@ -676,29 +548,24 @@ mod tests {
             .expect("client stalled mid-request-head must be disconnected");
     }
 
-    /// A request in flight keeps an HTTP/2 connection from counting as idle,
-    /// and the idle clock starts once it ends. The idle limit is zero, so only
-    /// the in-flight request can keep the wait pending: no clock is involved.
-    #[tokio::test]
+    /// A request in flight, including its response body, keeps a connection
+    /// from counting as idle; the idle clock starts once it ends.
+    #[tokio::test(start_paused = true)]
     async fn in_flight_request_defers_idle() {
+        let idle = Duration::from_secs(30);
         let activity = Activity::default();
         let request = activity.begin();
-        let waiting = idle_for(activity.subscribe(), Duration::ZERO);
-        tokio::pin!(waiting);
 
-        let mut cx = Context::from_waker(std::task::Waker::noop());
-        for _ in 0..3 {
-            assert!(
-                waiting.as_mut().poll(&mut cx).is_pending(),
-                "a connection with a request in flight must not go idle"
-            );
-            tokio::task::yield_now().await;
-        }
+        let waited = tokio::time::timeout(idle * 10, idle_for(activity.subscribe(), idle)).await;
+        assert!(
+            waited.is_err(),
+            "a connection with a request in flight must not go idle"
+        );
 
         drop(request);
-        tokio::time::timeout(BOUND, waiting)
-            .await
-            .expect("the idle wait must end once no request is in flight");
+        let started = tokio::time::Instant::now();
+        idle_for(activity.subscribe(), idle).await;
+        assert_eq!(started.elapsed(), idle);
     }
 
     /// Cancelling the token stops accepting and returns once the open
@@ -724,28 +591,5 @@ mod tests {
             .expect("join");
         read_until_closed(&mut silent).await.expect("silent closed");
         read_until_closed(&mut idle).await.expect("idle closed");
-    }
-
-    #[tokio::test]
-    async fn rewind_replays_prefix_then_reads_inner() {
-        let (mut client, server) = tokio::io::duplex(64);
-        client
-            .write_all(b"GET / HTTP/1.1\r\n")
-            .await
-            .expect("write");
-        drop(client);
-        let (mut rewound, version) = sniff_version(server).await.expect("sniff");
-        assert_eq!(version, Version::H1);
-        let mut all = Vec::new();
-        rewound.read_to_end(&mut all).await.expect("read");
-        assert_eq!(all, b"GET / HTTP/1.1\r\n");
-    }
-
-    #[tokio::test]
-    async fn sniff_detects_h2_preface() {
-        let (mut client, server) = tokio::io::duplex(64);
-        client.write_all(H2_PREFACE).await.expect("write");
-        let (_rewound, version) = sniff_version(server).await.expect("sniff");
-        assert_eq!(version, Version::H2);
     }
 }
