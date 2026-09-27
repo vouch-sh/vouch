@@ -275,6 +275,7 @@ impl rustls::server::danger::ClientCertVerifier for AcceptAnyClientCert {
 mod tests {
     use super::*;
     use crate::infra::accept::{self, ConnLimits};
+    use crate::infra::conn_caps::ConnCaps;
     use crate::infra::router::build_app;
     use crate::infra::tls;
     use crate::test_utils;
@@ -548,6 +549,7 @@ mod tests {
             MtlsHandshake::new(swap),
             app,
             limits,
+            ConnCaps::for_test(),
             CancellationToken::new(),
         ));
         (addr, server)
@@ -678,6 +680,7 @@ mod tests {
             accept::TlsHandshake(tls),
             app,
             ConnLimits::DEFAULT,
+            ConnCaps::for_test(),
             CancellationToken::new(),
         ));
 

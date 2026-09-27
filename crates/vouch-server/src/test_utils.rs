@@ -45,6 +45,7 @@ use crate::db::{
     self, AccessScope, AuditEventFilter, ClientKeys, FapiProfile, OAuthClientType, Organization,
     ScimScope, ScimScopeSet, SessionCache, SessionPurpose, TokenEndpointAuthMethod, User,
 };
+use crate::infra::conn_caps::ConnCapConfig;
 use crate::services::auth::NoClientAuth;
 use crate::services::idp::ConfiguredIdp;
 use crate::services::oidc::ScopeSet;
@@ -141,6 +142,7 @@ pub fn test_config() -> ServerConfig {
         allowed_aaguids: AaguidPolicy::Any,
         log_format: LogFormat::Text,
         trusted_proxies: Vec::new(),
+        connection_caps: ConnCapConfig::DEFAULT,
         metrics_bearer_token: None,
         certification_test_token: None,
         extra_ca_certs: None,

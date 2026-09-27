@@ -71,6 +71,8 @@ scrape_configs:
 | `http_request_duration_seconds` | histogram | `method`, `path` | Request latency. Not labelled by status. |
 | `vouch_auth_events_total` | counter | `event_type` | Authentication outcomes |
 | `vouch_credential_issuance_total` | counter | `type` | Credentials issued |
+| `vouch_connections_open` | gauge | — | Open connections across all listeners. At `VOUCH_MAX_CONNECTIONS`, new connections wait to be accepted. |
+| `vouch_connections_rejected_total` | counter | `reason` | Connections closed at accept. `reason` is `per_ip` (over `VOUCH_MAX_CONNECTIONS_PER_IP`). |
 
 The `method` and `path` labels are both drawn from fixed sets, so the number of series has a
 ceiling that no request can raise:

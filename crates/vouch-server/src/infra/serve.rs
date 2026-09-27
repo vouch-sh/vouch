@@ -17,6 +17,7 @@ use crate::config::ServerConfig;
 use crate::infra::s3_config;
 
 use super::accept::{self, ConnLimits, PlainHandshake, TlsHandshake};
+use super::conn_caps::ConnCaps;
 use super::mtls_listener::MtlsHandshake;
 use super::startup::ServerComponents;
 use crate::infra::tls;
@@ -156,6 +157,7 @@ async fn serve_tls_on(
         .with_context(|| format!("Failed to bind HTTPS listener on {}", addrs.https))?;
 
     // Nothing below can fail.
+    let caps = ConnCaps::new(config.connection_caps, config.trusted_proxies.clone());
     tracing::info!(
         "TLS enabled - listening on https://{} and http://{} (redirect)",
         addrs.https,
@@ -178,6 +180,7 @@ async fn serve_tls_on(
         MtlsHandshake::new(mtls_config_swap.clone()),
         app.clone(),
         ConnLimits::DEFAULT,
+        Arc::clone(&caps),
         shutdown_token.clone(),
     ));
     tracing::info!("mTLS listener started on port {}", addrs.mtls.port());
@@ -203,6 +206,7 @@ async fn serve_tls_on(
     // Spawn HTTP redirect server (port 80) - best effort, not fatal if fails
     let http_addr = addrs.http_redirect;
     let token_for_http = shutdown_token.clone();
+    let caps_for_http = Arc::clone(&caps);
     let http_handle = tokio::spawn(async move {
         match tokio::net::TcpListener::bind(http_addr).await {
             Ok(listener) => {
@@ -211,6 +215,7 @@ async fn serve_tls_on(
                     PlainHandshake,
                     redirect_app,
                     ConnLimits::DEFAULT,
+                    caps_for_http,
                     token_for_http,
                 )
                 .await;
@@ -231,6 +236,7 @@ async fn serve_tls_on(
         TlsHandshake(tls_config),
         app,
         ConnLimits::DEFAULT,
+        caps,
         shutdown_token,
     )
     .await;
@@ -273,6 +279,7 @@ async fn serve_plain(
         PlainHandshake,
         app,
         ConnLimits::DEFAULT,
+        ConnCaps::new(config.connection_caps, config.trusted_proxies.clone()),
         shutdown_token,
     )
     .await;

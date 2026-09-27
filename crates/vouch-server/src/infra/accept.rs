@@ -11,9 +11,12 @@
 //! Each accepted connection runs this pipeline in its own task:
 //!
 //! ```text
-//! accept → set_nodelay → spawn → [PROXY header, #1583] → handshake (timeout)
-//!        → hyper-util auto HTTP/1 or HTTP/2 (TokioTimer, idle limit)
+//! total cap → accept → set_nodelay → spawn → [PROXY header, #1583]
+//!   → per-client cap → handshake (timeout)
+//!   → hyper-util auto HTTP/1 or HTTP/2 (TokioTimer, idle limit)
 //! ```
+//!
+//! The caps are described in [`super::conn_caps`].
 //!
 //! The task is spawned before any per-connection I/O, so a client that stalls
 //! its TLS handshake occupies only its own task and never blocks `accept` for
@@ -44,6 +47,7 @@ use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
+use crate::infra::conn_caps::{ConnCaps, TotalSlot};
 use crate::infra::router::REQUEST_TIMEOUT;
 
 /// Time limits applied to every connection.
@@ -146,6 +150,7 @@ pub(crate) async fn serve<H: Handshake>(
     handshake: H,
     app: Router,
     limits: ConnLimits,
+    caps: Arc<ConnCaps>,
     shutdown: CancellationToken,
 ) {
     let handshake = Arc::new(handshake);
@@ -157,9 +162,9 @@ pub(crate) async fn serve<H: Handshake>(
             () = shutdown.cancelled() => break,
             // Reap finished connection tasks so the set does not grow.
             Some(_) = conns.join_next(), if !conns.is_empty() => continue,
-            accepted = listener.accept() => accepted,
+            accepted = accept_within_cap(&listener, &caps) => accepted,
         };
-        let (tcp, peer) = match accepted {
+        let (slot, tcp, peer) = match accepted {
             Ok(conn) => conn,
             Err(err) => {
                 handle_accept_error(err).await;
@@ -172,9 +177,11 @@ pub(crate) async fn serve<H: Handshake>(
         conns.spawn(serve_connection(
             tcp,
             peer,
+            slot,
             Arc::clone(&handshake),
             app.clone(),
             limits,
+            Arc::clone(&caps),
             shutdown.clone(),
         ));
     }
@@ -194,6 +201,17 @@ pub(crate) async fn serve<H: Handshake>(
     }
 }
 
+/// Accept one connection once the total cap has room for it. Cancel-safe:
+/// both waits are, and a slot reserved before `accept` is released on drop.
+async fn accept_within_cap(
+    listener: &TcpListener,
+    caps: &ConnCaps,
+) -> io::Result<(TotalSlot, TcpStream, SocketAddr)> {
+    let slot = caps.reserve().await.map_err(io::Error::other)?;
+    let (tcp, peer) = listener.accept().await?;
+    Ok((slot, tcp, peer))
+}
+
 /// Mirror `axum::serve`: per-connection errors are the client's business;
 /// anything else (for example `EMFILE`) backs off so the loop does not spin.
 async fn handle_accept_error(err: io::Error) {
@@ -209,18 +227,30 @@ async fn handle_accept_error(err: io::Error) {
     tokio::time::sleep(Duration::from_secs(1)).await;
 }
 
-/// Drive one connection from handshake to close.
+/// Drive one connection from handshake to close. `_slot` holds the
+/// connection's place under the total cap until it closes.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one connection's inputs, each distinct; bundling them adds a type for one call site"
+)]
 async fn serve_connection<H: Handshake>(
     tcp: TcpStream,
     peer: SocketAddr,
+    _slot: TotalSlot,
     handshake: Arc<H>,
     app: Router,
     limits: ConnLimits,
+    caps: Arc<ConnCaps>,
     shutdown: CancellationToken,
 ) {
     // A PROXY protocol v2 header read (#1583) belongs here, ahead of the
     // handshake and under its own timeout; it replaces `peer` with the
-    // header's source address.
+    // header's source address, so the per-client cap below counts the real
+    // client rather than the load balancer.
+    let Some(_client_slot) = caps.admit(peer.ip()) else {
+        tracing::debug!(remote_addr = %peer, "per-client connection cap reached; closing");
+        return;
+    };
     let handshake = tokio::time::timeout(limits.handshake, handshake.handshake(tcp, peer));
     let (io, info) = tokio::select! {
         () = shutdown.cancelled() => return,
@@ -366,6 +396,7 @@ impl HttpBody for TrackedBody {
 )]
 mod tests {
     use super::*;
+    use crate::infra::conn_caps::ConnCapConfig;
 
     use axum::routing::get;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -397,6 +428,13 @@ mod tests {
     async fn start(
         limits: ConnLimits,
     ) -> (SocketAddr, CancellationToken, tokio::task::JoinHandle<()>) {
+        start_with_caps(limits, ConnCaps::for_test()).await
+    }
+
+    async fn start_with_caps(
+        limits: ConnLimits,
+        caps: Arc<ConnCaps>,
+    ) -> (SocketAddr, CancellationToken, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("local addr");
         let shutdown = CancellationToken::new();
@@ -405,9 +443,35 @@ mod tests {
             PlainHandshake,
             app(),
             limits,
+            caps,
             shutdown.clone(),
         ));
         (addr, shutdown, server)
+    }
+
+    fn caps(max_total: u32, max_per_ip: u32) -> Arc<ConnCaps> {
+        ConnCaps::new(
+            ConnCapConfig {
+                max_total,
+                max_per_ip,
+            },
+            Vec::new(),
+        )
+    }
+
+    /// Send one keep-alive request and read its response head, leaving the
+    /// connection open.
+    async fn request_keep_alive(stream: &mut TcpStream) -> String {
+        stream
+            .write_all(b"GET /peer HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .expect("write");
+        let mut buf = vec![0u8; 1024];
+        let n = tokio::time::timeout(BOUND, stream.read(&mut buf))
+            .await
+            .expect("response within bound")
+            .expect("read");
+        String::from_utf8_lossy(buf.get(..n).unwrap_or_default()).into_owned()
     }
 
     /// Read until the server closes the connection; `Err` if it is still open
@@ -440,6 +504,61 @@ mod tests {
             .await
             .expect("shutdown")
             .expect("join");
+    }
+
+    /// A client over the per-client cap is closed at once, while its
+    /// connections under the cap keep working.
+    #[tokio::test]
+    async fn connection_over_the_per_client_cap_is_closed() {
+        let (addr, _shutdown, _server) = start_with_caps(ConnLimits::DEFAULT, caps(100, 1)).await;
+        let mut first = TcpStream::connect(addr).await.expect("connect");
+        let response = request_keep_alive(&mut first).await;
+        assert!(response.starts_with("HTTP/1.1 200"), "response: {response}");
+
+        let mut second = TcpStream::connect(addr).await.expect("connect");
+        let received = read_until_closed(&mut second)
+            .await
+            .expect("the second connection from the same address must be closed");
+        assert!(
+            received.is_empty(),
+            "closed before any response: {received:?}"
+        );
+
+        let response = request_keep_alive(&mut first).await;
+        assert!(
+            response.starts_with("HTTP/1.1 200"),
+            "the first connection still works; response: {response}"
+        );
+    }
+
+    /// With the total cap reached, a new connection is not served until an
+    /// open one closes; then it is.
+    #[tokio::test]
+    async fn total_cap_defers_new_connections_until_one_closes() {
+        let (addr, _shutdown, _server) = start_with_caps(ConnLimits::DEFAULT, caps(1, 64)).await;
+        let mut first = TcpStream::connect(addr).await.expect("connect");
+        let response = request_keep_alive(&mut first).await;
+        assert!(response.starts_with("HTTP/1.1 200"), "response: {response}");
+
+        // The kernel completes the handshake from its backlog, but the server
+        // does not accept it while the cap is full. A server that wrongly
+        // served it would answer well within this window; under load it can
+        // only make the check pass late, never fail spuriously.
+        let mut second = TcpStream::connect(addr).await.expect("connect");
+        second
+            .write_all(b"GET /peer HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .expect("write");
+        let mut byte = [0u8; 1];
+        let early = tokio::time::timeout(Duration::from_millis(200), second.read(&mut byte)).await;
+        assert!(early.is_err(), "served while the total cap was full");
+
+        drop(first);
+        let response = read_until_closed(&mut second)
+            .await
+            .expect("served once the first connection closed");
+        let response = String::from_utf8_lossy(&response);
+        assert!(response.starts_with("HTTP/1.1 200"), "response: {response}");
     }
 
     /// A client that connects and sends nothing is closed once the header read
