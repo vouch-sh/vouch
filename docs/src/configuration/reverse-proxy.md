@@ -134,13 +134,13 @@ response; and do not set a body limit below Vouch's, or you will convert precise
 proxy errors.
 
 The request timeout only starts once a request has arrived. Before that, every listener closes a
-connection that has not finished its TLS handshake within **10 seconds**, has not started sending a
-request within **30 seconds**, or has not completed an HTTP/1 request head within **30 seconds** of
+connection that has not finished its TLS handshake within **5 seconds**, has not started sending a
+request within **10 seconds**, or has not completed an HTTP/1 request head within **10 seconds** of
 it starting to arrive. The last limit also runs between requests, so an idle keep-alive connection
-is closed after 30 seconds. An HTTP/2 connection is closed once it has had no request in flight for
-30 seconds, which also covers a client that stops partway through a request's headers. A proxy that pools keep-alive
+is closed after 10 seconds. An HTTP/2 connection is closed once it has had no request in flight for
+10 seconds, which also covers a client that stops partway through a request's headers. A proxy that pools keep-alive
 connections to Vouch (for example nginx with `keepalive` in an `upstream` block) must close idle
-upstream connections sooner than that (`keepalive_timeout` below 30 seconds in nginx), or it can
+upstream connections sooner than that (`keepalive_timeout` below 10 seconds in nginx), or it can
 send a request on a connection just as Vouch closes it and answer the client with a 502.
 
 ## Example configurations
@@ -229,5 +229,5 @@ Either way:
 - [ ] Health checks target `/health/ready`, not `/health`
 - [ ] `VOUCH_BASE_URL` is the public URL clients use
 - [ ] Proxy timeouts are at least 30 seconds
-- [ ] A proxy that pools upstream keep-alive connections closes idle ones in under 30 seconds
+- [ ] A proxy that pools upstream keep-alive connections closes idle ones in under 10 seconds
 - [ ] Audit events at `/admin/audit` show real client IPs

@@ -131,9 +131,9 @@ in front of Vouch at your proxy.
 | SCIM, `/oauth/authorize`, SAML ACS | 64 KiB |
 | Enroll and login WebAuthn | 32 KiB |
 | GitHub webhook | 1 MiB |
-| TLS handshake | 10 seconds (connection closed) |
-| HTTP/1 request head, and idle keep-alive between requests | 30 seconds (connection closed) |
-| HTTP/2 connection with no request in flight | 30 seconds (GOAWAY, then closed) |
+| TLS handshake | 5 seconds (connection closed) |
+| HTTP/1 request head, and idle keep-alive between requests | 10 seconds (connection closed) |
+| HTTP/2 connection with no request in flight | 10 seconds (GOAWAY, then closed) |
 | HTTP/2 keep-alive ping | every 20 seconds; closed if unacknowledged for 20 seconds |
 
 ## Outbound connections

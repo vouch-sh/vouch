@@ -69,11 +69,14 @@ pub(crate) struct ConnLimits {
 }
 
 impl ConnLimits {
-    /// Limits for the production listeners. `header_read` matches hyper's own
-    /// default, which it only enforces once a timer is installed.
+    /// Limits for the production listeners. A legitimate client finishes a
+    /// handshake or sends a request head in well under a second, so these
+    /// only ever fire on a stalled or hostile peer. `drain` matches the
+    /// router's request timeout, so shutdown never cuts off a request that
+    /// could still have completed.
     pub(crate) const DEFAULT: Self = Self {
-        handshake: Duration::from_secs(10),
-        header_read: Duration::from_secs(30),
+        handshake: Duration::from_secs(5),
+        header_read: Duration::from_secs(10),
         h2_keep_alive_interval: Duration::from_secs(20),
         h2_keep_alive_timeout: Duration::from_secs(20),
         drain: Duration::from_secs(30),
