@@ -205,6 +205,62 @@ async fn test_rfc7592_put_accepts_rs256_only_jwks_for_non_fapi_client() {
     );
 }
 
+// RFC 7592 §2.2 is a full replacement, so a PUT that swaps in a JWKS with
+// no usable client-assertion signing key must be rejected for a standard
+// (non-FAPI) private_key_jwt client — symmetric with the admin application
+// API/console update path (`validate_update_fapi`) and with initial
+// registration's create-side guard. An `use: "enc"`-only EC key has no key
+// the runtime matcher ever selects for signature verification, so the
+// client would be stored but permanently unable to authenticate.
+#[tokio::test]
+async fn test_rfc7592_put_rejects_unusable_jwks_for_non_fapi_private_key_jwt_client() {
+    let (app, _state) = test_app().await;
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "token_endpoint_auth_method": "private_key_jwt",
+        "jwks": {"keys": [es256_jwk()]}
+    });
+    let (status, reg_body) = http_post_json(&app, "/oauth/register", &body.to_string(), &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "registration failed: {reg_body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&reg_body).expect("Valid JSON");
+    let client_id = json["client_id"].as_str().expect("client_id").to_string();
+    let token = json["registration_access_token"]
+        .as_str()
+        .expect("registration_access_token")
+        .to_string();
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "jwks": {
+            "keys": [{"kty": "EC", "crv": "P-256", "use": "enc"}]
+        }
+    });
+
+    let (status, body) = http_request(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(update_body.to_string()),
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an enc-only JWKS must be rejected on PUT for a non-FAPI private_key_jwt client: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_client_metadata");
+}
+
 #[tokio::test]
 async fn test_rfc7592_put_rejects_fapi_mtls_client_clearing_jwks() {
     // RFC 7592 §2.2 full replacement: an update that omits both jwks and
