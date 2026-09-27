@@ -541,7 +541,7 @@ pub fn is_valid_post_logout_redirect_uri_str(uri: &str) -> bool {
 /// A JSON Web Key Set (RFC 7517 Section 5).
 ///
 /// The typed representation shared by write-time acceptance checks (this
-/// module: `JwkSet::has_fapi_allowed_key`, `JwkSet::has_x5c`) and the runtime RFC
+/// module: `JwkSet::has_client_assertion_key`, `JwkSet::has_x5c`) and the runtime RFC
 /// 7523 client-assertion verifier (`services/oidc/jwt_bearer/jwks.rs`), so a
 /// member of the wrong JSON type (e.g. `"alg": true`) is rejected the same
 /// way in both places instead of silently read as absent by a separate,
@@ -667,7 +667,7 @@ pub struct JwkEntry {
 /// this to reject a malformed submission outright. Callers evaluating a
 /// JWKS that may be pre-existing stored data (which could predate this
 /// check) should treat a parse failure as "no usable key" rather than a
-/// hard error — see `JwkSet::has_fapi_allowed_key`'s callers.
+/// hard error — see `JwkSet::has_client_assertion_key`'s callers.
 ///
 /// # Errors
 /// Returns the `serde_json` deserialization error on a shape mismatch.
@@ -749,26 +749,28 @@ impl JwkSet {
         self.keys.iter().any(|key| key.is_usable_for(alg))
     }
 
-    /// Returns `true` when the set contains at least one key the FAPI 2.0
-    /// client-assertion validator (`FapiProfile::client_assertion_algorithms`,
-    /// which yields `JwsAlgorithm::FAPI_ALLOWED` for
-    /// `FapiProfile::Fapi2Security`) could actually use.
+    /// Returns `true` when the set contains at least one key the RFC 7523
+    /// client-assertion validator could use for a client on `profile` —
+    /// [`JwkSet::has_key_for`] over `profile.client_assertion_algorithms()`,
+    /// the same allowlist `services/oidc/jwt_bearer/client_auth.rs` verifies
+    /// against.
     ///
-    /// A FAPI client authenticates with whichever of the allowed algorithms
-    /// it has a key for, so the question is whether *any* of them is
-    /// satisfiable — which is [`JwkSet::has_key_for`] over the allowlist. A
-    /// JWKS made only of `alg: RS256` keys leaves the client with no
-    /// algorithm it is both allowed to use and has a matching key for; one
-    /// made only of `use: "enc"` keys leaves it with no key the search
-    /// selects at all. Both are permanently unauthenticatable.
+    /// A client authenticates with whichever allowed algorithm it has a key
+    /// for, so the question is whether *any* of them is satisfiable. A FAPI
+    /// JWKS made only of `alg: RS256` keys, or any JWKS made only of
+    /// `use: "enc"` keys, leaves the client permanently unable to
+    /// authenticate.
     ///
-    /// Used at every point a FAPI 2.0 client's JWKS is accepted or replaced:
+    /// The profile is a parameter, not a baked-in allowlist, so a write path
+    /// cannot check a standard-profile client against nothing: every point a
+    /// `private_key_jwt` client's inline JWKS is accepted or replaced —
     /// application creation and update (`handlers/applications/validate.rs`)
     /// and RFC 7591/7592 dynamic client registration
-    /// (`services/oidc/registration.rs`).
+    /// (`services/oidc/registration.rs`) — names the profile it checks.
     #[must_use]
-    pub fn has_fapi_allowed_key(&self) -> bool {
-        JwsAlgorithm::FAPI_ALLOWED
+    pub fn has_client_assertion_key(&self, profile: FapiProfile) -> bool {
+        profile
+            .client_assertion_algorithms()
             .iter()
             .any(|alg| self.has_key_for(*alg))
     }
@@ -782,7 +784,7 @@ impl JwkSet {
     /// matches keys carrying an `x5c` entry and returns
     /// `CertificateNotRegistered` if none do — the same "accepted at
     /// registration, unusable forever after" class
-    /// [`JwkSet::has_fapi_allowed_key`] closes for `private_key_jwt`.
+    /// [`JwkSet::has_client_assertion_key`] closes for `private_key_jwt`.
     ///
     /// Used wherever a `self_signed_tls_client_auth` client's inline JWKS is
     /// accepted or replaced: application creation and update
@@ -2440,8 +2442,8 @@ mod tests {
         let set = |json| parse_jwks_set(&json).expect("valid fixture");
 
         // RS256 and PS256 share a key type, so an unpinned RSA key satisfies
-        // both. Neither is reachable through has_fapi_allowed_key (RS256 is
-        // not FAPI-allowed), but request_object_signing_alg admits RS256 for
+        // both. Only PS256 is reachable through the FAPI client-assertion
+        // allowlist (RS256 is not FAPI-allowed), but request_object_signing_alg admits RS256 for
         // a non-FAPI client.
         let unpinned_rsa =
             set(serde_json::json!({"keys": [{"kty": "RSA", "n": "n", "e": "AQAB"}]}));

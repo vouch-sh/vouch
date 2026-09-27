@@ -491,27 +491,26 @@ pub async fn register_client(
                 "FAPI 2.0 requires jwks or jwks_uri",
             ));
         }
-        // Only for private_key_jwt: its JWKS carries client-assertion signing
-        // keys, so an inline JWKS must have at least one key usable with
-        // FAPI_ALLOWED (ES256/PS256/EdDSA) — see JwkSet::has_fapi_allowed_key.
-        // Without this, a client could register as FAPI 2.0 with an
-        // RS256-only JWKS and be unable to authenticate at the token endpoint
-        // from the start. tls_client_auth/self_signed_tls_client_auth JWKS
-        // conveys certificates via x5c instead (RFC 8705 §2.2.2), so this
-        // check does not apply to them.
-        if jwks_auth.auth_method == TokenEndpointAuthMethod::PrivateKeyJwt
-            && let Some(jwks) = jwks_auth.keys.as_ref().and_then(ClientKeys::inline)
-            && !jwks.has_fapi_allowed_key()
-        {
-            return Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidClientMetadata,
-                "FAPI 2.0 requires a JWKS key usable with ES256, PS256, or EdDSA",
-            ));
-        }
         FapiProfile::Fapi2Security
     } else {
         FapiProfile::None
     };
+
+    // Only for private_key_jwt: its JWKS carries client-assertion signing
+    // keys, so an inline JWKS must hold at least one key usable with the
+    // profile's allowlist — see JwkSet::has_client_assertion_key. Without
+    // this, a client could register with an RS256-only JWKS as FAPI 2.0, or
+    // an encryption-only JWKS on either profile, and be unable to
+    // authenticate at the token endpoint from the start.
+    // tls_client_auth/self_signed_tls_client_auth JWKS conveys certificates
+    // via x5c instead (RFC 8705 §2.2.2), so this check does not apply to
+    // them. A remote jwks_uri can't be inspected synchronously.
+    if jwks_auth.auth_method == TokenEndpointAuthMethod::PrivateKeyJwt
+        && let Some(jwks) = jwks_auth.keys.as_ref().and_then(ClientKeys::inline)
+        && !jwks.has_client_assertion_key(fapi_profile)
+    {
+        return Err(no_client_assertion_key(fapi_profile));
+    }
 
     // 12b. Validate the signed-response algorithms (OIDC Core §3.1.3.7 and
     // §5.3.4, JARM §2.3.2, RFC 9701 §6.1).
@@ -994,7 +993,7 @@ struct RequestObjectSigning {
 /// MUST be validated using a key associated with the client and the algorithm
 /// specified in the 'alg' Header Parameter" — and is silent on whether an
 /// unsatisfiable registration must be refused; this refuses it for the same
-/// reason `JwkSet::has_fapi_allowed_key` and `JwkSet::has_x5c` refuse theirs.
+/// reason `JwkSet::has_client_assertion_key` and `JwkSet::has_x5c` refuse theirs.
 /// Accepted unchecked, the pairing leaves the client unable to reach the
 /// authorization endpoint at all: the signed path fails key resolution, and
 /// `require_signed_request_object` refuses the plain one.
@@ -1277,6 +1276,24 @@ struct ValidatedJwksAuth {
     /// RFC 7591 §2 key material, in whichever of the two forms was sent.
     keys: Option<ClientKeys>,
     auth_method: TokenEndpointAuthMethod,
+}
+
+/// The `invalid_client_metadata` error for a `private_key_jwt` JWKS with no
+/// key usable under `profile`'s client-assertion allowlist, shared by
+/// registration (RFC 7591) and replacement (RFC 7592) so both name the same
+/// algorithms.
+fn no_client_assertion_key(profile: FapiProfile) -> ServiceError {
+    ServiceError::oauth(
+        OAuthErrorCode::InvalidClientMetadata,
+        match profile {
+            FapiProfile::Fapi2Security => {
+                "FAPI 2.0 requires a JWKS key usable with ES256, PS256, or EdDSA"
+            }
+            FapiProfile::None => {
+                "private_key_jwt requires a JWKS key usable with ES256, RS256, PS256, or EdDSA"
+            }
+        },
+    )
 }
 
 /// Validate the structure of whichever key form was supplied, and the HTTPS
@@ -1832,10 +1849,6 @@ pub async fn delete_client_configuration(
 ///   client (RFC 7592 §2.2/§5 make all of these indistinguishable to avoid
 ///   disclosing client existence).
 /// - `ServiceError::OAuth` if the request body contains invalid metadata.
-#[expect(
-    clippy::too_many_lines,
-    reason = "single-pass RFC 7592 PUT metadata validation"
-)]
 pub async fn update_client_configuration(
     state: &Arc<AppState>,
     client_id: &str,
@@ -1935,31 +1948,16 @@ pub async fn update_client_configuration(
     // preserves. Only for private_key_jwt: its JWKS carries client-assertion
     // signing keys, so an inline JWKS replacing the client's key material
     // must have at least one key usable with the client's profile allowlist
-    // — see FapiProfile::client_assertion_algorithms and JwkSet::has_key_for.
-    // FAPI 2.0 permits ES256/PS256/EdDSA; the standard profile additionally
-    // permits RS256. tls_client_auth/self_signed_tls_client_auth JWKS conveys
-    // certificates via x5c instead (RFC 8705 §2.2.2), so this check does not
-    // apply to them. A remote jwks_uri can't be inspected synchronously, so
-    // this only guards the inline case, same as registration and the admin
-    // application API. Symmetric with the create-side guard in
-    // validate_create_application, which enforces usability for both FAPI and
-    // standard private_key_jwt clients.
+    // — see JwkSet::has_client_assertion_key. tls_client_auth/
+    // self_signed_tls_client_auth JWKS conveys certificates via x5c instead
+    // (RFC 8705 §2.2.2), so this check does not apply to them. A remote
+    // jwks_uri can't be inspected synchronously, so this only guards the
+    // inline case, same as registration and the admin application API.
     if client.token_endpoint_auth_method == TokenEndpointAuthMethod::PrivateKeyJwt
         && let Some(jwks) = keys.as_ref().and_then(ClientKeys::inline)
-        && !client
-            .fapi_profile
-            .client_assertion_algorithms()
-            .iter()
-            .any(|alg| jwks.has_key_for(*alg))
+        && !jwks.has_client_assertion_key(client.fapi_profile)
     {
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidClientMetadata,
-            if client.is_fapi() {
-                "FAPI 2.0 requires a JWKS key usable with ES256, PS256, or EdDSA"
-            } else {
-                "private_key_jwt requires a JWKS key usable with ES256, RS256, PS256, or EdDSA"
-            },
-        ));
+        return Err(no_client_assertion_key(client.fapi_profile));
     }
 
     // The five RFC 8705 §2.1.2 certificate-subject parameters are written as a

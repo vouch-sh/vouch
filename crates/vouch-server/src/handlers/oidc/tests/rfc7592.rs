@@ -82,7 +82,7 @@ fn es256_jwk() -> serde_json::Value {
 // =========================================================================
 // FAPI 2.0 JWKS algorithm usability on PUT — RFC 7592 §2.2 is a full
 // replacement, so a PUT that swaps in an RS256-only JWKS must be rejected
-// exactly like initial registration. See JwkSet::has_fapi_allowed_key.
+// exactly like initial registration. See JwkSet::has_client_assertion_key.
 // =========================================================================
 
 #[tokio::test]
