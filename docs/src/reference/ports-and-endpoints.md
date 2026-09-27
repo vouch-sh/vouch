@@ -125,7 +125,7 @@ in front of Vouch at your proxy.
 
 | Scope | Limit |
 |-------|-------|
-| Global timeout | 30 seconds (408 on expiry) |
+| Global timeout | 10 seconds (408 on expiry) |
 | Global body | 256 KiB |
 | Credential issuance | 8 KiB |
 | SCIM, `/oauth/authorize`, SAML ACS | 64 KiB |

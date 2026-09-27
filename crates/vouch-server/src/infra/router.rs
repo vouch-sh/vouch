@@ -48,6 +48,13 @@ const SAML_ACS_BODY_LIMIT: usize = 64 * 1024;
 /// Global body size limit (per-route overrides above are more restrictive).
 const GLOBAL_BODY_LIMIT: usize = 256 * 1024;
 
+/// Global request timeout; a request still running after this gets a 408.
+///
+/// Every upstream call a handler makes is bounded well inside it (the shared
+/// HTTP client's `SERVER_TOTAL`, the JWKS fetch, KMS, the database pool), so
+/// it only fires on a handler that has stalled.
+pub(crate) const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Build a rate limiter, or a no-op passthrough when certification test mode
 /// is active (`VOUCH_CERTIFICATION_TEST_TOKEN` is set).
 macro_rules! maybe_rate_limit {
@@ -193,7 +200,7 @@ pub fn build_app(state: Arc<AppState>, config: &config::ServerConfig) -> anyhow:
         Arc::clone(&state),
         org_host::org_host_gate,
     ))
-    // Global request timeout: 30 seconds.
+    // Global request timeout: `REQUEST_TIMEOUT`.
     //
     // The `TimeoutLayer` MUST be placed INSIDE (innermost relative to) the
     // observability middleware below. In tower/axum the last `.layer()` call
@@ -210,7 +217,7 @@ pub fn build_app(state: Arc<AppState>, config: &config::ServerConfig) -> anyhow:
     // See commit 7bbcbb0f for the regression that introduced this ordering bug.
     .layer(TimeoutLayer::with_status_code(
         StatusCode::REQUEST_TIMEOUT,
-        std::time::Duration::from_secs(30),
+        REQUEST_TIMEOUT,
     ))
     .layer(axum::middleware::from_fn(metrics::metrics_middleware))
     .layer(DefaultBodyLimit::max(GLOBAL_BODY_LIMIT))

@@ -87,11 +87,11 @@ for a multi-instance deployment specifically:
 ## Graceful shutdown
 
 On `SIGTERM` or Ctrl-C, the server stops accepting connections and gives in-flight requests up to
-**30 seconds** to finish, then closes the database pool and flushes any pending OpenTelemetry
+**10 seconds** to finish, then closes the database pool and flushes any pending OpenTelemetry
 spans.
 
-Set your orchestrator's termination grace period above 30 seconds so it does not `SIGKILL` mid-
-drain — Kubernetes defaults to 30, which leaves no margin.
+Set your orchestrator's termination grace period above 10 seconds so it does not `SIGKILL` mid-
+drain. Kubernetes' default of 30 seconds is enough.
 
 The background cleanup and S3 polling tasks are aborted rather than drained; an interrupted cleanup
 pass resumes on the next instance's next tick.

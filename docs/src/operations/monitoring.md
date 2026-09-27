@@ -61,7 +61,7 @@ scrape_configs:
       - targets: ["auth.example.com"]
 ```
 
-`/metrics` is not rate-limited, but it is subject to the global 30-second request timeout.
+`/metrics` is not rate-limited, but it is subject to the global 10-second request timeout.
 
 ### Exported metrics
 

@@ -151,7 +151,7 @@ explicitly.
 
 | Limit | Value |
 |-------|-------|
-| Global request timeout | 30 seconds (408 on expiry) |
+| Global request timeout | 10 seconds (408 on expiry) |
 | Global body limit | 256 KiB |
 | Credential issuance | 8 KiB |
 | SCIM, `/oauth/authorize`, SAML ACS | 64 KiB |

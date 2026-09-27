@@ -127,9 +127,9 @@ HTTP redirect without otherwise failing.
 
 ## Timeouts and body limits
 
-Vouch applies a **30-second** global request timeout and a **256 KiB** global body limit, with
+Vouch applies a **10-second** global request timeout and a **256 KiB** global body limit, with
 tighter per-route limits (8 KiB for credential issuance, 64 KiB for SCIM and SAML ACS). Set your
-proxy's timeouts at or above 30 seconds so that Vouch, not the proxy, produces the timeout
+proxy's timeouts at or above 10 seconds so that Vouch, not the proxy, produces the timeout
 response; and do not set a body limit below Vouch's, or you will convert precise 413s into opaque
 proxy errors.
 
@@ -228,6 +228,6 @@ Either way:
 
 - [ ] Health checks target `/health/ready`, not `/health`
 - [ ] `VOUCH_BASE_URL` is the public URL clients use
-- [ ] Proxy timeouts are at least 30 seconds
+- [ ] Proxy timeouts are at least 10 seconds
 - [ ] A proxy that pools upstream keep-alive connections closes idle ones in under 10 seconds
 - [ ] Audit events at `/admin/audit` show real client IPs
