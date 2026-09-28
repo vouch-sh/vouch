@@ -1430,6 +1430,47 @@ async fn test_rfc7591_rejects_non_fapi_registration_with_enc_only_jwks() {
     assert_eq!(json["error"], "invalid_client_metadata");
 }
 
+// A structurally-incomplete inline JWK — right `kty`/`alg`/`use` but missing
+// the key-material members `build_decoding_key_from_jwk` requires (EC `x`/`y`,
+// RSA `n`/`e`, OKP `x`) — selects but cannot be constructed, so without the
+// write-time gate it would pass registration and then fail every later
+// token-endpoint `client_assertion` with `invalid_client`. The gate now refuses
+// it at registration on both profiles, symmetric with the `use: "enc"`-only
+// case above. The kty/FAPI variants are covered at the predicate/gate level by
+// `test_jwk_set_has_key_for_alg_rejects_structurally_incomplete_keys` and the
+// `has_client_assertion_key_fapi_covers_alg_and_kty_cases` standard-profile
+// cases; this test guards the full RFC 7591 HTTP path against being refactored
+// to bypass the gate.
+#[tokio::test]
+async fn test_rfc7591_rejects_standard_registration_with_structurally_incomplete_ec_jwks() {
+    let (app, state) = test_app().await;
+    let auth = bearer_token_unique(&state, "nonfapi-ec-no-xy").await;
+
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "token_endpoint_auth_method": "private_key_jwt",
+        "jwks": {
+            "keys": [{"kty": "EC", "alg": "ES256", "crv": "P-256"}]
+        }
+    });
+
+    let (status, body) = http_post_json(
+        &app,
+        "/oauth/register",
+        &body.to_string(),
+        &[("Authorization", &auth)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an EC key with no x/y cannot authenticate a private_key_jwt client: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_client_metadata");
+}
+
 #[tokio::test]
 async fn test_rfc7591_accepts_fapi_registration_with_jwks_uri_only() {
     // A remote jwks_uri can't be inspected synchronously, so the algorithm

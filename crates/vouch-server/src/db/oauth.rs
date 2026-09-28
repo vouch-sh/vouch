@@ -708,9 +708,14 @@ impl JwkEntry {
     /// - `kty` must be the one [`KeyType::for_alg`] names. A key whose `kty`
     ///   can't carry the algorithm is unmatchable however it is declared, so
     ///   an absent `alg` does not make an `oct` key usable.
-    /// - For `EdDSA`, `crv` must be `Ed25519`: `build_decoding_key_from_jwk`
-    ///   refuses any other curve outright. No equivalent constraint exists on
-    ///   its `EC` or `RSA` arms, so none is imposed here.
+    /// - The key-material members `build_decoding_key_from_jwk` requires for
+    ///   construction must be present: `x` and `y` for an EC (`ES256`) key,
+    ///   `n` and `e` for an RSA (`RS256`/`PS256`) key, and `x` with `crv`
+    ///   `Ed25519` for an OKP (`EdDSA`) key. A key that selects but cannot be
+    ///   constructed would pass registration and then fail every later
+    ///   token-endpoint `client_assertion` with `invalid_client` — the
+    ///   operator-self-stranding condition the write-time gate exists to
+    ///   refuse.
     #[must_use]
     pub fn is_usable_for(&self, alg: JwsAlgorithm) -> bool {
         if self.use_.as_deref().is_some_and(|u| u != "sig") {
@@ -722,10 +727,19 @@ impl JwkEntry {
         if self.kty != KeyType::for_alg(alg) {
             return false;
         }
-        if alg == JwsAlgorithm::EdDsa && self.crv.as_deref() != Some("Ed25519") {
-            return false;
+        match (&self.kty, alg) {
+            (KeyType::Ec, JwsAlgorithm::Es256) => self.x.is_some() && self.y.is_some(),
+            (KeyType::Rsa, JwsAlgorithm::Rs256 | JwsAlgorithm::Ps256) => {
+                self.n.is_some() && self.e.is_some()
+            }
+            (KeyType::Okp, JwsAlgorithm::EdDsa) => {
+                self.crv.as_deref() == Some("Ed25519") && self.x.is_some()
+            }
+            // Unreachable after the `kty != KeyType::for_alg(alg)` gate above
+            // (`for_alg` never returns `Other`), but kept as a deliberate,
+            // visible decision rather than a shared wildcard.
+            _ => true,
         }
-        true
     }
 }
 
@@ -2487,6 +2501,114 @@ mod tests {
 
         let empty = set(serde_json::json!({"keys": []}));
         assert!(!empty.has_key_for(JwsAlgorithm::Es256));
+    }
+
+    #[test]
+    fn test_jwk_set_has_key_for_alg_rejects_structurally_incomplete_keys() {
+        // `build_decoding_key_from_jwk` requires the key-material members to
+        // construct a decoding key (EC `x`/`y`, RSA `n`/`e`, OKP `x` with
+        // `crv` `Ed25519`); a key that selects on `kty`/`alg`/`use` but omits
+        // them would pass the write-time gate and then fail every later
+        // token-endpoint `client_assertion` with `invalid_client`.
+        // `is_usable_for` / `has_key_for` mirror those required members so the
+        // write-time gate refuses them at registration rather than at the
+        // token endpoint.
+        let set = |json| parse_jwks_set(&json).expect("valid fixture");
+
+        // EC key with right kty/alg/use but no x or y (and each one missing
+        // alone, since `build_decoding_key_from_jwk` reports them separately).
+        let ec_no_components = set(serde_json::json!({
+            "keys": [{"kty": "EC", "alg": "ES256", "crv": "P-256", "use": "sig"}]
+        }));
+        let ec_missing_x = set(serde_json::json!({
+            "keys": [{"kty": "EC", "alg": "ES256", "crv": "P-256", "use": "sig", "y": "y"}]
+        }));
+        let ec_missing_y = set(serde_json::json!({
+            "keys": [{"kty": "EC", "alg": "ES256", "crv": "P-256", "use": "sig", "x": "x"}]
+        }));
+        assert!(
+            !ec_no_components.has_key_for(JwsAlgorithm::Es256),
+            "EC key missing both x and y is not usable"
+        );
+        assert!(
+            !ec_missing_x.has_key_for(JwsAlgorithm::Es256),
+            "EC key missing x is not usable"
+        );
+        assert!(
+            !ec_missing_y.has_key_for(JwsAlgorithm::Es256),
+            "EC key missing y is not usable"
+        );
+        // Directly on the entry, the single-key write-time gate's view.
+        let ec_entry = ec_no_components.keys.first().expect("one key");
+        assert!(!ec_entry.is_usable_for(JwsAlgorithm::Es256));
+        // A complete EC key is still usable (regression guard).
+        let ec_complete = set(serde_json::json!({
+            "keys": [{"kty": "EC", "alg": "ES256", "crv": "P-256", "use": "sig", "x": "x", "y": "y"}]
+        }));
+        assert!(ec_complete.has_key_for(JwsAlgorithm::Es256));
+
+        // RSA key with right kty/alg/use but no n or e.
+        let rsa_no_components = set(serde_json::json!({
+            "keys": [{"kty": "RSA", "alg": "PS256", "use": "sig"}]
+        }));
+        let rsa_missing_n = set(serde_json::json!({
+            "keys": [{"kty": "RSA", "alg": "PS256", "use": "sig", "e": "AQAB"}]
+        }));
+        let rsa_missing_e = set(serde_json::json!({
+            "keys": [{"kty": "RSA", "alg": "PS256", "use": "sig", "n": "n"}]
+        }));
+        assert!(
+            !rsa_no_components.has_key_for(JwsAlgorithm::Ps256),
+            "RSA key missing both n and e is not usable"
+        );
+        assert!(
+            !rsa_missing_n.has_key_for(JwsAlgorithm::Ps256),
+            "RSA key missing n is not usable"
+        );
+        assert!(
+            !rsa_missing_e.has_key_for(JwsAlgorithm::Ps256),
+            "RSA key missing e is not usable"
+        );
+        // RS256 and PS256 share RSA, so an unpinned key (no alg) is usable for
+        // both — but still only when n/e are present.
+        assert!(
+            !rsa_no_components.has_key_for(JwsAlgorithm::Rs256),
+            "RSA key with no n/e is not usable for RS256 either"
+        );
+        let rsa_complete = set(serde_json::json!({
+            "keys": [{"kty": "RSA", "alg": "PS256", "use": "sig", "n": "n", "e": "AQAB"}]
+        }));
+        assert!(rsa_complete.has_key_for(JwsAlgorithm::Ps256));
+
+        // OKP key with right kty/alg/crv but no x.
+        let okp_no_x = set(serde_json::json!({
+            "keys": [{"kty": "OKP", "alg": "EdDSA", "crv": "Ed25519", "use": "sig"}]
+        }));
+        assert!(
+            !okp_no_x.has_key_for(JwsAlgorithm::EdDsa),
+            "OKP key missing x is not usable"
+        );
+        let okp_complete = set(serde_json::json!({
+            "keys": [{"kty": "OKP", "alg": "EdDSA", "crv": "Ed25519", "use": "sig", "x": "x"}]
+        }));
+        assert!(okp_complete.has_key_for(JwsAlgorithm::EdDsa));
+
+        // A structurally-incomplete key ahead of a complete one still leaves
+        // the set usable: `has_key_for` returns true as long as any key is
+        // usable, so a malformed sibling does not strand a set that also
+        // carries a valid key — the same property the runtime matcher relies
+        // on, and the property a `jwks_uri` set (which skips the write-time
+        // gate) depends on.
+        let mixed = set(serde_json::json!({
+            "keys": [
+                {"kty": "EC", "alg": "ES256", "crv": "P-256"},
+                {"kty": "EC", "alg": "ES256", "crv": "P-256", "x": "x", "y": "y"}
+            ]
+        }));
+        assert!(
+            mixed.has_key_for(JwsAlgorithm::Es256),
+            "one complete key among incomplete ones satisfies the set"
+        );
     }
 
     #[test]

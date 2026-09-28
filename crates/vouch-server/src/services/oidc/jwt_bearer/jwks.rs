@@ -380,10 +380,12 @@ mod tests {
     }
 
     /// An RSA key with no `n`/`e` components — metadata-complete (right `kty`,
-    /// absent `use`/`alg`) but unbuildable. `is_usable_for` does not check
-    /// component presence for RSA, so this passes write-time validation and
-    /// reaches the runtime matcher, reproducing the production scenario a
-    /// single malformed key ahead of a valid one creates.
+    /// absent `use`/`alg`) but unbuildable. The inline-JWKS write-time gate
+    /// (`is_usable_for`) now refuses such a key for `private_key_jwt`, but the
+    /// runtime matcher must still skip it when the key arrives by a path the
+    /// gate doesn't cover — a `jwks_uri` fetch, or a stored JWKS written
+    /// before the gate — so this reproduces the production scenario a single
+    /// malformed key ahead of a valid one creates.
     fn malformed_rsa_jwk_entry(
         kid: Option<&str>,
         alg: Option<&str>,

@@ -261,6 +261,64 @@ async fn test_rfc7592_put_rejects_unusable_jwks_for_non_fapi_private_key_jwt_cli
     assert_eq!(json["error"], "invalid_client_metadata");
 }
 
+// A structurally-incomplete inline JWK (right `kty`/`alg` but missing the
+// key-material members `build_decoding_key_from_jwk` requires) selects but
+// cannot be constructed, so RFC 7592 PUT — a full replacement — must reject it
+// symmetrically with initial registration. Guards the PUT path against being
+// refactored to bypass the write-time gate; the FAPI variant and the other
+// kty are covered at the gate level by
+// `has_client_assertion_key_fapi_covers_alg_and_kty_cases` and at the
+// predicate level by `test_jwk_set_has_key_for_alg_rejects_structurally_incomplete_keys`.
+#[tokio::test]
+async fn test_rfc7592_put_rejects_structurally_incomplete_jwks_for_non_fapi_private_key_jwt_client()
+{
+    let (app, _state) = test_app().await;
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "token_endpoint_auth_method": "private_key_jwt",
+        "jwks": {"keys": [es256_jwk()]}
+    });
+    let (status, reg_body) = http_post_json(&app, "/oauth/register", &body.to_string(), &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "registration failed: {reg_body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&reg_body).expect("Valid JSON");
+    let client_id = json["client_id"].as_str().expect("client_id").to_string();
+    let token = json["registration_access_token"]
+        .as_str()
+        .expect("registration_access_token")
+        .to_string();
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "jwks": {
+            "keys": [{"kty": "EC", "alg": "ES256", "crv": "P-256"}]
+        }
+    });
+
+    let (status, body) = http_request(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(update_body.to_string()),
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an EC key with no x/y must be rejected on PUT for a non-FAPI private_key_jwt client: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_client_metadata");
+}
+
 #[tokio::test]
 async fn test_rfc7592_put_rejects_fapi_mtls_client_clearing_jwks() {
     // RFC 7592 §2.2 full replacement: an update that omits both jwks and

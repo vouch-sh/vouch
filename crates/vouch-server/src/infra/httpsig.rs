@@ -153,9 +153,11 @@ impl KeyResolver for OAuthClientKeyResolver {
                 // abort the scan: RFC 7517 §4.5 makes `kid` uniqueness a SHOULD,
                 // so a later key carrying the same `kid` can still verify the
                 // signature (same candidate-skip rule as the JWT bearer and
-                // upstream-IdP key searches). `is_usable_for` gates `kty` (and
-                // `crv` for EdDSA) but not EC coordinate presence/validity, so
-                // `jwk_to_p256_public_key` still guards the build here.
+                // upstream-IdP key searches). `is_usable_for` gates `kty`,
+                // `crv`, and EC coordinate presence, so a key with absent
+                // `x`/`y` is already skipped above; `jwk_to_p256_public_key`
+                // still guards the build here (a present but malformed
+                // coordinate).
                 let Some(public_key) = serde_json::to_value(key)
                     .ok()
                     .and_then(|v| jwk_to_p256_public_key(&v))

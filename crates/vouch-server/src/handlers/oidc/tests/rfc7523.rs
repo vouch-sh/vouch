@@ -245,10 +245,12 @@ async fn test_rfc7523_private_key_jwt_client_auth_full_flow() {
 
 /// Build a JWT client whose inline JWKS contains, in order, a metadata-complete
 /// but unbuildable EC key (missing `x`/`y`, same `kid`) and then the valid EC
-/// signing key. Reproduces the production-reachable scenario: `is_usable_for`
-/// does not check EC component presence, so the malformed key passes
-/// write-time validation and reaches the runtime matcher ahead of the valid
-/// key.
+/// signing key. Planted directly via `create_test_client` (which writes the
+/// document store, bypassing the handler-layer `has_client_assertion_key`
+/// gate): the inline-JWKS write gate now refuses a key missing `x`/`y`, but
+/// the runtime matcher must still skip an unbuildable key when it arrives by
+/// a path the gate doesn't cover — a `jwks_uri` fetch returning a malformed
+/// key ahead of a valid one with the same `kid`.
 async fn create_test_jwt_client_malformed_first(
     store: &db::store::DocumentStore,
     user_id: &str,

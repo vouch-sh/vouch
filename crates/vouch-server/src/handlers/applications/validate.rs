@@ -1243,6 +1243,31 @@ mod tests {
         assert!(matches!(err, AppValidationError::PrivateKeyJwtNoUsableKey));
     }
 
+    // A structurally-incomplete inline JWK (right `kty`/`alg` but missing the
+    // key-material members `build_decoding_key_from_jwk` requires) selects but
+    // cannot be constructed. The admin create path (`validate_create_application`,
+    // the validation pipeline the console form and admin API both use) must
+    // refuse it, symmetric with the `use: "enc"`-only case above. Guards the
+    // admin create path against bypassing the write-time gate; the FAPI variant
+    // and other kty are covered at the gate level by
+    // `has_client_assertion_key_fapi_covers_alg_and_kty_cases` and at the
+    // predicate level by `test_jwk_set_has_key_for_alg_rejects_structurally_incomplete_keys`.
+    #[test]
+    fn create_standard_private_key_jwt_rejects_jwks_with_structurally_incomplete_key() {
+        let redirect_uris = vec!["https://example.com/cb".to_string()];
+        let jwks = serde_json::json!({"keys": [{"kty": "EC", "alg": "ES256", "crv": "P-256"}]})
+            .to_string();
+        let err = validate_create_application(auth_input(
+            "web",
+            &redirect_uris,
+            None,
+            Some("private_key_jwt"),
+            Some(&jwks),
+        ))
+        .expect_err("an EC key with no x/y cannot authenticate");
+        assert!(matches!(err, AppValidationError::PrivateKeyJwtNoUsableKey));
+    }
+
     #[test]
     fn create_fapi_refuses_client_secret_basic() {
         let redirect_uris = vec!["https://example.com/cb".to_string()];
@@ -1423,7 +1448,9 @@ mod tests {
             &user.id,
             TestClientSpec {
                 token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
-                jwks: TestJwks::Custom(serde_json::json!({"keys": [{"kty": "EC"}]})),
+                jwks: TestJwks::Custom(
+                    serde_json::json!({"keys": [{"kty": "EC", "crv": "P-256", "x": "x", "y": "y"}]}),
+                ),
                 dpop_bound_access_tokens: true,
                 fapi_profile: Some(FapiProfile::Fapi2Security),
                 with_secret: false,
@@ -1517,7 +1544,9 @@ mod tests {
             &user.id,
             TestClientSpec {
                 token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
-                jwks: TestJwks::Custom(serde_json::json!({"keys": [{"kty": "EC"}]})),
+                jwks: TestJwks::Custom(
+                    serde_json::json!({"keys": [{"kty": "EC", "crv": "P-256", "x": "x", "y": "y"}]}),
+                ),
                 fapi_profile: None,
                 with_secret: false,
                 ..Default::default()
@@ -2154,7 +2183,15 @@ mod tests {
 
     #[test]
     fn has_client_assertion_key_fapi_covers_alg_and_kty_cases() {
-        let no_alg = serde_json::json!({"keys": [{"kty": "EC"}]});
+        // Keys expected to pass carry the key-material members
+        // `build_decoding_key_from_jwk` requires for construction (`x`/`y` for
+        // EC, `n`/`e` for RSA, `x` for OKP), so this test stays focused on the
+        // `alg`/`kty`/`use` selection rules. A structurally-incomplete key is
+        // rejected for the missing-component reason, not the selection reason
+        // — that is covered separately below.
+
+        let no_alg =
+            serde_json::json!({"keys": [{"kty": "EC", "crv": "P-256", "x": "x", "y": "y"}]});
         assert!(
             jwk_set(no_alg).has_client_assertion_key(FapiProfile::Fapi2Security),
             "no alg field survives"
@@ -2163,19 +2200,20 @@ mod tests {
         // The nuance that motivated this guard: an RSA key normally used for
         // RS256 survives if it declares no alg constraint, because it can then
         // be presented with PS256 instead.
-        let unpinned_rsa = serde_json::json!({"keys": [{"kty": "RSA"}]});
+        let unpinned_rsa = serde_json::json!({"keys": [{"kty": "RSA", "n": "n", "e": "AQAB"}]});
         assert!(
             jwk_set(unpinned_rsa).has_client_assertion_key(FapiProfile::Fapi2Security),
             "an RSA key with no alg field survives (usable with PS256)"
         );
 
-        let es256 = serde_json::json!({"keys": [{"kty": "EC", "alg": "ES256"}]});
+        let es256 = serde_json::json!({"keys": [{"kty": "EC", "alg": "ES256", "crv": "P-256", "x": "x", "y": "y"}]});
         assert!(jwk_set(es256).has_client_assertion_key(FapiProfile::Fapi2Security));
 
-        let ps256 = serde_json::json!({"keys": [{"kty": "RSA", "alg": "PS256"}]});
+        let ps256 =
+            serde_json::json!({"keys": [{"kty": "RSA", "alg": "PS256", "n": "n", "e": "AQAB"}]});
         assert!(jwk_set(ps256).has_client_assertion_key(FapiProfile::Fapi2Security));
 
-        let eddsa = serde_json::json!({"keys": [{"kty": "OKP", "crv": "Ed25519", "alg": "EdDSA"}]});
+        let eddsa = serde_json::json!({"keys": [{"kty": "OKP", "crv": "Ed25519", "alg": "EdDSA", "x": "x"}]});
         assert!(jwk_set(eddsa).has_client_assertion_key(FapiProfile::Fapi2Security));
 
         // EdDSA is the one algorithm whose runtime key construction constrains
@@ -2236,7 +2274,10 @@ mod tests {
         );
 
         let mixed = serde_json::json!({
-            "keys": [{"kty": "RSA", "alg": "RS256"}, {"kty": "EC", "alg": "ES256"}]
+            "keys": [
+                {"kty": "RSA", "alg": "RS256", "n": "n", "e": "AQAB"},
+                {"kty": "EC", "alg": "ES256", "crv": "P-256", "x": "x", "y": "y"}
+            ]
         });
         assert!(
             jwk_set(mixed).has_client_assertion_key(FapiProfile::Fapi2Security),
@@ -2254,7 +2295,7 @@ mod tests {
         );
 
         let explicit_sig = serde_json::json!({
-            "keys": [{"kty": "EC", "alg": "ES256", "use": "sig"}]
+            "keys": [{"kty": "EC", "alg": "ES256", "use": "sig", "crv": "P-256", "x": "x", "y": "y"}]
         });
         assert!(
             jwk_set(explicit_sig).has_client_assertion_key(FapiProfile::Fapi2Security),
@@ -2263,6 +2304,50 @@ mod tests {
 
         let empty = serde_json::json!({"keys": []});
         assert!(!jwk_set(empty).has_client_assertion_key(FapiProfile::Fapi2Security));
+
+        // A structurally-incomplete key — right `kty`/`alg`/`use` but missing
+        // the key-material members `build_decoding_key_from_jwk` requires to
+        // construct a decoding key — selects but cannot be built, so it must
+        // be rejected exactly like the `use: "enc"` and `alg`-mismatch cases
+        // above. Without this check the client would pass registration and
+        // then fail every later token-endpoint `client_assertion` it sends
+        // with `invalid_client`.
+        let ec_no_xy = serde_json::json!({"keys": [{"kty": "EC", "alg": "ES256", "crv": "P-256"}]});
+        assert!(
+            !jwk_set(ec_no_xy.clone()).has_client_assertion_key(FapiProfile::Fapi2Security),
+            "an EC key with no x/y cannot build an ES256 decoding key"
+        );
+
+        let rsa_no_ne = serde_json::json!({"keys": [{"kty": "RSA", "alg": "PS256"}]});
+        assert!(
+            !jwk_set(rsa_no_ne).has_client_assertion_key(FapiProfile::Fapi2Security),
+            "an RSA key with no n/e cannot build a PS256 decoding key"
+        );
+
+        let okp_no_x =
+            serde_json::json!({"keys": [{"kty": "OKP", "crv": "Ed25519", "alg": "EdDSA"}]});
+        assert!(
+            !jwk_set(okp_no_x).has_client_assertion_key(FapiProfile::Fapi2Security),
+            "an OKP key with no x cannot build an EdDSA decoding key"
+        );
+
+        // The standard profile routes through the same `is_usable_for` over
+        // `CLIENT_ASSERTION_ALLOWED` (which still contains ES256/PS256/EdDSA),
+        // so the structurally-incomplete rejection is not FAPI-specific: a
+        // `private_key_jwt` client on `FapiProfile::None` is refused the same
+        // way. A complete EC key is still accepted (regression guard: the new
+        // component check must not reject a well-formed key).
+        assert!(
+            !jwk_set(ec_no_xy).has_client_assertion_key(FapiProfile::None),
+            "an EC key with no x/y is rejected on the standard profile too"
+        );
+        assert!(
+            jwk_set(
+                serde_json::json!({"keys": [{"kty": "EC", "crv": "P-256", "x": "x", "y": "y"}]})
+            )
+            .has_client_assertion_key(FapiProfile::None),
+            "a complete EC key is usable on the standard profile"
+        );
     }
 
     #[test]
@@ -2488,6 +2573,39 @@ mod tests {
         let result = validate_update_fapi(&validated, &client)
             .and_then(|()| compute_fapi_update_fields(&validated, &client).map(|_| ()));
         let err = result.expect_err("a key set with no signing key cannot authenticate");
+        assert!(matches!(err, AppValidationError::PrivateKeyJwtNoUsableKey));
+        assert_eq!(err.code(), "jwks_algorithm_unsupported");
+    }
+
+    // A structurally-incomplete inline JWK (right `kty`/`alg` but missing the
+    // key-material members `build_decoding_key_from_jwk` requires) selects but
+    // cannot be constructed. The admin update path (`validate_update_fapi` →
+    // `compute_fapi_update_fields`, the pipeline the console form and admin API
+    // both use) must refuse it, symmetric with the create-side guard and the
+    // `use: "enc"`-only case above. Guards the admin update path against
+    // bypassing the write-time gate; the FAPI variant and other kty are covered
+    // at the gate level by `has_client_assertion_key_fapi_covers_alg_and_kty_cases`.
+    #[tokio::test]
+    async fn update_standard_private_key_jwt_rejects_jwks_with_structurally_incomplete_key() {
+        let state = test_app_state().await;
+        let client = non_fapi_pkjwt_client(&state, "pkjwt-incomplete@example.com").await;
+
+        let jwks = serde_json::json!({"keys": [{"kty": "EC", "alg": "ES256", "crv": "P-256"}]})
+            .to_string();
+        let validated = validate_update_format(UpdateAppInput {
+            redirect_uris: None,
+            resource_uris: None,
+            post_logout_redirect_uris: None,
+            access_scope: None,
+            fapi_profile: None,
+            jwks: Some(&jwks),
+            jwks_uri: None,
+        })
+        .expect("valid update input");
+
+        let result = validate_update_fapi(&validated, &client)
+            .and_then(|()| compute_fapi_update_fields(&validated, &client).map(|_| ()));
+        let err = result.expect_err("an EC key with no x/y cannot authenticate");
         assert!(matches!(err, AppValidationError::PrivateKeyJwtNoUsableKey));
         assert_eq!(err.code(), "jwks_algorithm_unsupported");
     }
