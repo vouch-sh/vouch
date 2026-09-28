@@ -147,8 +147,12 @@ pub(crate) async fn fetch_and_cache(
 /// inputs — a caller re-deriving this from the cache's freshness would be a
 /// second encoding of the same branch rule, liable to silently diverge if
 /// the TTL policy or fetch logic here changes without the mirror keeping up.
+///
+/// Threaded out of `jwt_bearer::jwks::resolve_client_jwks` so the RFC 7523
+/// and RFC 9101 kid-miss force-refresh paths can gate a second fetch on it,
+/// the same within-request bound the mTLS self-signed path applies.
 #[derive(Debug)]
-pub(crate) enum JwksOrigin {
+pub enum JwksOrigin {
     /// Served from a cache row within [`JWKS_CACHE_TTL_SECONDS`] — no
     /// network call.
     NoFetch,
@@ -209,32 +213,14 @@ mod tests {
     use crate::test_utils;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    // Throwaway self-signed P-256 cert (SAN: localhost) + PKCS#8 key, reused
-    // from `crates/vouch-tests/tests/pq_tls.rs`. Valid until 2036. Used only to
-    // stand up a loopback TLS listener for the end-to-end-over-TLS JWKS test;
-    // cert verification is bypassed (`danger_accept_invalid_certs`) because
+    // The end-to-end-over-TLS JWKS test serves `test_tls_acceptor`'s cert, so
+    // verification is bypassed (`danger_accept_invalid_certs`):
     // the cert has no IP SAN and the SSRF guard resolves domain names via
     // hickory (which does not read `/etc/hosts`), so the URL uses the `127.0.0.1`
     // IP literal to avoid a DNS lookup. The size-cap mechanism under test is
     // transport-agnostic (per the bug report) — what matters is that it runs
     // *after* TLS termination on a real `reqwest::Response` over a real TLS
     // connection, which this exercises.
-    const TLS_CERT_PEM: &str = "-----BEGIN CERTIFICATE-----\n\
-MIIBoDCCAUagAwIBAgIUPOBIDoD8Akv9FXfEjb8GEV6GYLowCgYIKoZIzj0EAwIw\n\
-HDEaMBgGA1UEAwwRdm91Y2gtcHEtdGxzLXRlc3QwHhcNMjYwNzA5MTEzMDE1WhcN\n\
-MzYwNzA2MTEzMDE1WjAcMRowGAYDVQQDDBF2b3VjaC1wcS10bHMtdGVzdDBZMBMG\n\
-ByqGSM49AgEGCCqGSM49AwEHA0IABO7wN7GBAX4FydRe2AvENBb6WZ9XHh4NKbkO\n\
-G9ulpEIAVoZaGHMAlK7ZGTLf/tBukQxhXDwQKLLot23POsF8nP+jZjBkMB0GA1Ud\n\
-DgQWBBQ3svXuWL2wS8xcHilgxDuYURTVwDAfBgNVHSMEGDAWgBQ3svXuWL2wS8xc\n\
-HilgxDuYURTVwDAUBgNVHREEDTALgglsb2NhbGhvc3QwDAYDVR0TAQH/BAIwADAK\n\
-BggqhkjOPQQDAgNIADBFAiEAqVgc77k203H6G5gEaAcHuna5DKJmQPCQjQLQAtry\n\
-KnMCICKcoY9vNlshsz2y7RVcfGqowba3/xXj3aYFegT/BdAW\n\
------END CERTIFICATE-----\n";
-    const TLS_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
-MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgTljx1Qv2H2TQMKaX\n\
-+palx1XsuLkORqDCzFBkRDcz3tihRANCAATu8DexgQF+BcnUXtgLxDQW+lmfVx4e\n\
-DSm5DhvbpaRCAFaGWhhzAJSu2Rky3/7QbpEMYVw8ECiy6LdtzzrBfJz/\n\
------END PRIVATE KEY-----\n";
 
     /// Assert the error is an `invalid_client` OAuth error rejecting non-HTTPS.
     fn assert_rejected_as_non_https(err: &ServiceError) {
@@ -658,29 +644,6 @@ DSm5DhvbpaRCAFaGWhhzAJSu2Rky3/7QbpEMYVw8ECiy6LdtzzrBfJz/\n\
         assert_invalid_client(&err, "JWKS response exceeds maximum size (256KB)");
     }
 
-    /// A `tokio_rustls` acceptor using the throwaway self-signed cert above and
-    /// an explicit aws-lc-rs provider (no reliance on a process-default
-    /// provider being installed in tests).
-    fn tls_acceptor() -> tokio_rustls::TlsAcceptor {
-        use rustls::pki_types::pem::PemObject;
-        use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-        use std::sync::Arc;
-        let certs: Vec<CertificateDer<'static>> =
-            CertificateDer::pem_slice_iter(TLS_CERT_PEM.as_bytes())
-                .collect::<Result<Vec<_>, _>>()
-                .expect("parse test certificate");
-        let key = PrivateKeyDer::from_pem_slice(TLS_KEY_PEM.as_bytes()).expect("parse test key");
-        let config = rustls::ServerConfig::builder_with_provider(Arc::new(
-            rustls::crypto::aws_lc_rs::default_provider(),
-        ))
-        .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
-        .expect("configure TLS versions")
-        .with_no_client_auth()
-        .with_single_cert(certs, key)
-        .expect("build server config");
-        tokio_rustls::TlsAcceptor::from(Arc::new(config))
-    }
-
     /// A reqwest client that performs a real TLS handshake but does not verify
     /// the server certificate. The throwaway self-signed cert has no IP SAN, the
     /// URL uses the `127.0.0.1` literal, and the size cap under test runs after
@@ -711,7 +674,7 @@ DSm5DhvbpaRCAFaGWhhzAJSu2Rky3/7QbpEMYVw8ECiy6LdtzzrBfJz/\n\
         const SLOW_CHUNKS: u32 = 40;
         const TOTAL_WILLING: u64 = CHUNK_BIG as u64 + SLOW_CHUNKS as u64 * CHUNK_SMALL as u64;
 
-        let acceptor = tls_acceptor();
+        let acceptor = test_utils::test_tls_acceptor();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind loopback listener");

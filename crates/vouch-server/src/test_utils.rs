@@ -2451,3 +2451,26 @@ MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQghUolejGt3e2SfwZJ\n\
 BRRya1VbXh8fYhiJfLvrVBbs/lqhRANCAAQDqsXPWIDIF7tgRkNyjoBTbVcRu6XX\n\
 p3HeUzp466+syZz4uujFaFZUPW4t8nZUSdXHuxxzhLovxtFNGqAybYFZ\n\
 -----END PRIVATE KEY-----\n";
+
+/// A TLS acceptor serving [`TEST_TLS_CERT_PEM`], for in-process HTTPS test
+/// servers. The provider is explicit, so a test does not rely on a
+/// process-default provider being installed. The certificate names no IP, so a
+/// client connecting to `127.0.0.1` must skip verification.
+#[must_use]
+pub fn test_tls_acceptor() -> tokio_rustls::TlsAcceptor {
+    use rustls::pki_types::pem::PemObject as _;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+    let certs = CertificateDer::pem_slice_iter(TEST_TLS_CERT_PEM.as_bytes())
+        .collect::<Result<Vec<_>, _>>()
+        .expect("parse test certificate");
+    let key = PrivateKeyDer::from_pem_slice(TEST_TLS_KEY_PEM.as_bytes()).expect("parse test key");
+    let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+    .expect("configure TLS versions")
+    .with_no_client_auth()
+    .with_single_cert(certs, key)
+    .expect("build server config");
+    tokio_rustls::TlsAcceptor::from(Arc::new(config))
+}

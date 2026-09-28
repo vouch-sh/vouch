@@ -386,7 +386,7 @@ async fn resolve_client_decoding_key(
     // relaxation; private/link-local targets stay blocked.
     let allow_loopback = !state.config().tls_configured();
 
-    let jwks = resolve_client_jwks(
+    let (jwks, origin) = resolve_client_jwks(
         &state.store,
         &client.id,
         client.keys.as_ref().and_then(ClientKeys::inline),
@@ -404,7 +404,13 @@ async fn resolve_client_decoding_key(
         ClientAuthError::InvalidCredentials
     })?;
 
-    // Find matching key, with force-refresh on kid-miss for jwks_uri clients
+    // Find matching key, with force-refresh on kid-miss for jwks_uri clients.
+    // `origin` threads `resolve_client_jwks`'s fetch report into the kid-miss
+    // gate, bounding this path to at most one network fetch per request — the
+    // same bound the mTLS self-signed path keeps via its `JwksOrigin::Fetched`
+    // gate. Without it, two sequential 5s JWKS fetches can consume the 10s
+    // `REQUEST_TIMEOUT` and surface as a bare 408 instead of this function's
+    // structured 401 `invalid_client`.
     find_matching_key_with_refresh_client(
         &state.store,
         &client.id,
@@ -414,6 +420,7 @@ async fn resolve_client_decoding_key(
         &state.http_client,
         &jwks,
         header,
+        origin,
     )
     .await
     .map_err(|e| {
@@ -435,12 +442,16 @@ mod tests {
     use crate::crypto::alg::JwsAlgorithm;
     use crate::crypto::document_crypto::{DocumentCrypto, PlaintextDocumentCrypto};
     use crate::crypto::keys::OidcSigningKey;
+    use crate::db::documents::jwks_cache::JwksCacheDoc;
+    use crate::db::store::DocumentStore;
     use crate::db::{self, ClientKeys, Pool};
     use crate::infra::conn_caps::ConnCapConfig;
     use crate::services::oidc::jwt_bearer::validate::JwtAudience;
+    use crate::test_utils::{build_test_app_state_with_http_client, test_tls_acceptor};
     use arc_swap::ArcSwap;
     use secrecy::SecretString;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use vouch_common::AaguidPolicy;
 
     /// Build a minimal `Arc<AppState>` backed by an in-memory SQLite database
@@ -908,6 +919,264 @@ mod tests {
         assert!(
             result.is_ok(),
             "inline-JWKS client must resolve key despite cache DB error: {result:?}"
+        );
+    }
+
+    // ========================================================================
+    // Regression: the RFC 7523 path must perform at most ONE JWKS fetch per
+    // request — the within-request `JwksOrigin::Fetched` gate.
+    //
+    // Before the fix, a `jwks_uri` client whose cache was past the 1h TTL
+    // fetched once in `resolve_client_jwks`, then — on a `kid` miss —
+    // force-refreshed AGAIN unconditionally, so two sequential 5s fetches
+    // could consume the whole 10s `REQUEST_TIMEOUT` and surface a bare 408
+    // instead of the structured 401 `invalid_client` the handler returns.
+    //
+    // `fetch_jwks` requires `https://`, so a plaintext wiremock server cannot
+    // drive this path. These helpers stand up a `tokio-rustls` server on the
+    // loopback address (the SSRF guard permits loopback in the test default
+    // where TLS is not configured) and count how many connections it accepts
+    // — the mutation-killing signal the mTLS sibling test
+    // (`test_authenticate_client_mtls_self_signed_skips_retry_when_resolution_already_fetched`)
+    // could not assert without a counting harness. Mirrors the TLS pattern in
+    // `infra::jwks::tests` and `handlers::oidc::tests::rfc9101`.
+    // ========================================================================
+
+    /// P-256 EC key x/y coordinates (base64url, RFC 7517 test vectors) for the
+    /// counting test's kid-present JWKS — a parseable, buildable EC key the
+    /// kid-miss force-refresh successfully verifies against.
+    const EC_X: &str = "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU";
+    const EC_Y: &str = "x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0";
+
+    /// A `reqwest` client that performs a real TLS handshake but does not
+    /// verify the server certificate, so the loopback mock's self-signed cert
+    /// is accepted. Kept off the shared `AppState::http_client` to avoid
+    /// weakening any other test's trust store.
+    fn https_client_trusting_any_cert() -> reqwest::Client {
+        reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("build test https client")
+    }
+
+    /// Directly seed a `JwksCacheDoc` at a given age — `db::upsert_jwks_cache`
+    /// always stamps `cached_at: now`, so a TTL-boundary test needs this
+    /// instead. Mirrors `services::oidc::token::tests::seed_jwks_cache`.
+    async fn seed_jwks_cache(
+        store: &DocumentStore,
+        parent_id: &str,
+        value: serde_json::Value,
+        age_seconds: i64,
+    ) {
+        let doc = JwksCacheDoc {
+            value,
+            cached_at: jiff::Timestamp::now()
+                .checked_sub(jiff::SignedDuration::from_secs(age_seconds))
+                .expect("cache age must be representable"),
+        };
+        store
+            .upsert(&format!("jwks_cache:{parent_id}"), &doc)
+            .await
+            .expect("seed jwks cache");
+    }
+
+    /// Spawn a loopback HTTPS server that serves `body` on every connection
+    /// and counts how many TCP connections it accepts, returning the URL.
+    /// Each accepted connection is one JWKS fetch initiated by the handler,
+    /// so the counter is the mutation-killing signal: it must read `1` after
+    /// a request that, before the fix, performed two sequential fetches.
+    async fn spawn_counting_jwks_server(body: String, accepted: Arc<AtomicU64>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let acceptor = test_tls_acceptor();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let port = listener.local_addr().expect("local_addr").port();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\
+             \r\n\
+             {body}",
+            body.len()
+        );
+        tokio::spawn(async move {
+            loop {
+                let (stream, _peer) = match listener.accept().await {
+                    Ok(s) => s,
+                    Err(_) => return,
+                };
+                accepted.fetch_add(1, Ordering::SeqCst);
+                let acceptor = acceptor.clone();
+                let response = response.clone();
+                tokio::spawn(async move {
+                    let mut tls = match acceptor.accept(stream).await {
+                        Ok(t) => t,
+                        Err(_) => return,
+                    };
+                    // Drain the (small, body-less) GET so the kernel does not
+                    // RST before reqwest reads the response. Bounded so a
+                    // misbehaving peer cannot wedge the server task. Named
+                    // bindings (not `let _ =`) keep `#[must_use]` results
+                    // acknowledged without triggering `let_underscore_must_use`.
+                    let mut buf = [0u8; 1024];
+                    let _read =
+                        tokio::time::timeout(std::time::Duration::from_secs(1), tls.read(&mut buf))
+                            .await;
+                    let _write = tls.write_all(response.as_bytes()).await;
+                    let _shutdown = tls.shutdown().await;
+                });
+            }
+        });
+        format!("https://127.0.0.1:{port}/jwks")
+    }
+
+    /// Helper: build a `jwks_uri` client pointing at `server_url`, registered
+    /// for `private_key_jwt`, with no inline JWKS and no secret.
+    async fn make_uri_client(
+        state: &Arc<crate::AppState>,
+        server_url: String,
+        email: &str,
+    ) -> OAuthClient {
+        use crate::test_utils::{TestClientSpec, create_test_client, create_test_user};
+        let user = create_test_user(&state.store, email).await;
+        let created = create_test_client(
+            &state.store,
+            &user.id,
+            TestClientSpec {
+                token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
+                jwks_uri: Some(server_url),
+                with_secret: false,
+                ..Default::default()
+            },
+        )
+        .await;
+        db::get_oauth_client_by_id(&state.store, &created.app_id)
+            .await
+            .expect("db lookup")
+            .expect("client exists")
+    }
+
+    /// Regression for the RFC 7523 two-fetch race: a `jwks_uri` client whose
+    /// cache is past the 1h TTL (so `resolve_client_jwks` fetches — fetch #1)
+    /// and whose served JWKS lacks the assertion's `kid` (so `find_matching_key`
+    /// misses) must NOT perform a second force-refresh fetch in the same request.
+    ///
+    /// Before the fix, the kid-miss path unconditionally called `fetch_and_cache`
+    /// again, so a host that dribbled both 5s fetches could consume the whole
+    /// 10s `REQUEST_TIMEOUT` and surface a bare 408 in place of this function's
+    /// structured 401 `invalid_client`. The within-request `JwksOrigin::Fetched`
+    /// gate bounds the path to one fetch; this test counts the fetches.
+    #[tokio::test]
+    async fn resolve_client_decoding_key_bounded_to_one_jwks_fetch() {
+        let accepted = Arc::new(AtomicU64::new(0));
+        // Kid-less but valid JWKS: fetch #1 succeeds, `find_matching_key`
+        // misses, and the gate must skip fetch #2.
+        let server_url = spawn_counting_jwks_server(
+            serde_json::json!({"keys":[]}).to_string(),
+            accepted.clone(),
+        )
+        .await;
+
+        let http_client = https_client_trusting_any_cert();
+        let state = build_test_app_state_with_http_client(Vec::new(), |_| {}, http_client).await;
+        let client = make_uri_client(&state, server_url, "counting@example.com").await;
+
+        // Seed a STALE cache (2h old: past the 1h TTL so fetch #1 runs, within
+        // the 24h stale window so a failed fetch would still fall back). The
+        // seeded value lacks the kid, matching what the server serves. The
+        // snapshot `resolve_client_decoding_key` loads HERE is the pre-fetch
+        // one, so the 10s rate-limit gate (which reads `cached_at`) does not
+        // suppress fetch #2 either — the within-request `JwksOrigin` gate is
+        // the only bound, which is exactly the bug scenario.
+        seed_jwks_cache(
+            &state.store,
+            &client.id,
+            serde_json::json!({"keys":[]}),
+            7200,
+        )
+        .await;
+
+        let header = JwtAssertionHeader {
+            alg: JwsAlgorithm::Es256,
+            kid: Some("missing-kid".to_string()),
+        };
+        let result = resolve_client_decoding_key(&state, &client, &header).await;
+
+        // The kid is absent from every JWKS the path sees, so the terminal
+        // result is the structured 401 `invalid_client` — never a 408 (which
+        // a dropped handler future would produce).
+        assert!(
+            matches!(result, Err(ClientAuthError::InvalidCredentials)),
+            "a kid-miss must resolve to InvalidCredentials (401), not a transport \
+             timeout or other error: {result:?}"
+        );
+        // The fix's mechanism: exactly one network fetch (fetch #1). Without
+        // the gate, the kid-miss force-refresh would issue fetch #2 against
+        // the same server, so this counter would read 2.
+        let fetches = accepted.load(Ordering::SeqCst);
+        assert_eq!(
+            fetches, 1,
+            "the RFC 7523 path must perform exactly one JWKS fetch per request \
+             (got {fetches}); a second fetch can race the 10s REQUEST_TIMEOUT and \
+             surface a 408 instead of the structured 401 invalid_client"
+        );
+    }
+
+    /// Control for the gate above: when `resolve_client_jwks` served the JWKS
+    /// from a FRESH cache (`JwksOrigin::NoFetch` — no fetch happened), the
+    /// kid-miss force-refresh must STILL proceed, fetching the rotated key
+    /// exactly once. This proves the gate only suppresses a redundant SECOND
+    /// fetch within a request, not the legitimate single refresh the path
+    /// exists for (RFC 7523 key rotation: client signs with a new `kid` before
+    /// the server's 1h cache has expired).
+    #[tokio::test]
+    async fn resolve_client_decoding_key_refreshes_once_when_origin_is_no_fetch() {
+        let accepted = Arc::new(AtomicU64::new(0));
+        // The server serves the kid the assertion uses; the FRESH cache lacks
+        // it, so resolution serves a kid-less set from cache (`NoFetch`), the
+        // kid-miss force-refresh fetches the rotated set, and `find_matching_key`
+        // finds the key — the happy key-rotation path.
+        let server_url = spawn_counting_jwks_server(
+            serde_json::json!({
+                "keys": [{
+                    "kty": "EC",
+                    "crv": "P-256",
+                    "kid": "missing-kid",
+                    "x": EC_X,
+                    "y": EC_Y
+                }]
+            })
+            .to_string(),
+            accepted.clone(),
+        )
+        .await;
+
+        let http_client = https_client_trusting_any_cert();
+        let state = build_test_app_state_with_http_client(Vec::new(), |_| {}, http_client).await;
+        let client = make_uri_client(&state, server_url, "rotating@example.com").await;
+
+        // FRESH cache (60s old: within the 1h TTL) holding a kid-less set —
+        // `resolve_client_jwks` serves it from cache (`NoFetch`), so the gate
+        // does NOT fire and the force-refresh proceeds.
+        seed_jwks_cache(&state.store, &client.id, serde_json::json!({"keys":[]}), 60).await;
+
+        let header = JwtAssertionHeader {
+            alg: JwsAlgorithm::Es256,
+            kid: Some("missing-kid".to_string()),
+        };
+        let result = resolve_client_decoding_key(&state, &client, &header).await;
+
+        assert!(
+            result.is_ok(),
+            "the rotated key must verify after a single force-refresh: {result:?}"
+        );
+        let fetches = accepted.load(Ordering::SeqCst);
+        assert_eq!(
+            fetches, 1,
+            "the legitimate key-rotation refresh fetches exactly once (got {fetches})"
         );
     }
 }

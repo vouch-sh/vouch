@@ -381,7 +381,7 @@ pub async fn validate_request_object(
     // relaxation; private/link-local targets stay blocked.
     let allow_loopback = !state.config().tls_configured();
 
-    let jwks = resolve_client_jwks(
+    let (jwks, origin) = resolve_client_jwks(
         &state.store,
         &client.id,
         client.keys.as_ref().and_then(ClientKeys::inline),
@@ -400,6 +400,13 @@ pub async fn validate_request_object(
         )
     })?;
 
+    // `origin` threads `resolve_client_jwks`'s fetch report into the kid-miss
+    // gate, bounding this path to at most one network fetch per request — the
+    // same bound the RFC 7523 and mTLS paths keep via their `JwksOrigin` gates.
+    // The `/oauth/authorize` and `/oauth/par` endpoints that run Request Object
+    // verification sit under the same 10s `REQUEST_TIMEOUT` as the token
+    // endpoint, so the two-fetch race that gates prevents here would otherwise
+    // surface as a bare 408 instead of an `invalid_request_object` error.
     let decoding_key = find_matching_key_with_refresh_client(
         &state.store,
         &client.id,
@@ -409,6 +416,7 @@ pub async fn validate_request_object(
         &state.http_client,
         &jwks,
         &assertion_header,
+        origin,
     )
     .await
     .map_err(|e| {

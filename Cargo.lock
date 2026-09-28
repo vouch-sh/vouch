@@ -7638,6 +7638,7 @@ dependencies = [
  "http",
  "jiff",
  "proptest",
+ "reqwest",
  "rustls",
  "secrecy",
  "serde",

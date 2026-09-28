@@ -10,12 +10,19 @@ use crate::db::store::DocumentStore;
 use crate::db::{self, JwkSet, UnusableJwk};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use crate::infra::jwks;
+use crate::infra::jwks::JwksOrigin;
 
 /// Resolve the JWKS for a client — from an inline key set or a fetched
 /// `jwks_uri`. The two are exclusive (RFC 7591 §2), so there is no precedence
 /// between them: at most one is ever `Some`.
 ///
 /// For `jwks_uri` clients, uses database-backed caching with stale-while-revalidate.
+///
+/// Also returns [`JwksOrigin`] so the caller's kid-miss force-refresh can gate a
+/// second fetch on whether resolution already fetched in this request — the
+/// same within-request bound the mTLS self-signed path applies
+/// (`services::oidc::token`). Inline keys never fetch, so they report
+/// [`JwksOrigin::NoFetch`].
 pub async fn resolve_client_jwks(
     store: &DocumentStore,
     client_id: &str,
@@ -24,10 +31,10 @@ pub async fn resolve_client_jwks(
     jwks_cache: Option<&JwksCacheDoc>,
     allow_loopback: bool,
     http_client: &reqwest::Client,
-) -> ServiceResult<JwkSet> {
+) -> ServiceResult<(JwkSet, JwksOrigin)> {
     // An inline key set is already parsed — it arrives typed and needs no fetch.
     if let Some(jwks) = jwks {
-        return Ok(jwks.clone());
+        return Ok((jwks.clone(), JwksOrigin::NoFetch));
     }
 
     // JWKS URI with caching
@@ -60,14 +67,19 @@ async fn resolve_jwks_uri(
     cached: Option<&JwksCacheDoc>,
     allow_loopback: bool,
     http_client: &reqwest::Client,
-) -> ServiceResult<JwkSet> {
-    // This path doesn't act on whether the resolution fetched — that
-    // distinction only matters to the mTLS force-refetch retry gate
-    // (services/oidc/token.rs).
-    let (value, _origin) =
+) -> ServiceResult<(JwkSet, JwksOrigin)> {
+    // Keep `origin` so the RFC 7523 kid-miss force-refresh path can gate a
+    // second fetch on it — the same within-request bound the mTLS self-signed
+    // path applies (`services::oidc::token`). With the compressed
+    // `REQUEST_TIMEOUT` (10s) and a 5s per-fetch cap, a second fetch in this
+    // request could race the router's innermost `TimeoutLayer` and surface as
+    // a bare 408 instead of the structured 401 `invalid_client` this path
+    // returns. Resolution already fetched → the kid is missing from a fresh
+    // set → fetching again would only repeat it.
+    let (value, origin) =
         jwks::resolve_cached_jwks(store, parent_id, uri, cached, allow_loopback, http_client)
             .await?;
-    parse_jwks_value(&value)
+    parse_jwks_value(&value).map(|jwks| (jwks, origin))
 }
 
 /// Parse a JWKS from a `serde_json::Value`.
@@ -125,7 +137,7 @@ const JWKS_FORCE_REFRESH_MIN_INTERVAL_SECONDS: i64 = 10;
 /// where a client starts signing with a new key before the server's cache has expired.
 #[expect(
     clippy::too_many_arguments,
-    reason = "store/client/uri/cache/loopback-flag/http-client/jwks/header are all distinct inputs"
+    reason = "store/client/uri/cache/loopback-flag/http-client/jwks/header/origin are all distinct inputs"
 )]
 pub async fn find_matching_key_with_refresh_client(
     store: &DocumentStore,
@@ -137,6 +149,7 @@ pub async fn find_matching_key_with_refresh_client(
     http_client: &reqwest::Client,
     jwks: &JwkSet,
     header: &JwtAssertionHeader,
+    origin: JwksOrigin,
 ) -> ServiceResult<jsonwebtoken::DecodingKey> {
     // Try initial match first
     if let Ok(key) = find_matching_key(jwks, header) {
@@ -147,6 +160,27 @@ pub async fn find_matching_key_with_refresh_client(
     let Some(uri) = jwks_uri else {
         return find_matching_key(jwks, header);
     };
+
+    // Within-request gate: if `resolve_client_jwks` already fetched in this
+    // request (`JwksOrigin::Fetched`), the kid is missing from a freshly
+    // fetched set, so a second `fetch_and_cache` would only repeat it. This
+    // bounds every auth attempt to at most one network fetch — the same gate
+    // the mTLS self-signed path applies at `services::oidc::token`. Under the
+    // 10s `REQUEST_TIMEOUT` with a 5s per-fetch cap, a second fetch here could
+    // race the router's innermost `TimeoutLayer` and surface as a bare 408
+    // instead of the structured 401 `invalid_client` this function returns.
+    //
+    // The cross-request 10s throttle below cannot substitute: the
+    // `jwks_cache` snapshot is loaded once before resolution, so for a
+    // freshly-registered client it is `None` (the `if let Some(cache)` guard
+    // is skipped) and for a stale-cache client it already predates the 10s
+    // window by construction.
+    if matches!(origin, JwksOrigin::Fetched) {
+        tracing::debug!(
+            "Skipping JWKS force-refresh for client {client_id}: JWKS already fetched in this request"
+        );
+        return find_matching_key(jwks, header);
+    }
 
     // Rate-limit: skip force-refresh if cached within the last 10 seconds.
     if let Some(cache) = jwks_cache
@@ -958,6 +992,9 @@ mod tests {
             &http_client,
             &jwks,
             &hdr,
+            // No URI → the function returns before the origin gate, so the
+            // value is irrelevant; `NoFetch` is the honest report.
+            JwksOrigin::NoFetch,
         )
         .await;
 
@@ -993,6 +1030,9 @@ mod tests {
             &http_client,
             &jwks,
             &hdr,
+            // `NoFetch`: the origin gate must NOT fire here, so the 10s
+            // rate-limit gate below it is what this test exercises.
+            JwksOrigin::NoFetch,
         )
         .await;
 
@@ -1031,6 +1071,9 @@ mod tests {
             &http_client,
             &stale_jwks,
             &hdr,
+            // `NoFetch`: the origin gate must NOT fire here, so the
+            // force-refresh attempt path below is what this test exercises.
+            JwksOrigin::NoFetch,
         )
         .await;
 
@@ -1038,6 +1081,199 @@ mod tests {
         assert!(
             result.is_err(),
             "kid-miss with stale cache: fallback error expected when fetch fails"
+        );
+    }
+
+    // =======================================================================
+    // resolve_client_jwks — JwksOrigin reporting
+    //
+    // Mirrors the mTLS self-signed path's `resolve_self_signed_jwks` origin
+    // tests in `services::oidc::token::tests`: the `JwksOrigin` a URI-backed
+    // resolution reports is the signal the kid-miss force-refresh gate reads,
+    // so it must be `NoFetch` for a fresh cache and `Fetched` once a fetch is
+    // attempted (success or stale-while-revalidate fallback). An unreachable
+    // `https://` URI stands in for the fetch without a real network server:
+    // the SSRF guard permits loopback in the test default (no TLS configured),
+    // the connection is dialed, and it fails on connection-refused.
+    // =======================================================================
+
+    /// Directly seed a `JwksCacheDoc` at a given age — `db::upsert_jwks_cache`
+    /// always stamps `cached_at: now`, so a TTL-boundary test needs this.
+    /// Mirrors `services::oidc::token::tests::seed_jwks_cache`.
+    async fn seed_jwks_cache(
+        store: &DocumentStore,
+        parent_id: &str,
+        value: serde_json::Value,
+        age_seconds: i64,
+    ) {
+        let doc = JwksCacheDoc {
+            value,
+            cached_at: jiff::Timestamp::now()
+                .checked_sub(jiff::SignedDuration::from_secs(age_seconds))
+                .expect("cache age must be representable"),
+        };
+        store
+            .upsert(&format!("jwks_cache:{parent_id}"), &doc)
+            .await
+            .expect("seed jwks cache");
+    }
+
+    /// A URI the SSRF guard permits (loopback, allowed in the test default
+    /// where TLS is not configured) but nothing listens on, so a fetch
+    /// attempt fails fast on connection-refused.
+    const UNREACHABLE_JWKS_URI: &str = "https://127.0.0.1:1/jwks.json";
+
+    #[tokio::test]
+    async fn resolve_client_jwks_reports_no_fetch_for_inline_jwks() {
+        // An inline key set never fetches, so the RFC 7523 path's kid-miss
+        // gate reads `NoFetch` — moot for inline clients (no URI to
+        // force-refresh from), but the value must be correct so the gate
+        // never misfires for an inline-configured client.
+        let state = test_utils::test_app_state().await;
+        let inline = JwkSet {
+            keys: vec![ec_jwk_entry(Some("inline-kid"), None, None)],
+        };
+
+        let (resolved, origin) = resolve_client_jwks(
+            &state.store,
+            "inline-client",
+            Some(&inline),
+            None,
+            None,
+            false,
+            &state.http_client,
+        )
+        .await
+        .expect("inline jwks must resolve");
+
+        assert_eq!(resolved, inline);
+        assert!(
+            matches!(origin, JwksOrigin::NoFetch),
+            "an inline key set never fetches"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_client_jwks_reports_no_fetch_for_fresh_cache() {
+        // A cache within the 1h TTL is served without a fetch — the signal the
+        // kid-miss force-refresh gate relies on to know it may still fetch
+        // once this request. The unreachable URI would fail if dialed, so a
+        // success proves no fetch happened.
+        let state = test_utils::test_app_state().await;
+        let value = serde_json::json!({"keys":[]});
+        seed_jwks_cache(&state.store, "client-fresh-origin", value.clone(), 60).await;
+        let cached = db::get_jwks_cache(&state.store, "client-fresh-origin")
+            .await
+            .expect("cache read")
+            .expect("cache seeded");
+
+        let (resolved, origin) = resolve_client_jwks(
+            &state.store,
+            "client-fresh-origin",
+            None,
+            Some(UNREACHABLE_JWKS_URI),
+            Some(&cached),
+            true,
+            &state.http_client,
+        )
+        .await
+        .expect("a fresh cache must resolve without a fetch");
+
+        assert_eq!(resolved, db::parse_jwks_set(&value).expect("parse jwks"));
+        assert!(
+            matches!(origin, JwksOrigin::NoFetch),
+            "a cache within the TTL must not fetch"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_client_jwks_reports_fetched_for_stale_cache() {
+        // Past the 1h TTL but within the 24h stale window: resolution attempts
+        // a fetch (fails against the unreachable URI) and falls back to the
+        // stale cache — `JwksOrigin::Fetched`. This is the origin the kid-miss
+        // gate must read to skip a second fetch in the same request.
+        let state = test_utils::test_app_state().await;
+        let value = serde_json::json!({"keys":[]});
+        seed_jwks_cache(&state.store, "client-stale-origin", value.clone(), 7200).await;
+        let cached = db::get_jwks_cache(&state.store, "client-stale-origin")
+            .await
+            .expect("cache read")
+            .expect("cache seeded");
+
+        let (resolved, origin) = resolve_client_jwks(
+            &state.store,
+            "client-stale-origin",
+            None,
+            Some(UNREACHABLE_JWKS_URI),
+            Some(&cached),
+            true,
+            &state.http_client,
+        )
+        .await
+        .expect("a failed fetch within the stale window must fall back to the cache");
+
+        assert_eq!(resolved, db::parse_jwks_set(&value).expect("parse jwks"));
+        assert!(
+            matches!(origin, JwksOrigin::Fetched),
+            "a cache past the TTL must attempt a fetch"
+        );
+    }
+
+    // =======================================================================
+    // find_matching_key_with_refresh_client — within-request origin gate
+    // =======================================================================
+
+    #[tokio::test]
+    async fn find_matching_key_with_refresh_skips_when_origin_is_fetched() {
+        // When `resolve_client_jwks` already fetched in this request
+        // (`JwksOrigin::Fetched`), the kid-miss force-refresh must be skipped
+        // — bounding the auth attempt to at most one network fetch. This
+        // mirrors the mTLS self-signed path's gate
+        // (`test_authenticate_client_mtls_self_signed_skips_retry_when_resolution_already_fetched`).
+        //
+        // Structural coverage, not a mutation-killing assertion for the gate:
+        // a skipped refresh and an attempted-then-failed refresh both fall
+        // back to the same kid-miss error text by design, so this test alone
+        // cannot distinguish them. The mutation-killing assertion — that the
+        // skipped path performs exactly one network fetch, not two — lives in
+        // `client_auth::tests::resolve_client_decoding_key_bounded_to_one_jwks_fetch`
+        // (a network-call-counting harness). This test pins the gate's
+        // observable contract: `Fetched` returns a clean `invalid_client`,
+        // never a panic, hang, or a leaked network-error message.
+        let state = test_utils::test_app_state().await;
+        let http_client = reqwest::Client::new();
+        let jwks = JwkSet { keys: vec![] };
+        let hdr = header(JwsAlgorithm::Es256, Some("missing-kid"));
+
+        // Stale cache (2h old) — past the 10s rate-limit window, so the
+        // cross-request throttle does NOT skip; the within-request origin
+        // gate is the only thing that prevents the fetch.
+        let stale = JwksCacheDoc {
+            value: serde_json::json!({"keys": []}),
+            cached_at: jiff::Timestamp::now() - jiff::SignedDuration::from_secs(7200),
+        };
+
+        let result = find_matching_key_with_refresh_client(
+            &state.store,
+            "client-already-fetched",
+            Some(UNREACHABLE_JWKS_URI),
+            Some(&stale),
+            true,
+            &http_client,
+            &jwks,
+            &hdr,
+            JwksOrigin::Fetched,
+        )
+        .await;
+
+        let err = result.expect_err("already-fetched must skip the force-refresh");
+        assert!(
+            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient),
+            "already-fetched must resolve to invalid_client: {err:?}"
+        );
+        assert!(
+            matches!(&err, ServiceError::OAuth { description, .. } if description == "No matching key found in JWKS"),
+            "already-fetched must fall back to the original kid-miss, not a leaked fetch error: {err:?}"
         );
     }
 }
