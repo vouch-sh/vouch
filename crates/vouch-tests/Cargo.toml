@@ -23,10 +23,12 @@ http = { workspace = true, features = ["std"] }
 jiff = { workspace = true, features = ["std", "serde", "tz-system"] }
 rustls = { workspace = true, features = ["aws-lc-rs", "std", "prefer-post-quantum", "tls12"] }
 secrecy = { workspace = true, features = ["serde"] }
+reqwest = { workspace = true, features = ["json", "rustls", "form"] }
 serde = { workspace = true, features = ["std", "derive"] }
 serde_json = { workspace = true, features = ["std"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "signal", "time"] }
+tokio-rustls = { workspace = true, features = ["aws-lc-rs"] }
 tower = { workspace = true, features = ["util"] }
 uuid = { workspace = true, features = ["v7", "serde", "std"] }
 vouch-agent = { path = "../vouch-agent", features = ["test-utils"] }

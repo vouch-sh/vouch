@@ -147,8 +147,12 @@ pub(crate) async fn fetch_and_cache(
 /// inputs — a caller re-deriving this from the cache's freshness would be a
 /// second encoding of the same branch rule, liable to silently diverge if
 /// the TTL policy or fetch logic here changes without the mirror keeping up.
+///
+/// Threaded out of `jwt_bearer::jwks::resolve_client_jwks` so the RFC 7523
+/// and RFC 9101 kid-miss force-refresh paths can gate a second fetch on it,
+/// the same within-request bound the mTLS self-signed path applies.
 #[derive(Debug)]
-pub(crate) enum JwksOrigin {
+pub enum JwksOrigin {
     /// Served from a cache row within [`JWKS_CACHE_TTL_SECONDS`] — no
     /// network call.
     NoFetch,
