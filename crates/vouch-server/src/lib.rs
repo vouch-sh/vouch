@@ -115,6 +115,18 @@ pub struct AppState {
     pub github_app: Option<std::sync::Arc<services::integrations::github::GitHubApp>>,
     /// Shared HTTP client for outbound server-side API calls (no redirects).
     pub http_client: reqwest::Client,
+    /// Dedicated HTTP client for the OIDC enrollment callback's outbound IdP
+    /// calls (token-exchange POST + IdP JWKS fetch).
+    ///
+    /// Separate from [`http_client`](Self::http_client) because the callback
+    /// legitimately outlives a single server-side API call: a self-hosted IdP
+    /// under load can take 5–15s to return a token, a band the shared
+    /// client's 5s total / 3s read gap rejects. Built by
+    /// [`vouch_common::http::enroll_idp_client`] with a widened read gap
+    /// (`reqwest` exposes no per-request `read_timeout` override, so widening
+    /// the *total* alone on the shared client does not help). See
+    /// `infra::router::ENROLL_CALLBACK_TIMEOUT` for the route-side budget.
+    pub enroll_idp_client: reqwest::Client,
     /// Session lookup cache (30s TTL).
     pub session_cache: db::SessionCache,
     /// Per-org issuer signing key cache (60s TTL).
@@ -327,6 +339,7 @@ mod redirect_tests {
                 b"test_jwt_secret_must_be_at_least_32_characters_long".to_vec(),
             ),
             github_app: None,
+            enroll_idp_client: reqwest::Client::new(),
             http_client: reqwest::Client::new(),
             session_cache: db::SessionCache::new(10_000, 30),
             org_keys_cache: Default::default(),

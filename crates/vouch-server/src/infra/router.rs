@@ -52,8 +52,27 @@ const GLOBAL_BODY_LIMIT: usize = 256 * 1024;
 ///
 /// Every upstream call a handler makes is bounded well inside it (the shared
 /// HTTP client's `SERVER_TOTAL`, the JWKS fetch, KMS, the database pool), so
-/// it only fires on a handler that has stalled.
+/// it only fires on a handler that has stalled. Also reused as the shutdown
+/// drain timeout ([`crate::infra::accept::ConnLimits::DEFAULT::drain`]), so
+/// shutdown never cuts off a request that could still have completed.
 pub(crate) const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Route-specific timeout for the OIDC enrollment callback
+/// (`GET /oauth/callback`).
+///
+/// Unlike a single API call, the callback performs two sequential outbound
+/// IdP calls (token exchange then JWKS fetch) and is browser-initiated rather
+/// than CLI-driven, so it legitimately takes longer than [`REQUEST_TIMEOUT`]:
+/// self-hosted IdPs (Keycloak, Dex, Authentik) under load can return a token
+/// in the 5–15s band that [`REQUEST_TIMEOUT`] cannot admit. The per-request
+/// `.timeout()` overrides on the two IdP calls
+/// ([`handlers::enroll::IDP_TOKEN_EXCHANGE_TIMEOUT`] = 15s,
+/// [`services::idp::oidc::IDP_JWKS_FETCH_TIMEOUT`] = 5s) fit within this
+/// budget with headroom for handler overhead (DB state consumption, JSON
+/// parsing, response templating). Applied as a per-route `TimeoutLayer`
+/// rather than raising the global [`REQUEST_TIMEOUT`], so every other
+/// handler keeps its tighter 10s bound.
+pub(crate) const ENROLL_CALLBACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// Build a rate limiter, or a no-op passthrough when certification test mode
 /// is active (`VOUCH_CERTIFICATION_TEST_TOKEN` is set).
@@ -176,7 +195,29 @@ pub fn build_app(state: Arc<AppState>, config: &config::ServerConfig) -> anyhow:
         Router::new()
     };
 
-    Ok(security_headers::apply_security_layers(
+    // The OIDC enrollment callback (`GET /oauth/callback`) gets a longer,
+    // route-specific timeout than every other route: it makes two sequential
+    // outbound IdP calls (token exchange then JWKS fetch) and is
+    // browser-initiated rather than CLI-driven, so it legitimately outlives a
+    // single API call. See `ENROLL_CALLBACK_TIMEOUT`, `handlers::enroll::oidc_callback`,
+    // and `services::idp::oidc::verify_id_token`.
+    let callback_routes = build_enrollment_callback_routes();
+
+    // Inner shared layers — security response headers, request-scoped i18n,
+    // and the org-issuer-subdomain gate — are applied to each group *before*
+    // its timeout, preserving the existing innermost-to-outermost order
+    // (security_headers → i18n → org_host → timeout → metrics → …). They are
+    // applied per-group (rather than once on the post-merge router) so each
+    // group can keep its own `TimeoutLayer` and the two groups can be merged
+    // without one timeout wrapping — and so tightening — the other.
+    //
+    // Install request-scoped i18n for every route. The UI router renders
+    // templates via `PageContext::current()`, but several API routes also
+    // return HTML (e.g. `/oauth/authorize` consent/error pages,
+    // `/oauth/callback` enrollment errors), so the layer is applied to both
+    // groups rather than only inside `build_ui_routes`. Adding a new language
+    // is then just dropping an `i18n/<tag>/vouch-server.ftl` catalog.
+    let main_inner = security_headers::apply_security_layers(
         api_routes
             .merge(ui_routes)
             .merge(authorization_endpoint_routes)
@@ -185,12 +226,6 @@ pub fn build_app(state: Arc<AppState>, config: &config::ServerConfig) -> anyhow:
         config,
         &state.idps,
     )?
-    // Install request-scoped i18n for every route. The UI router renders
-    // templates via `PageContext::current()`, but several API routes also
-    // return HTML (e.g. `/oauth/authorize` consent/error pages,
-    // `/oauth/callback` enrollment errors), so the layer is applied at the
-    // merged-router level rather than only inside `build_ui_routes`. Adding
-    // a new language is then just dropping an `i18n/<tag>/vouch-server.ftl` catalog.
     .layer(axum::middleware::from_fn(i18n::i18n_layer))
     // Gate org issuer-subdomain hosts (`{label}.{primary_host}`) to the
     // WIF-only surface: discovery, JWKS, health. Primary-host requests and
@@ -199,8 +234,17 @@ pub fn build_app(state: Arc<AppState>, config: &config::ServerConfig) -> anyhow:
     .layer(axum::middleware::from_fn_with_state(
         Arc::clone(&state),
         org_host::org_host_gate,
-    ))
-    // Global request timeout: `REQUEST_TIMEOUT`.
+    ));
+
+    let callback_inner =
+        security_headers::apply_security_layers(callback_routes, config, &state.idps)?
+            .layer(axum::middleware::from_fn(i18n::i18n_layer))
+            .layer(axum::middleware::from_fn_with_state(
+                Arc::clone(&state),
+                org_host::org_host_gate,
+            ));
+
+    // Per-group request timeouts.
     //
     // The `TimeoutLayer` MUST be placed INSIDE (innermost relative to) the
     // observability middleware below. In tower/axum the last `.layer()` call
@@ -208,29 +252,46 @@ pub fn build_app(state: Arc<AppState>, config: &config::ServerConfig) -> anyhow:
     //   set_request_id → request_span_middleware → propagate_request_id
     //   → DefaultBodyLimit → metrics_middleware → TimeoutLayer → handler
     // When the timeout fires it returns a 408 and drops the inner future
-    // (the handler). Because `metrics_middleware` is OUTSIDE the timeout, its
+    // (the handler). Because `metrics_middleware` is OUTSIDE the timeouts, its
     // `next.run(req).await` resolves with the 408 response and it records the
     // request count/duration with `status="408"`. If it were placed inside the
     // `TimeoutLayer` (as it was previously), the metrics recording — which runs
     // AFTER `next.run(req).await` — would be cancelled along with the handler,
     // and timed-out requests would be completely invisible to Prometheus.
     // See commit 7bbcbb0f for the regression that introduced this ordering bug.
-    .layer(TimeoutLayer::with_status_code(
-        StatusCode::REQUEST_TIMEOUT,
-        REQUEST_TIMEOUT,
-    ))
-    .layer(axum::middleware::from_fn(metrics::metrics_middleware))
-    .layer(DefaultBodyLimit::max(GLOBAL_BODY_LIMIT))
-    .layer(request_id::propagate_request_id_layer())
-    .layer(axum::middleware::from_fn(
-        request_id::request_span_middleware,
-    ))
-    .layer(request_id::set_request_id_layer())
-    // Outermost: every request-scoped time comparison downstream reads this
-    // one instant, so the stamp must be taken before any other layer can
-    // await. The last `.layer()` call is the outermost in tower/axum.
-    .layer(axum::middleware::from_fn(arrival::arrival_layer))
-    .with_state(state))
+    //
+    // The two groups are merged AFTER their timeouts are applied, so neither
+    // group's timeout wraps the other: the enrollment callback keeps its
+    // longer `ENROLL_CALLBACK_TIMEOUT` (20s) while every other route keeps the
+    // global `REQUEST_TIMEOUT` (10s). Side note: `REQUEST_TIMEOUT` is also the
+    // shutdown drain budget (see `crate::infra::accept::ConnLimits::DEFAULT`),
+    // which a callback request holding the 20s slot outruns — but shutdown
+    // draining is a best-effort bound on in-flight requests, and a legitimate
+    // enrollment completing a slow token exchange is exactly the request worth
+    // waiting for, not the one to cut off.
+    let timed = main_inner
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            REQUEST_TIMEOUT,
+        ))
+        .merge(callback_inner.layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            ENROLL_CALLBACK_TIMEOUT,
+        )));
+
+    Ok(timed
+        .layer(axum::middleware::from_fn(metrics::metrics_middleware))
+        .layer(DefaultBodyLimit::max(GLOBAL_BODY_LIMIT))
+        .layer(request_id::propagate_request_id_layer())
+        .layer(axum::middleware::from_fn(
+            request_id::request_span_middleware,
+        ))
+        .layer(request_id::set_request_id_layer())
+        // Outermost: every request-scoped time comparison downstream reads this
+        // one instant, so the stamp must be taken before any other layer can
+        // await. The last `.layer()` call is the outermost in tower/axum.
+        .layer(axum::middleware::from_fn(arrival::arrival_layer))
+        .with_state(state))
 }
 
 /// Rate-limited auth/token routes.
@@ -490,6 +551,47 @@ fn build_general_limited_routes(
         .layer(DefaultBodyLimit::max(SCIM_BODY_LIMIT)))
 }
 
+/// Response headers shared by all API routes and the enrollment callback:
+/// the API CORS policy plus no-store cache headers.
+///
+/// An authorization response can carry a code in its `Location`, so it must
+/// not be cached; the same applies to the enrollment callback's 303 redirect
+/// and its error templates. Factored out so the callback (which lives outside
+/// [`build_api_routes`] for a route-specific timeout — see
+/// [`build_enrollment_callback_routes`]) keeps the same response headers
+/// rather than re-spelling the layer stack.
+fn with_api_response_headers(router: Router<Arc<AppState>>) -> Router<Arc<AppState>> {
+    router
+        .layer(security_headers::build_api_cors_layer())
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-cache, no-store, must-revalidate"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::PRAGMA,
+            HeaderValue::from_static("no-cache"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::EXPIRES,
+            HeaderValue::from_static("0"),
+        ))
+}
+
+/// The OIDC enrollment callback, `GET /oauth/callback`.
+///
+/// Pulled out of [`build_api_routes`] so [`build_app`] can give it a
+/// route-specific [`ENROLL_CALLBACK_TIMEOUT`] (longer than the global
+/// [`REQUEST_TIMEOUT`]); see the constants' docs for why. Shares the same
+/// API response headers as the rest of the API group via
+/// [`with_api_response_headers`], so the callback's 303 redirect and error
+/// templates keep the same CORS / no-store headers they had when the route
+/// lived inside `build_api_routes`.
+fn build_enrollment_callback_routes() -> Router<Arc<AppState>> {
+    with_api_response_headers(
+        Router::new().route("/oauth/callback", get(handlers::enroll::oidc_callback)),
+    )
+}
+
 /// Build all API routes with CORS and cache headers.
 ///
 /// `state` is borrowed; the sub-router builders that need to layer
@@ -515,66 +617,54 @@ fn build_api_routes(
             resource_metadata::layer,
         ));
 
-    Ok(Router::new()
-        // OIDC Provider endpoints
-        .route(
-            "/.well-known/openid-configuration",
-            get(handlers::oidc::discovery),
-        )
-        // RFC 8414 Section 3: OAuth Authorization Server Metadata alias
-        .route(
-            "/.well-known/oauth-authorization-server",
-            get(handlers::oidc::discovery),
-        )
-        // RFC 9728 §3.1: OAuth 2.0 Protected Resource Metadata.
-        // Root document plus the path-insertion form for per-resource
-        // metadata. The wildcard variant is a separate route and does
-        // NOT shadow the sibling well-known URLs above (axum 0.8 route
-        // matcher prefers literal routes over wildcards).
-        .route(
-            "/.well-known/oauth-protected-resource",
-            get(handlers::oidc::protected_resource_metadata_root),
-        )
-        .route(
-            "/.well-known/oauth-protected-resource/{*path}",
-            get(handlers::oidc::protected_resource_metadata_subpath),
-        )
-        .route("/oauth/jwks", get(handlers::oidc::jwks))
-        .merge(userinfo_routes)
-        .route("/oauth/callback", get(handlers::enroll::oidc_callback))
-        // Auth endpoints
-        .route("/v1/auth/status", get(handlers::auth::status))
-        // Merge rate-limited route groups
-        .merge(build_rate_limited_routes(
-            state,
-            config,
-            Arc::clone(&httpsig_resolver),
-        )?)
-        .merge(build_credential_routes(
-            state,
-            config,
-            Arc::clone(&httpsig_resolver),
-        )?)
-        .merge(build_general_limited_routes(state, config)?)
-        .merge(build_api_management_routes(
-            state,
-            config,
-            httpsig_resolver,
-        )?)
-        .merge(build_public_read_routes(config)?)
-        .layer(security_headers::build_api_cors_layer())
-        .layer(SetResponseHeaderLayer::if_not_present(
-            header::CACHE_CONTROL,
-            HeaderValue::from_static("no-cache, no-store, must-revalidate"),
-        ))
-        .layer(SetResponseHeaderLayer::overriding(
-            header::PRAGMA,
-            HeaderValue::from_static("no-cache"),
-        ))
-        .layer(SetResponseHeaderLayer::overriding(
-            header::EXPIRES,
-            HeaderValue::from_static("0"),
-        )))
+    Ok(with_api_response_headers(
+        Router::new()
+            // OIDC Provider endpoints
+            .route(
+                "/.well-known/openid-configuration",
+                get(handlers::oidc::discovery),
+            )
+            // RFC 8414 Section 3: OAuth Authorization Server Metadata alias
+            .route(
+                "/.well-known/oauth-authorization-server",
+                get(handlers::oidc::discovery),
+            )
+            // RFC 9728 §3.1: OAuth 2.0 Protected Resource Metadata.
+            // Root document plus the path-insertion form for per-resource
+            // metadata. The wildcard variant is a separate route and does
+            // NOT shadow the sibling well-known URLs above (axum 0.8 route
+            // matcher prefers literal routes over wildcards).
+            .route(
+                "/.well-known/oauth-protected-resource",
+                get(handlers::oidc::protected_resource_metadata_root),
+            )
+            .route(
+                "/.well-known/oauth-protected-resource/{*path}",
+                get(handlers::oidc::protected_resource_metadata_subpath),
+            )
+            .route("/oauth/jwks", get(handlers::oidc::jwks))
+            .merge(userinfo_routes)
+            // Auth endpoints
+            .route("/v1/auth/status", get(handlers::auth::status))
+            // Merge rate-limited route groups
+            .merge(build_rate_limited_routes(
+                state,
+                config,
+                Arc::clone(&httpsig_resolver),
+            )?)
+            .merge(build_credential_routes(
+                state,
+                config,
+                Arc::clone(&httpsig_resolver),
+            )?)
+            .merge(build_general_limited_routes(state, config)?)
+            .merge(build_api_management_routes(
+                state,
+                config,
+                httpsig_resolver,
+            )?)
+            .merge(build_public_read_routes(config)?),
+    ))
 }
 
 /// Rate-limited public read-only routes.
@@ -1070,6 +1160,121 @@ mod tests {
             "TimeoutLayer must be applied before metrics_middleware in build_app \
              (innermost vs. outer observer); source order: TimeoutLayer at \
              {timeout_pos}, metrics at {metrics_pos}"
+        );
+    }
+
+    /// The OIDC enrollment callback's route timeout must be wider than the
+    /// global request timeout. Regression for `94991ed6`: the commit lowered
+    /// `SERVER_TOTAL` 15s→5s and `REQUEST_TIMEOUT` 30s→10s without widening
+    /// `/oauth/callback`, so the callback's two sequential IdP calls were each
+    /// capped at 5s and the whole route at 10s. A self-hosted IdP whose token
+    /// endpoint returns in the 5–15s band (which the pre-commit 15s per-call
+    /// budget admitted) was rejected. The fix gives the callback its own
+    /// [`ENROLL_CALLBACK_TIMEOUT`] (20s) wider than [`REQUEST_TIMEOUT`] (10s),
+    /// so the per-request overrides below fit. Pins the structural split
+    /// against a silent re-merge.
+    #[test]
+    fn enroll_callback_route_timeout_is_wider_than_global() {
+        assert!(
+            ENROLL_CALLBACK_TIMEOUT > REQUEST_TIMEOUT,
+            "the enrollment callback route must have a wider timeout than the \
+             global request timeout; got ENROLL_CALLBACK_TIMEOUT={ENROLL_CALLBACK_TIMEOUT:?} \
+             vs REQUEST_TIMEOUT={REQUEST_TIMEOUT:?}"
+        );
+        // Exact values pin the chosen budget against silent drift, since a
+        // later "tidy up the timeouts" change could widen or narrow one
+        // constant without revisiting the relationship the fix relies on.
+        assert_eq!(
+            REQUEST_TIMEOUT,
+            Duration::from_secs(10),
+            "global request timeout must stay at 10s"
+        );
+        assert_eq!(
+            ENROLL_CALLBACK_TIMEOUT,
+            Duration::from_secs(20),
+            "enrollment callback route timeout must be 20s: 15s token exchange + \
+             5s JWKS fetch leaves headroom under 20s for handler overhead"
+        );
+    }
+
+    /// The two per-request outbound IdP calls in the enrollment callback must
+    /// each carry an explicit `.timeout()` that fits inside the route-specific
+    /// [`ENROLL_CALLBACK_TIMEOUT`], and the token exchange must alone exceed
+    /// the old global [`REQUEST_TIMEOUT`] — that is the budget that admits the
+    /// 5–15s token-endpoint band the regression cut off. Pins the relationship
+    /// between the route timeout and the per-request overrides so loosening
+    /// one without the other is caught.
+    #[test]
+    fn enroll_callback_per_request_timeouts_fit_route_budget() {
+        use crate::handlers::enroll::IDP_TOKEN_EXCHANGE_TIMEOUT;
+        use crate::services::idp::oidc::IDP_JWKS_FETCH_TIMEOUT;
+
+        // The token exchange alone must exceed the regression-era global
+        // budget: this is what re-admits the 5–15s band (5s was the cut-off
+        // before the fix).
+        assert!(
+            IDP_TOKEN_EXCHANGE_TIMEOUT > REQUEST_TIMEOUT,
+            "token exchange per-request timeout must exceed the global request \
+             timeout; got {IDP_TOKEN_EXCHANGE_TIMEOUT:?} vs {REQUEST_TIMEOUT:?}"
+        );
+        assert_eq!(
+            IDP_TOKEN_EXCHANGE_TIMEOUT,
+            Duration::from_secs(15),
+            "token exchange restores the pre-94991ed6 15s per-call budget"
+        );
+        // The two per-request overrides must fit inside the route budget.
+        assert!(
+            IDP_TOKEN_EXCHANGE_TIMEOUT + IDP_JWKS_FETCH_TIMEOUT <= ENROLL_CALLBACK_TIMEOUT,
+            "the two sequential IdP calls ({IDP_TOKEN_EXCHANGE_TIMEOUT:?} + \
+             {IDP_JWKS_FETCH_TIMEOUT:?}) must fit inside the route timeout \
+             {ENROLL_CALLBACK_TIMEOUT:?}"
+        );
+        // The JWKS fetch does not get widened: it stays at the 5s budget the
+        // 94991ed6 regime had, made explicit so `SERVER_TOTAL` drifting cannot
+        // loosen it.
+        assert_eq!(
+            IDP_JWKS_FETCH_TIMEOUT,
+            Duration::from_secs(5),
+            "IdP JWKS fetch per-request timeout must stay at 5s"
+        );
+    }
+
+    /// Source-level ratchet: `/oauth/callback` must NOT be registered inside
+    /// [`build_api_routes`], which lives under the global [`REQUEST_TIMEOUT`].
+    /// The route must instead live in [`build_enrollment_callback_routes`] and
+    /// reach [`build_app`] as its own group so it can take
+    /// [`ENROLL_CALLBACK_TIMEOUT`]. Re-adding it to `build_api_routes` would
+    /// silently re-tighten the callback to 10s, re-introducing the regression.
+    #[test]
+    fn oauth_callback_is_isolated_from_global_timeout_group() {
+        let src = include_str!("router.rs");
+        // The route must have its own builder, separate from build_api_routes.
+        assert!(
+            src.contains("fn build_enrollment_callback_routes"),
+            "the enrollment callback must be isolated in its own builder so it can \
+             take the route-specific ENROLL_CALLBACK_TIMEOUT"
+        );
+        // Isolate `build_api_routes`'s body: from its signature to the next
+        // top-level `fn` (the public-read-routes builder it calls).
+        let (_, rest) = src
+            .split_once("fn build_api_routes(")
+            .expect("build_api_routes");
+        let (body, _) = rest
+            .split_once("\nfn ")
+            .expect("a top-level fn follows build_api_routes");
+        assert!(
+            !body.contains("\"/oauth/callback\""),
+            "/oauth/callback must live in build_enrollment_callback_routes (with the \
+             route-specific ENROLL_CALLBACK_TIMEOUT), not build_api_routes (under the \
+             global REQUEST_TIMEOUT); re-adding it re-introduces the regression"
+        );
+        // And build_app must actually apply the wider timeout to the callback
+        // group — guards against someone keeping the split but reverting the
+        // per-group timeout to REQUEST_TIMEOUT.
+        let (build_app_src, _) = src.split_once("#[cfg(test)]").expect("test module present");
+        assert!(
+            build_app_src.contains("ENROLL_CALLBACK_TIMEOUT"),
+            "build_app must apply ENROLL_CALLBACK_TIMEOUT to the callback group"
         );
     }
 

@@ -554,6 +554,7 @@ mod tests {
                 b"test_jwt_secret_must_be_at_least_32_characters_long".to_vec(),
             ),
             github_app: None,
+            enroll_idp_client: reqwest::Client::new(),
             http_client: reqwest::Client::new(),
             session_cache: db::SessionCache::new(10_000, 30),
             org_keys_cache: Default::default(),

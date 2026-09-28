@@ -881,6 +881,78 @@ async fn verify_id_token_happy_path() {
     assert_eq!(upstream.durable_subject.as_deref(), Some("user-123"));
 }
 
+/// The IdP JWKS fetch in [`verify_id_token`] is bounded by an explicit
+/// per-request `IDP_JWKS_FETCH_TIMEOUT` (5s), not by the shared server
+/// client's `SERVER_TOTAL`. The regression in `94991ed6` left this call
+/// relying on the client default; the fix makes the 5s explicit so it does
+/// not silently drift — and so loosening `SERVER_TOTAL` cannot widen it.
+///
+/// This test isolates the per-request timeout by handing [`verify_id_token`]
+/// a `reqwest::Client::new()` (no client-level default timeout), so the only
+/// bound on the JWKS GET is the per-request `.timeout()`. A JWKS endpoint
+/// that stalls 6s (past the 5s budget) must fail with a JWKS-fetch error
+/// rather than waiting the delay out. (`reqwest::Client::new()` is why this
+/// test reads 5s and not a wider client budget: on the real server the shared
+/// `server_client()` would also apply `SERVER_TOTAL = 5s`, but that bound
+/// is intentional, not the one under test here.) The 6s delay is a
+/// sanctioned real-clock wait — its subject is the timeout behavior under
+/// test, like the slow fake servers in `infra/jwks.rs`.
+#[tokio::test]
+async fn verify_id_token_fails_when_jwks_endpoint_exceeds_per_request_timeout() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let issuer = server.uri();
+    let client_id = "test-client";
+    let nonce = "test-nonce-jwks-timeout";
+
+    let key = OidcSigningKey::generate().unwrap();
+    let mut claims = base_claims(&issuer, client_id);
+    claims["nonce"] = serde_json::json!(nonce);
+    claims["hd"] = serde_json::json!("example.com");
+    let token = sign_test_jwt(&key, claims).await;
+    let provider = make_test_provider(&issuer);
+
+    // JWKS endpoint: stall 6s — past the 5s per-request budget.
+    let jwks_json = make_ec_jwks_json(&key);
+    Mock::given(method("GET"))
+        .and(path("/jwks"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(std::time::Duration::from_secs(6))
+                .set_body_string(jwks_json),
+        )
+        .mount(&server)
+        .await;
+
+    // Unbounded client: the per-request `.timeout()` is the only bound on
+    // the JWKS GET. If the per-request override were removed, this 6s delay
+    // would simply succeed (the GET has no other deadline), and the test
+    // would fail — so the test pins the wiring, not just the constant.
+    let client = reqwest::Client::new();
+
+    let start = std::time::Instant::now();
+    let result = verify_id_token(&client, &provider, &token, client_id, nonce).await;
+    let elapsed = start.elapsed();
+
+    let err = result.expect_err("a 6s JWKS fetch must fail the 5s per-request timeout");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("Failed to fetch JWKS") && msg.contains(provider.jwks_uri.as_str()),
+        "the error must be the JWKS-fetch failure (timeout surfaces as a reqwest \
+         Elapsed wrapped by the JWKS fetch map_err); got: {msg}"
+    );
+    // The per-request timeout (5s) must fire before the 6s delay delivers a
+    // response — a buffering/unbounded fetch would wait 6s and succeed. Allow
+    // a small margin for scheduling/overhead, but it must be well under 6s.
+    assert!(
+        elapsed < std::time::Duration::from_secs(6),
+        "JWKS fetch must be bounded by the 5s per-request timeout, not wait the 6s \
+         delay out; elapsed={elapsed:?}"
+    );
+}
+
 /// Regression for the buildable-but-wrong-family duplicate-`kid` case
 /// (introduced in commit 5af9b4e2): a validly-signed ES256 ID token whose
 /// verifying EC key shares its `kid` with an RSA entry earlier in the JWKS

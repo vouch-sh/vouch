@@ -558,6 +558,16 @@ async fn build_app_state(
     let http_client = http::server_client(&user_agent, extra_ca_pem.as_deref())
         .context("Failed to create shared HTTP client")?;
 
+    // Dedicated client for the OIDC enrollment callback's outbound IdP calls
+    // (token exchange + IdP JWKS fetch): a self-hosted IdP under load can take
+    // 5–15s to return a token, a band the shared client's 5s total / 3s read
+    // gap rejects. `reqwest` exposes no per-request `read_timeout` override, so
+    // this is a separate client with a widened read gap rather than a
+    // per-request `.timeout()` on `http_client`. See
+    // `router::ENROLL_CALLBACK_TIMEOUT` for the route-side budget.
+    let enroll_idp_client = http::enroll_idp_client(&user_agent, extra_ca_pem.as_deref())
+        .context("Failed to create enrollment-callback IdP HTTP client")?;
+
     let client_cert_trust = match config.mtls_client_ca_certs.as_deref() {
         Some(path) => {
             tracing::info!("Loading tls_client_auth client CA certificates from {path}");
@@ -663,6 +673,7 @@ async fn build_app_state(
         state_signer,
         github_app,
         http_client,
+        enroll_idp_client,
         session_cache: SessionCache::new(
             config.session_cache_max_capacity,
             config.session_cache_ttl_secs,

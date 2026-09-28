@@ -201,11 +201,38 @@ where
 /// (e.g. an OIDC Core §6.2 `request_uri` HTTPS fetch) against an in-process TLS
 /// mock: the test injects a `reqwest::Client` that trusts the mock's
 /// self-signed certificate, while the rest of the state is built exactly as
-/// [`build_test_app_state`] builds it.
+/// [`build_test_app_state`] builds it. The enrollment-callback IdP client is
+/// set to the same client; tests that need the two distinct (to reproduce the
+/// `enroll_idp_client` widening) use [`build_test_app_state_with_http_clients`].
 pub async fn build_test_app_state_with_http_client<F>(
     idps: Vec<ConfiguredIdp>,
     configure_store: F,
     http_client: reqwest::Client,
+) -> Arc<AppState>
+where
+    F: FnOnce(&mut DocumentStore),
+{
+    build_test_app_state_with_http_clients(idps, configure_store, http_client.clone(), http_client)
+        .await
+}
+
+/// Build an [`AppState`] for tests with distinct outbound HTTP clients for the
+/// shared server calls and the enrollment-callback IdP calls.
+///
+/// Production wires a *separate* [`vouch_common::http::enroll_idp_client`] into
+/// `AppState.enroll_idp_client` (widened read gap so a slow IdP token endpoint
+/// is not cut at the shared client's 3s `SERVER_READ`). Letting a test inject
+/// the two separately is what lets an enrollment-callback regression test
+/// inject a *narrow* `http_client` (mimicking the production
+/// [`vouch_common::http::server_client`]) alongside a *wide*
+/// `enroll_idp_client` — so the test passes only because the handler routes
+/// the token exchange through `enroll_idp_client`, and would fail if it
+/// regressed to `http_client`.
+pub async fn build_test_app_state_with_http_clients<F>(
+    idps: Vec<ConfiguredIdp>,
+    configure_store: F,
+    http_client: reqwest::Client,
+    enroll_idp_client: reqwest::Client,
 ) -> Arc<AppState>
 where
     F: FnOnce(&mut DocumentStore),
@@ -245,6 +272,7 @@ where
             b"test_jwt_secret_must_be_at_least_32_characters_long".to_vec(),
         ),
         github_app: None,
+        enroll_idp_client,
         http_client,
         session_cache: SessionCache::new(10_000, 30),
         org_keys_cache: Default::default(),
@@ -294,6 +322,7 @@ pub async fn test_app_state_with_rsa_key() -> Arc<AppState> {
             b"test_jwt_secret_must_be_at_least_32_characters_long".to_vec(),
         ),
         github_app: None,
+        enroll_idp_client: reqwest::Client::new(),
         http_client: reqwest::Client::new(),
         session_cache: SessionCache::new(10_000, 30),
         org_keys_cache: Default::default(),
@@ -389,6 +418,7 @@ pub async fn test_app_state_with_github_app(http_client: reqwest::Client) -> Arc
             b"test_jwt_secret_must_be_at_least_32_characters_long".to_vec(),
         ),
         github_app: Some(Arc::new(github_app)),
+        enroll_idp_client: http_client.clone(),
         http_client,
         session_cache: SessionCache::new(10_000, 30),
         org_keys_cache: Default::default(),
@@ -439,6 +469,7 @@ pub async fn test_app_state_encrypted() -> Arc<AppState> {
             b"test_jwt_secret_must_be_at_least_32_characters_long".to_vec(),
         ),
         github_app: None,
+        enroll_idp_client: reqwest::Client::new(),
         http_client: reqwest::Client::new(),
         session_cache: SessionCache::new(10_000, 30),
         org_keys_cache: Default::default(),

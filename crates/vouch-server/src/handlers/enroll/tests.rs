@@ -525,6 +525,39 @@ fn id_token_claims(issuer: &str, client_id: &str, nonce: &str, email: &str) -> s
     })
 }
 
+/// Build the full app router with the given IdPs and injected outbound HTTP
+/// clients — one for the shared server calls and one for the
+/// enrollment-callback IdP calls — mirroring
+/// [`crate::test_utils::test_app_with_idps`] but overriding both
+/// `state.http_client` and `state.enroll_idp_client`.
+///
+/// [`crate::test_utils::test_app_with_idps`] (and `test_app_state_with_idps`
+/// under it) build state with a bare `reqwest::Client::new()` that has NO
+/// client-level timeout — so a handler call that inherits the client default
+/// (no per-request `.timeout()`) never times out on a slow mock, and the
+/// enrollment-callback regression is not reproducible. The production
+/// `state.http_client` is [`vouch_common::http::server_client`] (5s total /
+/// 3s read gap) and `state.enroll_idp_client` is
+/// [`vouch_common::http::enroll_idp_client`] (15s / 15s). Tests that reproduce
+/// the `94991ed6` regression inject the *narrow* `server_client` as
+/// `http_client` (so reverting the handler to it re-introduces the 3s cut)
+/// alongside the *wide* `enroll_idp_client` (so the fix passes); the test
+/// passes only because the handler routes the token exchange through
+/// `enroll_idp_client`.
+async fn app_with_idps_and_clients(
+    idps: Vec<ConfiguredIdp>,
+    http_client: reqwest::Client,
+    enroll_idp_client: reqwest::Client,
+) -> (axum::Router, Arc<AppState>) {
+    use crate::infra::router::build_app;
+    use crate::test_utils::build_test_app_state_with_http_clients;
+    let state =
+        build_test_app_state_with_http_clients(idps, |_| {}, http_client, enroll_idp_client).await;
+    let config = state.config();
+    let router = build_app(state.clone(), &config).expect("build app");
+    (router, state)
+}
+
 #[tokio::test]
 async fn test_oidc_callback_rejects_whitespace_domain_email_e2e() {
     use crate::test_utils::{http_get, test_app_with_idps};
@@ -654,6 +687,250 @@ async fn test_oidc_callback_accepts_well_formed_email_e2e() {
         .await
         .expect("db query ok")
         .expect("E2E: well-formed email must be persisted");
+    assert_eq!(user.email, "alice@example.com");
+}
+
+/// Regression for `94991ed6`: an IdP whose token endpoint responds in the
+/// 5–15s band (self-hosted Keycloak/Dex/Authentik under load) must still
+/// complete enrollment. The commit lowered `SERVER_TOTAL` 15s→5s and
+/// `REQUEST_TIMEOUT` 30s→10s, capping the callback's token exchange at 5s (
+/// the shared client's default) and the whole route at 10s — so a 6s token
+/// response failed with `enroll-error-auth-complete-failed` before the IdP
+/// replied. The fix gives the callback a 20s route timeout and a 15s
+/// per-request timeout on the token exchange, re-admitting the band.
+///
+/// The test injects the real [`vouch_common::http::server_client`] (whose
+/// 5s total is the production bound the regression leans on) so that without
+/// the per-request `.timeout()` override the 6s response is cut at 5s; with
+/// the override (15s) it completes. The token endpoint delay (6s) is chosen
+/// to sit just past the 5s `SERVER_TOTAL` cut-off and well inside the 15s
+/// per-request budget. It is a sanctioned real-clock wait: its subject is the
+/// timeout behavior under test, like the slow fake servers in
+/// `infra/jwks.rs`'s chunked-oversize tests.
+#[tokio::test]
+async fn test_oidc_callback_completes_when_idp_token_endpoint_is_slow() {
+    use crate::test_utils::http_get;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let issuer = server.uri();
+    let key = OidcSigningKey::generate().expect("generate signing key");
+    let nonce = "e2e-slow-token-nonce";
+    let id_token = key
+        .sign_jwt(&id_token_claims(
+            &issuer,
+            "mock-client",
+            nonce,
+            "alice@example.com",
+        ))
+        .await
+        .expect("sign id token");
+
+    // JWKS endpoint: fast (keys are static JSON).
+    let jwk = key.public_key_jwk().expect("public_key_jwk");
+    let jwks_json = serde_json::json!({ "keys": [Jwk::Ec(jwk)] }).to_string();
+    Mock::given(method("GET"))
+        .and(path("/jwks"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(jwks_json))
+        .mount(&server)
+        .await;
+
+    // Token endpoint: 6s delay — inside the 5–15s band the regression cut
+    // off. `set_delay` is a real-clock `tokio::time::sleep` on the mock
+    // server; the per-request `.timeout()` races it.
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(std::time::Duration::from_secs(6))
+                .set_body_json(serde_json::json!({
+                    "id_token": id_token,
+                    "access_token": "fake-access-token",
+                    "token_type": "Bearer",
+                })),
+        )
+        .mount(&server)
+        .await;
+
+    // Inject the production clients so the inherited bounds are in play: the
+    // *narrow* `server_client` (5s total / 3s read gap) as `http_client`, and
+    // the *wide* `enroll_idp_client` (15s / 15s) as the enrollment-callback
+    // client. The test passes only because the handler routes the token
+    // exchange through `enroll_idp_client` — if the handler regressed to
+    // `http_client`, the 6s response would be cut at the 3s read gap and the
+    // test would fail. (With the bare `reqwest::Client::new()` that
+    // `test_app_with_idps` uses, the regression would not reproduce at all:
+    // no client-level timeout means the 6s delay simply completes.)
+    use vouch_common::http;
+    let http_client =
+        http::server_client("vouch-server-test", None).expect("build production server_client");
+    let enroll_idp_client = http::enroll_idp_client("vouch-server-test", None)
+        .expect("build production enroll_idp_client");
+    let (app, state) = app_with_idps_and_clients(
+        vec![mock_oidc_provider(&issuer)],
+        http_client,
+        enroll_idp_client,
+    )
+    .await;
+    // Open-enrollment mode (no allowlist) so a well-formed email proceeds.
+    {
+        let mut config = state.config().as_ref().clone();
+        config.allowed_domains = None;
+        state.config.store(std::sync::Arc::new(config));
+    }
+
+    let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().expect("valid timestamp");
+    let state_value = "e2e-slow-token-state";
+    db::create_oidc_state(
+        &state.store,
+        state_value,
+        None,
+        nonce,
+        "",
+        expires_at,
+        "mock-idp",
+    )
+    .await
+    .expect("create_oidc_state");
+
+    let (status, body) = http_get(
+        &app,
+        &format!("/oauth/callback?state={state_value}&code=dummy-auth-code"),
+        &[],
+    )
+    .await;
+
+    // The 6s token response sits in the 5–15s band: with the fix it completes
+    // and proceeds to the 303 redirect; without the per-request `.timeout()`
+    // override the shared client's 5s `SERVER_TOTAL` cancels the exchange and
+    // renders the error template (200 OK).
+    assert_eq!(
+        status,
+        StatusCode::SEE_OTHER,
+        "E2E: a 6s IdP token response must complete enrollment (regression for \
+         94991ed6); got {status}: {body}"
+    );
+    let user = db::get_user_by_email(&state.store, "alice@example.com")
+        .await
+        .expect("db query ok")
+        .expect("E2E: a 6s token response must still enroll the user");
+    assert_eq!(user.email, "alice@example.com");
+}
+
+/// Guards the route-specific [`crate::infra::router::ENROLL_CALLBACK_TIMEOUT`]
+/// (20s) part of the fix — the companion to
+/// [`test_oidc_callback_completes_when_idp_token_endpoint_is_slow`].
+///
+/// A token exchange that *exceeds the pre-fix global request budget* (10s)
+/// but stays inside the per-request override (15s) and the new route budget
+/// (20s) must still complete. A 6s delay (above) proves the per-request
+/// `.timeout()` override re-admits the 5–10s band but does not exercise the
+/// route timeout (6s < 10s). An 11s delay crosses the 10s global route budget
+/// the callback used to share: it only completes because the callback now has
+/// its own 20s [`ENROLL_CALLBACK_TIMEOUT`]. If someone re-merged
+/// `/oauth/callback` into the global 10s group while keeping the 15s
+/// per-request override, this test would fail with a 408 (the 10s route
+/// firing mid-exchange) instead of the 303.
+///
+/// On main (`94991ed6`), the shared client's 5s `SERVER_TOTAL` cancels the
+/// exchange at 5s — well before 11s — so the test fails with the
+/// `enroll-error-auth-complete-failed` template (200 OK), not 303. Like the
+/// 6s test it injects the real [`vouch_common::http::server_client`] so the
+/// inherited 5s bound is in play.
+#[tokio::test]
+async fn test_oidc_callback_completes_when_token_exchange_exceeds_global_request_timeout() {
+    use crate::test_utils::http_get;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let issuer = server.uri();
+    let key = OidcSigningKey::generate().expect("generate signing key");
+    let nonce = "e2e-route-timeout-nonce";
+    let id_token = key
+        .sign_jwt(&id_token_claims(
+            &issuer,
+            "mock-client",
+            nonce,
+            "alice@example.com",
+        ))
+        .await
+        .expect("sign id token");
+
+    let jwk = key.public_key_jwk().expect("public_key_jwk");
+    let jwks_json = serde_json::json!({ "keys": [Jwk::Ec(jwk)] }).to_string();
+    Mock::given(method("GET"))
+        .and(path("/jwks"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(jwks_json))
+        .mount(&server)
+        .await;
+
+    // 11s delay: past the 10s global request budget, inside the 15s
+    // per-request override and the 20s route budget.
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(std::time::Duration::from_secs(11))
+                .set_body_json(serde_json::json!({
+                    "id_token": id_token,
+                    "access_token": "fake-access-token",
+                    "token_type": "Bearer",
+                })),
+        )
+        .mount(&server)
+        .await;
+
+    use vouch_common::http;
+    let http_client =
+        http::server_client("vouch-server-test", None).expect("build production server_client");
+    let enroll_idp_client = http::enroll_idp_client("vouch-server-test", None)
+        .expect("build production enroll_idp_client");
+    let (app, state) = app_with_idps_and_clients(
+        vec![mock_oidc_provider(&issuer)],
+        http_client,
+        enroll_idp_client,
+    )
+    .await;
+    {
+        let mut config = state.config().as_ref().clone();
+        config.allowed_domains = None;
+        state.config.store(std::sync::Arc::new(config));
+    }
+
+    let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().expect("valid timestamp");
+    let state_value = "e2e-route-timeout-state";
+    db::create_oidc_state(
+        &state.store,
+        state_value,
+        None,
+        nonce,
+        "",
+        expires_at,
+        "mock-idp",
+    )
+    .await
+    .expect("create_oidc_state");
+
+    let (status, body) = http_get(
+        &app,
+        &format!("/oauth/callback?state={state_value}&code=dummy-auth-code"),
+        &[],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::SEE_OTHER,
+        "E2E: an 11s token response (past the 10s global budget, inside the 20s \
+         route budget) must complete — this guards the route-specific \
+         ENROLL_CALLBACK_TIMEOUT; got {status}: {body}"
+    );
+    let user = db::get_user_by_email(&state.store, "alice@example.com")
+        .await
+        .expect("db query ok")
+        .expect("E2E: an 11s token response must still enroll the user");
     assert_eq!(user.email, "alice@example.com");
 }
 

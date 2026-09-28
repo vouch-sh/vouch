@@ -30,6 +30,18 @@ const MAX_DISCOVERY_DOCUMENT_SIZE: usize = 256 * 1024;
 /// the remote host rather than by an operator.
 const MAX_IDP_JWKS_SIZE: usize = 256 * 1024;
 
+/// Per-request total timeout for the IdP JWKS fetch in [`verify_id_token`].
+///
+/// Fresh on each enrollment because keys rotate; the URL is the cached
+/// `jwks_uri` from startup discovery, so discovery being fast at boot does
+/// not bound this fetch's latency at enrollment time. Kept explicit, rather
+/// than inherited from the shared client's `SERVER_TOTAL`, so the 5s budget
+/// the IdP JWKS fetch gets does not silently drift with that constant — and
+/// so loosening `SERVER_TOTAL` never loosens this one. Sits under the
+/// route-specific [`crate::infra::router::ENROLL_CALLBACK_TIMEOUT`] with
+/// room for the preceding token exchange.
+pub(crate) const IDP_JWKS_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// A fully configured OIDC provider: discovery endpoints + client credentials.
 ///
 /// Built at startup by calling `fetch_discovery` for each OIDC provider and
@@ -408,6 +420,7 @@ pub(crate) async fn verify_id_token(
     // Fetch JWKS from the upstream IdP
     let jwks_response = http_client
         .get(provider.jwks_uri.as_str())
+        .timeout(IDP_JWKS_FETCH_TIMEOUT)
         .send()
         .await
         .map_err(|e| anyhow::anyhow!("Failed to fetch JWKS from {}: {e}", provider.jwks_uri))?;

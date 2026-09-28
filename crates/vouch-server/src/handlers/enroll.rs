@@ -54,6 +54,21 @@ use crate::services::oidc::ScopeSet;
 /// The body is a small JSON object whose largest member is an ID token.
 const MAX_TOKEN_RESPONSE_SIZE: usize = 256 * 1024;
 
+/// Per-request total timeout for the IdP token-exchange POST in the
+/// enrollment callback (`GET /oauth/callback`).
+///
+/// Restores the pre-`94991ed6` per-call budget (then `SERVER_TOTAL = 15s`)
+/// for the IdP token endpoint: self-hosted IdPs (Keycloak, Dex, Authentik)
+/// under load can respond in the 5–15s band, which the shared client's 5s
+/// [`vouch_common::http::timeouts::SERVER_TOTAL`] rejects. The callback is
+/// browser-initiated (the CLI polls a separate device-flow endpoint on a
+/// minutes-scale `expires_in`), so the `SERVER_TOTAL < CREDENTIAL_TOTAL`
+/// layering rationale does not tightly bind this per-call budget. Fits inside
+/// the route-specific [`crate::infra::router::ENROLL_CALLBACK_TIMEOUT`] with
+/// headroom for the subsequent JWKS fetch and handler overhead.
+pub(crate) const IDP_TOKEN_EXCHANGE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(15);
+
 // ============================================================================
 // Templates
 // ============================================================================
@@ -657,9 +672,10 @@ pub(crate) async fn oidc_callback(
     }
 
     let token_response = match state
-        .http_client
+        .enroll_idp_client
         .post(token_url)
         .form(&form_params)
+        .timeout(IDP_TOKEN_EXCHANGE_TIMEOUT)
         .send()
         .await
     {
@@ -701,9 +717,12 @@ pub(crate) async fn oidc_callback(
         };
 
     // Verify ID token: signature, issuer, audience, nonce, email_verified,
-    // and extract domain (OIDC Core Section 3.1.3.7).
+    // and extract domain (OIDC Core Section 3.1.3.7). Uses the dedicated
+    // `enroll_idp_client` (widened read gap) so a slow IdP JWKS endpoint is
+    // not cut at the shared client's 3s `SERVER_READ`; the JWKS fetch inside
+    // caps itself at `IDP_JWKS_FETCH_TIMEOUT` (5s) per-request.
     let identity = match oidc::verify_id_token(
-        &state.http_client,
+        &state.enroll_idp_client,
         &oidc_provider.provider,
         tokens.id_token.expose_secret(),
         client_id,
