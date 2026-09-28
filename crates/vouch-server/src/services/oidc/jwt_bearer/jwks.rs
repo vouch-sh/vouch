@@ -5,10 +5,9 @@
 //! with database-backed caching for multi-instance deployments.
 
 use super::validate::JwtAssertionHeader;
-use crate::crypto::alg::JwsAlgorithm;
 use crate::db::documents::jwks_cache::JwksCacheDoc;
 use crate::db::store::DocumentStore;
-use crate::db::{self, JwkEntry, JwkSet, KeyType};
+use crate::db::{self, JwkSet, UnusableJwk};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use crate::infra::jwks;
 
@@ -81,104 +80,39 @@ fn parse_jwks_value(value: &serde_json::Value) -> ServiceResult<JwkSet> {
 
 /// Find a matching key in a JWKS for the given JWT header.
 ///
-/// Matching strategy:
-/// 1. If `kid` is present in the header, match by `kid`.
-/// 2. Otherwise, match by algorithm/key type.
-///
-/// In both branches a candidate that matches the selector but cannot be
-/// built into a `DecodingKey` (wrong `kty` for the algorithm, or
-/// missing/invalid `x`/`y`/`n`/`e`/`crv` components) is skipped and the search
-/// continues, so an unbuildable key earlier in the set does not mask a usable
-/// one later. An error is returned only when no candidate is usable, in which
-/// case the first candidate's build error is preserved for diagnostics.
+/// The candidates are the keys whose `kid` equals the header's, or every key
+/// when the header has none. Each is tried with
+/// [`JwkEntry::decoding_key_for`], the rule write-time checks also use, and
+/// the first that builds is returned. A candidate that is not selectable for
+/// the algorithm is skipped; one that is selectable but malformed is skipped
+/// too, so an unbuildable key earlier in the set does not mask a usable one
+/// later (RFC 7517 §4.5 makes `kid` uniqueness a SHOULD). When none builds,
+/// the first malformed candidate's reason is returned.
 pub fn find_matching_key(
     jwks: &JwkSet,
     header: &JwtAssertionHeader,
 ) -> ServiceResult<jsonwebtoken::DecodingKey> {
-    // Try matching by kid first
-    if let Some(ref kid) = header.kid {
-        let mut first_build_err = None;
-        for key in &jwks.keys {
-            if key.kid.as_deref() == Some(kid) {
-                // Enforce the same `use`/`alg` constraints as the algorithm-fallback
-                // path: a key declared for encryption (`use != "sig"`) or a different
-                // algorithm must not be selected for signature verification, even when
-                // its `kid` matches. This mirrors the SAML KeyDescriptor behavior, which
-                // skips encryption-only keys.
-                if let Some(ref use_) = key.use_
-                    && use_ != "sig"
-                {
-                    continue;
-                }
-                if let Some(ref key_alg) = key.alg
-                    && key_alg.as_str() != header.alg.as_str()
-                {
-                    continue;
-                }
-                // A `kid` match that selects a key `build_decoding_key_from_jwk`
-                // cannot construct (wrong `kty` for the algorithm, or
-                // missing/invalid `x`/`y`/`n`/`e` components) is treated like the
-                // metadata mismatches above: skip it and keep scanning, so a later
-                // key carrying the same `kid` can still verify the assertion. The
-                // first build error is preserved so the all-candidates-fail case
-                // reports the same error a single-key set would.
-                match build_decoding_key_from_jwk(key, header.alg) {
-                    Ok(decoding_key) => return Ok(decoding_key),
-                    Err(e) if first_build_err.is_none() => first_build_err = Some(e),
-                    Err(_) => {}
-                }
-            }
-        }
-        tracing::debug!("No key with kid '{kid}' found in JWKS");
-        return Err(first_build_err.unwrap_or_else(|| {
-            ServiceError::oauth(
-                OAuthErrorCode::InvalidClient,
-                "No matching key found in JWKS",
-            )
-        }));
-    }
-
-    // Fall back to matching by algorithm/key type. The kty-per-alg rule is
-    // `KeyType::for_alg`, shared with the write-time usability checks so the
-    // two cannot disagree about which keys are selectable.
-    let expected_kty = KeyType::for_alg(header.alg);
-    let mut first_build_err = None;
-
+    let mut first_unusable = None;
     for key in &jwks.keys {
-        if key.kty == expected_kty {
-            // If key has an alg field, it must match
-            if let Some(ref key_alg) = key.alg
-                && key_alg.as_str() != header.alg.as_str()
-            {
-                continue;
-            }
-            // If key has a use field, it must be "sig"
-            if let Some(ref use_) = key.use_
-                && use_ != "sig"
-            {
-                continue;
-            }
-            // A candidate matching by `kty` that `build_decoding_key_from_jwk`
-            // cannot construct (missing/invalid `x`/`y`/`n`/`e`, or a wrong
-            // curve for OKP) is skipped and the search continues, mirroring
-            // the kid-match path. The `kty` selector does not check component
-            // presence, so a later key of the same `kty` can still satisfy the
-            // assertion. The first build error is preserved for the
-            // all-candidates-fail case.
-            match build_decoding_key_from_jwk(key, header.alg) {
-                Ok(decoding_key) => return Ok(decoding_key),
-                Err(e) if first_build_err.is_none() => first_build_err = Some(e),
-                Err(_) => {}
+        if header.kid.is_some() && key.kid != header.kid {
+            continue;
+        }
+        match key.decoding_key_for(header.alg) {
+            Ok(decoding_key) => return Ok(decoding_key),
+            Err(UnusableJwk::NotSelectable) => {}
+            Err(reason) => {
+                first_unusable.get_or_insert(reason);
             }
         }
     }
-
-    Err(first_build_err.unwrap_or_else(|| {
-        ServiceError::oauth(
-            OAuthErrorCode::InvalidClient,
-            "No matching key found in JWKS",
-        )
-    }))
+    if let Some(ref kid) = header.kid {
+        tracing::debug!("No usable key with kid '{kid}' found in JWKS");
+    }
+    let reason = first_unusable.unwrap_or(UnusableJwk::NotSelectable);
+    Err(ServiceError::oauth(
+        OAuthErrorCode::InvalidClient,
+        reason.to_string(),
+    ))
 }
 
 /// Minimum interval between JWKS URI force-refreshes (seconds).
@@ -245,75 +179,6 @@ pub async fn find_matching_key_with_refresh_client(
     }
 }
 
-/// Build a `DecodingKey` from a JWK entry.
-fn build_decoding_key_from_jwk(
-    key: &JwkEntry,
-    alg: JwsAlgorithm,
-) -> ServiceResult<jsonwebtoken::DecodingKey> {
-    match (&key.kty, alg) {
-        (KeyType::Ec, JwsAlgorithm::Es256) => {
-            let x = key.x.as_deref().ok_or_else(|| {
-                ServiceError::oauth(OAuthErrorCode::InvalidClient, "EC key missing x component")
-            })?;
-            let y = key.y.as_deref().ok_or_else(|| {
-                ServiceError::oauth(OAuthErrorCode::InvalidClient, "EC key missing y component")
-            })?;
-            jsonwebtoken::DecodingKey::from_ec_components(x, y).map_err(|e| {
-                tracing::debug!("Invalid EC key in JWKS: {e}");
-                ServiceError::oauth(OAuthErrorCode::InvalidClient, "Invalid key in JWKS")
-            })
-        }
-        (KeyType::Rsa, JwsAlgorithm::Rs256 | JwsAlgorithm::Ps256) => {
-            let n = key.n.as_deref().ok_or_else(|| {
-                ServiceError::oauth(OAuthErrorCode::InvalidClient, "RSA key missing n component")
-            })?;
-            let e = key.e.as_deref().ok_or_else(|| {
-                ServiceError::oauth(OAuthErrorCode::InvalidClient, "RSA key missing e component")
-            })?;
-            jsonwebtoken::DecodingKey::from_rsa_components(n, e).map_err(|e| {
-                tracing::debug!("Invalid RSA key in JWKS: {e}");
-                ServiceError::oauth(OAuthErrorCode::InvalidClient, "Invalid key in JWKS")
-            })
-        }
-        (KeyType::Okp, JwsAlgorithm::EdDsa) => {
-            let x = key.x.as_deref().ok_or_else(|| {
-                ServiceError::oauth(OAuthErrorCode::InvalidClient, "OKP key missing x component")
-            })?;
-            let crv = key.crv.as_deref().ok_or_else(|| {
-                ServiceError::oauth(
-                    OAuthErrorCode::InvalidClient,
-                    "OKP key missing crv component",
-                )
-            })?;
-            if crv != "Ed25519" {
-                return Err(ServiceError::oauth(
-                    OAuthErrorCode::InvalidClient,
-                    "EdDSA requires OKP key with Ed25519 curve",
-                ));
-            }
-            jsonwebtoken::DecodingKey::from_ed_components(x).map_err(|e| {
-                tracing::debug!("Invalid Ed25519 key in JWKS: {e}");
-                ServiceError::oauth(OAuthErrorCode::InvalidClient, "Invalid key in JWKS")
-            })
-        }
-        // Known kty, wrong alg for it. Kept as a separate arm from the
-        // `Other` case below rather than merged, so an unrecognized kty is
-        // a deliberate, visible decision here — both produce the same
-        // error today, but the split is what the "Other" case means, not
-        // an accident of a shared wildcard.
-        (KeyType::Ec | KeyType::Rsa | KeyType::Okp, _) => Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidClient,
-            "No matching key found in JWKS",
-        )),
-        // Unrecognized kty (RFC 7517 §4.1's registry is open — see
-        // `KeyType`): never selectable, regardless of alg.
-        (KeyType::Other(_), _) => Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidClient,
-            "No matching key found in JWKS",
-        )),
-    }
-}
-
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
@@ -322,7 +187,9 @@ fn build_decoding_key_from_jwk(
 )]
 mod tests {
     use super::*;
+    use crate::crypto::alg::JwsAlgorithm;
     use crate::crypto::jwk::EcJwk;
+    use crate::db::{JwkEntry, KeyType};
     use crate::test_utils;
     use base64::Engine as _;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -592,7 +459,7 @@ mod tests {
         };
         let hdr = header(JwsAlgorithm::Es256, Some("rsa-key"));
 
-        // kid match causes build_decoding_key_from_jwk("RSA", "ES256") which is
+        // kid match causes JwkEntry::decoding_key_for("RSA", "ES256") which is
         // an unsupported combination and returns an error.
         let result = find_matching_key(&jwks, &hdr);
         assert!(
@@ -715,7 +582,7 @@ mod tests {
     // write-time gates do not reject duplicate `kid`s. When two keys share a
     // `kid` and the first is the wrong `kty` for the header's algorithm (RSA
     // vs an ES256 header — the wrong-`kty`-for-`alg` arm of
-    // `build_decoding_key_from_jwk`), the search must skip it and use the
+    // `JwkEntry::decoding_key_for`), the search must skip it and use the
     // later, buildable sibling carrying the same `kid`.
     #[test]
     fn test_find_matching_key_kid_match_skips_unbuildable_sibling() {
@@ -788,14 +655,14 @@ mod tests {
     }
 
     // =======================================================================
-    // build_decoding_key_from_jwk tests
+    // JwkEntry::decoding_key_for tests
     // =======================================================================
 
     // RFC 7517 §4: an EC key is built from its crv, x and y parameters.
     #[test]
     fn test_build_decoding_key_ec_valid() {
         let key = ec_jwk_entry(None, None, None);
-        let result = build_decoding_key_from_jwk(&key, JwsAlgorithm::Es256);
+        let result = key.decoding_key_for(JwsAlgorithm::Es256);
         assert!(result.is_ok(), "should build valid EC decoding key");
     }
 
@@ -812,7 +679,8 @@ mod tests {
         // The full-size coordinates verify the token: the control case, without
         // which a truncated coordinate failing would prove nothing.
         let full = ec_entry_from_coordinates(jwk.x(), jwk.y());
-        let key = build_decoding_key_from_jwk(&full, JwsAlgorithm::Es256)
+        let key = full
+            .decoding_key_for(JwsAlgorithm::Es256)
             .expect("full-size EC key builds");
         assert!(
             verify_es256(&token, &key),
@@ -829,7 +697,8 @@ mod tests {
         );
         let truncated = ec_entry_from_coordinates(&short_x, jwk.y());
 
-        let verified = build_decoding_key_from_jwk(&truncated, JwsAlgorithm::Es256)
+        let verified = truncated
+            .decoding_key_for(JwsAlgorithm::Es256)
             .is_ok_and(|key| verify_es256(&token, &key));
         assert!(
             !verified,
@@ -873,14 +742,9 @@ mod tests {
         let mut key = ec_jwk_entry(None, None, None);
         key.x = None;
 
-        let result = build_decoding_key_from_jwk(&key, JwsAlgorithm::Es256);
+        let result = key.decoding_key_for(JwsAlgorithm::Es256);
         let err = result.unwrap_err();
-        assert!(
-            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
-        );
-        assert!(
-            matches!(&err, ServiceError::OAuth { description, .. } if description == "EC key missing x component")
-        );
+        assert!(err.to_string() == "EC key missing x component");
     }
 
     // RFC 7518 §6.2.1: "The following member MUST also be present for
@@ -892,14 +756,9 @@ mod tests {
         let mut key = ec_jwk_entry(None, None, None);
         key.y = None;
 
-        let result = build_decoding_key_from_jwk(&key, JwsAlgorithm::Es256);
+        let result = key.decoding_key_for(JwsAlgorithm::Es256);
         let err = result.unwrap_err();
-        assert!(
-            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
-        );
-        assert!(
-            matches!(&err, ServiceError::OAuth { description, .. } if description == "EC key missing y component")
-        );
+        assert!(err.to_string() == "EC key missing y component");
     }
 
     // RFC 7517 §4: EC parameters are base64url encoded.
@@ -908,14 +767,9 @@ mod tests {
         let mut key = ec_jwk_entry(None, None, None);
         key.x = Some("not-valid-base64url!!!".to_string());
 
-        let result = build_decoding_key_from_jwk(&key, JwsAlgorithm::Es256);
+        let result = key.decoding_key_for(JwsAlgorithm::Es256);
         let err = result.unwrap_err();
-        assert!(
-            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
-        );
-        assert!(
-            matches!(&err, ServiceError::OAuth { description, .. } if description == "Invalid key in JWKS")
-        );
+        assert!(err.to_string() == "Invalid key in JWKS");
     }
 
     // RFC 7518 §6.3.1: "The following members MUST be present for RSA public
@@ -923,7 +777,7 @@ mod tests {
     #[test]
     fn test_build_decoding_key_rsa_valid() {
         let key = rsa_jwk_entry(None, None, None);
-        let result = build_decoding_key_from_jwk(&key, JwsAlgorithm::Rs256);
+        let result = key.decoding_key_for(JwsAlgorithm::Rs256);
         assert!(result.is_ok(), "should build valid RSA decoding key");
     }
 
@@ -934,14 +788,9 @@ mod tests {
         let mut key = rsa_jwk_entry(None, None, None);
         key.n = None;
 
-        let result = build_decoding_key_from_jwk(&key, JwsAlgorithm::Rs256);
+        let result = key.decoding_key_for(JwsAlgorithm::Rs256);
         let err = result.unwrap_err();
-        assert!(
-            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
-        );
-        assert!(
-            matches!(&err, ServiceError::OAuth { description, .. } if description == "RSA key missing n component")
-        );
+        assert!(err.to_string() == "RSA key missing n component");
     }
 
     // RFC 7518 §6.3.1.2: the "e" (exponent) parameter is one of the members
@@ -951,14 +800,9 @@ mod tests {
         let mut key = rsa_jwk_entry(None, None, None);
         key.e = None;
 
-        let result = build_decoding_key_from_jwk(&key, JwsAlgorithm::Rs256);
+        let result = key.decoding_key_for(JwsAlgorithm::Rs256);
         let err = result.unwrap_err();
-        assert!(
-            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
-        );
-        assert!(
-            matches!(&err, ServiceError::OAuth { description, .. } if description == "RSA key missing e component")
-        );
+        assert!(err.to_string() == "RSA key missing e component");
     }
 
     // RFC 7517 §4: RSA parameters are base64url encoded.
@@ -967,14 +811,9 @@ mod tests {
         let mut key = rsa_jwk_entry(None, None, None);
         key.n = Some("not-valid!!!".to_string());
 
-        let result = build_decoding_key_from_jwk(&key, JwsAlgorithm::Rs256);
+        let result = key.decoding_key_for(JwsAlgorithm::Rs256);
         let err = result.unwrap_err();
-        assert!(
-            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
-        );
-        assert!(
-            matches!(&err, ServiceError::OAuth { description, .. } if description == "Invalid key in JWKS")
-        );
+        assert!(err.to_string() == "Invalid key in JWKS");
     }
 
     // RFC 7517 §4: kty and alg must agree.
@@ -982,14 +821,9 @@ mod tests {
     fn test_build_decoding_key_unsupported_kty_alg_combination() {
         // EC key with RS256 algorithm — unsupported combination
         let key = ec_jwk_entry(None, None, None);
-        let result = build_decoding_key_from_jwk(&key, JwsAlgorithm::Rs256);
+        let result = key.decoding_key_for(JwsAlgorithm::Rs256);
         let err = result.unwrap_err();
-        assert!(
-            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
-        );
-        assert!(
-            matches!(&err, ServiceError::OAuth { description, .. } if description == "No matching key found in JWKS")
-        );
+        assert!(err.to_string() == "No matching key found in JWKS");
     }
 
     // RFC 7517 §4: kty and alg must agree.
@@ -997,7 +831,7 @@ mod tests {
     fn test_build_decoding_key_rsa_key_with_ec_alg() {
         // RSA key with ES256 algorithm — unsupported combination
         let key = rsa_jwk_entry(None, None, None);
-        let result = build_decoding_key_from_jwk(&key, JwsAlgorithm::Es256);
+        let result = key.decoding_key_for(JwsAlgorithm::Es256);
         assert!(result.is_err());
     }
 
@@ -1005,7 +839,7 @@ mod tests {
     #[test]
     fn test_build_decoding_key_algorithm_kty_mismatch() {
         let key = ec_jwk_entry(None, None, None);
-        let result = build_decoding_key_from_jwk(&key, JwsAlgorithm::Rs256);
+        let result = key.decoding_key_for(JwsAlgorithm::Rs256);
         assert!(result.is_err());
     }
 
@@ -1032,7 +866,7 @@ mod tests {
     #[test]
     fn test_build_decoding_key_rsa_ps256_valid() {
         let key = rsa_jwk_entry(None, None, None);
-        let result = build_decoding_key_from_jwk(&key, JwsAlgorithm::Ps256);
+        let result = key.decoding_key_for(JwsAlgorithm::Ps256);
         assert!(
             result.is_ok(),
             "PS256 with valid RSA key should produce a decoding key"
@@ -1062,7 +896,7 @@ mod tests {
     #[test]
     fn test_build_decoding_key_okp_eddsa_valid() {
         let key = okp_jwk_entry(None, None, None);
-        let result = build_decoding_key_from_jwk(&key, JwsAlgorithm::EdDsa);
+        let result = key.decoding_key_for(JwsAlgorithm::EdDsa);
         assert!(
             result.is_ok(),
             "EdDSA with valid OKP key should produce a decoding key"
@@ -1075,14 +909,9 @@ mod tests {
         let mut key = okp_jwk_entry(None, None, None);
         key.x = None;
 
-        let result = build_decoding_key_from_jwk(&key, JwsAlgorithm::EdDsa);
+        let result = key.decoding_key_for(JwsAlgorithm::EdDsa);
         let err = result.unwrap_err();
-        assert!(
-            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
-        );
-        assert!(
-            matches!(&err, ServiceError::OAuth { description, .. } if description == "OKP key missing x component")
-        );
+        assert!(err.to_string() == "OKP key missing x component");
     }
 
     // RFC 7517 §4: an OKP key without crv is incomplete.
@@ -1091,14 +920,9 @@ mod tests {
         let mut key = okp_jwk_entry(None, None, None);
         key.crv = None;
 
-        let result = build_decoding_key_from_jwk(&key, JwsAlgorithm::EdDsa);
+        let result = key.decoding_key_for(JwsAlgorithm::EdDsa);
         let err = result.unwrap_err();
-        assert!(
-            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
-        );
-        assert!(
-            matches!(&err, ServiceError::OAuth { description, .. } if description == "OKP key missing crv component")
-        );
+        assert!(err.to_string() == "OKP key missing crv component");
     }
 
     // RFC 7517 §4: crv must name the curve the algorithm uses.
@@ -1107,14 +931,9 @@ mod tests {
         let mut key = okp_jwk_entry(None, None, None);
         key.crv = Some("Ed448".to_string());
 
-        let result = build_decoding_key_from_jwk(&key, JwsAlgorithm::EdDsa);
+        let result = key.decoding_key_for(JwsAlgorithm::EdDsa);
         let err = result.unwrap_err();
-        assert!(
-            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
-        );
-        assert!(
-            matches!(&err, ServiceError::OAuth { description, .. } if description == "EdDSA requires OKP key with Ed25519 curve")
-        );
+        assert!(err.to_string() == "EdDSA requires OKP key with Ed25519 curve");
     }
 
     // =======================================================================

@@ -11,6 +11,7 @@ use super::helpers::*;
 use crate::crypto;
 use crate::db::{self, RegistrationSource};
 use crate::services::auth::NoClientAuth;
+use crate::test_utils::{TEST_JWK_EC_X, TEST_JWK_EC_Y, TEST_JWK_RSA_N};
 
 // ========================================================================
 // Helper
@@ -1180,7 +1181,7 @@ async fn test_rfc7591_rejects_fapi_registration_with_rs256_only_jwks() {
         "dpop_bound_access_tokens": true,
         "token_endpoint_auth_method": "private_key_jwt",
         "jwks": {
-            "keys": [{"kty": "RSA", "alg": "RS256", "n": "n", "e": "AQAB"}]
+            "keys": [{"kty": "RSA", "alg": "RS256", "n": TEST_JWK_RSA_N, "e": "AQAB"}]
         }
     });
 
@@ -1213,7 +1214,7 @@ async fn test_rfc7591_accepts_fapi_registration_with_unpinned_rsa_jwks() {
         "dpop_bound_access_tokens": true,
         "token_endpoint_auth_method": "private_key_jwt",
         "jwks": {
-            "keys": [{"kty": "RSA", "n": "n", "e": "AQAB"}]
+            "keys": [{"kty": "RSA", "n": TEST_JWK_RSA_N, "e": "AQAB"}]
         }
     });
 
@@ -1376,7 +1377,7 @@ async fn test_rfc7591_accepts_non_fapi_registration_with_rs256_only_jwks() {
         "redirect_uris": ["https://example.com/callback"],
         "token_endpoint_auth_method": "private_key_jwt",
         "jwks": {
-            "keys": [{"kty": "RSA", "alg": "RS256", "n": "n", "e": "AQAB"}]
+            "keys": [{"kty": "RSA", "alg": "RS256", "n": TEST_JWK_RSA_N, "e": "AQAB"}]
         }
     });
 
@@ -1409,7 +1410,7 @@ async fn test_rfc7591_rejects_non_fapi_registration_with_enc_only_jwks() {
         "redirect_uris": ["https://example.com/callback"],
         "token_endpoint_auth_method": "private_key_jwt",
         "jwks": {
-            "keys": [{"kty": "EC", "crv": "P-256", "use": "enc"}]
+            "keys": [{"kty": "EC", "x": TEST_JWK_EC_X, "y": TEST_JWK_EC_Y, "crv": "P-256", "use": "enc"}]
         }
     });
 
@@ -1428,6 +1429,48 @@ async fn test_rfc7591_rejects_non_fapi_registration_with_enc_only_jwks() {
     );
     let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
     assert_eq!(json["error"], "invalid_client_metadata");
+}
+
+// RFC 7518 §6.2.1.2 and §6.3.1: an EC key's coordinates "MUST be the full
+// size of a coordinate for the curve", and "The following members MUST be
+// present for RSA public keys". A key failing either can never verify a
+// client assertion, so registration refuses it with invalid_client_metadata
+// (RFC 7591 §3.2.2) instead of accepting a client the token endpoint rejects.
+#[tokio::test]
+async fn test_rfc7591_rejects_jwks_whose_only_key_cannot_be_built() {
+    let (app, state) = test_app().await;
+    let short_x = "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRV";
+    let off_curve_y = TEST_JWK_EC_X;
+    let malformed = [
+        serde_json::json!({"kty": "EC", "alg": "ES256", "crv": "P-256"}),
+        serde_json::json!({"kty": "EC", "crv": "P-256", "x": short_x, "y": TEST_JWK_EC_Y}),
+        serde_json::json!({"kty": "EC", "crv": "P-256", "x": TEST_JWK_EC_X, "y": off_curve_y}),
+        serde_json::json!({"kty": "RSA", "alg": "PS256"}),
+        serde_json::json!({"kty": "RSA", "n": "n", "e": "AQAB"}),
+        serde_json::json!({"kty": "OKP", "crv": "Ed25519", "x": "AAAA"}),
+    ];
+    for (i, key) in malformed.iter().enumerate() {
+        let auth = bearer_token_unique(&state, &format!("unbuildable-{i}")).await;
+        let body = serde_json::json!({
+            "redirect_uris": ["https://example.com/callback"],
+            "token_endpoint_auth_method": "private_key_jwt",
+            "jwks": {"keys": [key]}
+        });
+        let (status, body) = http_post_json(
+            &app,
+            "/oauth/register",
+            &body.to_string(),
+            &[("Authorization", &auth)],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{key} cannot verify a client assertion, so registration refuses it: {body}"
+        );
+        let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(json["error"], "invalid_client_metadata");
+    }
 }
 
 #[tokio::test]
@@ -1531,7 +1574,7 @@ async fn test_rfc7591_rejects_self_signed_registration_with_certificate_less_jwk
     let body = serde_json::json!({
         "redirect_uris": ["https://example.com/callback"],
         "token_endpoint_auth_method": "self_signed_tls_client_auth",
-        "jwks": {"keys": [{"kty": "RSA", "n": "n", "e": "AQAB"}]}
+        "jwks": {"keys": [{"kty": "RSA", "n": TEST_JWK_RSA_N, "e": "AQAB"}]}
     });
 
     let (status, body) = http_post_json(
@@ -1990,7 +2033,7 @@ async fn test_rfc7591_rejects_jwks_with_type_invalid_key_member() {
         "redirect_uris": ["https://example.com/callback"],
         "token_endpoint_auth_method": "private_key_jwt",
         "jwks": {
-            "keys": [{"kty": "EC", "alg": true}]
+            "keys": [{"kty": "EC", "x": TEST_JWK_EC_X, "y": TEST_JWK_EC_Y, "alg": true}]
         }
     });
 

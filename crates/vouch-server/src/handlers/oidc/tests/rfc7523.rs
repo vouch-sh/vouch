@@ -235,7 +235,7 @@ async fn test_rfc7523_private_key_jwt_client_auth_full_flow() {
 // ========================================================================
 // JWKS key-search short-circuit regression (find_matching_key)
 //
-// `find_matching_key` used to `return build_decoding_key_from_jwk(...)` on the
+// `find_matching_key` used to `return JwkEntry::decoding_key_for(...)` on the
 // first selector-matching candidate, so an unbuildable key positioned before a
 // usable one in the JWKS aborted the search and returned `invalid_client` even
 // though a valid key existed later in the set. These tests exercise the full

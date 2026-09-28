@@ -12,6 +12,7 @@ use crate::db::documents::session::SessionDoc;
 use crate::db::store::DocumentStore;
 use crate::db::{self, UpdateClientRegistrationParams, User};
 use crate::infra::router;
+use crate::test_utils::{TEST_JWK_EC_X, TEST_JWK_EC_Y, TEST_JWK_RSA_N};
 use crate::{crypto, test_utils};
 
 /// Register a client via POST /oauth/register, return (client_id, registration_access_token).
@@ -98,7 +99,7 @@ async fn test_rfc7592_put_rejects_rs256_only_jwks_for_fapi_client() {
     let update_body = serde_json::json!({
         "redirect_uris": ["https://example.com/callback"],
         "jwks": {
-            "keys": [{"kty": "RSA", "alg": "RS256", "n": "n", "e": "AQAB"}]
+            "keys": [{"kty": "RSA", "alg": "RS256", "n": TEST_JWK_RSA_N, "e": "AQAB"}]
         }
     });
 
@@ -136,7 +137,7 @@ async fn test_rfc7592_put_accepts_unpinned_rsa_jwks_for_fapi_client() {
     let update_body = serde_json::json!({
         "redirect_uris": ["https://example.com/callback"],
         "jwks": {
-            "keys": [{"kty": "RSA", "n": "n", "e": "AQAB"}]
+            "keys": [{"kty": "RSA", "n": TEST_JWK_RSA_N, "e": "AQAB"}]
         }
     });
 
@@ -182,7 +183,7 @@ async fn test_rfc7592_put_accepts_rs256_only_jwks_for_non_fapi_client() {
     let update_body = serde_json::json!({
         "redirect_uris": ["https://example.com/callback"],
         "jwks": {
-            "keys": [{"kty": "RSA", "alg": "RS256", "n": "n", "e": "AQAB"}]
+            "keys": [{"kty": "RSA", "alg": "RS256", "n": TEST_JWK_RSA_N, "e": "AQAB"}]
         }
     });
 
@@ -236,7 +237,7 @@ async fn test_rfc7592_put_rejects_unusable_jwks_for_non_fapi_private_key_jwt_cli
     let update_body = serde_json::json!({
         "redirect_uris": ["https://example.com/callback"],
         "jwks": {
-            "keys": [{"kty": "EC", "crv": "P-256", "use": "enc"}]
+            "keys": [{"kty": "EC", "x": TEST_JWK_EC_X, "y": TEST_JWK_EC_Y, "crv": "P-256", "use": "enc"}]
         }
     });
 
@@ -457,7 +458,7 @@ async fn test_rfc7592_put_rejects_self_signed_client_swapping_in_certificate_les
 
     let update_body = serde_json::json!({
         "redirect_uris": ["https://example.com/callback"],
-        "jwks": {"keys": [{"kty": "RSA", "n": "n", "e": "AQAB"}]}
+        "jwks": {"keys": [{"kty": "RSA", "n": TEST_JWK_RSA_N, "e": "AQAB"}]}
     });
 
     let (status, body) = http_request(
@@ -493,7 +494,7 @@ async fn test_rfc7592_put_rejects_jwks_with_type_invalid_key_member() {
 
     let update_body = serde_json::json!({
         "redirect_uris": ["https://example.com/callback"],
-        "jwks": {"keys": [{"kty": "EC", "use": 123}]}
+        "jwks": {"keys": [{"kty": "EC", "x": TEST_JWK_EC_X, "y": TEST_JWK_EC_Y, "use": 123}]}
     });
 
     let (status, body) = http_request(

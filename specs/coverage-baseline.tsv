@@ -1921,11 +1921,6 @@ rfc8032#8.3#a1fa4ee2	SHOULD NOT	Contexts SHOULD NOT be used opportunistically, a
 rfc8032#8.5#53db1afb	SHOULD NOT	These variants SHOULD NOT be used.
 rfc8032#8.5#b90d9214	SHOULD	In summary, if a high 128-bit security level is enough, use of Ed25519 is RECOMMENDED; otherwise, Ed448 is RECOMMENDED.
 rfc8032#8.7#b1d4110e	MUST	In particular, unless the underlying protocol does not require it, the receiver MUST buffer the entire message (or enough information to reconstruct it, e.g., c
-rfc8037#2#406f588a	MUST	o The parameter "kty" MUST be "OKP".
-rfc8037#2#6b2a6dfa	MUST NOT	This parameter MUST NOT be present for public keys.
-rfc8037#2#8baf35c8	MUST	o The parameter "crv" MUST be present and contain the subtype of the key (from the "JSON Web Elliptic Curve" registry).
-rfc8037#2#96fccb82	MUST	o The parameter "x" MUST be present and contain the public key encoded using the base64url [RFC4648] encoding.
-rfc8037#2#fee54005	MUST	o The parameter "d" MUST be present for private keys and contain the private key encoded using the base64url encoding.
 rfc8037#3.1#a409ef41	MUST NOT	These subtypes MUST NOT be used for Elliptic Curve Diffie-Hellman Ephemeral Static (ECDH-ES).
 rfc8037#3.2#03bfecd0	MUST NOT	These subtypes MUST NOT be used for signing.
 rfc8037#4#44565ba9	MUST	If key generation or batch signature verification is performed, a well-seeded cryptographic random number generator is REQUIRED.
