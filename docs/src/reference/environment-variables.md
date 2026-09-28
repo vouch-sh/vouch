@@ -27,6 +27,8 @@ families, and `DSQL_USER`. They are listed in their relevant sections below.
 | `VOUCH_LISTEN_ADDR` | No | `[::]:3000` | Address and port to listen on. **Ignored when TLS is configured** — the server then binds 443 and 80 unconditionally. |
 | `VOUCH_MTLS_PORT` | No | `8443` | Port for the mTLS listener used by RFC 8705 certificate-bound tokens. The listener starts automatically whenever TLS is configured; there is no flag to disable it, and a bind failure here is fatal. |
 | `VOUCH_TRUSTED_PROXIES` | No | _(empty)_ | Comma-separated CIDRs of trusted reverse proxies (e.g. `10.0.0.0/8`). When empty, `X-Forwarded-For` is ignored entirely and the TCP peer is treated as the client — which behind a load balancer means **every user shares one rate-limit bucket**. An invalid CIDR is a fatal startup error. See [Behind a Reverse Proxy](../configuration/reverse-proxy.md). |
+| `VOUCH_HTTPS_PROXY_PROTOCOL_SOURCES` | No | _(empty)_ | Comma-separated CIDRs allowed to send a PROXY protocol v2 header on the HTTPS listener (443). When set, every connection to 443 must start with the header and come from one of these ranges, or it is closed; the header's source address becomes the client IP. For TLS-passthrough proxies (Istio/Envoy `PASSTHROUGH`, nginx `stream`, HAProxy `mode tcp`). Requires TLS. Cannot be combined with `VOUCH_TRUSTED_PROXIES`. An invalid CIDR is a fatal startup error. See [PROXY protocol](../configuration/reverse-proxy.md#proxy-protocol). |
+| `VOUCH_MTLS_PROXY_PROTOCOL_SOURCES` | No | _(empty)_ | The same, for the mTLS listener (`VOUCH_MTLS_PORT`). May be combined with `VOUCH_TRUSTED_PROXIES`. |
 | `VOUCH_MAX_CONNECTIONS` | No | `10000` | Maximum open connections across all listeners. When reached, Vouch stops accepting and new connections wait in the kernel's listen backlog until one closes. Keep it below the process's open-file limit (the AMI sets 65535). Must be at least 1. |
 | `VOUCH_MAX_CONNECTIONS_PER_IP` | No | `64` | Maximum open connections from one client address, counting IPv6 clients per /64. A connection over the cap is closed before its TLS handshake. Peers in `VOUCH_TRUSTED_PROXIES` are exempt, so behind a proxy that terminates TLS, set `VOUCH_TRUSTED_PROXIES` or the cap applies to the proxy itself. Must be at least 1. |
 | `VOUCH_EXTRA_CA_CERTS` | No | _(none)_ | Path to a PEM bundle of additional certificate authorities for the server's outbound HTTPS client. Needed when your IdP, or another service the server calls, uses an internal CA. An unreadable file is a fatal startup error. |
@@ -328,6 +330,9 @@ offending variable.
 | `VOUCH_ALLOWED_AAGUIDS` has a non-UUID entry | `Invalid VOUCH_ALLOWED_AAGUIDS` |
 | `VOUCH_LOG_FORMAT` is not `text` or `json` | `Invalid VOUCH_LOG_FORMAT` |
 | `VOUCH_TRUSTED_PROXIES` has a malformed CIDR | `Invalid CIDR in VOUCH_TRUSTED_PROXIES` |
+| `VOUCH_HTTPS_PROXY_PROTOCOL_SOURCES` or `VOUCH_MTLS_PROXY_PROTOCOL_SOURCES` has a malformed CIDR | `Invalid CIDR in VOUCH_…_PROXY_PROTOCOL_SOURCES` |
+| `VOUCH_HTTPS_PROXY_PROTOCOL_SOURCES` and `VOUCH_TRUSTED_PROXIES` are both set | `cannot both be set` |
+| A `VOUCH_*_PROXY_PROTOCOL_SOURCES` is set without TLS | `apply to the TLS listeners` |
 | `VOUCH_EXTRA_CA_CERTS` file is unreadable | Read failure |
 | `VOUCH_MTLS_CLIENT_CA_CERTS` file is unreadable | `Failed to read VOUCH_MTLS_CLIENT_CA_CERTS file` |
 | `VOUCH_MTLS_CLIENT_CA_CERTS` holds no valid CA certificate | `Invalid VOUCH_MTLS_CLIENT_CA_CERTS bundle` |

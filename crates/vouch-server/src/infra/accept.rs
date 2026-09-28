@@ -11,12 +11,13 @@
 //! Each accepted connection runs this pipeline in its own task:
 //!
 //! ```text
-//! accept → set_nodelay → total cap → spawn → [PROXY header, #1583]
+//! accept → set_nodelay → total cap → spawn → PROXY header (timeout)
 //!   → per-client cap → handshake (timeout)
 //!   → hyper-util auto HTTP/1 or HTTP/2 (TokioTimer, idle limit)
 //! ```
 //!
-//! The caps are described in [`super::conn_caps`].
+//! The caps are described in [`super::conn_caps`], the PROXY step in
+//! [`ProxyProtocol`].
 //!
 //! The task is spawned before any per-connection I/O, so a client that stalls
 //! its TLS handshake occupies only its own task and never blocks `accept` for
@@ -25,7 +26,7 @@
 use std::convert::Infallible;
 use std::future::Future;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -39,6 +40,9 @@ use hyper::body::{Body as HttpBody, Frame, Incoming, SizeHint};
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto;
 use hyper_util::service::TowerToHyperService;
+use ipnet::IpNet;
+use proxy_header::io::ProxiedStream;
+use proxy_header::{ParseConfig, Protocol};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
@@ -53,8 +57,12 @@ use crate::infra::router::REQUEST_TIMEOUT;
 /// Time limits applied to every connection.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ConnLimits {
-    /// From TCP accept to a finished [`Handshake`] (the TLS handshake on the
-    /// HTTPS and mTLS listeners).
+    /// From TCP accept to a complete PROXY protocol header, on a listener
+    /// that requires one.
+    pub(crate) proxy_header: Duration,
+    /// From the end of the PROXY header (or TCP accept, without one) to a
+    /// finished [`Handshake`] (the TLS handshake on the HTTPS and mTLS
+    /// listeners).
     pub(crate) handshake: Duration,
     /// hyper's HTTP/1 header read timeout, and the idle limit: a connection
     /// with no request in flight for this long is closed.
@@ -81,12 +89,109 @@ impl ConnLimits {
     /// request timeout, so shutdown never cuts off a request that could still
     /// have completed.
     pub(crate) const DEFAULT: Self = Self {
+        // The PROXY protocol spec (proxy-protocol.txt §2) lets the receiver
+        // time out a missing header, "at least 3 seconds to cover a TCP
+        // retransmit".
+        proxy_header: Duration::from_secs(5),
         handshake: Duration::from_secs(5),
         header_read: Duration::from_secs(10),
         h2_keep_alive_interval: Duration::from_secs(20),
         h2_keep_alive_timeout: Duration::from_secs(20),
         drain: REQUEST_TIMEOUT,
     };
+}
+
+/// The stream a [`Handshake`] starts from: the accepted TCP stream, after
+/// any PROXY protocol header. Bytes read past the header (the start of the TLS
+/// ClientHello, when both arrive in one segment) are replayed on the first
+/// read, so the handshake sees the stream exactly as the client sent it.
+pub(crate) type ClientStream = ProxiedStream<TcpStream>;
+
+/// PROXY protocol v2 on one listener.
+///
+/// A TCP proxy that relays TLS without terminating it (Istio/Envoy
+/// `PASSTHROUGH`, nginx `stream`, HAProxy `mode tcp`) opens its own connection
+/// and cannot add `X-Forwarded-For` to ciphertext; it sends the client's
+/// address in a PROXY header ahead of the relayed bytes instead.
+///
+/// The spec (<https://www.haproxy.org/download/1.8/doc/proxy-protocol.txt>)
+/// shapes each rule here:
+///
+/// - §2: "The receiver MUST be configured to only receive the protocol
+///   described in this specification and MUST not try to guess whether the
+///   protocol header is present or not." On an enabled listener the header is
+///   required; there is no detection.
+/// - §2: "The receiver SHOULD ensure proper access filtering so that only
+///   trusted proxies are allowed to use this protocol." A connection from
+///   outside `sources` is closed before anything is read.
+/// - §2: "The receiver MUST NOT start processing the connection before it
+///   receives a complete and valid PROXY protocol header." The header is read
+///   in full, under [`ConnLimits::proxy_header`], before the TLS handshake.
+///
+/// Only v2 is accepted: the load balancers and gateways this is for send v2,
+/// and turning v1 off keeps the text parser out of reach.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ProxyProtocol {
+    /// Peers allowed to send the header; empty means the listener does not
+    /// take the PROXY protocol.
+    sources: Arc<[IpNet]>,
+}
+
+impl ProxyProtocol {
+    /// The PROXY protocol is off: the TCP peer is the client.
+    pub(crate) fn off() -> Self {
+        Self::default()
+    }
+
+    /// Require a PROXY header from peers in `sources`; empty turns it off.
+    pub(crate) fn from_sources(sources: &[IpNet]) -> Self {
+        Self {
+            sources: sources.into(),
+        }
+    }
+
+    fn enabled(&self) -> bool {
+        !self.sources.is_empty()
+    }
+
+    fn allows(&self, peer: IpAddr) -> bool {
+        let peer = peer.to_canonical();
+        self.sources.iter().any(|net| net.contains(&peer))
+    }
+}
+
+/// v2 only, and no TLVs: nothing reads them.
+const PROXY_PARSE: ParseConfig = ParseConfig {
+    include_tlvs: false,
+    allow_v1: false,
+    allow_v2: true,
+};
+
+/// Read the PROXY header from a peer already checked against the source list,
+/// and return the stream after it with the client's address.
+///
+/// A `LOCAL` header (the proxy's own health check) carries no address, and
+/// the spec says the receiver "must use the real connection endpoints"; the
+/// same holds for a `PROXY` command with an `UNSPEC` or `AF_UNIX` family,
+/// where the receiver "is free to accept the connection anyway and use the
+/// real endpoints addresses". Both keep `tcp_peer`. A UDP address cannot
+/// describe a TCP connection, so it is refused.
+async fn read_proxy_header(
+    tcp: TcpStream,
+    tcp_peer: SocketAddr,
+) -> io::Result<(ClientStream, SocketAddr)> {
+    let stream = ProxiedStream::create_from_tokio(tcp, PROXY_PARSE).await?;
+    let client = match stream.proxy_header().proxied_address() {
+        None => tcp_peer,
+        Some(addr) if addr.protocol == Protocol::Stream => addr.source,
+        Some(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "PROXY header describes a datagram connection",
+            ));
+        }
+    };
+    Ok((stream, client))
 }
 
 /// Per-connection setup between TCP accept and HTTP.
@@ -99,10 +204,11 @@ pub(crate) trait Handshake: Send + Sync + 'static {
     /// Connection metadata exposed to handlers.
     type Info: Clone + Send + Sync + 'static;
 
-    /// Turn an accepted TCP stream into the stream hyper serves.
+    /// Turn an accepted stream into the stream hyper serves. `peer` is the
+    /// client: the PROXY header's source address when the listener takes one.
     fn handshake(
         &self,
-        tcp: TcpStream,
+        stream: ClientStream,
         peer: SocketAddr,
     ) -> impl Future<Output = io::Result<(Self::Io, Self::Info)>> + Send;
 }
@@ -111,15 +217,15 @@ pub(crate) trait Handshake: Send + Sync + 'static {
 pub(crate) struct PlainHandshake;
 
 impl Handshake for PlainHandshake {
-    type Io = TcpStream;
+    type Io = ClientStream;
     type Info = SocketAddr;
 
     async fn handshake(
         &self,
-        tcp: TcpStream,
+        stream: ClientStream,
         peer: SocketAddr,
-    ) -> io::Result<(TcpStream, SocketAddr)> {
-        Ok((tcp, peer))
+    ) -> io::Result<(ClientStream, SocketAddr)> {
+        Ok((stream, peer))
     }
 }
 
@@ -130,15 +236,15 @@ impl Handshake for PlainHandshake {
 pub(crate) struct TlsHandshake(pub(crate) RustlsConfig);
 
 impl Handshake for TlsHandshake {
-    type Io = tokio_rustls::server::TlsStream<TcpStream>;
+    type Io = tokio_rustls::server::TlsStream<ClientStream>;
     type Info = SocketAddr;
 
     async fn handshake(
         &self,
-        tcp: TcpStream,
+        stream: ClientStream,
         peer: SocketAddr,
     ) -> io::Result<(Self::Io, SocketAddr)> {
-        let tls = TlsAcceptor::from(self.0.get_inner()).accept(tcp).await?;
+        let tls = TlsAcceptor::from(self.0.get_inner()).accept(stream).await?;
         Ok((tls, peer))
     }
 }
@@ -147,6 +253,7 @@ impl Handshake for TlsHandshake {
 /// connections [`ConnLimits::drain`] to finish.
 pub(crate) async fn serve<H: Handshake>(
     listener: TcpListener,
+    proxy: ProxyProtocol,
     handshake: H,
     app: Router,
     limits: ConnLimits,
@@ -191,6 +298,7 @@ pub(crate) async fn serve<H: Handshake>(
             tcp,
             peer,
             slot,
+            proxy.clone(),
             Arc::clone(&handshake),
             app.clone(),
             limits,
@@ -237,23 +345,51 @@ async fn handle_accept_error(err: io::Error) {
 )]
 async fn serve_connection<H: Handshake>(
     tcp: TcpStream,
-    peer: SocketAddr,
+    tcp_peer: SocketAddr,
     _slot: TotalSlot,
+    proxy: ProxyProtocol,
     handshake: Arc<H>,
     app: Router,
     limits: ConnLimits,
     caps: Arc<ConnCaps>,
     shutdown: CancellationToken,
 ) {
-    // A PROXY protocol v2 header read (#1583) belongs here, ahead of the
-    // handshake and under its own timeout; it replaces `peer` with the
-    // header's source address, so the per-client cap below counts the real
-    // client rather than the load balancer.
+    // With the PROXY protocol on, `peer` becomes the header's source address,
+    // so the per-client cap below counts the client rather than the proxy.
+    let (stream, peer) = if proxy.enabled() {
+        if !proxy.allows(tcp_peer.ip()) {
+            tracing::debug!(remote_addr = %tcp_peer, "connection from outside the PROXY protocol sources; closing");
+            metrics::counter!("vouch_connections_rejected_total", "reason" => "proxy_source")
+                .increment(1);
+            return;
+        }
+        let header = tokio::time::timeout(limits.proxy_header, read_proxy_header(tcp, tcp_peer));
+        tokio::select! {
+            () = shutdown.cancelled() => return,
+            header = header => match header {
+                Ok(Ok(read)) => read,
+                Ok(Err(err)) => {
+                    tracing::debug!(remote_addr = %tcp_peer, "PROXY header refused: {err}");
+                    metrics::counter!("vouch_connections_rejected_total", "reason" => "proxy_header")
+                        .increment(1);
+                    return;
+                }
+                Err(_) => {
+                    tracing::debug!(remote_addr = %tcp_peer, "PROXY header timed out");
+                    metrics::counter!("vouch_connections_rejected_total", "reason" => "proxy_header")
+                        .increment(1);
+                    return;
+                }
+            },
+        }
+    } else {
+        (ProxiedStream::unproxied(tcp), tcp_peer)
+    };
     let Some(_client_slot) = caps.admit(peer.ip()) else {
         tracing::debug!(remote_addr = %peer, "per-client connection cap reached; closing");
         return;
     };
-    let handshake = tokio::time::timeout(limits.handshake, handshake.handshake(tcp, peer));
+    let handshake = tokio::time::timeout(limits.handshake, handshake.handshake(stream, peer));
     let (io, info) = tokio::select! {
         () = shutdown.cancelled() => return,
         handshake = handshake => match handshake {
@@ -409,6 +545,7 @@ mod tests {
     /// Short limits so the timeout tests finish quickly; the drain is long
     /// enough that no test depends on it expiring.
     const SHORT: ConnLimits = ConnLimits {
+        proxy_header: Duration::from_millis(300),
         handshake: Duration::from_millis(300),
         header_read: Duration::from_millis(300),
         h2_keep_alive_interval: Duration::from_secs(20),
@@ -437,11 +574,33 @@ mod tests {
         limits: ConnLimits,
         caps: Arc<ConnCaps>,
     ) -> (SocketAddr, CancellationToken, tokio::task::JoinHandle<()>) {
+        start_full(limits, caps, ProxyProtocol::off()).await
+    }
+
+    /// A listener requiring a PROXY header from `sources`.
+    async fn start_proxied(
+        limits: ConnLimits,
+        caps: Arc<ConnCaps>,
+        sources: &[&str],
+    ) -> (SocketAddr, CancellationToken, tokio::task::JoinHandle<()>) {
+        let sources: Vec<IpNet> = sources
+            .iter()
+            .map(|net| net.parse().expect("CIDR"))
+            .collect();
+        start_full(limits, caps, ProxyProtocol::from_sources(&sources)).await
+    }
+
+    async fn start_full(
+        limits: ConnLimits,
+        caps: Arc<ConnCaps>,
+        proxy: ProxyProtocol,
+    ) -> (SocketAddr, CancellationToken, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("local addr");
         let shutdown = CancellationToken::new();
         let server = tokio::spawn(serve(
             listener,
+            proxy,
             PlainHandshake,
             app(),
             limits,
@@ -687,6 +846,161 @@ mod tests {
         read_until_closed(&mut stream)
             .await
             .expect("client stalled mid-request-head must be disconnected");
+    }
+
+    /// A PROXY v2 header for a TCP connection from `source`.
+    fn proxy_v2(source: &str) -> Vec<u8> {
+        let header = proxy_header::ProxyHeader::with_address(proxy_header::ProxiedAddress::stream(
+            source.parse().expect("source"),
+            "192.0.2.1:443".parse().expect("destination"),
+        ));
+        let mut buf = Vec::new();
+        header.encode_v2(&mut buf).expect("encode");
+        buf
+    }
+
+    /// Send `header` and a `Connection: close` request for `/peer` in one
+    /// write, and return everything the server sends before closing.
+    async fn request_after(addr: SocketAddr, header: &[u8]) -> String {
+        let mut stream = TcpStream::connect(addr).await.expect("connect");
+        let mut bytes = header.to_vec();
+        bytes.extend_from_slice(
+            b"GET /peer HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        );
+        stream.write_all(&bytes).await.expect("write");
+        let response = read_until_closed(&mut stream).await.expect("closed");
+        String::from_utf8_lossy(&response).into_owned()
+    }
+
+    const LOOPBACK: &[&str] = &["127.0.0.0/8"];
+
+    /// The header's source address, not the proxy's, is the peer handlers
+    /// see. The request follows the header in the same write, so the bytes
+    /// read past the header must be replayed to hyper.
+    #[tokio::test]
+    async fn proxy_header_source_becomes_the_peer() {
+        let (addr, _shutdown, _server) =
+            start_proxied(ConnLimits::DEFAULT, ConnCaps::for_test(), LOOPBACK).await;
+        let response = request_after(addr, &proxy_v2("203.0.113.9:40000")).await;
+        assert!(response.starts_with("HTTP/1.1 200"), "response: {response}");
+        assert!(
+            response.ends_with("203.0.113.9"),
+            "the peer must be the header's source; response: {response}"
+        );
+    }
+
+    /// proxy-protocol.txt §2: "The receiver SHOULD ensure proper access
+    /// filtering so that only trusted proxies are allowed to use this
+    /// protocol." A well-formed header from a peer outside the configured
+    /// sources is a client forging its address; it is closed unanswered.
+    #[tokio::test]
+    async fn proxy_header_from_untrusted_source_is_refused() {
+        let (addr, _shutdown, _server) =
+            start_proxied(ConnLimits::DEFAULT, ConnCaps::for_test(), &["192.0.2.0/24"]).await;
+        let response = request_after(addr, &proxy_v2("203.0.113.9:40000")).await;
+        assert!(response.is_empty(), "response: {response}");
+    }
+
+    /// proxy-protocol.txt §2: the receiver "MUST not try to guess whether the
+    /// protocol header is present or not." A request without one, even from a
+    /// trusted source, is not served.
+    #[tokio::test]
+    async fn missing_proxy_header_is_refused() {
+        let (addr, _shutdown, _server) =
+            start_proxied(ConnLimits::DEFAULT, ConnCaps::for_test(), LOOPBACK).await;
+        let response = request_after(addr, b"").await;
+        assert!(response.is_empty(), "response: {response}");
+    }
+
+    /// Only v2 is accepted, so the v1 text form is refused.
+    #[tokio::test]
+    async fn proxy_v1_header_is_refused() {
+        let (addr, _shutdown, _server) =
+            start_proxied(ConnLimits::DEFAULT, ConnCaps::for_test(), LOOPBACK).await;
+        let response = request_after(addr, b"PROXY TCP4 203.0.113.9 192.0.2.1 40000 443\r\n").await;
+        assert!(response.is_empty(), "response: {response}");
+    }
+
+    /// A UDP address cannot describe the TCP connection it arrived on.
+    #[tokio::test]
+    async fn proxy_header_for_a_datagram_is_refused() {
+        let (addr, _shutdown, _server) =
+            start_proxied(ConnLimits::DEFAULT, ConnCaps::for_test(), LOOPBACK).await;
+        let header =
+            proxy_header::ProxyHeader::with_address(proxy_header::ProxiedAddress::datagram(
+                "203.0.113.9:40000".parse().expect("source"),
+                "192.0.2.1:443".parse().expect("destination"),
+            ));
+        let mut buf = Vec::new();
+        header.encode_v2(&mut buf).expect("encode");
+        let response = request_after(addr, &buf).await;
+        assert!(response.is_empty(), "response: {response}");
+    }
+
+    /// proxy-protocol.txt §2.2, LOCAL: "The receiver must accept this
+    /// connection as valid and must use the real connection endpoints". A
+    /// proxy's own health check is served, with the TCP peer as the client.
+    #[tokio::test]
+    async fn local_proxy_header_keeps_the_tcp_peer() {
+        let (addr, _shutdown, _server) =
+            start_proxied(ConnLimits::DEFAULT, ConnCaps::for_test(), LOOPBACK).await;
+        let mut buf = Vec::new();
+        proxy_header::ProxyHeader::with_local()
+            .encode_v2(&mut buf)
+            .expect("encode");
+        let response = request_after(addr, &buf).await;
+        assert!(response.starts_with("HTTP/1.1 200"), "response: {response}");
+        assert!(response.ends_with("127.0.0.1"), "response: {response}");
+    }
+
+    /// A trusted peer that never finishes its header is closed by the header
+    /// timeout. The handshake and header read limits are far beyond the
+    /// test's bound, so only the PROXY timeout can close it.
+    #[tokio::test]
+    async fn stalled_proxy_header_is_closed() {
+        let limits = ConnLimits {
+            proxy_header: Duration::from_millis(300),
+            handshake: Duration::from_secs(3600),
+            header_read: Duration::from_secs(3600),
+            ..ConnLimits::DEFAULT
+        };
+        let (addr, _shutdown, _server) =
+            start_proxied(limits, ConnCaps::for_test(), LOOPBACK).await;
+        let mut stream = TcpStream::connect(addr).await.expect("connect");
+        // The start of a valid header, then nothing.
+        let header = proxy_v2("203.0.113.9:40000");
+        let half = header.get(..10).expect("partial header");
+        stream.write_all(half).await.expect("write");
+        read_until_closed(&mut stream)
+            .await
+            .expect("a stalled PROXY header must be closed");
+    }
+
+    /// The per-client cap counts the header's source address: behind a proxy
+    /// every connection shares the proxy's TCP address, which would otherwise
+    /// put all clients under one cap.
+    #[tokio::test]
+    async fn per_client_cap_counts_the_proxied_client() {
+        let (addr, _shutdown, _server) =
+            start_proxied(ConnLimits::DEFAULT, caps(100, 1), LOOPBACK).await;
+        let mut first = TcpStream::connect(addr).await.expect("connect");
+        first
+            .write_all(&proxy_v2("203.0.113.9:40000"))
+            .await
+            .expect("write header");
+        let response = request_keep_alive(&mut first).await;
+        assert!(response.starts_with("HTTP/1.1 200"), "response: {response}");
+
+        let other = request_after(addr, &proxy_v2("203.0.113.10:40000")).await;
+        assert!(
+            other.starts_with("HTTP/1.1 200"),
+            "another client behind the same proxy has its own allowance; response: {other}"
+        );
+        let same = request_after(addr, &proxy_v2("203.0.113.9:40001")).await;
+        assert!(
+            same.is_empty(),
+            "a second connection from the same client is over its cap; response: {same}"
+        );
     }
 
     /// A request in flight, including its response body, keeps a connection

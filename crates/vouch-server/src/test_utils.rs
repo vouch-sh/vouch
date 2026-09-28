@@ -142,6 +142,8 @@ pub fn test_config() -> ServerConfig {
         allowed_aaguids: AaguidPolicy::Any,
         log_format: LogFormat::Text,
         trusted_proxies: Vec::new(),
+        https_proxy_protocol_sources: Vec::new(),
+        mtls_proxy_protocol_sources: Vec::new(),
         connection_caps: ConnCapConfig::DEFAULT,
         metrics_bearer_token: None,
         certification_test_token: None,

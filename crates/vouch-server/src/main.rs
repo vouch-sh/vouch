@@ -152,7 +152,9 @@ async fn prepare_serve(
 
 async fn run_server(args: config::Args, instance: Option<bootstrap::Bootstrap>) -> Result<()> {
     // Initialize all server components (config, database, state, background tasks)
-    let components = startup::initialize(args, instance.as_ref()).await?;
+    // Boxed: holding `Args` puts this future over clippy's `large_futures`
+    // threshold.
+    let components = Box::pin(startup::initialize(args, instance.as_ref())).await?;
 
     // Build the HTTP router with all routes, middleware, and state
     let app = components.build_app()?;

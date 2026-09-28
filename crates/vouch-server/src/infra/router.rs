@@ -823,8 +823,10 @@ fn build_admin_routes(config: &config::ServerConfig) -> anyhow::Result<Router<Ar
 /// Readiness probe handler.
 ///
 /// Checks database connectivity. Returns 200 if ready, 503 if not.
-/// Used by Kubernetes readiness and startup probes.
-async fn readiness_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+/// Used by Kubernetes readiness and startup probes. Also served on the port 80
+/// redirect listener, which never takes the PROXY protocol, so a probe keeps
+/// working when port 443 requires a PROXY header.
+pub(crate) async fn readiness_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     match state.db.is_healthy().await {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"status": "ready"}))),
         Err(e) => {

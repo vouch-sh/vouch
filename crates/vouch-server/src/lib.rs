@@ -154,9 +154,12 @@ impl AppState {
 /// - Validates Host header against `rp_id` to prevent injection attacks
 /// - Uses 308 Permanent Redirect to preserve HTTP method
 /// - Allows `/health` endpoint for load balancer health checks
+/// - Allows `/health/ready` for readiness probes, which cannot send the PROXY
+///   header port 443 may require
 pub fn build_redirect_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(|| async { "ok" }))
+        .route("/health/ready", get(infra::router::readiness_handler))
         .fallback(redirect_to_https)
         .with_state(state)
 }
@@ -223,6 +226,7 @@ mod redirect_tests {
     use crate::crypto::keys::OidcSigningKey;
     use crate::db::pool::PoolConfig;
     use crate::infra::conn_caps::ConnCapConfig;
+    use crate::test_utils::test_app_state;
     use axum::body::Body;
     use axum::http::Request;
     use secrecy::SecretString;
@@ -286,6 +290,8 @@ mod redirect_tests {
             allowed_aaguids: AaguidPolicy::Any,
             log_format: config::LogFormat::Text,
             trusted_proxies: Vec::new(),
+            https_proxy_protocol_sources: Vec::new(),
+            mtls_proxy_protocol_sources: Vec::new(),
             connection_caps: ConnCapConfig::DEFAULT,
             metrics_bearer_token: None,
             certification_test_token: None,
@@ -373,6 +379,23 @@ mod redirect_tests {
         let req = Request::builder()
             .uri("/health")
             .header("host", "vouch.sh")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// Port 80 never takes the PROXY protocol, so it must answer the
+    /// readiness probe itself rather than redirect it to 443, which may
+    /// require a PROXY header the kubelet cannot send.
+    #[tokio::test]
+    async fn test_readiness_served_on_http() {
+        let app = build_redirect_router(test_app_state().await);
+
+        let req = Request::builder()
+            .uri("/health/ready")
+            .header("host", "10.0.0.5")
             .body(Body::empty())
             .unwrap();
 

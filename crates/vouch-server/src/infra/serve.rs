@@ -16,7 +16,7 @@ use crate::AppState;
 use crate::config::ServerConfig;
 use crate::infra::s3_config;
 
-use super::accept::{self, ConnLimits, PlainHandshake, TlsHandshake};
+use super::accept::{self, ConnLimits, PlainHandshake, ProxyProtocol, TlsHandshake};
 use super::conn_caps::ConnCaps;
 use super::mtls_listener::MtlsHandshake;
 use super::startup::ServerComponents;
@@ -177,6 +177,7 @@ async fn serve_tls_on(
 
     let mtls_handle = tokio::spawn(accept::serve(
         mtls_listener,
+        ProxyProtocol::from_sources(&config.mtls_proxy_protocol_sources),
         MtlsHandshake::new(mtls_config_swap.clone()),
         app.clone(),
         ConnLimits::DEFAULT,
@@ -210,8 +211,11 @@ async fn serve_tls_on(
     let http_handle = tokio::spawn(async move {
         match tokio::net::TcpListener::bind(http_addr).await {
             Ok(listener) => {
+                // Never takes the PROXY protocol, so a readiness probe that
+                // sends no header can reach `/health/ready` here.
                 accept::serve(
                     listener,
+                    ProxyProtocol::off(),
                     PlainHandshake,
                     redirect_app,
                     ConnLimits::DEFAULT,
@@ -233,6 +237,7 @@ async fn serve_tls_on(
     // Run HTTPS server (port 443) - this blocks until shutdown
     accept::serve(
         https_listener,
+        ProxyProtocol::from_sources(&config.https_proxy_protocol_sources),
         TlsHandshake(tls_config),
         app,
         ConnLimits::DEFAULT,
@@ -261,6 +266,17 @@ async fn serve_plain(
     app: Router,
     s3_parts: S3ConfigParts,
 ) -> Result<Option<JoinHandle<()>>> {
+    // The PROXY protocol settings name the HTTPS and mTLS listeners, which
+    // only run with TLS; ignoring them here would leave an operator believing
+    // the header was required.
+    if !config.https_proxy_protocol_sources.is_empty()
+        || !config.mtls_proxy_protocol_sources.is_empty()
+    {
+        anyhow::bail!(
+            "VOUCH_HTTPS_PROXY_PROTOCOL_SOURCES and VOUCH_MTLS_PROXY_PROTOCOL_SOURCES apply to \
+             the TLS listeners; configure VOUCH_TLS_CERT and VOUCH_TLS_KEY or unset them"
+        );
+    }
     // Bind before starting anything, so a port conflict leaves nothing running.
     let listener = tokio::net::TcpListener::bind(&config.listen_addr).await?;
     tracing::info!("Listening on http://{}", config.listen_addr);
@@ -276,6 +292,7 @@ async fn serve_plain(
     });
     accept::serve(
         listener,
+        ProxyProtocol::off(),
         PlainHandshake,
         app,
         ConnLimits::DEFAULT,

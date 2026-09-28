@@ -228,17 +228,18 @@ fn parse_log_format(s: &str) -> Result<LogFormat> {
     }
 }
 
-/// Parse a comma-separated list of CIDR networks.
-fn parse_trusted_proxies(s: &str) -> Result<Vec<IpNet>> {
+/// Parse a comma-separated list of CIDR networks; `var` names the setting in
+/// the error.
+fn parse_cidr_list(s: &str, var: &str) -> Result<Vec<IpNet>> {
     if s.trim().is_empty() {
         return Ok(Vec::new());
     }
     s.split(',')
         .map(|cidr| {
             let trimmed = cidr.trim();
-            trimmed.parse::<IpNet>().map_err(|e| {
-                anyhow::anyhow!("Invalid CIDR in VOUCH_TRUSTED_PROXIES '{}': {}", trimmed, e)
-            })
+            trimmed
+                .parse::<IpNet>()
+                .map_err(|e| anyhow::anyhow!("Invalid CIDR in {var} '{trimmed}': {e}"))
         })
         .collect()
 }
@@ -523,6 +524,21 @@ pub struct Args {
     /// is used directly (safe for direct exposure without a reverse proxy).
     #[arg(long, env = "VOUCH_TRUSTED_PROXIES", default_value = "")]
     pub trusted_proxies: String,
+
+    /// CIDRs allowed to send a PROXY protocol v2 header on the HTTPS listener
+    /// (comma-separated).
+    ///
+    /// When set, every connection to port 443 must start with the header and
+    /// come from one of these ranges; any other connection is closed. For a
+    /// TLS-passthrough proxy (Istio/Envoy `PASSTHROUGH`, nginx `stream`,
+    /// HAProxy `mode tcp`). Cannot be combined with `VOUCH_TRUSTED_PROXIES`.
+    #[arg(long, env = "VOUCH_HTTPS_PROXY_PROTOCOL_SOURCES", default_value = "")]
+    pub https_proxy_protocol_sources: String,
+
+    /// CIDRs allowed to send a PROXY protocol v2 header on the mTLS listener
+    /// (comma-separated). Same rules as `VOUCH_HTTPS_PROXY_PROTOCOL_SOURCES`.
+    #[arg(long, env = "VOUCH_MTLS_PROXY_PROTOCOL_SOURCES", default_value = "")]
+    pub mtls_proxy_protocol_sources: String,
 
     /// Maximum open connections across all listeners. When reached, new
     /// connections wait in the kernel backlog until one closes.
@@ -927,6 +943,10 @@ pub struct ServerConfig {
     pub log_format: LogFormat,
     /// Trusted proxy CIDRs for X-Forwarded-For parsing.
     pub trusted_proxies: Vec<IpNet>,
+    /// PROXY protocol senders on the HTTPS listener; empty means off.
+    pub https_proxy_protocol_sources: Vec<IpNet>,
+    /// PROXY protocol senders on the mTLS listener; empty means off.
+    pub mtls_proxy_protocol_sources: Vec<IpNet>,
     /// Caps on open connections.
     pub connection_caps: ConnCapConfig,
     /// Bearer token for /metrics endpoint access control.
@@ -1066,7 +1086,25 @@ impl ServerConfig {
         let log_format = parse_log_format(&args.log_format)?;
 
         // Parse trusted proxies
-        let trusted_proxies = parse_trusted_proxies(&args.trusted_proxies)?;
+        let trusted_proxies = parse_cidr_list(&args.trusted_proxies, "VOUCH_TRUSTED_PROXIES")?;
+        let https_proxy_protocol_sources = parse_cidr_list(
+            &args.https_proxy_protocol_sources,
+            "VOUCH_HTTPS_PROXY_PROTOCOL_SOURCES",
+        )?;
+        let mtls_proxy_protocol_sources = parse_cidr_list(
+            &args.mtls_proxy_protocol_sources,
+            "VOUCH_MTLS_PROXY_PROTOCOL_SOURCES",
+        )?;
+        // Both describe a proxy in front of port 443. With the PROXY protocol
+        // on, the peer is already the client, and walking X-Forwarded-For from
+        // there would let a client inside the trusted range pick its address.
+        if !https_proxy_protocol_sources.is_empty() && !trusted_proxies.is_empty() {
+            anyhow::bail!(
+                "VOUCH_HTTPS_PROXY_PROTOCOL_SOURCES and VOUCH_TRUSTED_PROXIES cannot both be \
+                 set: the HTTPS listener takes the client address from the PROXY header or \
+                 from X-Forwarded-For, not both"
+            );
+        }
 
         // Parse unified IdP list (OIDC + SAML).
         let idps = parse_idps(args.idps.as_deref())?;
@@ -1134,6 +1172,8 @@ impl ServerConfig {
             allowed_aaguids,
             log_format,
             trusted_proxies,
+            https_proxy_protocol_sources,
+            mtls_proxy_protocol_sources,
             connection_caps: ConnCapConfig {
                 max_total: args.max_connections,
                 max_per_ip: args.max_connections_per_ip,
@@ -2051,6 +2091,89 @@ mod tests {
     // (`https://host//oauth/token`), breaking spec-compliant clients and
     // DPoP `htu` validation.
     // ========================================================================
+
+    // ========================================================================
+    // ServerConfig::from_args — PROXY protocol sources
+    // ========================================================================
+
+    #[test]
+    fn from_args_parses_proxy_protocol_sources_per_listener() {
+        let args = Args::try_parse_from([
+            "vouch-server",
+            "--https-proxy-protocol-sources=10.0.0.0/8, 2001:db8::/32",
+            "--mtls-proxy-protocol-sources=192.168.0.0/16",
+        ])
+        .expect("parse");
+        let config = ServerConfig::from_args(args, None).expect("config builds");
+        let https: Vec<String> = config
+            .https_proxy_protocol_sources
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(https, ["10.0.0.0/8", "2001:db8::/32"]);
+        let mtls: Vec<String> = config
+            .mtls_proxy_protocol_sources
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(mtls, ["192.168.0.0/16"]);
+    }
+
+    #[test]
+    fn from_args_proxy_protocol_off_by_default() {
+        let args = Args::try_parse_from(["vouch-server"]).expect("parse");
+        let config = ServerConfig::from_args(args, None).expect("config builds");
+        assert!(config.https_proxy_protocol_sources.is_empty());
+        assert!(config.mtls_proxy_protocol_sources.is_empty());
+    }
+
+    #[test]
+    fn from_args_rejects_invalid_proxy_protocol_cidr() {
+        let args =
+            Args::try_parse_from(["vouch-server", "--mtls-proxy-protocol-sources=10.0.0.0/33"])
+                .expect("parse");
+        let err = ServerConfig::from_args(args, None)
+            .err()
+            .expect("invalid CIDR is fatal");
+        assert!(
+            err.to_string()
+                .contains("VOUCH_MTLS_PROXY_PROTOCOL_SOURCES"),
+            "the error names the setting: {err}"
+        );
+    }
+
+    /// The HTTPS listener takes the client address from one proxy mechanism.
+    /// With both, a client inside `VOUCH_TRUSTED_PROXIES` that reached 443
+    /// through the PROXY sender could pick its address with X-Forwarded-For.
+    #[test]
+    fn from_args_rejects_https_proxy_protocol_with_trusted_proxies() {
+        let args = Args::try_parse_from([
+            "vouch-server",
+            "--https-proxy-protocol-sources=10.0.0.0/8",
+            "--trusted-proxies=10.0.0.0/8",
+        ])
+        .expect("parse");
+        let err = ServerConfig::from_args(args, None)
+            .err()
+            .expect("combination is fatal");
+        assert!(
+            err.to_string().contains("cannot both be set"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// The mTLS listener never reads X-Forwarded-For, so its PROXY setting
+    /// coexists with a TLS-terminating proxy in front of 443.
+    #[test]
+    fn from_args_allows_mtls_proxy_protocol_with_trusted_proxies() {
+        let args = Args::try_parse_from([
+            "vouch-server",
+            "--mtls-proxy-protocol-sources=10.0.0.0/8",
+            "--trusted-proxies=10.0.0.0/8",
+        ])
+        .expect("parse");
+        ServerConfig::from_args(args, None).expect("config builds");
+    }
 
     #[test]
     fn from_args_trims_single_trailing_slash_from_base_url() {

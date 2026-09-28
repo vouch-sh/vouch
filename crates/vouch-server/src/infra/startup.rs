@@ -833,6 +833,20 @@ fn log_startup_summary(config: &config::ServerConfig) {
         );
     }
 
+    for (listener, sources) in [
+        ("HTTPS", &config.https_proxy_protocol_sources),
+        ("mTLS", &config.mtls_proxy_protocol_sources),
+    ] {
+        if !sources.is_empty() {
+            let cidrs: Vec<String> = sources.iter().map(ToString::to_string).collect();
+            tracing::warn!(
+                "PROXY protocol required on the {listener} listener from: {} -- the header's \
+                 source address is the client address",
+                cidrs.join(", "),
+            );
+        }
+    }
+
     let pool_cfg = &config.pool_config;
     tracing::info!(
         "Database pool: max_connections={}, min_connections={}, idle_timeout={}s, acquire_timeout={}s",

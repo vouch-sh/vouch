@@ -196,6 +196,9 @@ opentelemetry_sdk = { version = "=0.33.0", default-features = false }
 opentelemetry-otlp = { version = "=0.33.0", default-features = false }
 p256 = { version = "=0.13.2", default-features = false }
 proptest = { version = "=1.11.0", default-features = false }
+# PROXY protocol v2 header parsing for the HTTPS and mTLS listeners (#1583).
+# MIT, no unsafe; its only dependencies (tokio, pin-project-lite) are already in the tree.
+proxy-header = { version = "=0.1.3", default-features = false }
 psl = { version = "=2.1.237", default-features = false }
 reqwest = { version = "=0.13.5", default-features = false }
 roxmltree = { version = "=0.21.1", default-features = false }
