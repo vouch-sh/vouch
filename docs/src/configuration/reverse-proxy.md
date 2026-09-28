@@ -52,10 +52,10 @@ recorded on **audit events**.
 
 It applies to the HTTPS port only. On the mTLS port (8443) Vouch terminates TLS itself, so no proxy
 can add a header there, and `X-Forwarded-For` is always ignored: the client IP is the TCP peer, or
-the PROXY header's source when `VOUCH_MTLS_PROXY_PROTOCOL_SOURCES` is set.
+the PROXY header's source when `VOUCH_PROXY_PROTOCOL` is on.
 
-It cannot be combined with `VOUCH_HTTPS_PROXY_PROTOCOL_SOURCES`; the server refuses to start with
-both. See [PROXY protocol](#proxy-protocol).
+With `VOUCH_PROXY_PROTOCOL` on, the same list names the proxies allowed to send the PROXY header,
+and `X-Forwarded-For` is not read on any port. See [PROXY protocol](#proxy-protocol).
 
 **When it is unset** (the default), `X-Forwarded-For` is ignored completely and the TCP peer
 address is used as the client IP. Behind a proxy, that peer address is the proxy. Every user
@@ -233,19 +233,20 @@ header ahead of the relayed bytes, and Vouch reads it before the TLS handshake. 
 cipher policy, its post-quantum key exchange, the mTLS listener and RFC 8705 certificate-bound
 tokens.
 
-Enable it per listener, naming the ranges your proxies connect from:
+Turn it on, and name the ranges your proxies connect from in `VOUCH_TRUSTED_PROXIES`:
 
 ```bash
-VOUCH_HTTPS_PROXY_PROTOCOL_SOURCES=10.244.0.0/16   # port 443
-VOUCH_MTLS_PROXY_PROTOCOL_SOURCES=10.244.0.0/16    # port 8443 (VOUCH_MTLS_PORT)
+VOUCH_PROXY_PROTOCOL=true
+VOUCH_TRUSTED_PROXIES=10.244.0.0/16
 ```
 
-On a listener with it enabled:
+It applies to the HTTPS listener (443) and the mTLS listener (`VOUCH_MTLS_PORT`, 8443) together.
+On both:
 
 - **Every connection must start with a PROXY protocol v2 header.** A connection without one is
   closed. There is no auto-detection: the spec forbids guessing whether the header is present, so a
   listener with the PROXY protocol on cannot also serve clients that connect directly.
-- **Only the listed ranges may send it.** A connection from any other address is closed before
+- **Only `VOUCH_TRUSTED_PROXIES` may send it.** A connection from any other address is closed before
   anything is read from it. Anyone who can reach the listener from inside a listed range can claim
   any client address, so list only your proxies, and restrict who can reach the port (below).
 - **Version 2 (binary) only.** The text v1 format is refused. AWS NLB sends v2, and Istio/Envoy send
@@ -258,13 +259,11 @@ On a listener with it enabled:
   address is used as the client.
 
 The header's source address is then the client for rate limiting, the audit `client_ip`, and the
-per-address connection cap. `X-Forwarded-For` is never read on a listener that takes the PROXY
-protocol: `VOUCH_HTTPS_PROXY_PROTOCOL_SOURCES` and `VOUCH_TRUSTED_PROXIES` cannot both be set, and
-the server refuses to start if they are. `VOUCH_MTLS_PROXY_PROTOCOL_SOURCES` can be combined with
-`VOUCH_TRUSTED_PROXIES`, for a TLS-terminating proxy on 443 and a passthrough proxy on 8443.
+per-address connection cap. `X-Forwarded-For` is not read: the proxy relays TLS it cannot add the
+header to, so any `X-Forwarded-For` in the request came from the client.
 
-Both settings apply only when TLS is configured; the server refuses to start with either set and
-no TLS certificate. An invalid CIDR is a fatal startup error. Port 80 never takes the PROXY
+`VOUCH_PROXY_PROTOCOL` applies only when TLS is configured, and needs `VOUCH_TRUSTED_PROXIES`; the
+server refuses to start without either. Port 80 never takes the PROXY
 protocol, and serves `/health/ready` so that probes which cannot send the header, such as the
 kubelet's, still have a readiness endpoint.
 
@@ -360,8 +359,8 @@ Both halves of that are required:
 `sidecar.istio.io/inject: "false"` also works, but it takes Vouch's outbound traffic (database,
 upstream IdP) out of the mesh too.
 
-**5. Restrict who can send the header.** Vouch sees the gateway pods' IPs, so set both
-`VOUCH_*_PROXY_PROTOCOL_SOURCES` to the pod CIDR the gateway pods run in. Any other pod in that CIDR
+**5. Restrict who can send the header.** Vouch sees the gateway pods' IPs, so set
+`VOUCH_TRUSTED_PROXIES` to the pod CIDR the gateway pods run in. Any other pod in that CIDR
 could forge a header, so add a `NetworkPolicy` that admits only the gateway pods to Vouch's 443 and
 8443:
 
@@ -410,8 +409,7 @@ With TLS terminated at the proxy:
 
 With the PROXY protocol:
 
-- [ ] `VOUCH_HTTPS_PROXY_PROTOCOL_SOURCES` / `VOUCH_MTLS_PROXY_PROTOCOL_SOURCES` list only the
-      proxies' ranges, and `VOUCH_TRUSTED_PROXIES` is unset
+- [ ] `VOUCH_PROXY_PROTOCOL=true`, and `VOUCH_TRUSTED_PROXIES` lists only the proxies' ranges
 - [ ] The proxy sends PROXY protocol **v2**
 - [ ] Nothing but the proxy can reach 443 and 8443 (security group, `NetworkPolicy`)
 - [ ] Probes that cannot send the header use port 80

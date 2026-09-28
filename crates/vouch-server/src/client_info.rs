@@ -110,8 +110,11 @@ impl FromRequestParts<Arc<AppState>> for ClientInfo {
         state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
         let config = state.config.load();
-        let client_ip =
-            client_ip_from_request(&parts.extensions, &parts.headers, &config.trusted_proxies);
+        let client_ip = client_ip_from_request(
+            &parts.extensions,
+            &parts.headers,
+            config.forwarded_for_proxies(),
+        );
 
         Ok(Self {
             client_ip,

@@ -51,6 +51,7 @@ use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
+use crate::config::ServerConfig;
 use crate::infra::conn_caps::{ConnCaps, TotalSlot};
 use crate::infra::router::REQUEST_TIMEOUT;
 
@@ -141,6 +142,16 @@ impl ProxyProtocol {
     /// The PROXY protocol is off: the TCP peer is the client.
     pub(crate) fn off() -> Self {
         Self::default()
+    }
+
+    /// The listener setting for `config`: a header from every trusted proxy
+    /// when `VOUCH_PROXY_PROTOCOL` is on, otherwise off.
+    pub(crate) fn from_config(config: &ServerConfig) -> Self {
+        if config.proxy_protocol {
+            Self::from_sources(&config.trusted_proxies)
+        } else {
+            Self::off()
+        }
     }
 
     /// Require a PROXY header from peers in `sources`; empty turns it off.

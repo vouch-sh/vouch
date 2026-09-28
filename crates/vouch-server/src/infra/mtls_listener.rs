@@ -717,6 +717,15 @@ mod tests {
     async fn serve_over_https_proxied(
         app: axum::Router,
     ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+        serve_over_https_with(app, loopback_sender()).await
+    }
+
+    /// Serve `app` through the real accept loop and `TlsHandshake`, with the
+    /// PROXY protocol setting `proxy`.
+    async fn serve_over_https_with(
+        app: axum::Router,
+        proxy: ProxyProtocol,
+    ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
         let (cert_der, pkcs8_der) = make_self_signed_server_cert();
         let server_cert = rustls::pki_types::CertificateDer::from(cert_der);
         let server_key = rustls::pki_types::PrivateKeyDer::Pkcs8(pkcs8_der.into());
@@ -728,7 +737,7 @@ mod tests {
         let addr = tcp.local_addr().expect("local addr");
         let server = tokio::spawn(accept::serve(
             tcp,
-            loopback_sender(),
+            proxy,
             accept::TlsHandshake(tls),
             app,
             ConnLimits::DEFAULT,
@@ -788,6 +797,19 @@ mod tests {
         path: &'static str,
         client_cert: Option<(Vec<u8>, Vec<u8>)>,
     ) -> String {
+        let request =
+            format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        send_over_tls_after(addr, header, request, client_cert).await
+    }
+
+    /// Send `header`, then a TLS session carrying the raw HTTP `request`, and
+    /// return the response.
+    async fn send_over_tls_after(
+        addr: SocketAddr,
+        header: Vec<u8>,
+        request: String,
+        client_cert: Option<(Vec<u8>, Vec<u8>)>,
+    ) -> String {
         let exchange = tokio::task::spawn_blocking(move || {
             let provider = Arc::new(tls::bcp195_crypto_provider());
             let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
@@ -818,8 +840,6 @@ mod tests {
                     prefix: Some(header),
                 },
             );
-            let request =
-                format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
             tls.write_all(request.as_bytes()).expect("write");
             let mut response = Vec::new();
             // The server may close without close_notify; what arrived is kept.
@@ -864,6 +884,37 @@ mod tests {
         assert!(
             response.ends_with("203.0.113.9"),
             "ClientInfo must record the PROXY header's source; response: {response}"
+        );
+    }
+
+    /// With `VOUCH_PROXY_PROTOCOL` on, X-Forwarded-For is not read even when
+    /// the PROXY header's client sits inside `VOUCH_TRUSTED_PROXIES`: the
+    /// trusted proxy relays TLS it cannot add the header to, so any
+    /// X-Forwarded-For comes from the client, which could pick its address.
+    #[tokio::test]
+    async fn https_proxy_protocol_ignores_forwarded_for_from_trusted_client() {
+        let state = test_utils::test_app_state().await;
+        let mut config = (**state.config()).clone();
+        config.proxy_protocol = true;
+        config.trusted_proxies = vec![
+            "127.0.0.0/8".parse().expect("CIDR"),
+            "10.0.0.0/8".parse().expect("CIDR"),
+        ];
+        state.config.store(Arc::new(config.clone()));
+        let (addr, server) =
+            serve_over_https_with(client_ip_app(state), ProxyProtocol::from_config(&config)).await;
+
+        let request = "GET /client-ip HTTP/1.1\r\nHost: localhost\r\n\
+                       X-Forwarded-For: 203.0.113.50\r\nConnection: close\r\n\r\n"
+            .to_string();
+        let response = send_over_tls_after(addr, proxy_v2("10.1.2.3:40000"), request, None).await;
+        server.abort();
+
+        assert!(response.starts_with("HTTP/1.1 200"), "response: {response}");
+        assert!(
+            response.ends_with("10.1.2.3"),
+            "the PROXY header's source is the client, not X-Forwarded-For; \
+             response: {response}"
         );
     }
 

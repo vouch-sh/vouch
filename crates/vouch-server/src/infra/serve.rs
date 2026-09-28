@@ -177,7 +177,7 @@ async fn serve_tls_on(
 
     let mtls_handle = tokio::spawn(accept::serve(
         mtls_listener,
-        ProxyProtocol::from_sources(&config.mtls_proxy_protocol_sources),
+        ProxyProtocol::from_config(config),
         MtlsHandshake::new(mtls_config_swap.clone()),
         app.clone(),
         ConnLimits::DEFAULT,
@@ -237,7 +237,7 @@ async fn serve_tls_on(
     // Run HTTPS server (port 443) - this blocks until shutdown
     accept::serve(
         https_listener,
-        ProxyProtocol::from_sources(&config.https_proxy_protocol_sources),
+        ProxyProtocol::from_config(config),
         TlsHandshake(tls_config),
         app,
         ConnLimits::DEFAULT,
@@ -266,15 +266,13 @@ async fn serve_plain(
     app: Router,
     s3_parts: S3ConfigParts,
 ) -> Result<Option<JoinHandle<()>>> {
-    // The PROXY protocol settings name the HTTPS and mTLS listeners, which
-    // only run with TLS; ignoring them here would leave an operator believing
-    // the header was required.
-    if !config.https_proxy_protocol_sources.is_empty()
-        || !config.mtls_proxy_protocol_sources.is_empty()
-    {
+    // The PROXY protocol applies to the HTTPS and mTLS listeners, which only
+    // run with TLS; ignoring it here would leave an operator believing the
+    // header was required.
+    if config.proxy_protocol {
         anyhow::bail!(
-            "VOUCH_HTTPS_PROXY_PROTOCOL_SOURCES and VOUCH_MTLS_PROXY_PROTOCOL_SOURCES apply to \
-             the TLS listeners; configure VOUCH_TLS_CERT and VOUCH_TLS_KEY or unset them"
+            "VOUCH_PROXY_PROTOCOL applies to the TLS listeners; configure VOUCH_TLS_CERT and \
+             VOUCH_TLS_KEY or unset it"
         );
     }
     // Bind before starting anything, so a port conflict leaves nothing running.

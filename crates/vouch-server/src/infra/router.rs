@@ -62,7 +62,7 @@ macro_rules! maybe_rate_limit {
         tower::util::option_layer(if $config.certification_test_token.is_some() {
             None
         } else {
-            Some($builder(&$config.trusted_proxies)?)
+            Some($builder($config.forwarded_for_proxies())?)
         })
     };
 }
