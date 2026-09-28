@@ -447,7 +447,7 @@ mod tests {
     use crate::db::{self, ClientKeys, Pool};
     use crate::infra::conn_caps::ConnCapConfig;
     use crate::services::oidc::jwt_bearer::validate::JwtAudience;
-    use crate::test_utils::build_test_app_state_with_http_client;
+    use crate::test_utils::{build_test_app_state_with_http_client, test_tls_acceptor};
     use arc_swap::ArcSwap;
     use secrecy::SecretString;
     use std::sync::Arc;
@@ -942,53 +942,11 @@ mod tests {
     // `infra::jwks::tests` and `handlers::oidc::tests::rfc9101`.
     // ========================================================================
 
-    /// Throwaway self-signed ECDSA P-256 certificate for in-process TLS test
-    /// servers, reused from `infra::jwks::tests` / `rfc9101.rs`. Valid until
-    /// 2036; the test client uses `danger_accept_invalid_certs` and the
-    /// `127.0.0.1` IP literal, so the missing IP SAN does not matter.
-    const TLS_CERT_PEM: &str = "-----BEGIN CERTIFICATE-----\n\
-MIIBoDCCAUagAwIBAgIUPOBIDoD8Akv9FXfEjb8GEV6GYLowCgYIKoZIzj0EAwIw\n\
-HDEaMBgGA1UEAwwRdm91Y2gtcHEtdGxzLXRlc3QwHhcNMjYwNzA5MTEzMDE1WhcN\n\
-MzYwNzA2MTEzMDE1WjAcMRowGAYDVQQDDBF2b3VjaC1wcS10bHMtdGVzdDBZMBMG\n\
-ByqGSM49AgEGCCqGSM49AwEHA0IABO7wN7GBAX4FydRe2AvENBb6WZ9XHh4NKbkO\n\
-G9ulpEIAVoZaGHMAlK7ZGTLf/tBukQxhXDwQKLLot23POsF8nP+jZjBkMB0GA1Ud\n\
-DgQWBBQ3svXuWL2wS8xcHilgxDuYURTVwDAfBgNVHSMEGDAWgBQ3svXuWL2wS8xc\n\
-HilgxDuYURTVwDAUBgNVHREEDTALgglsb2NhbGhvc3QwDAYDVR0TAQH/BAIwADAK\n\
-BggqhkjOPQQDAgNIADBFAiEAqVgc77k203H6G5gEaAcHuna5DKJmQPCQjQLQAtry\n\
-KnMCICKcoY9vNlshsz2y7RVcfGqowba3/xXj3aYFegT/BdAW\n\
------END CERTIFICATE-----\n";
-    const TLS_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
-MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgTljx1Qv2H2TQMKaX\n\
-+palx1XsuLkORqDCzFBkRDcz3tihRANCAATu8DexgQF+BcnUXtgLxDQW+lmfVx4e\n\
-DSm5DhvbpaRCAFaGWhhzAJSu2Rky3/7QbpEMYVw8ECiy6LdtzzrBfJz/\n\
------END PRIVATE KEY-----\n";
-
     /// P-256 EC key x/y coordinates (base64url, RFC 7517 test vectors) for the
     /// counting test's kid-present JWKS — a parseable, buildable EC key the
     /// kid-miss force-refresh successfully verifies against.
     const EC_X: &str = "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU";
     const EC_Y: &str = "x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0";
-
-    /// A `tokio-rustls` acceptor using the throwaway self-signed cert and an
-    /// explicit aws-lc-rs provider (no reliance on a process-default provider).
-    fn tls_acceptor() -> tokio_rustls::TlsAcceptor {
-        use rustls::pki_types::pem::PemObject;
-        use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-        let certs: Vec<CertificateDer<'static>> =
-            CertificateDer::pem_slice_iter(TLS_CERT_PEM.as_bytes())
-                .collect::<Result<Vec<_>, _>>()
-                .expect("parse test certificate");
-        let key = PrivateKeyDer::from_pem_slice(TLS_KEY_PEM.as_bytes()).expect("parse test key");
-        let config = rustls::ServerConfig::builder_with_provider(Arc::new(
-            rustls::crypto::aws_lc_rs::default_provider(),
-        ))
-        .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
-        .expect("configure TLS versions")
-        .with_no_client_auth()
-        .with_single_cert(certs, key)
-        .expect("build server config");
-        tokio_rustls::TlsAcceptor::from(Arc::new(config))
-    }
 
     /// A `reqwest` client that performs a real TLS handshake but does not
     /// verify the server certificate, so the loopback mock's self-signed cert
@@ -1030,7 +988,7 @@ DSm5DhvbpaRCAFaGWhhzAJSu2Rky3/7QbpEMYVw8ECiy6LdtzzrBfJz/\n\
     /// a request that, before the fix, performed two sequential fetches.
     async fn spawn_counting_jwks_server(body: String, accepted: Arc<AtomicU64>) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let acceptor = tls_acceptor();
+        let acceptor = test_tls_acceptor();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind loopback listener");

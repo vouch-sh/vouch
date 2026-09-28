@@ -7645,7 +7645,6 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
- "tokio-rustls",
  "tower",
  "urlencoding",
  "uuid",
