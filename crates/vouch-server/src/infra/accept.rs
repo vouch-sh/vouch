@@ -11,7 +11,7 @@
 //! Each accepted connection runs this pipeline in its own task:
 //!
 //! ```text
-//! total cap → accept → set_nodelay → spawn → [PROXY header, #1583]
+//! accept → set_nodelay → total cap → spawn → [PROXY header, #1583]
 //!   → per-client cap → handshake (timeout)
 //!   → hyper-util auto HTTP/1 or HTTP/2 (TokioTimer, idle limit)
 //! ```
@@ -162,9 +162,9 @@ pub(crate) async fn serve<H: Handshake>(
             () = shutdown.cancelled() => break,
             // Reap finished connection tasks so the set does not grow.
             Some(_) = conns.join_next(), if !conns.is_empty() => continue,
-            accepted = accept_within_cap(&listener, &caps) => accepted,
+            accepted = listener.accept() => accepted,
         };
-        let (slot, tcp, peer) = match accepted {
+        let (tcp, peer) = match accepted {
             Ok(conn) => conn,
             Err(err) => {
                 handle_accept_error(err).await;
@@ -174,6 +174,19 @@ pub(crate) async fn serve<H: Handshake>(
         if let Err(err) = tcp.set_nodelay(true) {
             tracing::trace!("failed to set TCP_NODELAY on incoming connection: {err:#}");
         }
+        // Take a place under the total cap only once a connection has arrived.
+        // A place taken before `accept` would sit unused on a quiet listener,
+        // out of reach of the busy listeners sharing the cap. At the cap this
+        // listener waits here holding one connection, and the rest queue in
+        // the kernel backlog.
+        let slot = tokio::select! {
+            biased;
+            () = shutdown.cancelled() => break,
+            slot = caps.reserve() => slot,
+        };
+        // The semaphore is never closed, so this only drops the connection in
+        // a case that cannot happen.
+        let Ok(slot) = slot else { continue };
         conns.spawn(serve_connection(
             tcp,
             peer,
@@ -199,17 +212,6 @@ pub(crate) async fn serve<H: Handshake>(
         );
         conns.shutdown().await;
     }
-}
-
-/// Accept one connection once the total cap has room for it. Cancel-safe:
-/// both waits are, and a slot reserved before `accept` is released on drop.
-async fn accept_within_cap(
-    listener: &TcpListener,
-    caps: &ConnCaps,
-) -> io::Result<(TotalSlot, TcpStream, SocketAddr)> {
-    let slot = caps.reserve().await.map_err(io::Error::other)?;
-    let (tcp, peer) = listener.accept().await?;
-    Ok((slot, tcp, peer))
 }
 
 /// Mirror `axum::serve`: per-connection errors are the client's business;
@@ -559,6 +561,21 @@ mod tests {
             .expect("served once the first connection closed");
         let response = String::from_utf8_lossy(&response);
         assert!(response.starts_with("HTTP/1.1 200"), "response: {response}");
+    }
+
+    /// A listener waiting for its next connection holds no place under the
+    /// shared total cap, so a quiet listener cannot starve a busy one.
+    #[tokio::test]
+    async fn idle_listener_holds_no_connection_slot() {
+        let caps = caps(1, 64);
+        let (_addr, _shutdown, _server) =
+            start_with_caps(ConnLimits::DEFAULT, Arc::clone(&caps)).await;
+        // Single-threaded runtime: yielding lets the accept loop run until it
+        // is parked waiting for a connection.
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(caps.available(), 1, "the idle listener holds a slot");
     }
 
     /// A client that connects and sends nothing is closed once the header read

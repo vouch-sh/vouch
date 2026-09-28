@@ -6,9 +6,11 @@
 //! invisible to it. These caps act at accept time instead, before any TLS
 //! work, the model of nginx's `limit_conn` and HAProxy's `maxconn`:
 //!
-//! - **Total**: a semaphore shared by every listener. When it is exhausted
-//!   the accept loops stop accepting, so new connections wait in the kernel
-//!   backlog rather than being accepted and dropped.
+//! - **Total**: a semaphore shared by every listener, taken for each accepted
+//!   connection. When it is exhausted each accept loop holds the one
+//!   connection it has accepted until a place frees, and stops accepting, so
+//!   further connections wait in the kernel backlog rather than being
+//!   accepted and dropped.
 //! - **Per client**: open connections per client address, closed at once when
 //!   over the cap. IPv6 clients are counted per /64, since one host can use a
 //!   whole /64. Peers in `VOUCH_TRUSTED_PROXIES` are exempt: behind a proxy
@@ -118,6 +120,12 @@ impl ConnCaps {
     #[cfg(test)]
     pub(crate) fn for_test() -> Arc<Self> {
         Self::new(ConnCapConfig::DEFAULT, Vec::new())
+    }
+
+    /// Places left under the total cap.
+    #[cfg(test)]
+    pub(crate) fn available(&self) -> usize {
+        self.total.available_permits()
     }
 
     #[cfg(test)]
