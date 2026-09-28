@@ -222,6 +222,7 @@ mod redirect_tests {
     use crate::crypto::document_crypto::{DocumentCrypto, PlaintextDocumentCrypto};
     use crate::crypto::keys::OidcSigningKey;
     use crate::db::pool::PoolConfig;
+    use crate::infra::conn_caps::ConnCapConfig;
     use axum::body::Body;
     use axum::http::Request;
     use secrecy::SecretString;
@@ -285,6 +286,7 @@ mod redirect_tests {
             allowed_aaguids: AaguidPolicy::Any,
             log_format: config::LogFormat::Text,
             trusted_proxies: Vec::new(),
+            connection_caps: ConnCapConfig::DEFAULT,
             metrics_bearer_token: None,
             certification_test_token: None,
             extra_ca_certs: None,

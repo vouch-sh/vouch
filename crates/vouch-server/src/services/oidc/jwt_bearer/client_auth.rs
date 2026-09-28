@@ -436,6 +436,7 @@ mod tests {
     use crate::crypto::document_crypto::{DocumentCrypto, PlaintextDocumentCrypto};
     use crate::crypto::keys::OidcSigningKey;
     use crate::db::{self, ClientKeys, Pool};
+    use crate::infra::conn_caps::ConnCapConfig;
     use crate::services::oidc::jwt_bearer::validate::JwtAudience;
     use arc_swap::ArcSwap;
     use secrecy::SecretString;
@@ -521,6 +522,7 @@ mod tests {
             allowed_aaguids: AaguidPolicy::Any,
             log_format: LogFormat::Text,
             trusted_proxies: Vec::new(),
+            connection_caps: ConnCapConfig::DEFAULT,
             metrics_bearer_token: None,
             certification_test_token: None,
             extra_ca_certs: None,

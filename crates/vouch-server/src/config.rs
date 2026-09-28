@@ -4,6 +4,7 @@
 use crate::crypto::webauthn_verify::OriginPolicy;
 use crate::db::pool::PoolConfig;
 use crate::infra::bootstrap::Bootstrap;
+use crate::infra::conn_caps::ConnCapConfig;
 use anyhow::{Context, Result};
 use aws_config::FrameworkMetadata;
 use clap::{ArgAction, CommandFactory, Parser, parser::ValueSource};
@@ -523,6 +524,26 @@ pub struct Args {
     #[arg(long, env = "VOUCH_TRUSTED_PROXIES", default_value = "")]
     pub trusted_proxies: String,
 
+    /// Maximum open connections across all listeners. When reached, new
+    /// connections wait in the kernel backlog until one closes.
+    #[arg(
+        long,
+        env = "VOUCH_MAX_CONNECTIONS",
+        default_value_t = ConnCapConfig::DEFAULT.max_total,
+        value_parser = clap::value_parser!(u32).range(1..),
+    )]
+    pub max_connections: u32,
+
+    /// Maximum open connections per client address (IPv6: per /64). Peers in
+    /// `VOUCH_TRUSTED_PROXIES` are exempt.
+    #[arg(
+        long,
+        env = "VOUCH_MAX_CONNECTIONS_PER_IP",
+        default_value_t = ConnCapConfig::DEFAULT.max_per_ip,
+        value_parser = clap::value_parser!(u32).range(1..),
+    )]
+    pub max_connections_per_ip: u32,
+
     /// Bearer token for /metrics endpoint. If unset, /metrics is disabled.
     #[arg(long, env = "VOUCH_METRICS_BEARER_TOKEN")]
     pub metrics_bearer_token: Option<String>,
@@ -906,6 +927,8 @@ pub struct ServerConfig {
     pub log_format: LogFormat,
     /// Trusted proxy CIDRs for X-Forwarded-For parsing.
     pub trusted_proxies: Vec<IpNet>,
+    /// Caps on open connections.
+    pub connection_caps: ConnCapConfig,
     /// Bearer token for /metrics endpoint access control.
     /// If `None`, the /metrics endpoint is not exposed.
     pub metrics_bearer_token: Option<NonEmptySecret>,
@@ -1111,6 +1134,10 @@ impl ServerConfig {
             allowed_aaguids,
             log_format,
             trusted_proxies,
+            connection_caps: ConnCapConfig {
+                max_total: args.max_connections,
+                max_per_ip: args.max_connections_per_ip,
+            },
             // `NonEmptySecret` treats `VAR=""` as unset: each of these three
             // switches a feature on by being present and then keys it, so an
             // empty value would enable the feature under a publicly-known key.

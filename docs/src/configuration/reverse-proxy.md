@@ -143,6 +143,13 @@ connections to Vouch (for example nginx with `keepalive` in an `upstream` block)
 upstream connections sooner than that (`keepalive_timeout` below 10 seconds in nginx), or it can
 send a request on a connection just as Vouch closes it and answer the client with a 502.
 
+Vouch also caps open connections: **64 per client address** (`VOUCH_MAX_CONNECTIONS_PER_IP`,
+counting IPv6 clients per /64) and **10,000 in total** (`VOUCH_MAX_CONNECTIONS`). A proxy that
+terminates TLS connects from its own address on behalf of every client, so list it in
+`VOUCH_TRUSTED_PROXIES`: trusted proxies are exempt from the per-address cap. Without that, the cap
+applies to the proxy itself and it will see refused connections under load. With NLB passthrough
+and client IP preservation, the cap sees each real client and needs no configuration.
+
 ## Example configurations
 
 ### nginx (TLS terminated at the proxy)
@@ -230,4 +237,5 @@ Either way:
 - [ ] `VOUCH_BASE_URL` is the public URL clients use
 - [ ] Proxy timeouts are at least 10 seconds
 - [ ] A proxy that pools upstream keep-alive connections closes idle ones in under 10 seconds
+- [ ] A proxy that terminates TLS is listed in `VOUCH_TRUSTED_PROXIES`, so the per-address connection cap does not apply to it
 - [ ] Audit events at `/admin/audit` show real client IPs

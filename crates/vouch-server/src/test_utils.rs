@@ -45,6 +45,7 @@ use crate::db::{
     self, AccessScope, AuditEventFilter, ClientKeys, FapiProfile, OAuthClientType, Organization,
     ScimScope, ScimScopeSet, SessionCache, SessionPurpose, TokenEndpointAuthMethod, User,
 };
+use crate::infra::conn_caps::ConnCapConfig;
 use crate::services::auth::NoClientAuth;
 use crate::services::idp::ConfiguredIdp;
 use crate::services::oidc::ScopeSet;
@@ -141,6 +142,7 @@ pub fn test_config() -> ServerConfig {
         allowed_aaguids: AaguidPolicy::Any,
         log_format: LogFormat::Text,
         trusted_proxies: Vec::new(),
+        connection_caps: ConnCapConfig::DEFAULT,
         metrics_bearer_token: None,
         certification_test_token: None,
         extra_ca_certs: None,
@@ -2418,3 +2420,23 @@ pub fn build_client_assertion(
 
     format!("{header_b64}.{claims_b64}.{sig_b64}")
 }
+
+/// Throwaway self-signed P-256 server certificate, generated for tests only.
+pub const TEST_TLS_CERT_PEM: &str = "-----BEGIN CERTIFICATE-----\n\
+MIIBiDCCAS2gAwIBAgIUAzsi4KkqvGaw6UTFs4DrQEe2KWwwCgYIKoZIzj0EAwIw\n\
+GTEXMBUGA1UEAwwOdm91Y2gtdGxzLXRlc3QwHhcNMjYwNjEwMTYxMjM3WhcNMzYw\n\
+NjA3MTYxMjM3WjAZMRcwFQYDVQQDDA52b3VjaC10bHMtdGVzdDBZMBMGByqGSM49\n\
+AgEGCCqGSM49AwEHA0IABAOqxc9YgMgXu2BGQ3KOgFNtVxG7pdencd5TOnjrr6zJ\n\
+nPi66MVoVlQ9bi3ydlRJ1ce7HHOEui/G0U0aoDJtgVmjUzBRMB0GA1UdDgQWBBQW\n\
+yEA6dBvaxTzloNCzXuJLG5z9/DAfBgNVHSMEGDAWgBQWyEA6dBvaxTzloNCzXuJL\n\
+G5z9/DAPBgNVHRMBAf8EBTADAQH/MAoGCCqGSM49BAMCA0kAMEYCIQC9cwWPeNND\n\
+WFbJkO8dqEVE69Xzdj+NMgenQFOJsOW2yAIhAISz7zP/KDBC6jVhH7qJTR9E7Rnr\n\
+3wT8S2AL3BFHW6+2\n\
+-----END CERTIFICATE-----\n";
+
+/// PKCS#8 private key for [`TEST_TLS_CERT_PEM`].
+pub const TEST_TLS_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQghUolejGt3e2SfwZJ\n\
+BRRya1VbXh8fYhiJfLvrVBbs/lqhRANCAAQDqsXPWIDIF7tgRkNyjoBTbVcRu6XX\n\
+p3HeUzp466+syZz4uujFaFZUPW4t8nZUSdXHuxxzhLovxtFNGqAybYFZ\n\
+-----END PRIVATE KEY-----\n";
