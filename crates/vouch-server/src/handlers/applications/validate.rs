@@ -991,9 +991,10 @@ mod tests {
     use crate::db::documents::oauth::OAuthClientDoc;
     use crate::db::{self, ClientKeys, JwkSet, OAuthClient};
     use crate::test_utils::*;
+    use crate::test_utils::{TEST_JWK_EC_X, TEST_JWK_EC_Y, TEST_JWK_ED25519_X, TEST_JWK_RSA_N};
 
     fn fapi_jwks_json() -> String {
-        serde_json::json!({"keys": [{"kty": "EC", "crv": "P-256", "x": "x", "y": "y"}]}).to_string()
+        serde_json::json!({"keys": [{"kty": "EC", "crv": "P-256", "x": TEST_JWK_EC_X, "y": TEST_JWK_EC_Y}]}).to_string()
     }
 
     #[test]
@@ -1200,7 +1201,7 @@ mod tests {
     fn create_standard_private_key_jwt_accepts_rs256_only_key() {
         let redirect_uris = vec!["https://example.com/cb".to_string()];
         let jwks =
-            serde_json::json!({"keys": [{"kty": "RSA", "alg": "RS256", "n": "n", "e": "AQAB"}]})
+            serde_json::json!({"keys": [{"kty": "RSA", "alg": "RS256", "n": TEST_JWK_RSA_N, "e": "AQAB"}]})
                 .to_string();
 
         let validated = validate_create_application(auth_input(
@@ -1231,7 +1232,7 @@ mod tests {
     fn create_standard_private_key_jwt_rejects_jwks_with_no_signing_key() {
         let redirect_uris = vec!["https://example.com/cb".to_string()];
         let jwks =
-            serde_json::json!({"keys": [{"kty": "EC", "crv": "P-256", "use": "enc"}]}).to_string();
+            serde_json::json!({"keys": [{"kty": "EC", "x": TEST_JWK_EC_X, "y": TEST_JWK_EC_Y, "crv": "P-256", "use": "enc"}]}).to_string();
         let err = validate_create_application(auth_input(
             "web",
             &redirect_uris,
@@ -1423,7 +1424,7 @@ mod tests {
             &user.id,
             TestClientSpec {
                 token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
-                jwks: TestJwks::Custom(serde_json::json!({"keys": [{"kty": "EC"}]})),
+                jwks: TestJwks::Custom(serde_json::json!({"keys": [{"kty": "EC", "x": TEST_JWK_EC_X, "y": TEST_JWK_EC_Y}]})),
                 dpop_bound_access_tokens: true,
                 fapi_profile: Some(FapiProfile::Fapi2Security),
                 with_secret: false,
@@ -1443,7 +1444,7 @@ mod tests {
     async fn stale_jwks_fapi_client(state: &crate::AppState, email: &str) -> OAuthClient {
         let user = create_test_user(&state.store, email).await;
         let jwks = serde_json::json!({
-            "keys": [{"kty": "RSA", "alg": "RS256", "n": "n", "e": "AQAB"}]
+            "keys": [{"kty": "RSA", "alg": "RS256", "n": TEST_JWK_RSA_N, "e": "AQAB"}]
         });
         let created = create_test_client(
             &state.store,
@@ -1484,7 +1485,7 @@ mod tests {
             TestClientSpec {
                 token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
                 jwks: TestJwks::Custom(
-                    serde_json::json!({"keys": [{"kty": "EC", "crv": "P-256", "x": "x", "y": "y"}]}),
+                    serde_json::json!({"keys": [{"kty": "EC", "crv": "P-256", "x": TEST_JWK_EC_X, "y": TEST_JWK_EC_Y}]}),
                 ),
                 dpop_bound_access_tokens: true,
                 fapi_profile: Some(FapiProfile::Fapi2Security),
@@ -1496,7 +1497,7 @@ mod tests {
         state
             .store
             .modify::<OAuthClientDoc, _>(&created.app_id, |data| {
-                data.jwks = Some(serde_json::json!({"keys": [{"kty": "EC", "alg": true}]}));
+                data.jwks = Some(serde_json::json!({"keys": [{"kty": "EC", "x": TEST_JWK_EC_X, "y": TEST_JWK_EC_Y, "alg": true}]}));
             })
             .await
             .expect("write a pre-gate JWKS");
@@ -1517,7 +1518,7 @@ mod tests {
             &user.id,
             TestClientSpec {
                 token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
-                jwks: TestJwks::Custom(serde_json::json!({"keys": [{"kty": "EC"}]})),
+                jwks: TestJwks::Custom(serde_json::json!({"keys": [{"kty": "EC", "x": TEST_JWK_EC_X, "y": TEST_JWK_EC_Y}]})),
                 fapi_profile: None,
                 with_secret: false,
                 ..Default::default()
@@ -1700,7 +1701,7 @@ mod tests {
     // ========================================================================
 
     fn rs256_only_jwks_json() -> String {
-        serde_json::json!({"keys": [{"kty": "RSA", "alg": "RS256", "n": "n", "e": "AQAB"}]})
+        serde_json::json!({"keys": [{"kty": "RSA", "alg": "RS256", "n": TEST_JWK_RSA_N, "e": "AQAB"}]})
             .to_string()
     }
 
@@ -1709,11 +1710,11 @@ mod tests {
     // works" from "the alg happens to be spelled out and disallowed" — the guard
     // must key off the declared alg, not the key type.
     fn unpinned_rsa_jwks_json() -> String {
-        serde_json::json!({"keys": [{"kty": "RSA", "n": "n", "e": "AQAB"}]}).to_string()
+        serde_json::json!({"keys": [{"kty": "RSA", "n": TEST_JWK_RSA_N, "e": "AQAB"}]}).to_string()
     }
 
     fn eddsa_jwks_json() -> String {
-        serde_json::json!({"keys": [{"kty": "OKP", "crv": "Ed25519", "alg": "EdDSA", "x": "x"}]})
+        serde_json::json!({"keys": [{"kty": "OKP", "crv": "Ed25519", "alg": "EdDSA", "x": TEST_JWK_ED25519_X}]})
             .to_string()
     }
 
@@ -2154,7 +2155,8 @@ mod tests {
 
     #[test]
     fn has_client_assertion_key_fapi_covers_alg_and_kty_cases() {
-        let no_alg = serde_json::json!({"keys": [{"kty": "EC"}]});
+        let no_alg =
+            serde_json::json!({"keys": [{"kty": "EC", "x": TEST_JWK_EC_X, "y": TEST_JWK_EC_Y}]});
         assert!(
             jwk_set(no_alg).has_client_assertion_key(FapiProfile::Fapi2Security),
             "no alg field survives"
@@ -2163,23 +2165,24 @@ mod tests {
         // The nuance that motivated this guard: an RSA key normally used for
         // RS256 survives if it declares no alg constraint, because it can then
         // be presented with PS256 instead.
-        let unpinned_rsa = serde_json::json!({"keys": [{"kty": "RSA"}]});
+        let unpinned_rsa =
+            serde_json::json!({"keys": [{"kty": "RSA", "n": TEST_JWK_RSA_N, "e": "AQAB"}]});
         assert!(
             jwk_set(unpinned_rsa).has_client_assertion_key(FapiProfile::Fapi2Security),
             "an RSA key with no alg field survives (usable with PS256)"
         );
 
-        let es256 = serde_json::json!({"keys": [{"kty": "EC", "alg": "ES256"}]});
+        let es256 = serde_json::json!({"keys": [{"kty": "EC", "x": TEST_JWK_EC_X, "y": TEST_JWK_EC_Y, "alg": "ES256"}]});
         assert!(jwk_set(es256).has_client_assertion_key(FapiProfile::Fapi2Security));
 
-        let ps256 = serde_json::json!({"keys": [{"kty": "RSA", "alg": "PS256"}]});
+        let ps256 = serde_json::json!({"keys": [{"kty": "RSA", "n": TEST_JWK_RSA_N, "e": "AQAB", "alg": "PS256"}]});
         assert!(jwk_set(ps256).has_client_assertion_key(FapiProfile::Fapi2Security));
 
-        let eddsa = serde_json::json!({"keys": [{"kty": "OKP", "crv": "Ed25519", "alg": "EdDSA"}]});
+        let eddsa = serde_json::json!({"keys": [{"kty": "OKP", "x": TEST_JWK_ED25519_X, "crv": "Ed25519", "alg": "EdDSA"}]});
         assert!(jwk_set(eddsa).has_client_assertion_key(FapiProfile::Fapi2Security));
 
         // EdDSA is the one algorithm whose runtime key construction constrains
-        // the curve: `build_decoding_key_from_jwk` requires `crv` to be present
+        // the curve: `JwkEntry::decoding_key_for` requires `crv` to be present
         // and `Ed25519`, so an OKP key that omits it or names another curve is
         // unusable however it declares its alg.
         let okp_no_crv = serde_json::json!({"keys": [{"kty": "OKP", "alg": "EdDSA"}]});
@@ -2195,7 +2198,7 @@ mod tests {
             "EdDSA requires an Ed25519 curve"
         );
 
-        let rs256_only = serde_json::json!({"keys": [{"kty": "RSA", "alg": "RS256"}]});
+        let rs256_only = serde_json::json!({"keys": [{"kty": "RSA", "n": TEST_JWK_RSA_N, "e": "AQAB", "alg": "RS256"}]});
         assert!(!jwk_set(rs256_only).has_client_assertion_key(FapiProfile::Fapi2Security));
 
         // A kty the runtime matcher never selects for ES256/PS256/EdDSA (e.g. a
@@ -2217,13 +2220,13 @@ mod tests {
             "an oct key must not survive by declaring an allowed alg"
         );
 
-        let rsa_with_es256 = serde_json::json!({"keys": [{"kty": "RSA", "alg": "ES256"}]});
+        let rsa_with_es256 = serde_json::json!({"keys": [{"kty": "RSA", "n": TEST_JWK_RSA_N, "e": "AQAB", "alg": "ES256"}]});
         assert!(
             !jwk_set(rsa_with_es256).has_client_assertion_key(FapiProfile::Fapi2Security),
             "an RSA key declaring ES256 is unmatchable at runtime"
         );
 
-        let ec_with_ps256 = serde_json::json!({"keys": [{"kty": "EC", "alg": "PS256"}]});
+        let ec_with_ps256 = serde_json::json!({"keys": [{"kty": "EC", "x": TEST_JWK_EC_X, "y": TEST_JWK_EC_Y, "alg": "PS256"}]});
         assert!(
             !jwk_set(ec_with_ps256).has_client_assertion_key(FapiProfile::Fapi2Security),
             "an EC key declaring PS256 is unmatchable at runtime"
@@ -2236,7 +2239,7 @@ mod tests {
         );
 
         let mixed = serde_json::json!({
-            "keys": [{"kty": "RSA", "alg": "RS256"}, {"kty": "EC", "alg": "ES256"}]
+            "keys": [{"kty": "RSA", "n": TEST_JWK_RSA_N, "e": "AQAB", "alg": "RS256"}, {"kty": "EC", "x": TEST_JWK_EC_X, "y": TEST_JWK_EC_Y, "alg": "ES256"}]
         });
         assert!(
             jwk_set(mixed).has_client_assertion_key(FapiProfile::Fapi2Security),
@@ -2246,7 +2249,7 @@ mod tests {
         // The runtime matcher also filters on `use`: an otherwise-usable key
         // marked for encryption is never selected for signature verification.
         let enc_only = serde_json::json!({
-            "keys": [{"kty": "EC", "alg": "ES256", "use": "enc"}]
+            "keys": [{"kty": "EC", "x": TEST_JWK_EC_X, "y": TEST_JWK_EC_Y, "alg": "ES256", "use": "enc"}]
         });
         assert!(
             !jwk_set(enc_only).has_client_assertion_key(FapiProfile::Fapi2Security),
@@ -2254,7 +2257,7 @@ mod tests {
         );
 
         let explicit_sig = serde_json::json!({
-            "keys": [{"kty": "EC", "alg": "ES256", "use": "sig"}]
+            "keys": [{"kty": "EC", "x": TEST_JWK_EC_X, "y": TEST_JWK_EC_Y, "alg": "ES256", "use": "sig"}]
         });
         assert!(
             jwk_set(explicit_sig).has_client_assertion_key(FapiProfile::Fapi2Security),
@@ -2281,10 +2284,10 @@ mod tests {
     fn jwks_with_type_invalid_member_fails_to_parse() {
         // A non-string "alg"/"use" must fail the typed parse instead of
         // being silently read as absent — the bug class this guard closes.
-        let bad_alg = serde_json::json!({"keys": [{"kty": "EC", "alg": true}]});
+        let bad_alg = serde_json::json!({"keys": [{"kty": "EC", "x": TEST_JWK_EC_X, "y": TEST_JWK_EC_Y, "alg": true}]});
         assert!(db::parse_jwks_set(&bad_alg).is_err());
 
-        let bad_use = serde_json::json!({"keys": [{"kty": "EC", "use": 123}]});
+        let bad_use = serde_json::json!({"keys": [{"kty": "EC", "x": TEST_JWK_EC_X, "y": TEST_JWK_EC_Y, "use": 123}]});
         assert!(db::parse_jwks_set(&bad_use).is_err());
     }
 
@@ -2425,7 +2428,8 @@ mod tests {
         let state = test_app_state().await;
         let client = non_fapi_self_signed_client(&state, "self-signed-swap@example.com").await;
 
-        let jwks = serde_json::json!({"keys": [{"kty": "RSA", "n": "n", "e": "AQAB"}]}).to_string();
+        let jwks = serde_json::json!({"keys": [{"kty": "RSA", "n": TEST_JWK_RSA_N, "e": "AQAB"}]})
+            .to_string();
         let validated = validate_update_format(UpdateAppInput {
             redirect_uris: None,
             resource_uris: None,
@@ -2473,7 +2477,7 @@ mod tests {
         let client = non_fapi_pkjwt_client(&state, "pkjwt-unusable@example.com").await;
 
         let jwks =
-            serde_json::json!({"keys": [{"kty": "EC", "crv": "P-256", "use": "enc"}]}).to_string();
+            serde_json::json!({"keys": [{"kty": "EC", "x": TEST_JWK_EC_X, "y": TEST_JWK_EC_Y, "crv": "P-256", "use": "enc"}]}).to_string();
         let validated = validate_update_format(UpdateAppInput {
             redirect_uris: None,
             resource_uris: None,
@@ -2531,7 +2535,7 @@ mod tests {
         let client = non_fapi_pkjwt_client(&state, "pkjwt-mismatch@example.com").await;
 
         let jwks =
-            serde_json::json!({"keys": [{"kty": "RSA", "alg": "ES256", "n": "n", "e": "AQAB"}]})
+            serde_json::json!({"keys": [{"kty": "RSA", "alg": "ES256", "n": TEST_JWK_RSA_N, "e": "AQAB"}]})
                 .to_string();
         let validated = validate_update_format(UpdateAppInput {
             redirect_uris: None,
@@ -2816,7 +2820,7 @@ mod tests {
     #[test]
     fn create_rejects_jwks_with_type_invalid_key_member() {
         let redirect_uris = vec!["https://example.com/cb".to_string()];
-        let jwks = serde_json::json!({"keys": [{"kty": "EC", "alg": true}]}).to_string();
+        let jwks = serde_json::json!({"keys": [{"kty": "EC", "x": TEST_JWK_EC_X, "y": TEST_JWK_EC_Y, "alg": true}]}).to_string();
         let err = validate_create_application(CreateAppInput {
             name: "App",
             application_type: "web",
@@ -2874,7 +2878,7 @@ mod tests {
 
     #[test]
     fn update_rejects_jwks_with_type_invalid_key_member() {
-        let jwks = serde_json::json!({"keys": [{"kty": "EC", "use": 123}]}).to_string();
+        let jwks = serde_json::json!({"keys": [{"kty": "EC", "x": TEST_JWK_EC_X, "y": TEST_JWK_EC_Y, "use": 123}]}).to_string();
         let err = validate_update_format(UpdateAppInput {
             redirect_uris: None,
             resource_uris: None,

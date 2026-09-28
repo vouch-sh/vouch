@@ -139,23 +139,14 @@ impl KeyResolver for OAuthClientKeyResolver {
                 if key.kid.as_deref() != Some(keyid.as_str()) {
                     continue; // skip JWKs whose kid doesn't match the signature keyid
                 }
-                // Enforce the same `use`/`alg`/`kty` selection rules as the
-                // JWT-bearer and SAML key searches via the single shared
-                // predicate (`JwkEntry::is_usable_for`): a key declared for
-                // encryption (`use != "sig"`) or a different algorithm is never a
-                // signature-verification key, even when its `kid` matches. This is
-                // the candidate-skip rule the JWT-bearer `find_matching_key`
-                // already applies on `kid` match.
+                // The shared rule (`JwkEntry::decoding_key_for`) the JWT-bearer
+                // search and write-time checks use: a key for encryption, for
+                // another algorithm, or not a valid P-256 point is skipped, and
+                // the scan continues, since RFC 7517 §4.5 makes `kid` uniqueness
+                // a SHOULD and a later key with the same `kid` may verify.
                 if !key.is_usable_for(JwsAlgorithm::Es256) {
                     continue;
                 }
-                // A kid-matching key that is not a buildable P-256 key must not
-                // abort the scan: RFC 7517 §4.5 makes `kid` uniqueness a SHOULD,
-                // so a later key carrying the same `kid` can still verify the
-                // signature (same candidate-skip rule as the JWT bearer and
-                // upstream-IdP key searches). `is_usable_for` gates `kty` (and
-                // `crv` for EdDSA) but not EC coordinate presence/validity, so
-                // `jwk_to_p256_public_key` still guards the build here.
                 let Some(public_key) = serde_json::to_value(key)
                     .ok()
                     .and_then(|v| jwk_to_p256_public_key(&v))

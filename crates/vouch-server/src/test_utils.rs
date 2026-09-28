@@ -2322,6 +2322,16 @@ pub const TEST_JWT_SECRET: &[u8] = b"test-jwt-secret-for-unit-tests-only";
 /// Issuer URL for unit tests.
 pub const TEST_ISSUER: &str = "https://example.com";
 
+/// P-256 public key coordinates from RFC 7517 Appendix A.1, a point on the
+/// curve, for JWK fixtures that must pass `JwkEntry::decoding_key_for`.
+pub const TEST_JWK_EC_X: &str = "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU";
+/// See [`TEST_JWK_EC_X`].
+pub const TEST_JWK_EC_Y: &str = "x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0";
+/// RSA modulus from RFC 7517 Appendix A.1.
+pub const TEST_JWK_RSA_N: &str = "0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4cbbfAAtVT86zwu1RK7aPFFxuhDR1L6tSoc_BJECPebWKRXjBZCiFV4n3oknjhMstn64tZ_2W-5JsGY4Hc5n9yBXArwl93lqt7_RN5w6Cf0h4QyQ5v-65YGjQR0_FDW2QvzqY368QQMicAtaSqzs8KJZgnYb9c7d0zgdAZHzu6qMQvRL5hajrn1n91CbOpbISD08qNLyrdkt-bFTWhAI4vMQFh6WeZu0fM4lFd2NcRwr3XPksINHaQ-G_xBniIqbw0Ls1jF44-csFCur-kEgU8awapJzKnqDKgw";
+/// Ed25519 public key from RFC 8037 Appendix A.2.
+pub const TEST_JWK_ED25519_X: &str = "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo";
+
 /// Generate a fresh OIDC signing key for tests.
 /// Fuzzing entry: run arbitrary policy text through the production
 /// validation path (compose + lower + validate against the embedded Vouch

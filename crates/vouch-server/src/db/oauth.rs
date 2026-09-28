@@ -16,6 +16,8 @@ use crate::db::documents::oauth;
 use crate::error::ServiceError;
 use anyhow::Result;
 use axum::http::StatusCode;
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
@@ -694,38 +696,135 @@ impl KeyType {
     }
 }
 
+/// Why a JWK cannot verify signatures made with a given algorithm.
+///
+/// `Display` is the `error_description` the token endpoint returns for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum UnusableJwk {
+    /// The key is declared for another use or algorithm, or its `kty` cannot
+    /// carry the algorithm. A search skips it without recording why.
+    #[error("No matching key found in JWKS")]
+    NotSelectable,
+    /// A member the key type requires is absent.
+    #[error("{0}")]
+    MissingMember(&'static str),
+    /// An OKP key on a curve other than Ed25519.
+    #[error("EdDSA requires OKP key with Ed25519 curve")]
+    WrongCurve,
+    /// The members are present but do not form a public key.
+    #[error("Invalid key in JWKS")]
+    InvalidKey,
+}
+
+/// Decode a base64url (no padding) JWK member.
+fn jwk_member(value: &str) -> Result<Vec<u8>, UnusableJwk> {
+    URL_SAFE_NO_PAD
+        .decode(value)
+        .map_err(|_| UnusableJwk::InvalidKey)
+}
+
 impl JwkEntry {
-    /// Returns `true` when the runtime verifier could build a decoding key
-    /// from this key for `alg`.
+    /// The key that verifies `alg` signatures, if this entry can be one.
     ///
-    /// Mirrors what a verification actually needs, in the order the runtime
-    /// applies it (`jwt_bearer::jwks::find_matching_key` for selection, then
-    /// `build_decoding_key_from_jwk` for construction):
+    /// The one decision about whether a JWK is usable. The token endpoint's
+    /// key search (`services/oidc/jwt_bearer/jwks.rs`), the RFC 9421
+    /// resolver (`infra/httpsig.rs`), and every write path that checks a
+    /// client's inline JWKS all call this, so a key accepted at registration
+    /// is one the token endpoint can build.
     ///
-    /// - `use`, if present, must be `sig` — a key declared for encryption is
-    ///   skipped even when its `kid` matches.
-    /// - `alg`, if present, must equal the algorithm in question.
-    /// - `kty` must be the one [`KeyType::for_alg`] names. A key whose `kty`
-    ///   can't carry the algorithm is unmatchable however it is declared, so
-    ///   an absent `alg` does not make an `oct` key usable.
-    /// - For `EdDSA`, `crv` must be `Ed25519`: `build_decoding_key_from_jwk`
-    ///   refuses any other curve outright. No equivalent constraint exists on
-    ///   its `EC` or `RSA` arms, so none is imposed here.
+    /// - `use`, if present, must be `sig`; `alg`, if present, must equal
+    ///   `alg`; `kty` must be the one [`KeyType::for_alg`] names.
+    /// - EC: `x` and `y` are 32-byte coordinates of a point on P-256. RFC 7518
+    ///   §6.2.1.2: "The length of this octet string MUST be the full size of
+    ///   a coordinate for the curve specified in the "crv" parameter."
+    /// - RSA: RFC 7518 §6.3.1: "The following members MUST be present for
+    ///   RSA public keys" — `n` and `e`, each non-empty.
+    /// - OKP: RFC 8037 §2: "The parameter "crv" MUST be present" and "The
+    ///   parameter "x" MUST be present"; `crv` must be `Ed25519`, whose
+    ///   encoded point is "a little-endian string of 32 octets" (RFC 8032
+    ///   §5.1.2).
+    ///
+    /// # Errors
+    /// [`UnusableJwk`] naming the first rule the key fails.
+    pub fn decoding_key_for(
+        &self,
+        alg: JwsAlgorithm,
+    ) -> Result<jsonwebtoken::DecodingKey, UnusableJwk> {
+        if self.use_.as_deref().is_some_and(|u| u != "sig")
+            || self.alg.as_deref().is_some_and(|a| a != alg.as_str())
+            || self.kty != KeyType::for_alg(alg)
+        {
+            return Err(UnusableJwk::NotSelectable);
+        }
+        match alg {
+            JwsAlgorithm::Es256 => {
+                let x = self
+                    .x
+                    .as_deref()
+                    .ok_or(UnusableJwk::MissingMember("EC key missing x component"))?;
+                let y = self
+                    .y
+                    .as_deref()
+                    .ok_or(UnusableJwk::MissingMember("EC key missing y component"))?;
+                let x_bytes = jwk_member(x)?;
+                let y_bytes = jwk_member(y)?;
+                let (Ok(x_bytes), Ok(y_bytes)) = (
+                    <[u8; 32]>::try_from(x_bytes.as_slice()),
+                    <[u8; 32]>::try_from(y_bytes.as_slice()),
+                ) else {
+                    return Err(UnusableJwk::InvalidKey);
+                };
+                let point = p256::EncodedPoint::from_affine_coordinates(
+                    &x_bytes.into(),
+                    &y_bytes.into(),
+                    false,
+                );
+                if p256::PublicKey::from_sec1_bytes(point.as_bytes()).is_err() {
+                    return Err(UnusableJwk::InvalidKey);
+                }
+                jsonwebtoken::DecodingKey::from_ec_components(x, y)
+                    .map_err(|_| UnusableJwk::InvalidKey)
+            }
+            JwsAlgorithm::Rs256 | JwsAlgorithm::Ps256 => {
+                let n = self
+                    .n
+                    .as_deref()
+                    .ok_or(UnusableJwk::MissingMember("RSA key missing n component"))?;
+                let e = self
+                    .e
+                    .as_deref()
+                    .ok_or(UnusableJwk::MissingMember("RSA key missing e component"))?;
+                if jwk_member(n)?.is_empty() || jwk_member(e)?.is_empty() {
+                    return Err(UnusableJwk::InvalidKey);
+                }
+                jsonwebtoken::DecodingKey::from_rsa_components(n, e)
+                    .map_err(|_| UnusableJwk::InvalidKey)
+            }
+            JwsAlgorithm::EdDsa => {
+                let x = self
+                    .x
+                    .as_deref()
+                    .ok_or(UnusableJwk::MissingMember("OKP key missing x component"))?;
+                let crv = self
+                    .crv
+                    .as_deref()
+                    .ok_or(UnusableJwk::MissingMember("OKP key missing crv component"))?;
+                if crv != "Ed25519" {
+                    return Err(UnusableJwk::WrongCurve);
+                }
+                if jwk_member(x)?.len() != 32 {
+                    return Err(UnusableJwk::InvalidKey);
+                }
+                jsonwebtoken::DecodingKey::from_ed_components(x)
+                    .map_err(|_| UnusableJwk::InvalidKey)
+            }
+        }
+    }
+
+    /// Returns `true` when [`Self::decoding_key_for`] succeeds for `alg`.
     #[must_use]
     pub fn is_usable_for(&self, alg: JwsAlgorithm) -> bool {
-        if self.use_.as_deref().is_some_and(|u| u != "sig") {
-            return false;
-        }
-        if self.alg.as_deref().is_some_and(|a| a != alg.as_str()) {
-            return false;
-        }
-        if self.kty != KeyType::for_alg(alg) {
-            return false;
-        }
-        if alg == JwsAlgorithm::EdDsa && self.crv.as_deref() != Some("Ed25519") {
-            return false;
-        }
-        true
+        self.decoding_key_for(alg).is_ok()
     }
 }
 
@@ -2206,6 +2305,7 @@ mod tests {
     use crate::db::pool::PoolConfig;
     use crate::db::{self, ClientInfo};
     use crate::test_utils::{self, TestClientSpec};
+    use crate::test_utils::{TEST_JWK_EC_X, TEST_JWK_EC_Y, TEST_JWK_ED25519_X, TEST_JWK_RSA_N};
 
     /// A stored `None` resolves from the client's `application_type`, not from
     /// RFC 7591 §2's registration default.
@@ -2422,19 +2522,82 @@ mod tests {
         );
 
         let no_x5c = parse_jwks_set(&serde_json::json!({
-            "keys": [{"kty": "RSA", "n": "n", "e": "AQAB"}]
+            "keys": [{"kty": "RSA", "n": TEST_JWK_RSA_N, "e": "AQAB"}]
         }))
         .expect("valid fixture");
         assert!(!no_x5c.has_x5c());
 
         let mixed = parse_jwks_set(&serde_json::json!({
             "keys": [
-                {"kty": "RSA", "n": "n", "e": "AQAB"},
+                {"kty": "RSA", "n": TEST_JWK_RSA_N, "e": "AQAB"},
                 {"kty": "RSA", "x5c": ["ZmFrZS1jZXJ0"]}
             ]
         }))
         .expect("valid fixture");
         assert!(mixed.has_x5c(), "one x5c-bearing key is enough");
+    }
+
+    // RFC 7518 §6.2.1.2: EC coordinates "MUST be the full size of a
+    // coordinate for the curve"; a point off P-256 is no public key at all.
+    // Checked at construction, so the token endpoint's search skips such a key
+    // and registration refuses it by the same rule.
+    #[test]
+    fn test_decoding_key_for_rejects_ec_keys_that_are_not_p256_points() {
+        let ec = |x: &str, y: &str| JwkEntry {
+            kty: KeyType::Ec,
+            kid: None,
+            alg: None,
+            use_: None,
+            crv: Some("P-256".to_string()),
+            x: Some(x.to_string()),
+            y: Some(y.to_string()),
+            n: None,
+            e: None,
+            x5c: None,
+        };
+        assert!(ec(TEST_JWK_EC_X, TEST_JWK_EC_Y).is_usable_for(JwsAlgorithm::Es256));
+        assert_eq!(
+            ec("f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRV", TEST_JWK_EC_Y)
+                .decoding_key_for(JwsAlgorithm::Es256)
+                .err(),
+            Some(UnusableJwk::InvalidKey),
+            "a 31-octet x coordinate"
+        );
+        assert_eq!(
+            ec(TEST_JWK_EC_X, TEST_JWK_EC_X)
+                .decoding_key_for(JwsAlgorithm::Es256)
+                .err(),
+            Some(UnusableJwk::InvalidKey),
+            "a point off the curve"
+        );
+        assert_eq!(
+            ec("x", "y").decoding_key_for(JwsAlgorithm::Es256).err(),
+            Some(UnusableJwk::InvalidKey),
+            "members that are not base64url"
+        );
+    }
+
+    // RFC 8037 §2: "The parameter "x" MUST be present and contain the public
+    // key"; an Ed25519 public key is a 32-octet encoded point.
+    #[test]
+    fn test_decoding_key_for_rejects_ed25519_keys_of_the_wrong_length() {
+        let okp = |x: &str| JwkEntry {
+            kty: KeyType::Okp,
+            kid: None,
+            alg: None,
+            use_: None,
+            crv: Some("Ed25519".to_string()),
+            x: Some(x.to_string()),
+            y: None,
+            n: None,
+            e: None,
+            x5c: None,
+        };
+        assert!(okp(TEST_JWK_ED25519_X).is_usable_for(JwsAlgorithm::EdDsa));
+        assert_eq!(
+            okp("AAAA").decoding_key_for(JwsAlgorithm::EdDsa).err(),
+            Some(UnusableJwk::InvalidKey)
+        );
     }
 
     #[test]
@@ -2446,7 +2609,7 @@ mod tests {
         // allowlist (RS256 is not FAPI-allowed), but request_object_signing_alg admits RS256 for
         // a non-FAPI client.
         let unpinned_rsa =
-            set(serde_json::json!({"keys": [{"kty": "RSA", "n": "n", "e": "AQAB"}]}));
+            set(serde_json::json!({"keys": [{"kty": "RSA", "n": TEST_JWK_RSA_N, "e": "AQAB"}]}));
         assert!(unpinned_rsa.has_key_for(JwsAlgorithm::Rs256));
         assert!(unpinned_rsa.has_key_for(JwsAlgorithm::Ps256));
         assert!(!unpinned_rsa.has_key_for(JwsAlgorithm::Es256));
@@ -2454,7 +2617,7 @@ mod tests {
         // A declared alg pins the key to exactly that algorithm, even within
         // one key type.
         let rs256_pinned = set(
-            serde_json::json!({"keys": [{"kty": "RSA", "alg": "RS256", "n": "n", "e": "AQAB"}]}),
+            serde_json::json!({"keys": [{"kty": "RSA", "alg": "RS256", "n": TEST_JWK_RSA_N, "e": "AQAB"}]}),
         );
         assert!(rs256_pinned.has_key_for(JwsAlgorithm::Rs256));
         assert!(
@@ -2464,7 +2627,7 @@ mod tests {
 
         // The pairing from issue #1082: ES256 pinned against RSA-only keys.
         let rsa_only = set(serde_json::json!({
-            "keys": [{"kty": "RSA", "use": "sig", "kid": "k1", "n": "n", "e": "AQAB"}]
+            "keys": [{"kty": "RSA", "use": "sig", "kid": "k1", "n": TEST_JWK_RSA_N, "e": "AQAB"}]
         }));
         assert!(
             !rsa_only.has_key_for(JwsAlgorithm::Es256),
@@ -2472,15 +2635,16 @@ mod tests {
         );
 
         // `use` is honoured: an encryption key is never selected for signing.
-        let enc_only =
-            set(serde_json::json!({"keys": [{"kty": "EC", "use": "enc", "crv": "P-256"}]}));
+        let enc_only = set(
+            serde_json::json!({"keys": [{"kty": "EC", "x": TEST_JWK_EC_X, "y": TEST_JWK_EC_Y, "use": "enc", "crv": "P-256"}]}),
+        );
         assert!(!enc_only.has_key_for(JwsAlgorithm::Es256));
 
         // One usable key among unusable ones is enough.
         let mixed = set(serde_json::json!({
             "keys": [
-                {"kty": "RSA", "alg": "RS256", "n": "n", "e": "AQAB"},
-                {"kty": "EC", "crv": "P-256", "x": "x", "y": "y"}
+                {"kty": "RSA", "alg": "RS256", "n": TEST_JWK_RSA_N, "e": "AQAB"},
+                {"kty": "EC", "crv": "P-256", "x": TEST_JWK_EC_X, "y": TEST_JWK_EC_Y}
             ]
         }));
         assert!(mixed.has_key_for(JwsAlgorithm::Es256));

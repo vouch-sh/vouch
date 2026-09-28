@@ -819,6 +819,7 @@ pub(crate) async fn delete_secret_form(
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
+    use crate::test_utils::{TEST_JWK_EC_X, TEST_JWK_EC_Y};
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::{Arc, Mutex};
 
@@ -2098,7 +2099,7 @@ mod tests {
         .await;
         let cookie = format!("__Host-vouch_session={session_token}");
 
-        let jwks = serde_json::json!({"keys": [{"kty": "EC", "crv": "P-256", "x": "x", "y": "y"}]})
+        let jwks = serde_json::json!({"keys": [{"kty": "EC", "crv": "P-256", "x": TEST_JWK_EC_X, "y": TEST_JWK_EC_Y}]})
             .to_string();
         let form_body = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("name", "Key App")
