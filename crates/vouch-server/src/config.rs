@@ -251,6 +251,45 @@ fn parse_comma_list_preserve_case(s: &str) -> Vec<String> {
         .collect()
 }
 
+/// Value parser for `VOUCH_PROXY_PROTOCOL`.
+///
+/// The CLI `--proxy-protocol` flag is a clap `SetTrue` action: bare
+/// `--proxy-protocol` sets the field to `true` without invoking this parser,
+/// and `--proxy-protocol=…` is rejected ("no more values were expected")
+/// before any value is parsed. The parser therefore only runs for the **env**
+/// source (`.env`, docker-compose `environment:`, container env), where a
+/// set-but-empty `VOUCH_PROXY_PROTOCOL=` used to abort startup with
+/// `error: invalid value '' for '--proxy-protocol': value was not a boolean`.
+///
+/// Treating the empty string as `false` matches the documented default
+/// (`docs/src/reference/environment-variables.md`) and the
+/// `vouch_common::env::non_empty` convention used by `aws_use_fips_endpoint`
+/// (empty ⇒ unset ⇒ the provider chain proceeds). Non-empty values are
+/// delegated to [`BoolishValueParser`][clap::builder::BoolishValueParser] so
+/// the truthy/falsey vocabulary (`y/yes/t/true/on/1` and
+/// `n/no/f/false/off/0`, case-insensitive) is preserved exactly. A hand-rolled
+/// `true|1|yes|on` check would silently demote `t`/`y`/`True`/`TRUE` to
+/// `false`, which for a flag gating which proxies may claim a client IP is a
+/// regression worse than the bug being fixed.
+#[derive(Clone, Copy, Default)]
+struct ProxyProtocolValueParser;
+
+impl clap::builder::TypedValueParser for ProxyProtocolValueParser {
+    type Value = bool;
+
+    fn parse_ref(
+        &self,
+        cmd: &clap::Command,
+        arg: Option<&clap::Arg>,
+        value: &std::ffi::OsStr,
+    ) -> Result<bool, clap::Error> {
+        if value.is_empty() {
+            return Ok(false);
+        }
+        clap::builder::BoolishValueParser::new().parse_ref(cmd, arg, value)
+    }
+}
+
 // ============================================================================
 // Command Line Arguments
 // ============================================================================
@@ -535,7 +574,7 @@ pub struct Args {
     #[arg(
         long,
         env = "VOUCH_PROXY_PROTOCOL",
-        value_parser = clap::builder::BoolishValueParser::new(),
+        value_parser = ProxyProtocolValueParser,
     )]
     pub proxy_protocol: bool,
 
@@ -1456,11 +1495,12 @@ pub fn resolve_dsql_endpoints(
 )]
 mod tests {
     use crate::config::{
-        Args, BaseUrl, IdpConfig, NonEmptySecret, SamlProviderConfig, ServerConfig,
-        bootstrap_overlay_args, resolve_dsql_endpoints, validate_provider_slug,
+        Args, BaseUrl, IdpConfig, NonEmptySecret, ProxyProtocolValueParser, SamlProviderConfig,
+        ServerConfig, bootstrap_overlay_args, resolve_dsql_endpoints, validate_provider_slug,
     };
     use crate::infra::bootstrap::Bootstrap;
     use crate::test_utils::test_config;
+    use clap::builder::TypedValueParser as _;
     use clap::{CommandFactory, Parser};
     use secrecy::{ExposeSecret, SecretString};
     use std::collections::{BTreeMap, HashMap};
@@ -2139,6 +2179,111 @@ mod tests {
         assert!(
             tokens.is_empty(),
             "a false flag emits nothing, got: {tokens:?}"
+        );
+    }
+
+    // ========================================================================
+    // ServerConfig::from_args — PROXY protocol empty env value
+    //
+    // `VOUCH_PROXY_PROTOCOL=""` (set-but-empty, from a `.env`
+    // `VOUCH_PROXY_PROTOCOL=`, a docker-compose `environment:
+    // - VOUCH_PROXY_PROTOCOL=`, or a container env blob) used to abort startup
+    // at the clap parse with `error: invalid value '' for '--proxy-protocol':
+    // value was not a boolean`. The documented default is `false`
+    // (`docs/src/reference/environment-variables.md`), and
+    // `vouch_common::env::non_empty` treats empty env as unset for every other
+    // boolean-ish toggle (`aws_use_fips_endpoint`). `ProxyProtocolValueParser`
+    // mirrors that: empty ⇛ `false`.
+    //
+    // The env-var path itself (`std::env::set_var`) can't be unit-tested —
+    // `set_var` is `unsafe` under edition 2024 and `unsafe_code` is denied
+    // workspace-wide (see the note above the "Bootstrap overlay precedence"
+    // section). Clap's `#[arg(env = ...)]` resolution hands the env value to
+    // `value_parser` via the same `parse_ref` call the parser tests below
+    // exercise, so those assertions cover both the env and overlay-with-value
+    // sources; the manual `VOUCH_PROXY_PROTOCOL= ./vouch-server` repro in the
+    // test plan covers clap's own env routing end-to-end.
+    // ========================================================================
+
+    #[test]
+    fn proxy_protocol_value_parser_treats_empty_as_false() {
+        let cmd = clap::Command::new("vouch-server");
+        let parser = ProxyProtocolValueParser;
+        let parsed = parser
+            .parse_ref(&cmd, None, std::ffi::OsStr::new(""))
+            .expect("empty value is the documented default");
+        assert!(
+            !parsed,
+            "an empty env value must parse as `false`, not abort startup"
+        );
+    }
+
+    #[test]
+    fn proxy_protocol_value_parser_preserves_truthy_vocabulary() {
+        // A hand-rolled `true|1|yes|on` check would silently demote these to
+        // `false`, which (for a flag gating which proxies may claim a client
+        // IP) is a regression worse than the bug being fixed. Delegating to
+        // `BoolishValueParser` keeps every accepted spelling working.
+        let cmd = clap::Command::new("vouch-server");
+        let parser = ProxyProtocolValueParser;
+        for truthy in ["true", "t", "y", "T", "Y", "True", "TRUE", "1", "yes", "on"] {
+            let parsed = parser
+                .parse_ref(&cmd, None, std::ffi::OsStr::new(truthy))
+                .expect("truthy spelling must parse");
+            assert!(
+                parsed,
+                "truthy spelling '{truthy}' must still parse as true"
+            );
+        }
+    }
+
+    #[test]
+    fn proxy_protocol_value_parser_preserves_falsey_vocabulary() {
+        let cmd = clap::Command::new("vouch-server");
+        let parser = ProxyProtocolValueParser;
+        for falsey in ["false", "0", "no", "off", "n", "f", "False", "FALSE"] {
+            let parsed = parser
+                .parse_ref(&cmd, None, std::ffi::OsStr::new(falsey))
+                .expect("falsey spelling must parse");
+            assert!(
+                !parsed,
+                "falsey spelling '{falsey}' must still parse as false"
+            );
+        }
+    }
+
+    #[test]
+    fn proxy_protocol_value_parser_rejects_unknown_values() {
+        // The parser must still reject garbage so a typo like
+        // `VOUCH_PROXY_PROTOCOL=tru` is a visible startup error, not silently
+        // `false` (which would disable a security feature the operator meant
+        // to enable) and not silently `true` (which would require a header on
+        // every connection and break direct clients).
+        let cmd = clap::Command::new("vouch-server");
+        let parser = ProxyProtocolValueParser;
+        for garbage in ["maybe", "tru", "enabled"] {
+            assert!(
+                parser
+                    .parse_ref(&cmd, None, std::ffi::OsStr::new(garbage))
+                    .is_err(),
+                "an unknown value '{garbage}' must be a startup error, not silently coerced"
+            );
+        }
+    }
+
+    #[test]
+    fn bootstrap_overlay_skips_empty_proxy_protocol_blob_value() {
+        // The overlay's `blob.get(env_name).filter(|v| !v.is_empty())` guard
+        // means an empty `VOUCH_PROXY_PROTOCOL` in the bootstrap blob emits no
+        // token, so the env source — not the overlay — is the only path that
+        // reaches the parser with an empty value. This pins that guard for the
+        // proxy-protocol arg (a regression here would emit `--proxy-protocol=`
+        // and surface the bug through the overlay path instead).
+        let matches = matches_ignoring_process_env(&["vouch-server"]);
+        let tokens = bootstrap_overlay_args(&matches, &blob(&[("VOUCH_PROXY_PROTOCOL", "")]));
+        assert!(
+            tokens.is_empty(),
+            "an empty blob value must emit no overlay token, got: {tokens:?}"
         );
     }
 
