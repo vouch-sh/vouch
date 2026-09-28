@@ -50,7 +50,7 @@ flowchart TB
   l2 --> l3["propagate_request_id"]
   l3 --> l4["DefaultBodyLimit<br/>256 KiB"]
   l4 -- "outside the timeout,<br/>so 408s are still counted" --> l5["metrics_middleware"]
-  l5 --> l6["TimeoutLayer<br/>30 s"]
+  l5 --> l6["TimeoutLayer<br/>10 s"]
   l6 --> l7["org_host_gate"]
   l7 --> l8["i18n_layer"]
   l8 --> l9["security header bundle"]
