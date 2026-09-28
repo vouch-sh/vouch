@@ -7,8 +7,8 @@ work correctly, and the one setting whose absence degrades security silently.
 ## Terminate TLS in Vouch where you can
 
 The recommended topology is **TCP passthrough with TLS terminated inside Vouch**, through a load
-balancer that keeps the client's address (see [Supported topologies](#supported-topologies)), not
-TLS terminated at the proxy.
+balancer that keeps the client's address or a proxy that sends it with the PROXY protocol (see
+[Supported topologies](#supported-topologies)), not TLS terminated at the proxy.
 
 Vouch pins a BCP 195 cipher suite list, prefers hybrid post-quantum key exchange, and hosts the
 mTLS listener used for certificate-bound tokens. Terminating at the proxy replaces all of that with
@@ -21,21 +21,22 @@ you do, everything below still applies.
 
 ## Supported topologies
 
-Vouch supports two:
+Vouch supports three:
 
 - **Pass-through that keeps the client's address**: an L4 load balancer that forwards the TCP
   connection with the client's own source address, such as an AWS NLB with client IP preservation
   (see below). Vouch terminates TLS and serves the mTLS port itself.
+- **Pass-through with the PROXY protocol**: a TCP proxy that opens its own connection to Vouch and
+  sends the client's address in a PROXY protocol v2 header ahead of the relayed TLS, such as an
+  Istio or Envoy gateway with TLS `PASSTHROUGH`, nginx `stream`, or HAProxy in `mode tcp`. Vouch
+  terminates TLS and serves the mTLS port itself. See [PROXY protocol](#proxy-protocol).
 - **TLS terminated at an HTTP proxy**, which reports the client's address in `X-Forwarded-For` for
   `VOUCH_TRUSTED_PROXIES` to read. This gives up certificate-bound tokens.
 
-A TCP proxy that opens its own connection to Vouch is **not supported**: nginx `stream`, HAProxy in
-`mode tcp`, and an Istio or Envoy gateway with TLS `PASSTHROUGH`. Vouch then sees the proxy as
-every request's client, so all users share one rate-limit bucket and audit events record the
-proxy's address. With TLS opaque to the proxy there is no `X-Forwarded-For`; these proxies convey
-the client's address only through the PROXY protocol, which Vouch does not accept. Do not enable
-it on the proxy either: Vouch reads the PROXY header as the start of a TLS handshake and every
-connection fails.
+A TCP proxy that opens its own connection to Vouch *without* the PROXY protocol is not supported.
+Vouch then sees the proxy as every request's client, so all users share one rate-limit bucket and
+audit events record the proxy's address. With TLS opaque to the proxy there is no
+`X-Forwarded-For` to fall back on.
 
 ## Trusted proxies
 
@@ -50,7 +51,11 @@ how Vouch decides a request's client IP, which in turn drives **rate limiting** 
 recorded on **audit events**.
 
 It applies to the HTTPS port only. On the mTLS port (8443) Vouch terminates TLS itself, so no proxy
-can add a header there, and `X-Forwarded-For` is always ignored: the client IP is the TCP peer.
+can add a header there, and `X-Forwarded-For` is always ignored: the client IP is the TCP peer, or
+the PROXY header's source when `VOUCH_PROXY_PROTOCOL` is on.
+
+With `VOUCH_PROXY_PROTOCOL` on, the same list names the proxies allowed to send the PROXY header,
+and `X-Forwarded-For` is not read on any port. See [PROXY protocol](#proxy-protocol).
 
 **When it is unset** (the default), `X-Forwarded-For` is ignored completely and the TCP peer
 address is used as the client IP. Behind a proxy, that peer address is the proxy. Every user
@@ -111,7 +116,7 @@ When TLS is configured, the listen ports are **fixed** and `VOUCH_LISTEN_ADDR` i
 | Port | Purpose | Configurable |
 |------|---------|--------------|
 | 443 | HTTPS | No — fixed when TLS is configured |
-| 80 | HTTP→HTTPS redirect (308), plus `/health` | No |
+| 80 | HTTP→HTTPS redirect (308), plus `/health` and `/health/ready` | No |
 | 8443 | mTLS listener for certificate-bound tokens | Yes — `VOUCH_MTLS_PORT` |
 
 Without TLS configured, the server listens on `VOUCH_LISTEN_ADDR` (default `[::]:3000`) and none of
@@ -133,8 +138,9 @@ proxy's timeouts at or above 10 seconds so that Vouch, not the proxy, produces t
 response; and do not set a body limit below Vouch's, or you will convert precise 413s into opaque
 proxy errors.
 
-The request timeout only starts once a request has arrived. Before that, every listener closes a
-connection that has not finished its TLS handshake within **5 seconds**, has not started sending a
+The request timeout only starts once a request has arrived. Before that, a listener that takes the
+PROXY protocol closes a connection whose PROXY header has not fully arrived within **5 seconds**,
+and every listener closes a connection that has not finished its TLS handshake within **5 seconds**, has not started sending a
 request within **10 seconds**, or has not completed an HTTP/1 request head within **10 seconds** of
 it starting to arrive. The last limit also runs between requests, so an idle keep-alive connection
 is closed after 10 seconds. An HTTP/2 connection is closed once it has had no request in flight for
@@ -148,7 +154,8 @@ counting IPv6 clients per /64) and **10,000 in total** (`VOUCH_MAX_CONNECTIONS`)
 terminates TLS connects from its own address on behalf of every client, so list it in
 `VOUCH_TRUSTED_PROXIES`: trusted proxies are exempt from the per-address cap. Without that, the cap
 applies to the proxy itself and it will see refused connections under load. With NLB passthrough
-and client IP preservation, the cap sees each real client and needs no configuration.
+and client IP preservation, or with the PROXY protocol, the cap sees each real client and needs no
+configuration.
 
 ## Example configurations
 
@@ -198,9 +205,9 @@ certificate-bound tokens.
 
 Health-check the 443 target group with protocol **HTTPS** and path **`/health/ready`**. The health
 check's `Host` header is the load balancer node's IP rather than your domain. That passes, because
-Vouch validates `Host` only on the port 80 redirect listener. Do not health-check port 80 instead:
-it serves `/health` but not `/health/ready`, so it reports a live process even when the database is
-unreachable.
+Vouch validates `Host` only on the port 80 redirect listener, and `/health/ready` is exempt from
+that check. Checking 443 exercises the TLS listener as well as the database; port 80 serves
+`/health/ready` too, but a check there cannot notice a TLS listener that has stopped answering.
 
 On the Vouch side, set `VOUCH_TLS_CERT` and `VOUCH_TLS_KEY`, set `VOUCH_BASE_URL` to the public
 HTTPS URL, and leave `VOUCH_TRUSTED_PROXIES` **unset**.
@@ -217,6 +224,175 @@ balancer has a node in. A zone whose node has no local target does not fail fast
 connection for several seconds before falling back to another zone, which surfaces as intermittent
 multi-second latency rather than as an error.
 
+## PROXY protocol
+
+A TCP proxy that relays TLS without terminating it opens its own connection to Vouch, so the TCP
+peer Vouch sees is the proxy. It cannot add `X-Forwarded-For` to ciphertext. Instead it sends the
+client's address in a [PROXY protocol](https://www.haproxy.org/download/1.8/doc/proxy-protocol.txt)
+header ahead of the relayed bytes, and Vouch reads it before the TLS handshake. This keeps Vouch's
+cipher policy, its post-quantum key exchange, the mTLS listener and RFC 8705 certificate-bound
+tokens.
+
+Turn it on, and name the ranges your proxies connect from in `VOUCH_TRUSTED_PROXIES`:
+
+```bash
+VOUCH_PROXY_PROTOCOL=true
+VOUCH_TRUSTED_PROXIES=10.244.0.0/16
+```
+
+It applies to the HTTPS listener (443) and the mTLS listener (`VOUCH_MTLS_PORT`, 8443) together.
+On both:
+
+- **Every connection must start with a PROXY protocol v2 header.** A connection without one is
+  closed. There is no auto-detection: the spec forbids guessing whether the header is present, so a
+  listener with the PROXY protocol on cannot also serve clients that connect directly.
+- **Only `VOUCH_TRUSTED_PROXIES` may send it.** A connection from any other address is closed before
+  anything is read from it. Anyone who can reach the listener from inside a listed range can claim
+  any client address, so list only your proxies, and restrict who can reach the port (below).
+- **Version 2 (binary) only.** The text v1 format is refused. AWS NLB sends v2, and Istio/Envoy send
+  it with `proxyProtocol: { version: V2 }`. In HAProxy use `send-proxy-v2` on the `server` line
+  (`send-proxy` sends v1). In nginx `stream` use `proxy_protocol v2;`, available from nginx 1.31.4;
+  `proxy_protocol on;` sends v1.
+- **The header must arrive within 5 seconds** of the connection, then the TLS handshake gets its
+  usual 5 seconds.
+- A `LOCAL` header, which a proxy sends for its own health checks, is accepted, and the proxy's own
+  address is used as the client.
+
+The header's source address is then the client for rate limiting, the audit `client_ip`, and the
+per-address connection cap. `X-Forwarded-For` is not read: the proxy relays TLS it cannot add the
+header to, so any `X-Forwarded-For` in the request came from the client.
+
+`VOUCH_PROXY_PROTOCOL` applies only when TLS is configured, and needs `VOUCH_TRUSTED_PROXIES`; the
+server refuses to start without either. Port 80 never takes the PROXY
+protocol, and serves `/health/ready` so that probes which cannot send the header, such as the
+kubelet's, still have a readiness endpoint.
+
+### Istio ingress gateway on Kubernetes
+
+The path this is built for:
+
+```text
+client ──TLS──▶ AWS NLB ──PROXY v2──▶ Istio ingress gateway ──PROXY v2 + raw TLS──▶ Vouch pod :443 / :8443
+                (ip targets)          (TLS PASSTHROUGH, SNI routing)                (no sidecar on these ports)
+```
+
+**1. NLB to gateway.** Have the NLB send PROXY v2 to the gateway pods, and have the gateway read
+it. On the gateway `Service`
+([AWS Load Balancer Controller annotations](https://kubernetes-sigs.github.io/aws-load-balancer-controller/latest/guide/service/annotations/)):
+
+```yaml
+service.beta.kubernetes.io/aws-load-balancer-proxy-protocol: "*"
+service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+```
+
+On the gateway pods
+([gateway network topology](https://istio.io/latest/docs/ops/configuration/traffic-management/network-topologies/)):
+
+```yaml
+proxy.istio.io/config: '{"gatewayTopology" : { "proxyProtocol": {} }}'
+```
+
+That annotation makes the gateway expect the header on **every** TCP listener it has, so give
+Vouch a dedicated gateway.
+
+**2. Gateway routing.** SNI passthrough, one server per port
+([SNI passthrough](https://istio.io/latest/docs/tasks/traffic-management/ingress/ingress-sni-passthrough/)):
+
+```yaml
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata: { name: vouch }
+spec:
+  selector: { istio: vouch-gateway }
+  servers:
+  - port: { number: 443,  name: tls,      protocol: TLS }
+    tls: { mode: PASSTHROUGH }
+    hosts: [auth.example.com]
+  - port: { number: 8443, name: tls-mtls, protocol: TLS }
+    tls: { mode: PASSTHROUGH }
+    hosts: [auth.example.com]
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata: { name: vouch }
+spec:
+  hosts: [auth.example.com]
+  gateways: [vouch]
+  tls:
+  - match: [{ port: 443,  sniHosts: [auth.example.com] }]
+    route: [{ destination: { host: vouch, port: { number: 443 } } }]
+  - match: [{ port: 8443, sniHosts: [auth.example.com] }]
+    route: [{ destination: { host: vouch, port: { number: 8443 } } }]
+```
+
+**3. Gateway to Vouch.** A `DestinationRule` makes the gateway prepend the header
+([DestinationRule reference](https://istio.io/latest/docs/reference/config/networking/destination-rule/)):
+
+```yaml
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata: { name: vouch }
+spec:
+  host: vouch
+  trafficPolicy:
+    tls: { mode: DISABLE }          # no mesh mTLS on this hop; Vouch's own TLS protects it
+    proxyProtocol: { version: V2 }
+```
+
+**4. Keep the Vouch pod's sidecar off 443 and 8443.** On the Vouch pod template
+([annotations](https://istio.io/latest/docs/reference/config/annotations/)):
+
+```yaml
+traffic.sidecar.istio.io/excludeInboundPorts: "443,8443"
+```
+
+Both halves of that are required:
+
+- **Mesh mTLS breaks it.** Envoy writes the PROXY header to the raw socket before the mesh TLS
+  handshake starts, so with mesh mTLS on the Vouch pod's sidecar receives the header where it
+  expects a ClientHello and fails every connection. Hence `tls.mode: DISABLE` above.
+- **A sidecar in the path without mesh mTLS is unsafe.** The sidecar would relay the bytes, but the
+  TCP peer Vouch sees would become the sidecar (`127.0.0.6`). Vouch would have to trust that address
+  as a PROXY sender, and any pod that can reach the Vouch pod would have its forged header relayed
+  from it. Excluding the ports takes the sidecar out of the path.
+
+`sidecar.istio.io/inject: "false"` also works, but it takes Vouch's outbound traffic (database,
+upstream IdP) out of the mesh too.
+
+**5. Restrict who can send the header.** Vouch sees the gateway pods' IPs, so set
+`VOUCH_TRUSTED_PROXIES` to the pod CIDR the gateway pods run in. Any other pod in that CIDR
+could forge a header, so add a `NetworkPolicy` that admits only the gateway pods to Vouch's 443 and
+8443:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: vouch-ingress }
+spec:
+  podSelector: { matchLabels: { app: vouch } }
+  policyTypes: [Ingress]
+  ingress:
+  - from:
+    - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: istio-ingress } }
+      podSelector: { matchLabels: { istio: vouch-gateway } }
+    ports: [{ port: 443 }, { port: 8443 }]
+  - ports: [{ port: 80 }]           # readiness probes and the HTTP redirect
+```
+
+**6. Probes.** Point the readiness probe at port 80, which never takes the PROXY protocol. The
+kubelet sends no header, so a probe on 443 would be refused:
+
+```yaml
+readinessProbe:
+  httpGet: { path: /health/ready, port: 80 }
+livenessProbe:
+  httpGet: { path: /health, port: 80 }
+```
+
+Verify it end to end: requests from outside the NLB should show the client's address in audit
+events at `/admin/audit`, and a PROXY header sent to Vouch from a pod other than the gateway should
+be refused.
+
 ## Checklist
 
 With TCP passthrough:
@@ -230,6 +406,13 @@ With TLS terminated at the proxy:
 - [ ] `VOUCH_TRUSTED_PROXIES` covers your proxy ranges, and nothing wider
 - [ ] The proxy forwards the original `Host`
 - [ ] The proxy appends to `X-Forwarded-For` rather than replacing it
+
+With the PROXY protocol:
+
+- [ ] `VOUCH_PROXY_PROTOCOL=true`, and `VOUCH_TRUSTED_PROXIES` lists only the proxies' ranges
+- [ ] The proxy sends PROXY protocol **v2**
+- [ ] Nothing but the proxy can reach 443 and 8443 (security group, `NetworkPolicy`)
+- [ ] Probes that cannot send the header use port 80
 
 Either way:
 

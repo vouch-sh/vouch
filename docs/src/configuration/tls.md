@@ -7,7 +7,8 @@ Vouch requires HTTPS in production. TLS can be configured directly on the Vouch 
 When TLS is configured, the server automatically:
 - Listens on port **443** (HTTPS)
 - Runs an HTTP redirect server on port **80** (308 redirect to HTTPS)
-- Makes the `/health` endpoint accessible on HTTP (for load balancer health checks)
+- Makes `/health` and `/health/ready` accessible on HTTP (for load balancer health checks, and for
+  readiness probes when 443 requires the [PROXY protocol](reverse-proxy.md#proxy-protocol))
 - Validates the `Host` header against `rp_id` to prevent injection attacks
 - Ignores `VOUCH_LISTEN_ADDR` (ports are fixed at 443/80)
 

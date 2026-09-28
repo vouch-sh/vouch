@@ -827,10 +827,18 @@ fn log_startup_summary(config: &config::ServerConfig) {
             .iter()
             .map(ToString::to_string)
             .collect();
-        tracing::warn!(
-            "Trusted proxies configured: {} -- X-Forwarded-For will be parsed for client IP",
-            cidrs.join(", "),
-        );
+        if config.proxy_protocol {
+            tracing::warn!(
+                "PROXY protocol required on the HTTPS and mTLS listeners from: {} -- the \
+                 header's source address is the client address; X-Forwarded-For is ignored",
+                cidrs.join(", "),
+            );
+        } else {
+            tracing::warn!(
+                "Trusted proxies configured: {} -- X-Forwarded-For will be parsed for client IP",
+                cidrs.join(", "),
+            );
+        }
     }
 
     let pool_cfg = &config.pool_config;

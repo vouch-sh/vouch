@@ -15,10 +15,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use tokio::net::TcpStream;
 use tokio_rustls::TlsAcceptor;
 
-use super::accept::Handshake;
+use super::accept::{ClientStream, Handshake};
 
 /// The mTLS connection's peer certificate chain and remote socket address.
 ///
@@ -110,16 +109,16 @@ impl MtlsHandshake {
 }
 
 impl Handshake for MtlsHandshake {
-    type Io = tokio_rustls::server::TlsStream<TcpStream>;
+    type Io = tokio_rustls::server::TlsStream<ClientStream>;
     type Info = PeerClientCert;
 
     async fn handshake(
         &self,
-        tcp: TcpStream,
+        stream: ClientStream,
         peer_addr: SocketAddr,
     ) -> io::Result<(Self::Io, PeerClientCert)> {
         let acceptor = TlsAcceptor::from(self.tls_config.load_full());
-        let tls_stream = acceptor.accept(tcp).await?;
+        let tls_stream = acceptor.accept(stream).await?;
         let peer_chain_der = tls_stream
             .get_ref()
             .1
@@ -274,12 +273,15 @@ impl rustls::server::danger::ClientCertVerifier for AcceptAnyClientCert {
 )]
 mod tests {
     use super::*;
-    use crate::infra::accept::{self, ConnLimits};
+    use crate::AppState;
+    use crate::client_info::ClientInfo;
+    use crate::infra::accept::{self, ConnLimits, ProxyProtocol};
     use crate::infra::conn_caps::ConnCaps;
     use crate::infra::router::build_app;
     use crate::infra::tls;
     use crate::test_utils;
-    use tokio::net::TcpListener;
+    use std::io::{Read as _, Write as _};
+    use tokio::net::{TcpListener, TcpStream};
     use tokio_util::sync::CancellationToken;
 
     /// Build a self-signed server cert and PKCS#8 key for testing.
@@ -535,6 +537,14 @@ mod tests {
         app: axum::Router,
         limits: ConnLimits,
     ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+        serve_over_mtls_with(app, limits, ProxyProtocol::off()).await
+    }
+
+    async fn serve_over_mtls_with(
+        app: axum::Router,
+        limits: ConnLimits,
+        proxy: ProxyProtocol,
+    ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
         let (cert_der, pkcs8_der) = make_self_signed_server_cert();
         let server_cert = rustls::pki_types::CertificateDer::from(cert_der);
         let server_key = rustls::pki_types::PrivateKeyDer::Pkcs8(pkcs8_der.into());
@@ -546,6 +556,7 @@ mod tests {
         let addr = tcp.local_addr().expect("local addr");
         let server = tokio::spawn(accept::serve(
             tcp,
+            proxy,
             MtlsHandshake::new(swap),
             app,
             limits,
@@ -677,6 +688,7 @@ mod tests {
         let addr = tcp.local_addr().expect("local addr");
         let server = tokio::spawn(accept::serve(
             tcp,
+            ProxyProtocol::off(),
             accept::TlsHandshake(tls),
             app,
             ConnLimits::DEFAULT,
@@ -692,6 +704,301 @@ mod tests {
             status.starts_with('4') && status != "429",
             "the token handler must refuse the request (4xx); a 500 means the rate limiter \
              found no client IP. Response:\n{response}"
+        );
+    }
+
+    /// Loopback, where the tests' PROXY sender connects from.
+    fn loopback_sender() -> ProxyProtocol {
+        ProxyProtocol::from_sources(&["127.0.0.0/8".parse().expect("CIDR")])
+    }
+
+    /// Serve `app` through the real accept loop and the HTTPS listener's
+    /// `TlsHandshake`, taking the PROXY protocol from loopback.
+    async fn serve_over_https_proxied(
+        app: axum::Router,
+    ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+        serve_over_https_with(app, loopback_sender()).await
+    }
+
+    /// Serve `app` through the real accept loop and `TlsHandshake`, with the
+    /// PROXY protocol setting `proxy`.
+    async fn serve_over_https_with(
+        app: axum::Router,
+        proxy: ProxyProtocol,
+    ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+        let (cert_der, pkcs8_der) = make_self_signed_server_cert();
+        let server_cert = rustls::pki_types::CertificateDer::from(cert_der);
+        let server_key = rustls::pki_types::PrivateKeyDer::Pkcs8(pkcs8_der.into());
+        let server_config =
+            build_mtls_server_config(vec![server_cert], server_key).expect("config");
+        let tls = axum_server::tls_rustls::RustlsConfig::from_config(server_config);
+
+        let tcp = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = tcp.local_addr().expect("local addr");
+        let server = tokio::spawn(accept::serve(
+            tcp,
+            proxy,
+            accept::TlsHandshake(tls),
+            app,
+            ConnLimits::DEFAULT,
+            ConnCaps::for_test(),
+            CancellationToken::new(),
+        ));
+        (addr, server)
+    }
+
+    /// A PROXY v2 header for a TCP connection from `source`.
+    fn proxy_v2(source: &str) -> Vec<u8> {
+        let header = proxy_header::ProxyHeader::with_address(proxy_header::ProxiedAddress::stream(
+            source.parse().expect("source"),
+            "192.0.2.1:443".parse().expect("destination"),
+        ));
+        let mut buf = Vec::new();
+        header.encode_v2(&mut buf).expect("encode");
+        buf
+    }
+
+    /// A socket whose first write carries `prefix` ahead of the caller's
+    /// bytes, so the PROXY header and the start of the TLS ClientHello leave
+    /// in one write, as a proxy relaying a client's first segment sends them.
+    struct PrefixedWrite {
+        tcp: std::net::TcpStream,
+        prefix: Option<Vec<u8>>,
+    }
+
+    impl std::io::Read for PrefixedWrite {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.tcp.read(buf)
+        }
+    }
+
+    impl std::io::Write for PrefixedWrite {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if let Some(mut first) = self.prefix.take() {
+                first.extend_from_slice(buf);
+                self.tcp.write_all(&first)?;
+                return Ok(buf.len());
+            }
+            self.tcp.write(buf)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.tcp.flush()
+        }
+    }
+
+    /// Send `header`, then a TLS session carrying one `GET path` request, and
+    /// return the response. `client_cert` is a `(cert DER, PKCS#8 DER)` pair
+    /// to present. Blocking rustls, so the header can share the ClientHello's
+    /// write; run on the blocking pool.
+    async fn get_over_tls_after(
+        addr: SocketAddr,
+        header: Vec<u8>,
+        path: &'static str,
+        client_cert: Option<(Vec<u8>, Vec<u8>)>,
+    ) -> String {
+        let request =
+            format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        send_over_tls_after(addr, header, request, client_cert).await
+    }
+
+    /// Send `header`, then a TLS session carrying the raw HTTP `request`, and
+    /// return the response.
+    async fn send_over_tls_after(
+        addr: SocketAddr,
+        header: Vec<u8>,
+        request: String,
+        client_cert: Option<(Vec<u8>, Vec<u8>)>,
+    ) -> String {
+        let exchange = tokio::task::spawn_blocking(move || {
+            let provider = Arc::new(tls::bcp195_crypto_provider());
+            let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
+                .with_safe_default_protocol_versions()
+                .expect("client versions")
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(AcceptAnyServerCert(provider)));
+            let client_config = match client_cert {
+                Some((cert, key)) => builder
+                    .with_client_auth_cert(
+                        vec![rustls::pki_types::CertificateDer::from(cert)],
+                        rustls::pki_types::PrivateKeyDer::Pkcs8(key.into()),
+                    )
+                    .expect("client cert"),
+                None => builder.with_no_client_auth(),
+            };
+            let server_name =
+                rustls::pki_types::ServerName::try_from("localhost").expect("server name");
+            let conn = rustls::ClientConnection::new(Arc::new(client_config), server_name)
+                .expect("client connection");
+            let tcp = std::net::TcpStream::connect(addr).expect("connect");
+            tcp.set_read_timeout(Some(std::time::Duration::from_secs(30)))
+                .expect("read timeout");
+            let mut tls = rustls::StreamOwned::new(
+                conn,
+                PrefixedWrite {
+                    tcp,
+                    prefix: Some(header),
+                },
+            );
+            tls.write_all(request.as_bytes()).expect("write");
+            let mut response = Vec::new();
+            // The server may close without close_notify; what arrived is kept.
+            let _eof = tls.read_to_end(&mut response);
+            String::from_utf8_lossy(&response).into_owned()
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(60), exchange)
+            .await
+            .expect("TLS exchange timed out")
+            .expect("join")
+    }
+
+    /// The route the PROXY tests read: the client IP the audit `ClientInfo`
+    /// extractor resolves.
+    fn client_ip_app(state: Arc<AppState>) -> axum::Router {
+        use axum::routing::get;
+        axum::Router::new()
+            .route(
+                "/client-ip",
+                get(|info: ClientInfo| async move {
+                    info.client_ip()
+                        .map(|ip| ip.to_string())
+                        .unwrap_or_default()
+                }),
+            )
+            .with_state(state)
+    }
+
+    /// On the HTTPS listener the PROXY header's source is the client the
+    /// audit `ClientInfo` records, and the TLS handshake completes although
+    /// the header and the ClientHello arrive in one write.
+    #[tokio::test]
+    async fn https_proxy_header_client_reaches_client_info() {
+        let state = test_utils::test_app_state().await;
+        let (addr, server) = serve_over_https_proxied(client_ip_app(state)).await;
+
+        let response =
+            get_over_tls_after(addr, proxy_v2("203.0.113.9:40000"), "/client-ip", None).await;
+        server.abort();
+
+        assert!(response.starts_with("HTTP/1.1 200"), "response: {response}");
+        assert!(
+            response.ends_with("203.0.113.9"),
+            "ClientInfo must record the PROXY header's source; response: {response}"
+        );
+    }
+
+    /// With `VOUCH_PROXY_PROTOCOL` on, X-Forwarded-For is not read even when
+    /// the PROXY header's client sits inside `VOUCH_TRUSTED_PROXIES`: the
+    /// trusted proxy relays TLS it cannot add the header to, so any
+    /// X-Forwarded-For comes from the client, which could pick its address.
+    #[tokio::test]
+    async fn https_proxy_protocol_ignores_forwarded_for_from_trusted_client() {
+        let state = test_utils::test_app_state().await;
+        let mut config = (**state.config()).clone();
+        config.proxy_protocol = true;
+        config.trusted_proxies = vec![
+            "127.0.0.0/8".parse().expect("CIDR"),
+            "10.0.0.0/8".parse().expect("CIDR"),
+        ];
+        state.config.store(Arc::new(config.clone()));
+        let (addr, server) =
+            serve_over_https_with(client_ip_app(state), ProxyProtocol::from_config(&config)).await;
+
+        let request = "GET /client-ip HTTP/1.1\r\nHost: localhost\r\n\
+                       X-Forwarded-For: 203.0.113.50\r\nConnection: close\r\n\r\n"
+            .to_string();
+        let response = send_over_tls_after(addr, proxy_v2("10.1.2.3:40000"), request, None).await;
+        server.abort();
+
+        assert!(response.starts_with("HTTP/1.1 200"), "response: {response}");
+        assert!(
+            response.ends_with("10.1.2.3"),
+            "the PROXY header's source is the client, not X-Forwarded-For; \
+             response: {response}"
+        );
+    }
+
+    /// Each client behind the proxy gets its own rate-limit bucket: requests
+    /// that all arrive from the proxy's one TCP address, but carry distinct
+    /// PROXY sources, are not limited together, while the same source is.
+    #[tokio::test]
+    async fn https_proxy_header_client_keys_the_rate_limiter() {
+        let (app, _state) = test_utils::test_app().await;
+        let (addr, server) = serve_over_https_proxied(app).await;
+
+        // `build_auth_rate_limiter` allows a burst of 8 on `/oauth/token`; a
+        // GET is refused by the handler after the limiter has counted it.
+        let mut distinct = Vec::new();
+        for i in 0..12 {
+            let header = proxy_v2(&format!("203.0.113.{i}:40000"));
+            let response = get_over_tls_after(addr, header, "/oauth/token", None).await;
+            distinct.push(status_of(&response).to_string());
+        }
+        let mut same = Vec::new();
+        for _ in 0..12 {
+            let header = proxy_v2("198.51.100.7:40000");
+            let response = get_over_tls_after(addr, header, "/oauth/token", None).await;
+            same.push(status_of(&response).to_string());
+        }
+        server.abort();
+
+        assert!(
+            distinct.iter().all(|s| !s.is_empty() && s != "429"),
+            "distinct clients behind one proxy must not share a bucket; statuses: {distinct:?}"
+        );
+        assert!(
+            same.iter().any(|s| s == "429"),
+            "one client behind the proxy is still limited; statuses: {same:?}"
+        );
+    }
+
+    /// On the mTLS listener the client certificate chain survives the PROXY
+    /// header, and the header's source is both `PeerClientCert.peer_addr` and
+    /// the client IP `ClientInfo` records.
+    #[tokio::test]
+    async fn mtls_client_certificate_arrives_after_proxy_header() {
+        use axum::extract::ConnectInfo;
+        use axum::routing::get;
+
+        let (client_cert, client_key) = make_self_signed_server_cert();
+        let expected_leaf = client_cert.clone();
+        let state = test_utils::test_app_state().await;
+        let app = axum::Router::new()
+            .route(
+                "/peer",
+                get(
+                    move |ConnectInfo(peer): ConnectInfo<PeerClientCert>,
+                          info: ClientInfo| async move {
+                        let leaf_matches = peer.peer_chain_der.first() == Some(&expected_leaf);
+                        format!(
+                            "{} {} {} {leaf_matches}",
+                            peer.peer_addr.ip(),
+                            info.client_ip()
+                                .map(|ip| ip.to_string())
+                                .unwrap_or_default(),
+                            peer.peer_chain_der.len(),
+                        )
+                    },
+                ),
+            )
+            .with_state(state);
+        let (addr, server) =
+            serve_over_mtls_with(app, ConnLimits::DEFAULT, loopback_sender()).await;
+
+        let response = get_over_tls_after(
+            addr,
+            proxy_v2("203.0.113.9:40000"),
+            "/peer",
+            Some((client_cert, client_key)),
+        )
+        .await;
+        server.abort();
+
+        assert!(response.starts_with("HTTP/1.1 200"), "response: {response}");
+        assert!(
+            response.ends_with("203.0.113.9 203.0.113.9 1 true"),
+            "expected peer_addr, ClientInfo IP, chain length, and leaf match; \
+             response: {response}"
         );
     }
 

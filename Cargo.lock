@@ -5077,6 +5077,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "proxy-header"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "accf7ba1ae5e4f5b6acfb2d88d3cf68d03c333fca0260b06fb9aafcfcf22e2f5"
+dependencies = [
+ "pin-project-lite",
+ "tokio",
+]
+
+[[package]]
 name = "psl"
 version = "2.1.237"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7571,6 +7581,7 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "p256",
+ "proxy-header",
  "psl",
  "reqwest",
  "roxmltree",

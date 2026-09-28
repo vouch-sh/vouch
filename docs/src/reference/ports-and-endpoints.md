@@ -7,7 +7,7 @@ Reference for writing firewall rules, security groups, and load balancer routing
 | Port | Protocol | Purpose | Configurable |
 |------|----------|---------|--------------|
 | **443** | HTTPS | Main listener | No — fixed whenever TLS is configured |
-| **80** | HTTP | 308 redirect to HTTPS, plus `/health` | No |
+| **80** | HTTP | 308 redirect to HTTPS, plus `/health` and `/health/ready` | No |
 | **8443** | HTTPS + mTLS | Client-certificate listener for RFC 8705 certificate-bound tokens | Port only, via `VOUCH_MTLS_PORT` |
 | **3000** | HTTP | Default listener when TLS is **not** configured | Yes, via `VOUCH_LISTEN_ADDR` |
 
@@ -47,7 +47,7 @@ Three things regularly surprise operators here:
 | Endpoint | Method | Auth | Notes |
 |----------|--------|------|-------|
 | `/health` | GET | None | Liveness. Returns `ok` as plain text. Also served on port 80 |
-| `/health/ready` | GET | None | Readiness. Checks the database; 503 when unreachable |
+| `/health/ready` | GET | None | Readiness. Checks the database; 503 when unreachable. Also served on port 80, which never takes the PROXY protocol |
 | `/metrics` | GET | Metrics token | Only registered when `VOUCH_METRICS_BEARER_TOKEN` is set |
 
 ### Discovery and metadata

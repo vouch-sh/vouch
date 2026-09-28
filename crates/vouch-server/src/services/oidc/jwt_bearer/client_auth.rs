@@ -522,6 +522,7 @@ mod tests {
             allowed_aaguids: AaguidPolicy::Any,
             log_format: LogFormat::Text,
             trusted_proxies: Vec::new(),
+            proxy_protocol: false,
             connection_caps: ConnCapConfig::DEFAULT,
             metrics_bearer_token: None,
             certification_test_token: None,

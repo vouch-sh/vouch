@@ -524,6 +524,21 @@ pub struct Args {
     #[arg(long, env = "VOUCH_TRUSTED_PROXIES", default_value = "")]
     pub trusted_proxies: String,
 
+    /// Require a PROXY protocol v2 header from `VOUCH_TRUSTED_PROXIES` on the
+    /// HTTPS and mTLS listeners.
+    ///
+    /// For a TLS-passthrough proxy (Istio/Envoy `PASSTHROUGH`, nginx `stream`,
+    /// HAProxy `mode tcp`), which cannot add X-Forwarded-For. When set, every
+    /// connection to those listeners must come from a trusted proxy and start
+    /// with the header, whose source address becomes the client address;
+    /// X-Forwarded-For is ignored. Requires TLS and `VOUCH_TRUSTED_PROXIES`.
+    #[arg(
+        long,
+        env = "VOUCH_PROXY_PROTOCOL",
+        value_parser = clap::builder::BoolishValueParser::new(),
+    )]
+    pub proxy_protocol: bool,
+
     /// Maximum open connections across all listeners. When reached, new
     /// connections wait in the kernel backlog until one closes.
     #[arg(
@@ -642,10 +657,6 @@ pub fn bootstrap_overlay_args(
             // SetTrue args cannot accept `--flag=value`, so parse the blob
             // value leniently and emit the bare flag only when truthy.
             //
-            // `Args` currently declares no boolean flags, so this branch has
-            // no test. It is kept because the loop is generic over every
-            // declared argument: the first bool added would otherwise emit
-            // `--flag=true`, which clap rejects.
             let truthy = matches!(
                 value.trim().to_ascii_lowercase().as_str(),
                 "true" | "1" | "yes" | "on"
@@ -927,6 +938,9 @@ pub struct ServerConfig {
     pub log_format: LogFormat,
     /// Trusted proxy CIDRs for X-Forwarded-For parsing.
     pub trusted_proxies: Vec<IpNet>,
+    /// Whether the HTTPS and mTLS listeners require a PROXY protocol header
+    /// from `trusted_proxies` instead of reading X-Forwarded-For.
+    pub proxy_protocol: bool,
     /// Caps on open connections.
     pub connection_caps: ConnCapConfig,
     /// Bearer token for /metrics endpoint access control.
@@ -1067,6 +1081,12 @@ impl ServerConfig {
 
         // Parse trusted proxies
         let trusted_proxies = parse_trusted_proxies(&args.trusted_proxies)?;
+        if args.proxy_protocol && trusted_proxies.is_empty() {
+            anyhow::bail!(
+                "VOUCH_PROXY_PROTOCOL requires VOUCH_TRUSTED_PROXIES: only the proxies listed \
+                 there may send the PROXY header"
+            );
+        }
 
         // Parse unified IdP list (OIDC + SAML).
         let idps = parse_idps(args.idps.as_deref())?;
@@ -1134,6 +1154,7 @@ impl ServerConfig {
             allowed_aaguids,
             log_format,
             trusted_proxies,
+            proxy_protocol: args.proxy_protocol,
             connection_caps: ConnCapConfig {
                 max_total: args.max_connections,
                 max_per_ip: args.max_connections_per_ip,
@@ -1199,6 +1220,18 @@ impl ServerConfig {
     #[must_use]
     pub fn tls_configured(&self) -> bool {
         self.tls_cert.is_some() && self.tls_key.is_some()
+    }
+
+    /// Proxies whose X-Forwarded-For is honored: none with the PROXY protocol
+    /// on, because the peer is then the client itself, and walking the header
+    /// from a client inside `trusted_proxies` would let it pick its address.
+    #[must_use]
+    pub fn forwarded_for_proxies(&self) -> &[IpNet] {
+        if self.proxy_protocol {
+            &[]
+        } else {
+            &self.trusted_proxies
+        }
     }
 
     /// Validate that all required configuration is present.
@@ -2051,6 +2084,63 @@ mod tests {
     // (`https://host//oauth/token`), breaking spec-compliant clients and
     // DPoP `htu` validation.
     // ========================================================================
+
+    // ========================================================================
+    // ServerConfig::from_args — PROXY protocol
+    // ========================================================================
+
+    #[test]
+    fn from_args_proxy_protocol_off_by_default() {
+        let args =
+            Args::try_parse_from(["vouch-server", "--trusted-proxies=10.0.0.0/8"]).expect("parse");
+        let config = ServerConfig::from_args(args, None).expect("config builds");
+        assert!(!config.proxy_protocol);
+        assert_eq!(config.forwarded_for_proxies(), config.trusted_proxies);
+    }
+
+    /// With the PROXY protocol on, the trusted proxies send the header and
+    /// X-Forwarded-For is not read: the peer is then the client itself, and a
+    /// client inside the trusted range could otherwise pick its address.
+    #[test]
+    fn from_args_proxy_protocol_ignores_forwarded_for() {
+        let args = Args::try_parse_from([
+            "vouch-server",
+            "--proxy-protocol",
+            "--trusted-proxies=10.0.0.0/8",
+        ])
+        .expect("parse");
+        let config = ServerConfig::from_args(args, None).expect("config builds");
+        assert!(config.proxy_protocol);
+        assert_eq!(config.trusted_proxies.len(), 1);
+        assert!(config.forwarded_for_proxies().is_empty());
+    }
+
+    // proxy-protocol.txt §2: "The receiver SHOULD ensure proper access
+    // filtering so that only trusted proxies are allowed to use this
+    // protocol." With no trusted proxy there is no one to accept it from.
+    #[test]
+    fn from_args_rejects_proxy_protocol_without_trusted_proxies() {
+        let args = Args::try_parse_from(["vouch-server", "--proxy-protocol"]).expect("parse");
+        let err = ServerConfig::from_args(args, None)
+            .err()
+            .expect("PROXY protocol with no trusted proxy is fatal");
+        assert!(
+            err.to_string().contains("VOUCH_TRUSTED_PROXIES"),
+            "the error names the missing setting: {err}"
+        );
+    }
+
+    #[test]
+    fn bootstrap_overlay_sets_truthy_flag() {
+        let matches = matches_ignoring_process_env(&["vouch-server"]);
+        let tokens = bootstrap_overlay_args(&matches, &blob(&[("VOUCH_PROXY_PROTOCOL", "true")]));
+        assert_eq!(tokens, vec![std::ffi::OsString::from("--proxy-protocol")]);
+        let tokens = bootstrap_overlay_args(&matches, &blob(&[("VOUCH_PROXY_PROTOCOL", "false")]));
+        assert!(
+            tokens.is_empty(),
+            "a false flag emits nothing, got: {tokens:?}"
+        );
+    }
 
     #[test]
     fn from_args_trims_single_trailing_slash_from_base_url() {
