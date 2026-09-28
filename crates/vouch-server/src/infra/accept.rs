@@ -369,7 +369,7 @@ async fn serve_connection<H: Handshake>(
     // so the per-client cap below counts the client rather than the proxy.
     let (stream, peer) = if proxy.enabled() {
         if !proxy.allows(tcp_peer.ip()) {
-            tracing::debug!(remote_addr = %tcp_peer, "connection from outside the PROXY protocol sources; closing");
+            tracing::debug!(remote_addr = %tcp_peer, "PROXY protocol connection from outside VOUCH_TRUSTED_PROXIES; closing");
             metrics::counter!("vouch_connections_rejected_total", "reason" => "proxy_source")
                 .increment(1);
             return;

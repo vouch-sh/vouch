@@ -228,18 +228,17 @@ fn parse_log_format(s: &str) -> Result<LogFormat> {
     }
 }
 
-/// Parse a comma-separated list of CIDR networks; `var` names the setting in
-/// the error.
-fn parse_cidr_list(s: &str, var: &str) -> Result<Vec<IpNet>> {
+/// Parse a comma-separated list of CIDR networks.
+fn parse_trusted_proxies(s: &str) -> Result<Vec<IpNet>> {
     if s.trim().is_empty() {
         return Ok(Vec::new());
     }
     s.split(',')
         .map(|cidr| {
             let trimmed = cidr.trim();
-            trimmed
-                .parse::<IpNet>()
-                .map_err(|e| anyhow::anyhow!("Invalid CIDR in {var} '{trimmed}': {e}"))
+            trimmed.parse::<IpNet>().map_err(|e| {
+                anyhow::anyhow!("Invalid CIDR in VOUCH_TRUSTED_PROXIES '{}': {}", trimmed, e)
+            })
         })
         .collect()
 }
@@ -1081,7 +1080,7 @@ impl ServerConfig {
         let log_format = parse_log_format(&args.log_format)?;
 
         // Parse trusted proxies
-        let trusted_proxies = parse_cidr_list(&args.trusted_proxies, "VOUCH_TRUSTED_PROXIES")?;
+        let trusted_proxies = parse_trusted_proxies(&args.trusted_proxies)?;
         if args.proxy_protocol && trusted_proxies.is_empty() {
             anyhow::bail!(
                 "VOUCH_PROXY_PROTOCOL requires VOUCH_TRUSTED_PROXIES: only the proxies listed \
