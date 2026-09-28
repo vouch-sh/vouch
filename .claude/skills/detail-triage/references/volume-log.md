@@ -34,6 +34,7 @@ judgement columns come from the batch's record in `.local/`.
 | 2026-09-25 | 17 | 20 | 0 | 4 | 7 | 15 of 17 | proposed: #1549, #1532 as-is; 8 amend; #1541 and #1553 blocked; 7 superseded by class fixes (7592 token revocation, audit context, login-failure principal, helper URL); #1550 closed | not checkable (no records in container) | 0 (7 descriptions ready; `detail` CLI unavailable) |
 | 2026-09-26 | 2 | 2 | 0 | 1 | 2 | 1 of 2 | #1566 merge as-is; #1567 rebuilt on main (conflicts with #1561–#1571, `absolute_paths`) with an end-to-end listener test, superseded; #1546, #1547 closed as fixed by #1551 | 0 (neither was recorded residue) | 0 (both instances) |
 | 2026-09-27 | 2 | 2 | 0 | 0 | 2 | 2 of 2 | #1579 amended into a four-path class fix (RFC 7591 create sibling, profile-taking `has_client_assertion_key`); #1580 rebuilt without its env var (mTLS port never walks X-Forwarded-For); both superseded | 0 | 0 (type-level guardrail; `detail` CLI unavailable) |
+| 2026-09-28 | 5 | 5 | 0 | 0 | 5 | 5 of 5 | #1593 amended (shared caps builder, docs, overlay parser); #1594 superseded by #1598 (one select-and-build JWK rule); #1597/#1592 closed wontfix (empty env is a config error, 19 numeric siblings); #1595 amended (one shared test TLS acceptor; no new private-key copies); #1596 closed (per-route timeout, class left open) | 0 (09-25–27 records not local) | 0 (type-level guardrail; deadline lint pending) |
 
 Batches before 2026-08-20 have no record, so only their counted columns exist:
 run the script. `escape-unaware-delimiter-normalization` exists on Detail's side
@@ -781,3 +782,49 @@ reviewing the code.
 
 A predicate that bakes in one profile's allowlist makes the other profile's
 check something a caller has to remember. Pass the profile.
+
+## 2026-09-28
+
+| month | n | median age | p90 | <30d | >90d |
+|-------|---|-----------|-----|------|------|
+| 2026-09 | 147 | 4 | 194 | 79 | 47 |
+
+5 issues, 5 fix PRs, all CI-green and signed. All five blame merges from the
+previous two days (#1581, #1584, #1586), each in logic that merge added.
+
+- **Request budget** (#1590, #1591 from #1584): #1584 cut the request timeout
+  to 10s on the premise of one outbound step per request. A sibling hunt found
+  about 20 request paths that exceed it; a guarded client-URL fetch alone is
+  SSRF DNS 5s + HTTP 5s. The user chose deadline propagation (Go
+  `context.WithDeadline`, gRPC deadlines) over per-route timeouts (#1596) or
+  restoring 30s; whether to build it, and how the deadline reaches call sites,
+  is still open.
+  #1595's one-fetch cap stays; #1596 closed.
+- **JWK usability** (#1589 from #1581): three encodings of "can this key
+  verify alg". Detail's #1594 added a fourth; its fixtures accepted
+  `"x":"x"`. Replaced by one `JwkEntry::decoding_key_for` (#1598). 46
+  existing fixtures had placeholder key material that could never build.
+- **PROXY-mode cap exemption** (#1588 from #1586): instance; #1593's tests
+  built the caps inline, so the fix could be reverted silently. Amended to a
+  shared `ConnCaps::for_config`.
+- **Empty env** (#1592 from #1586): 20 settings abort on an empty value, 19
+  always have. Closed wontfix; the overlay's narrower truthy set was fixed.
+
+### Process
+
+- A budget stated per call ("every upstream call is bounded well inside the
+  timeout") does not bound a request. When a fix sets a request-level limit,
+  sum the sequential awaits on each path, including guard steps like DNS
+  pre-checks and KMS, before sizing it.
+- Placeholder material in fixtures (`"n": "n"`) hid the write/runtime split:
+  fixtures that the runtime cannot build agree with a weak write-time check by
+  construction. The 09-12 lesson again, applied to key material.
+- Passing `Some(arg)` from an unbuilt `clap::Command` to a value parser
+  panics when the parser formats an error. Pass `None`.
+- A Detail PR can add a test private key to a file the `detect-private-key`
+  hook does not exclude, and CI does not run the hook. #1595 did, twice.
+  Check new PEM blocks against the exclusion list, and prefer
+  `test_utils::test_tls_acceptor` to a new copy.
+- A test comment citing a subsection the requirements file lacks links to the
+  parent section and can prune unrelated rows. Read the pruned rows before
+  accepting a baseline update.
