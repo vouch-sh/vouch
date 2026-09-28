@@ -546,6 +546,7 @@ impl HttpBody for TrackedBody {
 mod tests {
     use super::*;
     use crate::infra::conn_caps::ConnCapConfig;
+    use crate::test_utils::test_config;
 
     use axum::routing::get;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1011,6 +1012,70 @@ mod tests {
         assert!(
             same.is_empty(),
             "a second connection from the same client is over its cap; response: {same}"
+        );
+    }
+
+    /// Caps as the server builds them for `127.0.0.1/32` as the trusted proxy
+    /// and one connection per address.
+    fn caps_trusting_loopback(proxy_protocol: bool) -> Arc<ConnCaps> {
+        let mut config = test_config();
+        config.proxy_protocol = proxy_protocol;
+        config.trusted_proxies = vec!["127.0.0.1/32".parse().expect("CIDR")];
+        config.connection_caps = ConnCapConfig {
+            max_total: 100,
+            max_per_ip: 1,
+        };
+        ConnCaps::for_config(&config)
+    }
+
+    /// With the PROXY protocol on, the peer is the header's source, so a
+    /// client inside `VOUCH_TRUSTED_PROXIES` is capped like any other.
+    /// docs/src/configuration/reverse-proxy.md: the header's source address
+    /// "is then the client for rate limiting, the audit `client_ip`, and the
+    /// per-address connection cap."
+    #[tokio::test]
+    async fn proxy_mode_caps_clients_inside_trusted_proxies() {
+        let (addr, _shutdown, _server) = start_proxied(
+            ConnLimits::DEFAULT,
+            caps_trusting_loopback(true),
+            &["127.0.0.1/32"],
+        )
+        .await;
+
+        let mut first = TcpStream::connect(addr).await.expect("connect");
+        first
+            .write_all(&proxy_v2("127.0.0.1:40000"))
+            .await
+            .expect("write header");
+        let response = request_keep_alive(&mut first).await;
+        assert!(
+            response.starts_with("HTTP/1.1 200"),
+            "first connection admitted: {response}"
+        );
+
+        let second = request_after(addr, &proxy_v2("127.0.0.1:40001")).await;
+        assert!(
+            second.is_empty(),
+            "a client inside VOUCH_TRUSTED_PROXIES is capped in PROXY mode; second: {second}"
+        );
+    }
+
+    /// Without the PROXY protocol, a peer in `VOUCH_TRUSTED_PROXIES` is a
+    /// proxy that every client shares, so it is exempt.
+    #[tokio::test]
+    async fn non_proxy_mode_keeps_trusted_proxy_exempt() {
+        let (addr, _shutdown, _server) =
+            start_with_caps(ConnLimits::DEFAULT, caps_trusting_loopback(false)).await;
+
+        let mut first = TcpStream::connect(addr).await.expect("connect");
+        let response = request_keep_alive(&mut first).await;
+        assert!(response.starts_with("HTTP/1.1 200"), "first: {response}");
+
+        let mut second = TcpStream::connect(addr).await.expect("connect");
+        let response = request_keep_alive(&mut second).await;
+        assert!(
+            response.starts_with("HTTP/1.1 200"),
+            "an exempt trusted proxy is not capped in non-PROXY mode; response: {response}"
         );
     }
 

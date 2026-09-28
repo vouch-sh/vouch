@@ -157,7 +157,7 @@ async fn serve_tls_on(
         .with_context(|| format!("Failed to bind HTTPS listener on {}", addrs.https))?;
 
     // Nothing below can fail.
-    let caps = ConnCaps::new(config.connection_caps, config.trusted_proxies.clone());
+    let caps = ConnCaps::for_config(config);
     tracing::info!(
         "TLS enabled - listening on https://{} and http://{} (redirect)",
         addrs.https,
@@ -294,7 +294,7 @@ async fn serve_plain(
         PlainHandshake,
         app,
         ConnLimits::DEFAULT,
-        ConnCaps::new(config.connection_caps, config.trusted_proxies.clone()),
+        ConnCaps::for_config(config),
         shutdown_token,
     )
     .await;

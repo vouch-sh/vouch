@@ -7,11 +7,12 @@ use crate::infra::bootstrap::Bootstrap;
 use crate::infra::conn_caps::ConnCapConfig;
 use anyhow::{Context, Result};
 use aws_config::FrameworkMetadata;
+use clap::builder::{BoolishValueParser, TypedValueParser as _};
 use clap::{ArgAction, CommandFactory, Parser, parser::ValueSource};
 use ipnet::IpNet;
 use secrecy::{ExposeSecret, SecretString};
 use std::collections::{BTreeMap, HashMap};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use vouch_common::AaguidPolicy;
 use vouch_common::env;
 
@@ -550,7 +551,7 @@ pub struct Args {
     pub max_connections: u32,
 
     /// Maximum open connections per client address (IPv6: per /64). Peers in
-    /// `VOUCH_TRUSTED_PROXIES` are exempt.
+    /// `VOUCH_TRUSTED_PROXIES` are exempt unless `VOUCH_PROXY_PROTOCOL` is on.
     #[arg(
         long,
         env = "VOUCH_MAX_CONNECTIONS_PER_IP",
@@ -654,15 +655,17 @@ pub fn bootstrap_overlay_args(
             continue;
         };
         if matches!(arg.get_action(), ArgAction::SetTrue) {
-            // SetTrue args cannot accept `--flag=value`, so parse the blob
-            // value leniently and emit the bare flag only when truthy.
-            //
-            let truthy = matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "true" | "1" | "yes" | "on"
-            );
-            if truthy {
-                tokens.push(OsString::from(format!("--{long}")));
+            // SetTrue args cannot accept `--flag=value`, so emit the bare
+            // flag when truthy. The value is read with the parser clap applies
+            // to the env var, so a blob value means what the same env value
+            // means. A value neither truthy nor falsy is passed as
+            // `--flag=value`, which clap refuses, naming the flag. No `Arg`
+            // is passed: clap panics formatting an error for an `Arg` of an
+            // unbuilt `Command`, and this error is discarded anyway.
+            match BoolishValueParser::new().parse_ref(&command, None, OsStr::new(value)) {
+                Ok(true) => tokens.push(OsString::from(format!("--{long}"))),
+                Ok(false) => {}
+                Err(_) => tokens.push(OsString::from(format!("--{long}={value}"))),
             }
         } else {
             tokens.push(OsString::from(format!("--{long}={value}")));
@@ -1222,9 +1225,11 @@ impl ServerConfig {
         self.tls_cert.is_some() && self.tls_key.is_some()
     }
 
-    /// Proxies whose X-Forwarded-For is honored: none with the PROXY protocol
-    /// on, because the peer is then the client itself, and walking the header
-    /// from a client inside `trusted_proxies` would let it pick its address.
+    /// Proxies a listener's peer can be: none with the PROXY protocol on,
+    /// because the peer is then the client itself. X-Forwarded-For is walked
+    /// only through these, and only these are exempt from the per-address
+    /// connection cap; either use of `trusted_proxies` in PROXY mode would let
+    /// a client inside that range choose its address or escape the cap.
     #[must_use]
     pub fn forwarded_for_proxies(&self) -> &[IpNet] {
         if self.proxy_protocol {
@@ -2139,6 +2144,43 @@ mod tests {
         assert!(
             tokens.is_empty(),
             "a false flag emits nothing, got: {tokens:?}"
+        );
+    }
+
+    #[test]
+    fn bootstrap_overlay_reads_flags_as_the_env_var_does() {
+        let matches = matches_ignoring_process_env(&["vouch-server"]);
+        for truthy in ["t", "y", "TRUE", "on", "1"] {
+            let tokens =
+                bootstrap_overlay_args(&matches, &blob(&[("VOUCH_PROXY_PROTOCOL", truthy)]));
+            assert_eq!(
+                tokens,
+                vec![std::ffi::OsString::from("--proxy-protocol")],
+                "{truthy:?} is true from the env var, so it is true from the blob"
+            );
+        }
+        for falsy in ["f", "n", "off", "0"] {
+            let tokens =
+                bootstrap_overlay_args(&matches, &blob(&[("VOUCH_PROXY_PROTOCOL", falsy)]));
+            assert!(
+                tokens.is_empty(),
+                "{falsy:?} emits nothing, got: {tokens:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn bootstrap_overlay_refuses_a_flag_value_that_is_not_boolean() {
+        let matches = matches_ignoring_process_env(&["vouch-server"]);
+        let tokens = bootstrap_overlay_args(&matches, &blob(&[("VOUCH_PROXY_PROTOCOL", "maybe")]));
+        let mut argv = vec![std::ffi::OsString::from("vouch-server")];
+        argv.extend(tokens);
+        let err = Args::try_parse_from(argv)
+            .err()
+            .expect("a non-boolean flag value is fatal");
+        assert!(
+            err.to_string().contains("--proxy-protocol"),
+            "the error names the flag: {err}"
         );
     }
 
