@@ -157,15 +157,7 @@ async fn serve_tls_on(
         .with_context(|| format!("Failed to bind HTTPS listener on {}", addrs.https))?;
 
     // Nothing below can fail.
-    // In PROXY mode the peer handed to `admit` is the PROXY header's source
-    // (the client), not the proxy's TCP address, so the trusted-proxy exemption
-    // — meant for a TLS-terminating proxy where every client shares the proxy's
-    // address — must not apply. `forwarded_for_proxies()` returns `&[]` when
-    // `proxy_protocol` is on and `&trusted_proxies` otherwise.
-    let caps = ConnCaps::new(
-        config.connection_caps,
-        config.forwarded_for_proxies().to_vec(),
-    );
+    let caps = ConnCaps::for_config(config);
     tracing::info!(
         "TLS enabled - listening on https://{} and http://{} (redirect)",
         addrs.https,
@@ -302,7 +294,7 @@ async fn serve_plain(
         PlainHandshake,
         app,
         ConnLimits::DEFAULT,
-        ConnCaps::new(config.connection_caps, config.trusted_proxies.clone()),
+        ConnCaps::for_config(config),
         shutdown_token,
     )
     .await;

@@ -14,7 +14,9 @@
 //! - **Per client**: open connections per client address, closed at once when
 //!   over the cap. IPv6 clients are counted per /64, since one host can use a
 //!   whole /64. Peers in `VOUCH_TRUSTED_PROXIES` are exempt: behind a proxy
-//!   that terminates TLS every client shares the proxy's address.
+//!   that terminates TLS every client shares the proxy's address. With
+//!   `VOUCH_PROXY_PROTOCOL` on, no peer is exempt: the peer is the PROXY
+//!   header's source, which is the client, not the proxy.
 //!
 //! One [`ConnCaps`] is shared by every listener in the process, so a client
 //! cannot multiply its allowance by spreading over the HTTPS and mTLS ports.
@@ -25,6 +27,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use ipnet::IpNet;
 use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore};
+
+use crate::config::ServerConfig;
 
 /// Operator-configurable connection caps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,6 +77,14 @@ impl ConnCaps {
             max_per_ip: config.max_per_ip,
             exempt,
         })
+    }
+
+    /// The caps for `config`, shared by every listener in the process.
+    pub(crate) fn for_config(config: &ServerConfig) -> Arc<Self> {
+        Self::new(
+            config.connection_caps,
+            config.forwarded_for_proxies().to_vec(),
+        )
     }
 
     /// Wait until the total cap has room for one more connection.
