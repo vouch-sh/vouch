@@ -546,6 +546,7 @@ impl HttpBody for TrackedBody {
 mod tests {
     use super::*;
     use crate::infra::conn_caps::ConnCapConfig;
+    use crate::test_utils::test_config;
 
     use axum::routing::get;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1011,6 +1012,103 @@ mod tests {
         assert!(
             same.is_empty(),
             "a second connection from the same client is over its cap; response: {same}"
+        );
+    }
+
+    /// Regression for the PROXY-mode trusted-proxy exemption bypass. In
+    /// PROXY mode the peer handed to `admit` is the PROXY header's source
+    /// (the client), not the proxy's TCP address, so the trusted-proxy
+    /// exemption — meant for a TLS-terminating proxy where every client
+    /// shares the proxy's address — must not apply.
+    ///
+    /// `ServerConfig::forwarded_for_proxies()` returns `&[]` when
+    /// `proxy_protocol` is on, so a client whose real IP falls inside
+    /// `VOUCH_TRUSTED_PROXIES` is still counted against `max_per_ip`. This
+    /// mirrors exactly how `serve_tls_on` builds the shared `ConnCaps`.
+    ///
+    /// docs/src/configuration/reverse-proxy.md: the header's source address
+    /// "is then the client for rate limiting, the audit `client_ip`, and the
+    /// per-address connection cap."
+    #[tokio::test]
+    async fn proxy_mode_caps_clients_inside_trusted_proxies() {
+        let proxy_cidr = &["127.0.0.1/32"];
+        let mut config = test_config();
+        config.proxy_protocol = true;
+        config.trusted_proxies = proxy_cidr
+            .iter()
+            .map(|net| net.parse().expect("CIDR"))
+            .collect();
+        config.connection_caps = ConnCapConfig {
+            max_total: 100,
+            max_per_ip: 1,
+        };
+        // Exactly what serve_tls_on does post-fix (serve.rs): the exempt list
+        // is `forwarded_for_proxies()`, which is empty in PROXY mode, not
+        // `trusted_proxies` directly.
+        let caps = ConnCaps::new(
+            config.connection_caps,
+            config.forwarded_for_proxies().to_vec(),
+        );
+        let (addr, _shutdown, _server) = start_proxied(ConnLimits::DEFAULT, caps, proxy_cidr).await;
+
+        // Hold a keep-alive connection open so its ClientSlot stays held.
+        let mut first = TcpStream::connect(addr).await.expect("connect");
+        first
+            .write_all(&proxy_v2("127.0.0.1:40000"))
+            .await
+            .expect("write header");
+        let response = request_keep_alive(&mut first).await;
+        assert!(
+            response.starts_with("HTTP/1.1 200"),
+            "first connection admitted: {response}"
+        );
+
+        // Same PROXY-header source (127.0.0.1, inside trusted_proxies),
+        // max_per_ip=1, while the first is still open: must be refused, not
+        // exempt.
+        let second = request_after(addr, &proxy_v2("127.0.0.1:40001")).await;
+        assert!(
+            second.is_empty(),
+            "a client inside VOUCH_TRUSTED_PROXIES is capped in PROXY mode; second: {second}"
+        );
+    }
+
+    /// Companion to the PROXY-mode regression above: in non-PROXY mode the
+    /// proxy's TCP address is the peer (every client shares it), so the
+    /// trusted-proxy exemption must still apply. `forwarded_for_proxies()`
+    /// returns `&trusted_proxies` when `proxy_protocol` is off, and a peer in
+    /// that range is exempt from the per-IP cap. Guards against a fix that
+    /// drops the exemption in both modes.
+    #[tokio::test]
+    async fn non_proxy_mode_keeps_trusted_proxy_exempt() {
+        let proxy_cidr = &["127.0.0.1/32"];
+        let mut config = test_config();
+        config.proxy_protocol = false;
+        config.trusted_proxies = proxy_cidr
+            .iter()
+            .map(|net| net.parse().expect("CIDR"))
+            .collect();
+        config.connection_caps = ConnCapConfig {
+            max_total: 100,
+            max_per_ip: 1,
+        };
+        let caps = ConnCaps::new(
+            config.connection_caps,
+            config.forwarded_for_proxies().to_vec(),
+        );
+        let (addr, _shutdown, _server) = start_with_caps(ConnLimits::DEFAULT, caps).await;
+
+        // The TCP peer is 127.0.0.1, inside trusted_proxies: both connections
+        // are exempt from max_per_ip=1 and admitted.
+        let mut first = TcpStream::connect(addr).await.expect("connect");
+        let response = request_keep_alive(&mut first).await;
+        assert!(response.starts_with("HTTP/1.1 200"), "first: {response}");
+
+        let mut second = TcpStream::connect(addr).await.expect("connect");
+        let response = request_keep_alive(&mut second).await;
+        assert!(
+            response.starts_with("HTTP/1.1 200"),
+            "an exempt trusted proxy is not capped in non-PROXY mode; response: {response}"
         );
     }
 
