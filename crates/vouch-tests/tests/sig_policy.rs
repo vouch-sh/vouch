@@ -426,8 +426,8 @@ async fn test_keyless_can_access_public_v1_routes() {
 // Test 4 — `/v1/auth/status` exemption is pinned
 // ---------------------------------------------------------------------------
 
-/// `/v1/auth/status` is the only `/v1` route vouch-agent calls unsigned
-/// (`recovery.rs:69`). A regression making it required breaks agent recovery.
+/// `/v1/auth/status` is public: it answers `authenticated: false` for a missing
+/// or rejected token, so it must never demand a signature either.
 #[tokio::test]
 async fn test_auth_status_is_never_signature_rejected() {
     let harness = TestHarness::new().await;

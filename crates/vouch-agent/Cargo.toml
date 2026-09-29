@@ -32,10 +32,6 @@ i18n-embed-fl = { workspace = true }
 jiff = { workspace = true, features = ["std", "serde", "tz-system"] }
 mimalloc = { workspace = true, features = ["secure"] }
 rust-embed = { workspace = true }
-# Direct dependency only to enable prefer-post-quantum: reqwest builds its rustls
-# ClientConfig from the default provider, and this feature makes X25519MLKEM768 the
-# preferred key-exchange group for all outbound TLS.
-rustls = { workspace = true, features = ["aws-lc-rs", "std", "prefer-post-quantum", "tls12"] }
 secrecy = { workspace = true, features = ["serde"] }
 serde = { workspace = true, features = ["std", "derive"] }
 serde_json = { workspace = true, features = ["std"] }
@@ -53,9 +49,6 @@ zeroize = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-rustls = { workspace = true, features = ["fips"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

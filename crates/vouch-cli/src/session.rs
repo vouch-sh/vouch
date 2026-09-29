@@ -1,17 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Session utilities for credential commands.
 
+#[cfg(unix)]
+use crate::client::VouchClient;
 use crate::commands::credential::ssh;
 use crate::commands::setup::codeartifact;
 use crate::config::Config;
 use crate::exit_code::CliError;
 use crate::server_url::{InsecureOptIn, ServerUrl};
 use anyhow::{Context, Result};
+#[cfg(unix)]
+use secrecy::ExposeSecret;
 use secrecy::SecretString;
 #[cfg(unix)]
 use vouch_agent::{AgentClient, AgentError};
 use vouch_cli::fapi::ClientKey;
 use vouch_cli::tr;
+#[cfg(unix)]
+use vouch_common::SessionStatus;
 use vouch_common::{SessionCookie, write_cookie};
 
 /// A resolved session: server URL and authentication token.
@@ -61,18 +67,12 @@ async fn try_agent_token() -> Option<SecretString> {
 /// [`ServerUrlError`](crate::server_url::ServerUrlError), so callers can tell
 /// it from "not configured"), or if `VOUCH_ALLOW_INSECURE` is unreadable.
 pub(crate) async fn resolve_session(opt_in: InsecureOptIn) -> Result<ResolvedSession> {
-    let (server_raw, token) = stored_session().await?;
-    let server_url = ServerUrl::parse(&server_raw, opt_in.allowed()?)?;
-    Ok(ResolvedSession { server_url, token })
-}
-
-/// The stored session's server URL (unvalidated) and token.
-async fn stored_session() -> Result<(String, SecretString)> {
     // 1. Try agent first (Unix only)
     #[cfg(unix)]
     {
-        if let Some(session) = try_agent_session().await {
-            return Ok(session);
+        if let Some((server_raw, token)) = try_agent_session().await {
+            let server_url = ServerUrl::parse(&server_raw, opt_in.allowed()?)?;
+            return Ok(ResolvedSession { server_url, token });
         }
         if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
             eprintln!(
@@ -84,21 +84,22 @@ async fn stored_session() -> Result<(String, SecretString)> {
 
     // 2. Fall back to config file
     let config = Config::load().context(tr!("err-failed-load-config"))?;
-    let server = config
-        .server_url()
-        .ok_or(CliError::ConfigError(
-            "not configured — run 'vouch enroll' first".to_string(),
-        ))?
-        .to_string();
+    let server_raw = config.server_url().ok_or(CliError::ConfigError(
+        "not configured — run 'vouch enroll' first".to_string(),
+    ))?;
     let token = config
         .token()
         .ok_or(CliError::NotAuthenticated {
             reason: "no session token — run 'vouch login' to authenticate".to_string(),
         })?
-        // Clone the secret string before config is dropped
         .clone();
-
-    Ok((server, token))
+    let session = ResolvedSession {
+        server_url: ServerUrl::parse(server_raw, opt_in.allowed()?)?,
+        token,
+    };
+    #[cfg(unix)]
+    restore_agent_session(&session).await;
+    Ok(session)
 }
 
 /// Resolve the current authentication token.
@@ -117,10 +118,78 @@ pub(crate) async fn resolve_token() -> Result<SecretString> {
 
     // 2. Fall back to config file
     let config = Config::load().context(tr!("err-failed-load-config"))?;
-    let token = config.token().ok_or(CliError::NotAuthenticated {
-        reason: "no session token — run 'vouch login' to authenticate".to_string(),
-    })?;
-    Ok(token.clone())
+    let token = config
+        .token()
+        .ok_or(CliError::NotAuthenticated {
+            reason: "no session token — run 'vouch login' to authenticate".to_string(),
+        })?
+        .clone();
+    // Only a server URL this invocation's environment accepts may receive
+    // the token; without one the agent is simply not restored.
+    #[cfg(unix)]
+    if let Some(server_url) = config
+        .server_url()
+        .and_then(|raw| ServerUrl::parse(raw, InsecureOptIn::Env.allowed().ok()?).ok())
+    {
+        restore_agent_session(&ResolvedSession {
+            server_url,
+            token: token.clone(),
+        })
+        .await;
+    }
+    Ok(token)
+}
+
+/// Hand a session found only in the config file back to a running agent.
+///
+/// The agent keeps no session across a restart and never reads the token
+/// itself. When it is running without one, check the stored token with
+/// `/v1/auth/status`, signed with this CLI's DPoP key (RFC 9449 §7.1), and
+/// store the session in the agent if the server still accepts it.
+/// Best-effort: a failure leaves the agent empty, and the caller uses the
+/// config session regardless.
+#[cfg(unix)]
+async fn restore_agent_session(session: &ResolvedSession) {
+    if AgentClient::connect().await.is_err() {
+        return;
+    }
+    let status = match VouchClient::from_session(session) {
+        Ok(client) => {
+            client
+                .get_authenticated::<SessionStatus>("/v1/auth/status")
+                .await
+        }
+        Err(e) => Err(e),
+    };
+    let status = match status {
+        Ok(status) => status,
+        Err(e) => {
+            tracing::debug!("Not restoring the agent session: {e}");
+            return;
+        }
+    };
+    let (true, Some(email), Some(expires_in)) = (
+        status.authenticated,
+        status.email,
+        status.expires_in_seconds,
+    ) else {
+        tracing::debug!("The server no longer accepts the stored session");
+        return;
+    };
+    let Some(expires_at) = i64::try_from(expires_in)
+        .ok()
+        .and_then(|secs| jiff::Timestamp::now().as_second().checked_add(secs))
+        .and_then(|secs| jiff::Timestamp::from_second(secs).ok())
+    else {
+        return;
+    };
+    store_session_in_agent(
+        session.token.expose_secret(),
+        &email,
+        &expires_at.to_string(),
+        session.server_url.as_str(),
+    )
+    .await;
 }
 
 /// Store session in the agent (if running).
@@ -384,5 +453,198 @@ mod tests {
         );
         let result = unreadable.into_iter().next().unwrap();
         assert!(is_url_refusal(&result));
+    }
+
+    /// What a fake server saw on each `/v1/auth/status` request: the
+    /// `Authorization` value and whether a `DPoP` header was present.
+    #[cfg(all(unix, feature = "test-utils"))]
+    type SeenRequests = std::sync::Arc<std::sync::Mutex<Vec<(String, bool)>>>;
+
+    /// Resolve a session stored only in `config.json`, against a fake server
+    /// that answers `/v1/auth/status` with `status`, with or without an empty
+    /// agent running. Returns the agent's session afterwards (`None` when it
+    /// holds none or is not running) and the requests the server received.
+    #[cfg(all(unix, feature = "test-utils"))]
+    #[expect(
+        unsafe_code,
+        reason = "env mutation under ENV_LOCK; the prior values are restored before returning"
+    )]
+    async fn restore_from_config(
+        status: serde_json::Value,
+        agent_running: bool,
+    ) -> (Option<vouch_agent::SessionInfo>, Vec<(String, bool)>) {
+        use std::sync::Arc;
+        use tokio::net::{TcpListener, UnixListener};
+        use vouch_agent::server::AgentServer;
+        use vouch_agent::socket::{prepare_vouch_dir, socket_path};
+        use vouch_agent::state::AgentState;
+        use vouch_common::paths::client_key_file;
+
+        const VARS: [&str; 4] = [
+            "XDG_CONFIG_HOME",
+            "XDG_RUNTIME_DIR",
+            "XDG_DATA_HOME",
+            "VOUCH_ALLOW_INSECURE",
+        ];
+        let _guard = ENV_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let prior: Vec<_> = VARS.iter().map(|k| (*k, std::env::var_os(k))).collect();
+        // SAFETY: ENV_LOCK serialises env mutation in this test binary.
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", dir.path().join("config"));
+            std::env::set_var("XDG_RUNTIME_DIR", dir.path().join("run"));
+            std::env::set_var("XDG_DATA_HOME", dir.path().join("data"));
+            std::env::remove_var("VOUCH_ALLOW_INSECURE");
+        }
+
+        let seen = SeenRequests::default();
+        let seen_by_route = Arc::clone(&seen);
+        let router = axum::Router::new().route(
+            "/v1/auth/status",
+            axum::routing::get(move |headers: axum::http::HeaderMap| {
+                let seen = Arc::clone(&seen_by_route);
+                let status = status.clone();
+                async move {
+                    let auth = headers
+                        .get("authorization")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or_default()
+                        .to_string();
+                    seen.lock()
+                        .unwrap()
+                        .push((auth, headers.contains_key("dpop")));
+                    axum::Json(status)
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server = format!("http://{}", listener.local_addr().unwrap());
+        let http_task = tokio::spawn(async move { axum::serve(listener, router).await });
+
+        std::fs::create_dir_all(dir.path().join("config").join("vouch")).unwrap();
+        let mut config = Config::default();
+        config.set_server_url(&server);
+        config.set_token("stored-token");
+        config.save().unwrap();
+        // The CLI's DPoP key. Tests never register a keychain store, so
+        // `load_client_key` reads this file.
+        ClientKey::generate()
+            .unwrap()
+            .save(&client_key_file().unwrap())
+            .unwrap();
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let agent_task = if agent_running {
+            prepare_vouch_dir().unwrap();
+            let listener = UnixListener::bind(socket_path().unwrap()).unwrap();
+            let agent = AgentServer::new(AgentState::new(), shutdown_rx);
+            Some(tokio::spawn(
+                async move { agent.run_listener(listener).await },
+            ))
+        } else {
+            None
+        };
+
+        let resolved = resolve_session(InsecureOptIn::Cli(false)).await.unwrap();
+        assert_eq!(
+            resolved.server_url.as_str(),
+            server,
+            "the stored session is served"
+        );
+
+        let agent_session = if agent_running {
+            AgentClient::connect()
+                .await
+                .unwrap()
+                .get_session()
+                .await
+                .ok()
+        } else {
+            None
+        };
+        let seen = seen.lock().unwrap().clone();
+
+        shutdown_tx.send(true).unwrap();
+        if let Some(task) = agent_task {
+            task.await.unwrap().unwrap();
+        }
+        http_task.abort();
+        // SAFETY: as above; restores the prior values.
+        unsafe {
+            for (key, value) in prior {
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+        (agent_session, seen)
+    }
+
+    /// The agent keeps no session across a restart. The first command after
+    /// one checks the stored token with the server, signed with the CLI's
+    /// DPoP key (RFC 9449 §7.1), and hands the session back to the agent.
+    #[cfg(all(unix, feature = "test-utils"))]
+    #[tokio::test]
+    async fn stored_session_is_checked_with_dpop_and_restored_to_the_agent() {
+        let (agent_session, seen) = restore_from_config(
+            serde_json::json!({
+                "authenticated": true,
+                "email": "restored@example.com",
+                "expires_in_seconds": 3600,
+                "device_name": null,
+            }),
+            true,
+        )
+        .await;
+
+        assert_eq!(seen.len(), 1, "one status check: {seen:?}");
+        let (auth, has_dpop) = seen.first().unwrap();
+        assert!(
+            auth.starts_with("DPoP "),
+            "the check uses the DPoP scheme: {auth}"
+        );
+        assert!(*has_dpop, "the check carries a DPoP proof");
+        let session = agent_session.unwrap();
+        assert_eq!(session.user_email, "restored@example.com");
+        assert!(session.expires_in_seconds > 0);
+    }
+
+    /// A token the server no longer accepts is not handed to the agent.
+    #[cfg(all(unix, feature = "test-utils"))]
+    #[tokio::test]
+    async fn rejected_stored_session_is_not_restored() {
+        let (agent_session, seen) = restore_from_config(
+            serde_json::json!({
+                "authenticated": false,
+                "email": null,
+                "expires_in_seconds": null,
+                "device_name": null,
+            }),
+            true,
+        )
+        .await;
+
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert!(agent_session.is_none(), "{agent_session:?}");
+    }
+
+    /// With no agent running there is nothing to restore, so the token is
+    /// not sent anywhere.
+    #[cfg(all(unix, feature = "test-utils"))]
+    #[tokio::test]
+    async fn stored_session_is_not_checked_without_an_agent() {
+        let (_, seen) = restore_from_config(
+            serde_json::json!({
+                "authenticated": true,
+                "email": "restored@example.com",
+                "expires_in_seconds": 3600,
+                "device_name": null,
+            }),
+            false,
+        )
+        .await;
+
+        assert!(seen.is_empty(), "{seen:?}");
     }
 }

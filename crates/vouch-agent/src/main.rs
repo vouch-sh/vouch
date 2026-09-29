@@ -14,10 +14,8 @@ use tokio::signal::unix::{SignalKind, signal};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 use vouch_agent::daemon;
-use vouch_agent::dns;
 use vouch_agent::expiry_monitor;
 use vouch_agent::i18n;
-use vouch_agent::recovery;
 use vouch_agent::server::AgentServer;
 use vouch_agent::socket::{prepare_vouch_dir, remove_socket};
 use vouch_agent::ssh_agent::{SshAgentServer, ssh_agent_socket_path};
@@ -159,14 +157,6 @@ fn main() -> ExitCode {
         }
     }
 
-    // Initialize the process-wide DNS-over-HTTPS resolver from config + env
-    // before any HTTP traffic. Validates the configuration eagerly; the
-    // hickory resolver itself is built lazily on first use.
-    if let Err(e) = dns::init() {
-        error!("DNS-over-HTTPS initialization failed: {e:#}");
-        return ExitCode::FAILURE;
-    }
-
     // Run the server using a tokio runtime
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt,
@@ -192,11 +182,6 @@ async fn run_agent_server(enable_ssh_agent: bool) -> ExitCode {
     // Create agent state, shared by both servers so a credential and the
     // session authorizing it are always read and cleared together.
     let state = AgentState::new();
-
-    // Try to recover session from disk (best-effort)
-    if recovery::try_recover_session(&state).await {
-        info!("Session recovered from disk");
-    }
 
     // Shutdown signal channel for graceful shutdown
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);

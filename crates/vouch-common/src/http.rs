@@ -17,11 +17,6 @@ pub mod timeouts {
     /// Connection timeout for credential helper operations.
     pub const CREDENTIAL_CONNECT: Duration = Duration::from_secs(5);
 
-    /// Total timeout for agent background operations.
-    pub const AGENT_TOTAL: Duration = Duration::from_secs(5);
-    /// Connection timeout for agent background operations.
-    pub const AGENT_CONNECT: Duration = Duration::from_secs(3);
-
     /// Total timeout for server-side API calls.
     ///
     /// Shorter than [`CREDENTIAL_TOTAL`]: the CLI waits on the server, which
@@ -78,28 +73,6 @@ pub fn credential_client(user_agent: &str) -> Result<reqwest::Client, reqwest::E
     with_process_doh(builder).build()
 }
 
-/// Create an HTTP client for agent background operations.
-///
-/// Uses short timeouts (5s total, 3s connect) for best-effort,
-/// non-blocking background work. Redirects disabled (see
-/// [`credential_client`]).
-///
-/// # Arguments
-///
-/// * `user_agent` - The User-Agent header value for outgoing requests.
-///
-/// # Errors
-///
-/// Returns an error if the client cannot be built.
-pub fn agent_client(user_agent: &str) -> Result<reqwest::Client, reqwest::Error> {
-    let builder = reqwest::Client::builder()
-        .user_agent(user_agent)
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(timeouts::AGENT_TOTAL)
-        .connect_timeout(timeouts::AGENT_CONNECT);
-    with_process_doh(builder).build()
-}
-
 /// Create an HTTP client for server-side API calls.
 ///
 /// Uses short timeouts (5s total, 3s connect) so a slow upstream fails
@@ -152,12 +125,6 @@ mod tests {
     }
 
     #[test]
-    fn test_agent_client_builds() {
-        let client = agent_client("test-agent/1.0.0");
-        assert!(client.is_ok());
-    }
-
-    #[test]
     fn test_server_client_builds() {
         let client = server_client("test-agent", None);
         assert!(client.is_ok());
@@ -166,13 +133,10 @@ mod tests {
     #[test]
     fn test_timeout_values() {
         assert!(timeouts::CREDENTIAL_CONNECT < timeouts::CREDENTIAL_TOTAL);
-        assert!(timeouts::AGENT_CONNECT < timeouts::AGENT_TOTAL);
         assert!(timeouts::SERVER_CONNECT < timeouts::SERVER_TOTAL);
 
         assert!(timeouts::SERVER_READ < timeouts::SERVER_TOTAL);
 
-        // Agent should be fastest
-        assert!(timeouts::AGENT_TOTAL < timeouts::CREDENTIAL_TOTAL);
         // The server's upstream calls finish before the CLI stops waiting.
         assert!(timeouts::SERVER_TOTAL < timeouts::CREDENTIAL_TOTAL);
     }

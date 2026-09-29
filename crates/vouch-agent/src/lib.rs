@@ -31,16 +31,13 @@
 pub mod audit;
 #[cfg(unix)]
 pub mod client;
-mod config;
 pub mod daemon;
-pub mod dns;
 pub mod error;
 #[cfg(unix)]
 pub mod expiry_monitor;
 pub mod i18n;
 pub mod protocol;
 #[cfg(unix)]
-pub mod recovery;
 #[cfg(unix)]
 pub mod server;
 pub mod socket;
