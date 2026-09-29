@@ -35,6 +35,7 @@ judgement columns come from the batch's record in `.local/`.
 | 2026-09-26 | 2 | 2 | 0 | 1 | 2 | 1 of 2 | #1566 merge as-is; #1567 rebuilt on main (conflicts with #1561–#1571, `absolute_paths`) with an end-to-end listener test, superseded; #1546, #1547 closed as fixed by #1551 | 0 (neither was recorded residue) | 0 (both instances) |
 | 2026-09-27 | 2 | 2 | 0 | 0 | 2 | 2 of 2 | #1579 amended into a four-path class fix (RFC 7591 create sibling, profile-taking `has_client_assertion_key`); #1580 rebuilt without its env var (mTLS port never walks X-Forwarded-For); both superseded | 0 | 0 (type-level guardrail; `detail` CLI unavailable) |
 | 2026-09-28 | 5 | 5 | 0 | 0 | 5 | 5 of 5 | #1593 amended (shared caps builder, docs, overlay parser); #1594 superseded by #1598 (one select-and-build JWK rule); #1597/#1592 closed wontfix (empty env is a config error, 19 numeric siblings); #1595 amended (one shared test TLS acceptor; no new private-key copies); #1596 closed (per-route timeout, class left open) | 0 (09-25–27 records not local) | 0 (type-level guardrail; deadline lint pending) |
+| 2026-09-29 | 0 | 0 | 1 | 0 | 0 | 0 of 0 | #1603–#1605 (Doc Drift, blamed on #1584/#1585/#1586) and #1606 (Dead Code, non-persisted agent struct) merged as-is | 0 | 0 |
 
 Batches before 2026-08-20 have no record, so only their counted columns exist:
 run the script. `escape-unaware-delimiter-normalization` exists on Detail's side
@@ -828,3 +829,17 @@ previous two days (#1581, #1584, #1586), each in logic that merge added.
 - A test comment citing a subsection the requirements file lacks links to the
   parent section and can prune unrelated rows. Read the pruned rows before
   accepting a baseline update.
+
+## 2026-09-29
+
+No issues. Three Doc Drift PRs and one Dead Code PR, all merged as-is after
+review. Every doc drift was stale text left by the 09-27/28 merges: the
+request timeout in `ARCHITECTURE.md` (#1584), "no gauges" beside the new
+gauge (#1585), and the port 80 health-check claim in the HA guide (#1586),
+which #1593's PROXY docs sweep missed.
+
+### Process
+
+- When a change alters a documented value or behavior, `rg` the old value
+  across the repo, including `crates/*/ARCHITECTURE.md`, rather than updating
+  the pages already known to describe it.
