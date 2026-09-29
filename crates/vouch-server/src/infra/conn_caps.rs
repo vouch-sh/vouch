@@ -13,16 +13,16 @@
 //!   accepted and dropped.
 //! - **Per client**: open connections per client address, closed at once when
 //!   over the cap. IPv6 clients are counted per /64, since one host can use a
-//!   whole /64. Peers in `VOUCH_TRUSTED_PROXIES` are exempt: behind a proxy
-//!   that terminates TLS every client shares the proxy's address. With
-//!   `VOUCH_PROXY_PROTOCOL` on, no peer is exempt: the peer is the PROXY
-//!   header's source, which is the client, not the proxy.
+//!   whole /64. A TCP peer in `VOUCH_TRUSTED_PROXIES` is exempt: behind a
+//!   proxy that terminates TLS every client shares the proxy's address. An
+//!   address from a PROXY header is never exempt: it is the client, not the
+//!   proxy, even when it falls inside that range.
 //!
 //! One [`ConnCaps`] is shared by every listener in the process, so a client
 //! cannot multiply its allowance by spreading over the HTTPS and mTLS ports.
 
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv6Addr};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use ipnet::IpNet;
@@ -59,6 +59,23 @@ impl Default for ConnCapConfig {
     }
 }
 
+/// A connection's client address and where it came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Peer {
+    /// The TCP peer: the client, or a proxy that sent no PROXY header.
+    Tcp(SocketAddr),
+    /// The source address in a PROXY header: the client behind the proxy.
+    Header(SocketAddr),
+}
+
+impl Peer {
+    pub(crate) fn addr(self) -> SocketAddr {
+        match self {
+            Self::Tcp(addr) | Self::Header(addr) => addr,
+        }
+    }
+}
+
 /// Shared connection caps; see the module docs.
 #[derive(Debug)]
 pub(crate) struct ConnCaps {
@@ -81,10 +98,7 @@ impl ConnCaps {
 
     /// The caps for `config`, shared by every listener in the process.
     pub(crate) fn for_config(config: &ServerConfig) -> Arc<Self> {
-        Self::new(
-            config.connection_caps,
-            config.forwarded_for_proxies().to_vec(),
-        )
+        Self::new(config.connection_caps, config.trusted_proxies.clone())
     }
 
     /// Wait until the total cap has room for one more connection.
@@ -98,9 +112,10 @@ impl ConnCaps {
 
     /// Count one more connection from `peer`, or `None` if its address is
     /// already at the per-client cap.
-    pub(crate) fn admit(self: &Arc<Self>, peer: IpAddr) -> Option<ClientSlot> {
-        let peer = peer.to_canonical();
-        if self.exempt.iter().any(|net| net.contains(&peer)) {
+    pub(crate) fn admit(self: &Arc<Self>, peer: Peer) -> Option<ClientSlot> {
+        let exemptible = matches!(peer, Peer::Tcp(_));
+        let peer = peer.addr().ip().to_canonical();
+        if exemptible && self.exempt.iter().any(|net| net.contains(&peer)) {
             return Some(ClientSlot(None));
         }
         let key = client_key(peer);
@@ -204,8 +219,12 @@ mod tests {
         )
     }
 
-    fn ip(s: &str) -> IpAddr {
-        s.parse().expect("IP")
+    fn tcp(ip: &str) -> Peer {
+        Peer::Tcp(SocketAddr::new(ip.parse().expect("IP"), 40000))
+    }
+
+    fn header(ip: &str) -> Peer {
+        Peer::Header(SocketAddr::new(ip.parse().expect("IP"), 40000))
     }
 
     #[test]
@@ -216,20 +235,20 @@ mod tests {
     #[test]
     fn per_client_cap_refuses_the_next_connection_until_one_closes() {
         let caps = caps(100, 2, &[]);
-        let first = caps.admit(ip("203.0.113.7")).expect("first");
-        let _second = caps.admit(ip("203.0.113.7")).expect("second");
+        let first = caps.admit(tcp("203.0.113.7")).expect("first");
+        let _second = caps.admit(tcp("203.0.113.7")).expect("second");
         assert!(
-            caps.admit(ip("203.0.113.7")).is_none(),
+            caps.admit(tcp("203.0.113.7")).is_none(),
             "third is over the cap"
         );
         assert!(
-            caps.admit(ip("203.0.113.8")).is_some(),
+            caps.admit(tcp("203.0.113.8")).is_some(),
             "another client has its own allowance"
         );
 
         drop(first);
         assert!(
-            caps.admit(ip("203.0.113.7")).is_some(),
+            caps.admit(tcp("203.0.113.7")).is_some(),
             "a closed slot is reusable"
         );
     }
@@ -237,13 +256,13 @@ mod tests {
     #[test]
     fn ipv6_clients_are_counted_per_64() {
         let caps = caps(100, 1, &[]);
-        let _held = caps.admit(ip("2001:db8:1:2::1")).expect("first");
+        let _held = caps.admit(tcp("2001:db8:1:2::1")).expect("first");
         assert!(
-            caps.admit(ip("2001:db8:1:2:ffff::9")).is_none(),
+            caps.admit(tcp("2001:db8:1:2:ffff::9")).is_none(),
             "same /64, so the same client"
         );
         assert!(
-            caps.admit(ip("2001:db8:1:3::1")).is_some(),
+            caps.admit(tcp("2001:db8:1:3::1")).is_some(),
             "a different /64 is a different client"
         );
     }
@@ -251,18 +270,38 @@ mod tests {
     #[test]
     fn ipv4_mapped_ipv6_counts_as_the_ipv4_client() {
         let caps = caps(100, 1, &[]);
-        let _held = caps.admit(ip("203.0.113.7")).expect("first");
-        assert!(caps.admit(ip("::ffff:203.0.113.7")).is_none());
+        let _held = caps.admit(tcp("203.0.113.7")).expect("first");
+        assert!(caps.admit(tcp("::ffff:203.0.113.7")).is_none());
     }
 
     #[test]
     fn trusted_proxies_are_exempt() {
         let caps = caps(100, 1, &["10.0.0.0/8"]);
         let held: Vec<_> = (0..5)
-            .map(|_| caps.admit(ip("10.1.2.3")).expect("exempt"))
+            .map(|_| caps.admit(tcp("10.1.2.3")).expect("exempt"))
             .collect();
         assert_eq!(held.len(), 5);
         assert_eq!(caps.tracked_clients(), 0, "exempt peers are not counted");
+    }
+
+    #[test]
+    fn header_addresses_inside_trusted_proxies_are_counted() {
+        let caps = caps(100, 1, &["10.0.0.0/8"]);
+        let _held = caps.admit(header("10.1.2.3")).expect("first");
+        assert!(
+            caps.admit(header("10.1.2.3")).is_none(),
+            "a PROXY header's source is the client, never an exempt proxy"
+        );
+    }
+
+    #[test]
+    fn header_and_tcp_peers_share_one_count() {
+        let caps = caps(100, 1, &["10.0.0.0/8"]);
+        let _held = caps.admit(header("203.0.113.7")).expect("first");
+        assert!(
+            caps.admit(tcp("203.0.113.7")).is_none(),
+            "a client cannot add a listener without the PROXY protocol to its allowance"
+        );
     }
 
     #[test]
@@ -270,7 +309,7 @@ mod tests {
         let caps = caps(100, 4, &[]);
         let slots: Vec<_> = ["203.0.113.1", "203.0.113.2", "2001:db8::1"]
             .iter()
-            .map(|peer| caps.admit(ip(peer)).expect("admit"))
+            .map(|peer| caps.admit(tcp(peer)).expect("admit"))
             .collect();
         assert_eq!(caps.tracked_clients(), 3);
         drop(slots);
