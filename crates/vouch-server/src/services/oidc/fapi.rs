@@ -9,6 +9,8 @@
 use crate::crypto::alg::JwsAlgorithm;
 use crate::db::{OAuthClient, TokenEndpointAuthMethod};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
+use crate::services::oidc::dpop::ValidatedDpopProof;
+use crate::services::oidc::mtls::CertThumbprint;
 
 /// FAPI 2.0 authorization code lifetime in seconds (shorter than standard).
 pub const FAPI_AUTH_CODE_LIFETIME_SECONDS: i64 = 60;
@@ -62,15 +64,17 @@ pub fn validate_fapi_authorization_request(
     Ok(())
 }
 
-/// Sender-constraint mechanisms present on a token request.
+/// Sender-constraint mechanisms present on a token request: the keys the
+/// request proved possession of.
 ///
 /// FAPI 2.0 Section 5.3.2.1 requires at least one of these for FAPI clients.
-#[derive(Debug, Clone, Copy)]
-pub struct SenderConstraints {
-    /// A valid DPoP proof was provided in the request.
-    pub dpop: bool,
-    /// A client mTLS certificate was presented on the connection.
-    pub mtls_cert: bool,
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SenderConstraints<'a> {
+    /// The request's DPoP proof, validated for this endpoint (RFC 9449 §4.3).
+    pub dpop: Option<&'a ValidatedDpopProof>,
+    /// The thumbprint of the client certificate presented over mTLS, whether
+    /// or not the client opted into certificate-bound tokens.
+    pub mtls_cert: Option<&'a CertThumbprint>,
 }
 
 /// Validate FAPI 2.0 constraints on a token request.
@@ -85,14 +89,14 @@ pub struct SenderConstraints {
 /// Returns `ServiceError::OAuth` with `invalid_request` if constraints are violated.
 pub(crate) fn validate_fapi_token_request(
     client: &OAuthClient,
-    constraints: SenderConstraints,
+    constraints: SenderConstraints<'_>,
 ) -> ServiceResult<()> {
     if !client.is_fapi() {
         return Ok(());
     }
 
     // FAPI 2.0 Section 5.3.2.1: Sender-constrained tokens required (DPoP or mTLS)
-    if !constraints.dpop && !constraints.mtls_cert {
+    if constraints.dpop.is_none() && constraints.mtls_cert.is_none() {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidRequest,
             "FAPI 2.0 requires sender-constrained access tokens (DPoP or mTLS required)",
@@ -209,6 +213,7 @@ mod tests {
     use super::*;
     use crate::crypto::alg::JwsAlgorithm;
     use crate::db::{self, AccessScope, ClientKeys, FapiProfile, OAuthClientType};
+    use crate::services::oidc::mtls::compute_cert_thumbprint;
 
     /// Create a minimal FAPI 2.0 confidential client for testing.
     fn fapi_client() -> OAuthClient {
@@ -332,37 +337,42 @@ mod tests {
     // Token Request Tests
     // =========================================================================
 
-    const NO_CONSTRAINTS: SenderConstraints = SenderConstraints {
-        dpop: false,
-        mtls_cert: false,
-    };
-    const DPOP_ONLY: SenderConstraints = SenderConstraints {
-        dpop: true,
-        mtls_cert: false,
-    };
-    const MTLS_ONLY: SenderConstraints = SenderConstraints {
-        dpop: false,
-        mtls_cert: true,
-    };
+    fn dpop_proof() -> ValidatedDpopProof {
+        ValidatedDpopProof::for_testing("jkt".to_string(), "jti".to_string(), None)
+    }
+
+    fn cert_thumbprint() -> CertThumbprint {
+        compute_cert_thumbprint(b"certificate")
+    }
 
     #[test]
     fn test_validate_fapi_token_request_requires_sender_constraint() {
         let client = fapi_client();
-        assert!(validate_fapi_token_request(&client, NO_CONSTRAINTS).is_err());
+        assert!(validate_fapi_token_request(&client, SenderConstraints::default()).is_err());
     }
 
     #[test]
     fn test_validate_fapi_token_request_accepts_dpop() {
         let client = fapi_client();
-        assert!(validate_fapi_token_request(&client, DPOP_ONLY).is_ok());
+        let proof = dpop_proof();
+        let constraints = SenderConstraints {
+            dpop: Some(&proof),
+            mtls_cert: None,
+        };
+        assert!(validate_fapi_token_request(&client, constraints).is_ok());
     }
 
     #[test]
     fn test_validate_fapi_token_request_accepts_mtls() {
         // mTLS certificate is a valid sender-constraint mechanism for FAPI 2.0.
         let client = fapi_client();
+        let cert = cert_thumbprint();
+        let constraints = SenderConstraints {
+            dpop: None,
+            mtls_cert: Some(&cert),
+        };
         assert!(
-            validate_fapi_token_request(&client, MTLS_ONLY).is_ok(),
+            validate_fapi_token_request(&client, constraints).is_ok(),
             "mTLS cert must be accepted as sender-constraint for FAPI token request"
         );
     }
@@ -370,8 +380,13 @@ mod tests {
     #[test]
     fn test_validate_fapi_token_request_skips_non_fapi() {
         let client = standard_client();
-        assert!(validate_fapi_token_request(&client, NO_CONSTRAINTS).is_ok());
-        assert!(validate_fapi_token_request(&client, DPOP_ONLY).is_ok());
+        let proof = dpop_proof();
+        let dpop_only = SenderConstraints {
+            dpop: Some(&proof),
+            mtls_cert: None,
+        };
+        assert!(validate_fapi_token_request(&client, SenderConstraints::default()).is_ok());
+        assert!(validate_fapi_token_request(&client, dpop_only).is_ok());
     }
 
     // =========================================================================

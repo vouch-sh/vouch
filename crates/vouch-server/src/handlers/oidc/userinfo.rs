@@ -28,7 +28,6 @@ use axum::{
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use subtle::ConstantTimeEq;
 use vouch_common::protocol;
 
 /// User info response (OIDC Core Section 5.3.2).
@@ -187,9 +186,7 @@ pub(crate) async fn userinfo(
                 };
                 match decoded.cnf() {
                     Some(cnf) if cnf.jkt.is_some() => {
-                        let jkt = cnf.jkt.as_deref().unwrap_or("");
-                        let is_valid: bool = proof.jkt.as_bytes().ct_eq(jkt.as_bytes()).into();
-                        if !is_valid {
+                        if !cnf.confirms_dpop(&proof) {
                             return oauth_error(
                                 StatusCode::UNAUTHORIZED,
                                 OAuthErrorCode::InvalidDpopProof,
@@ -420,13 +417,9 @@ fn verify_mtls_binding(
         None => return Ok(()),
     };
 
-    // Check if the token carries an x5t#S256 certificate binding.
-    let expected = match decoded.cnf() {
-        Some(cnf) => match cnf.x5t_s256.as_deref() {
-            Some(thumbprint) => thumbprint,
-            None => return Ok(()), // No mTLS binding — nothing to verify.
-        },
-        None => return Ok(()), // No cnf claim at all — nothing to verify.
+    // Only a token carrying an x5t#S256 certificate binding needs checking.
+    let Some(cnf) = decoded.cnf().filter(|cnf| cnf.x5t_s256.is_some()) else {
+        return Ok(());
     };
 
     // Token is certificate-bound: client MUST present a matching certificate.
@@ -441,14 +434,7 @@ fn verify_mtls_binding(
         }
     };
 
-    // Constant-time comparison prevents timing-based thumbprint enumeration.
-    let is_valid: bool = cert
-        .thumbprint
-        .as_str()
-        .as_bytes()
-        .ct_eq(expected.as_bytes())
-        .into();
-    if !is_valid {
+    if !cnf.confirms_certificate(&cert.thumbprint) {
         return Err(Box::new(oauth_error(
             StatusCode::UNAUTHORIZED,
             OAuthErrorCode::InvalidToken,

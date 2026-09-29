@@ -553,3 +553,29 @@ pub(super) fn device_token_body(device_code: &str) -> String {
         device_code
     )
 }
+
+/// `GET /oauth/authorize` for an ordinary code request from `client_id`, with
+/// `session_token` as the session cookie. Returns the `Location` header.
+pub(super) async fn authorize_location_with_session(
+    app: &axum::Router,
+    client_id: &str,
+    session_token: &str,
+) -> String {
+    let challenge = sha256_base64url("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk");
+    let response = http_get_full(
+        app,
+        &format!(
+            "/oauth/authorize?response_type=code&client_id={client_id}&redirect_uri={}\
+             &scope=openid&code_challenge={challenge}&code_challenge_method=S256&state=s",
+            urlencoding::encode("https://example.com/callback"),
+        ),
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+    )
+    .await;
+    response
+        .headers
+        .get("Location")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string()
+}

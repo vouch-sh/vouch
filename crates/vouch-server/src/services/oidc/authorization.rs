@@ -863,6 +863,19 @@ pub async fn check_session_for_authorization(
     };
 
     match validate_session_token(state, token, arrival).await? {
+        // A cookie carries no DPoP proof and the browser connection no client
+        // certificate, so a sender-constrained access token in the session
+        // cookie proves nothing about who holds its key. Accepting it would
+        // let a stolen token mint a code for any client and redeem it
+        // unbound. Browser sign-in issues unbound session tokens.
+        Some(validated) if validated.cnf.is_some() => {
+            tracing::info!(
+                target: "security",
+                user_id = %validated.user.id,
+                "authorization refused a sender-constrained token in the session cookie"
+            );
+            Ok(AuthorizationSessionState::NeedsAuth)
+        }
         Some(validated) => {
             // Two separate facts, and the authorization flow needs both.
             //

@@ -16,7 +16,7 @@ use crate::db;
 use crate::error::{OAuthErrorCode, OAuthErrorResponse, ServiceError};
 use crate::handlers::session::{self, AuthContext, extract_org_admin, get_resource_auth_context};
 use crate::infra::mtls_listener::PeerClientCert;
-use crate::services::oidc::mtls::{self, ClientCertificate};
+use crate::services::oidc::mtls::{self, CertThumbprint, ClientCertificate};
 use axum_extra::extract::cookie::CookieJar;
 
 /// A validated UUID string. Rejects during deserialization if not valid.
@@ -289,6 +289,13 @@ impl FromRequestParts<Arc<AppState>> for OptionalClientCert {
             });
 
         Ok(Self(from_tls))
+    }
+}
+
+impl OptionalClientCert {
+    /// The RFC 8705 §3.1 thumbprint of the presented certificate.
+    pub(crate) fn thumbprint(&self) -> Option<&CertThumbprint> {
+        self.0.as_ref().map(|c| &c.thumbprint)
     }
 }
 
