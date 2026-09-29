@@ -52,7 +52,7 @@ use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
 use crate::config::ServerConfig;
-use crate::infra::conn_caps::{ConnCaps, TotalSlot};
+use crate::infra::conn_caps::{ConnCaps, Peer, TotalSlot};
 use crate::infra::router::REQUEST_TIMEOUT;
 
 /// Time limits applied to every connection.
@@ -185,16 +185,16 @@ const PROXY_PARSE: ParseConfig = ParseConfig {
 /// the spec says the receiver "must use the real connection endpoints"; the
 /// same holds for a `PROXY` command with an `UNSPEC` or `AF_UNIX` family,
 /// where the receiver "is free to accept the connection anyway and use the
-/// real endpoints addresses". Both keep `tcp_peer`. A UDP address cannot
-/// describe a TCP connection, so it is refused.
+/// real endpoints addresses". Both keep `tcp_peer`, which is the proxy. A UDP
+/// address cannot describe a TCP connection, so it is refused.
 async fn read_proxy_header(
     tcp: TcpStream,
     tcp_peer: SocketAddr,
-) -> io::Result<(ClientStream, SocketAddr)> {
+) -> io::Result<(ClientStream, Peer)> {
     let stream = ProxiedStream::create_from_tokio(tcp, PROXY_PARSE).await?;
     let client = match stream.proxy_header().proxied_address() {
-        None => tcp_peer,
-        Some(addr) if addr.protocol == Protocol::Stream => addr.source,
+        None => Peer::Tcp(tcp_peer),
+        Some(addr) if addr.protocol == Protocol::Stream => Peer::Header(addr.source),
         Some(_) => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -366,7 +366,8 @@ async fn serve_connection<H: Handshake>(
     shutdown: CancellationToken,
 ) {
     // With the PROXY protocol on, `peer` becomes the header's source address,
-    // so the per-client cap below counts the client rather than the proxy.
+    // so the per-client cap below counts the client rather than the proxy, and
+    // never exempts it as a trusted proxy.
     let (stream, peer) = if proxy.enabled() {
         if !proxy.allows(tcp_peer.ip()) {
             tracing::debug!(remote_addr = %tcp_peer, "PROXY protocol connection from outside VOUCH_TRUSTED_PROXIES; closing");
@@ -394,12 +395,13 @@ async fn serve_connection<H: Handshake>(
             },
         }
     } else {
-        (ProxiedStream::unproxied(tcp), tcp_peer)
+        (ProxiedStream::unproxied(tcp), Peer::Tcp(tcp_peer))
     };
-    let Some(_client_slot) = caps.admit(peer.ip()) else {
-        tracing::debug!(remote_addr = %peer, "per-client connection cap reached; closing");
+    let Some(_client_slot) = caps.admit(peer) else {
+        tracing::debug!(remote_addr = %peer.addr(), "per-client connection cap reached; closing");
         return;
     };
+    let peer = peer.addr();
     let handshake = tokio::time::timeout(limits.handshake, handshake.handshake(stream, peer));
     let (io, info) = tokio::select! {
         () = shutdown.cancelled() => return,
@@ -1057,6 +1059,52 @@ mod tests {
         assert!(
             second.is_empty(),
             "a client inside VOUCH_TRUSTED_PROXIES is capped in PROXY mode; second: {second}"
+        );
+    }
+
+    /// A `LOCAL` header keeps the TCP peer, so a trusted proxy's own health
+    /// checks stay exempt in PROXY mode.
+    #[tokio::test]
+    async fn proxy_mode_keeps_trusted_proxy_exempt_on_local_header() {
+        let (addr, _shutdown, _server) = start_proxied(
+            ConnLimits::DEFAULT,
+            caps_trusting_loopback(true),
+            &["127.0.0.1/32"],
+        )
+        .await;
+        let mut local = Vec::new();
+        proxy_header::ProxyHeader::with_local()
+            .encode_v2(&mut local)
+            .expect("encode");
+
+        let mut first = TcpStream::connect(addr).await.expect("connect");
+        first.write_all(&local).await.expect("write header");
+        let response = request_keep_alive(&mut first).await;
+        assert!(response.starts_with("HTTP/1.1 200"), "first: {response}");
+
+        let second = request_after(addr, &local).await;
+        assert!(
+            second.starts_with("HTTP/1.1 200"),
+            "a trusted proxy as the TCP peer is exempt; second: {second}"
+        );
+    }
+
+    /// Port 80 never takes the PROXY protocol, so with `VOUCH_PROXY_PROTOCOL`
+    /// on its peer is still the proxy, which stays exempt.
+    #[tokio::test]
+    async fn proxy_mode_keeps_trusted_proxy_exempt_without_proxy_protocol() {
+        let (addr, _shutdown, _server) =
+            start_with_caps(ConnLimits::DEFAULT, caps_trusting_loopback(true)).await;
+
+        let mut first = TcpStream::connect(addr).await.expect("connect");
+        let response = request_keep_alive(&mut first).await;
+        assert!(response.starts_with("HTTP/1.1 200"), "first: {response}");
+
+        let mut second = TcpStream::connect(addr).await.expect("connect");
+        let response = request_keep_alive(&mut second).await;
+        assert!(
+            response.starts_with("HTTP/1.1 200"),
+            "a trusted proxy as the TCP peer is exempt; second: {response}"
         );
     }
 

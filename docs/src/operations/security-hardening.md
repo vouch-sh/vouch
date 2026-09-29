@@ -162,7 +162,7 @@ explicitly.
 | HTTP/2 connection with no request in flight | 10 seconds (GOAWAY, then closed) |
 | HTTP/2 keep-alive ping | every 20 seconds; closed if unacknowledged for 20 seconds |
 | Open connections, all listeners | 10,000 (`VOUCH_MAX_CONNECTIONS`); further connections wait to be accepted |
-| Open connections per client address (IPv6: per /64) | 64 (`VOUCH_MAX_CONNECTIONS_PER_IP`); further connections closed. Trusted proxies exempt, except with the PROXY protocol |
+| Open connections per client address (IPv6: per /64) | 64 (`VOUCH_MAX_CONNECTIONS_PER_IP`); further connections closed. Trusted proxies exempt as the connection's peer; a PROXY header's source never is |
 
 ## Server-side request forgery
 

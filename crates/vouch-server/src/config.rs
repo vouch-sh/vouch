@@ -551,7 +551,7 @@ pub struct Args {
     pub max_connections: u32,
 
     /// Maximum open connections per client address (IPv6: per /64). Peers in
-    /// `VOUCH_TRUSTED_PROXIES` are exempt unless `VOUCH_PROXY_PROTOCOL` is on.
+    /// `VOUCH_TRUSTED_PROXIES` are exempt; a PROXY header's source never is.
     #[arg(
         long,
         env = "VOUCH_MAX_CONNECTIONS_PER_IP",
@@ -1225,11 +1225,10 @@ impl ServerConfig {
         self.tls_cert.is_some() && self.tls_key.is_some()
     }
 
-    /// Proxies a listener's peer can be: none with the PROXY protocol on,
+    /// Proxies a request's peer can be: none with the PROXY protocol on,
     /// because the peer is then the client itself. X-Forwarded-For is walked
-    /// only through these, and only these are exempt from the per-address
-    /// connection cap; either use of `trusted_proxies` in PROXY mode would let
-    /// a client inside that range choose its address or escape the cap.
+    /// only through these; walking it through `trusted_proxies` in PROXY mode
+    /// would let a client inside that range choose its address.
     #[must_use]
     pub fn forwarded_for_proxies(&self) -> &[IpNet] {
         if self.proxy_protocol {
