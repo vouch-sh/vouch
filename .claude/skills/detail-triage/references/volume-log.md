@@ -35,7 +35,7 @@ judgement columns come from the batch's record in `.local/`.
 | 2026-09-26 | 2 | 2 | 0 | 1 | 2 | 1 of 2 | #1566 merge as-is; #1567 rebuilt on main (conflicts with #1561–#1571, `absolute_paths`) with an end-to-end listener test, superseded; #1546, #1547 closed as fixed by #1551 | 0 (neither was recorded residue) | 0 (both instances) |
 | 2026-09-27 | 2 | 2 | 0 | 0 | 2 | 2 of 2 | #1579 amended into a four-path class fix (RFC 7591 create sibling, profile-taking `has_client_assertion_key`); #1580 rebuilt without its env var (mTLS port never walks X-Forwarded-For); both superseded | 0 | 0 (type-level guardrail; `detail` CLI unavailable) |
 | 2026-09-28 | 5 | 5 | 0 | 0 | 5 | 5 of 5 | #1593 amended (shared caps builder, docs, overlay parser); #1594 superseded by #1598 (one select-and-build JWK rule); #1597/#1592 closed wontfix (empty env is a config error, 19 numeric siblings); #1595 amended (one shared test TLS acceptor; no new private-key copies); #1596 closed (per-route timeout, class left open) | 0 (09-25–27 records not local) | 0 (type-level guardrail; deadline lint pending) |
-| 2026-09-29 | 0 | 0 | 1 | 0 | 0 | 0 of 0 | #1603–#1605 (Doc Drift, blamed on #1584/#1585/#1586) and #1606 (Dead Code, non-persisted agent struct) merged as-is | 0 | 0 |
+| 2026-09-29 | 1 | 1 | 1 | 1 | 1 | 1 of 1 | #1603–#1605 (Doc Drift, blamed on #1584/#1585/#1586) and #1606 (Dead Code, non-persisted agent struct) merged as-is; #1609 superseded by #1610: per-connection exemption by peer provenance replaces a second per-IP map | 1 of 1 (09-28 port-80 residue) | 0 (type-level guardrail: `Peer::Tcp`/`Peer::Header`) |
 
 Batches before 2026-08-20 have no record, so only their counted columns exist:
 run the script. `escape-unaware-delimiter-normalization` exists on Detail's side
@@ -843,3 +843,21 @@ which #1593's PROXY docs sweep missed.
 - When a change alters a documented value or behavior, `rg` the old value
   across the repo, including `crates/*/ARCHITECTURE.md`, rather than updating
   the pages already known to describe it.
+
+### Second batch: #1608
+
+One issue, blamed on #1593 (Detail's PROXY-mode fix from the day before) and
+recorded in the 09-28 Residue table almost word for word. Detail's fix, #1609,
+gave port 80 its own `ConnCaps` with its own per-IP map, which let a client
+that reaches port 80 directly count twice across ports. It also missed the
+`LOCAL`/`UNSPEC` header case, where the peer is the proxy too. Superseded by
+a fix that decides exemption per connection. The accept path now yields
+`Peer::Tcp` or `Peer::Header`, `admit` exempts only a TCP peer, and every
+listener shares one `ConnCaps`.
+
+- The lever for a residue recurrence is to fix the residue in the PR that
+  leaves it. On 09-28 the port-80 gap was written down as "no documented
+  topology", and one day later it came back as a finding.
+- When an exemption depends on where a value came from, carry that source in
+  the type rather than in a config-wide mode switch. A mode switch is right
+  for some listeners and wrong for the rest.
