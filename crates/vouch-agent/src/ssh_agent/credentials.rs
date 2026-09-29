@@ -9,14 +9,8 @@ use zeroize::Zeroizing;
 /// Certificate metadata for cache management.
 #[derive(Clone, Debug)]
 pub struct CertificateMetadata {
-    /// When the certificate was issued.
-    pub issued_at: Timestamp,
     /// When the certificate expires.
     pub expires_at: Timestamp,
-    /// Certificate serial number.
-    pub serial: u64,
-    /// Principals (users) the certificate is valid for.
-    pub principals: Vec<String>,
     /// The certificate's key ID, `{email}@{rp_id}` for a Vouch-issued one.
     pub key_id: String,
 }
@@ -24,28 +18,15 @@ pub struct CertificateMetadata {
 impl CertificateMetadata {
     /// Create metadata from a certificate.
     pub fn from_certificate(cert: &Certificate) -> Result<Self> {
-        // Extract validity times from certificate
-        let valid_after = cert.valid_after();
+        // Extract validity time from certificate
         let valid_before = cert.valid_before();
 
-        // Convert Unix timestamps to jiff::Timestamp
-        let issued_at = Timestamp::from_second(i64::try_from(valid_after).unwrap_or(0))
-            .map_err(|e| AgentError::Protocol(format!("invalid valid_after timestamp: {e}")))?;
+        // Convert Unix timestamp to jiff::Timestamp
         let expires_at = Timestamp::from_second(i64::try_from(valid_before).unwrap_or(i64::MAX))
             .map_err(|e| AgentError::Protocol(format!("invalid valid_before timestamp: {e}")))?;
 
-        // Extract principals
-        let principals = cert
-            .valid_principals()
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-
         Ok(Self {
-            issued_at,
             expires_at,
-            serial: cert.serial(),
-            principals,
             key_id: cert.key_id().to_string(),
         })
     }
@@ -170,10 +151,7 @@ mod tests {
         // Create a metadata with future expiration
         let future_expires = Timestamp::from_second(Timestamp::now().as_second() + 3600).unwrap();
         let metadata = CertificateMetadata {
-            issued_at: Timestamp::now(),
             expires_at: future_expires,
-            serial: 1,
-            principals: vec!["user".to_string()],
             key_id: "user@example.com@example.com".to_string(),
         };
 
@@ -185,10 +163,7 @@ mod tests {
         // Create a metadata with past expiration
         let past_expires = Timestamp::from_second(Timestamp::now().as_second() - 100).unwrap();
         let metadata = CertificateMetadata {
-            issued_at: Timestamp::now(),
             expires_at: past_expires,
-            serial: 1,
-            principals: vec!["user".to_string()],
             key_id: "user@example.com@example.com".to_string(),
         };
 
