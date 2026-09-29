@@ -417,9 +417,10 @@ jobs:
 
           # Best-effort, non-failing signal for the in-process IMDS/SSM
           # bootstrap: systemd's default boot status reporting goes to the
-          # console even though vouch-server.service itself redirects
-          # stdout/stderr to a log file this workflow cannot read (no SSH/SSM
-          # on this image). A repeated restart suggests bootstrap or startup
+          # console, while vouch-server.service output goes to the journal,
+          # which this workflow cannot read (no SSH/SSM on this image, and the
+          # test instance has no profile for the CloudWatch agent to ship it
+          # with). A repeated restart suggests bootstrap or startup
           # is crash-looping -- but this instance also needs an IAM instance
           # profile granting ssm:GetParameter on /vouch-server/* for the
           # seeded parameter above to actually be reachable, which is a
