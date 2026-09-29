@@ -1,6 +1,6 @@
 # vouch-server architecture
 
-How a request travels from the Axum listener, through the middleware stack, into a
+How a request travels from the accept loop, through the middleware stack, into a
 handler, past every proof and verification, and back out as a response.
 
 This document is for people reading or changing the code. It is **not** operator
@@ -34,6 +34,61 @@ compile.
 The second register does not appear in handler bodies. The enforcement lives in the
 signature of `create_oauth_access_token`. Reading a grant arm top-to-bottom will not
 show it.
+
+## Before the router: the accept loop
+
+No listener uses `axum::serve` or `axum-server`. Neither installs a hyper `Timer`, and
+without one hyper's HTTP/1 header read timeout silently becomes "no timeout", so a
+client that sends nothing holds its connection forever. The HTTPS, plain, redirect and
+mTLS listeners all run one accept loop instead, in `infra/accept.rs`, which drives hyper
+directly.
+
+```mermaid
+flowchart TB
+  acc(["TCP accept"]) --> tot["total cap<br/>semaphore, VOUCH_MAX_CONNECTIONS"]
+  tot --> spawn["spawn a task for the connection"]
+  spawn --> px{"listener takes<br/>the PROXY protocol?"}
+  px -- "yes" --> src{"TCP peer in<br/>the source CIDRs?"}
+  src -- "no" --> drop1["close, nothing read"]
+  src -- "yes" --> hdr["read PROXY v2 header<br/>5 s"]
+  hdr -- "source address" --> peer["peer = Peer::Header"]
+  px -- "no" --> tcp["peer = Peer::Tcp"]
+  peer --> per["per-client cap<br/>VOUCH_MAX_CONNECTIONS_PER_IP"]
+  tcp --> per
+  per -- "over the cap" --> drop2["close"]
+  per --> hs["TLS handshake<br/>5 s"]
+  hs --> hy["hyper HTTP/1 or HTTP/2<br/>TokioTimer, 10 s header read and idle limit"]
+  hy --> stack(["global middleware stack"])
+```
+
+The task is spawned before any per-connection I/O. On the old mTLS listener the
+handshake ran inside `accept()`, so one stalled client blocked every new connection; now
+a stalled handshake occupies only its own task.
+
+**The caps act before any TLS work.** The request rate limiter only sees requests that
+reach the router, so a client that opens connections and sends nothing is invisible to
+it. When the total semaphore is exhausted each loop stops accepting, and new connections
+wait in the kernel backlog instead of being accepted and dropped. One `ConnCaps` is
+shared by every listener, so a client cannot multiply its allowance by spreading across
+ports. IPv6 clients are counted per /64.
+
+**The peer's source decides the exemption.** A TCP peer inside `VOUCH_TRUSTED_PROXIES`
+is exempt from the per-client cap, because behind a TLS-terminating proxy every client
+shares the proxy's address. An address taken from a PROXY header is never exempt: it is
+the client, even when it falls inside that range. A PROXY `LOCAL` header keeps the TCP
+peer, and so keeps its exemption.
+
+The PROXY header's source address becomes the peer for everything downstream: the
+per-client cap, the rate-limit key and the audit `client_ip`. Bytes read past the header
+are replayed to the handshake, so it sees the stream exactly as the client sent it. v1
+headers, a missing header and UDP addresses are refused. There is no detection: on a
+listener that takes the protocol, the header is required.
+
+**One function turns a request into a client IP.** `client_ip_from_request` is the only
+crate-visible path, and both the rate-limit key and the audit row read it. It walks
+`X-Forwarded-For` only for a peer on the HTTPS port. On the mTLS port Vouch terminates
+TLS itself, so no proxy can add that header, and walking it would let a direct mTLS
+client inside `VOUCH_TRUSTED_PROXIES` pick its own rate-limit bucket.
 
 ## The global middleware stack
 
@@ -149,7 +204,8 @@ flowchart TB
   w5 --> jw
   jw --> cap["ClientAuthProof"]
   sec["ClientSecretVerification<br/>MtlsCertVerification<br/>NoClientAuth witness"] --> cap
-  reg["client registration flags"] --> scv["SenderConstraintProof::validate"] --> scp["SenderConstraintProof"]
+  pres["SenderConstraints<br/>ValidatedDpopProof, CertThumbprint"] --> scv["SenderConstraintProof::validate"]
+  reg["client registration flags"] --> scv --> scp["SenderConstraintProof"]
   nrc["no registered client"] --> scn["SenderConstraintProof::no_registered_client"] --> scp
   gp --> tip["TokenIssuanceProof<br/>not Clone<br/>must_use"]
   cap --> tip
@@ -204,8 +260,39 @@ one of them: it authenticates a registered client as the token endpoint does. **
 caller to `internal_endpoint` is an audit-relevant change.** Grep for it before merging.
 
 `SenderConstraintProof::validate` checks three registered requirements: FAPI 2.0
-§5.3.2.1, RFC 9449 §5, and RFC 8705 §3. `ParCreationProof` applies the same pattern to
-PAR storage, which issues no token and cannot use the token chokepoint.
+§5.3.2.1, RFC 9449 §5, and RFC 8705 §3. Its input, `SenderConstraints`, carries the
+evidence itself, not two booleans: a borrowed `ValidatedDpopProof` and the client
+certificate's `CertThumbprint`. `TokenBinding` borrows the same witnesses, so an issued
+`cnf` can only name a key this request proved. `ParCreationProof` applies the same
+pattern to PAR storage, which issues no token and cannot use the token chokepoint.
+
+### Token exchange keeps the subject's binding
+
+A token derived from a sender-constrained token stays bound to the same key, and only
+the holder of that key can derive it. `CnfClaim::confirmed_binding` enforces this. It
+takes the request's `SenderConstraints` and returns the binding the `cnf` names, or a
+`PossessionError` when the request is missing that key or proves a different one. In
+`exchange_token` that becomes `invalid_request`. Without the check, a stolen DPoP-bound
+token could be exchanged for a bearer token, or rebound to the thief's key.
+
+- **Subject token bound:** the issued token inherits the subject's binding, whatever the
+  client and the requested token type.
+- **Actor token bound:** the actor must prove its key, and the issued token is bound to
+  it. RFC 8693 §2.1 describes the actor as *"the party that is authorized to use the
+  requested security token"* (`specs/rfc/rfc8693.txt`).
+- **Bound subject with an actor:** refused. The actor does not hold the subject's key,
+  and only `may_act` (RFC 8693 §4.4) could authorize it. Vouch does not implement
+  `may_act`.
+- **Neither bound:** the client's own proof binds the token, as on any other grant. A
+  certificate binds it only when the client registered for certificate-bound tokens.
+
+A client registered for DPoP-bound tokens is refused a certificate-bound subject or
+actor token rather than having the certificate binding carried over.
+
+The authorization endpoint closes the same hole from the browser side. A session cookie
+carries no DPoP proof and the browser connection no client certificate, so
+`check_session_for_authorization` treats a cookie holding a bound token as signed out.
+Browser sign-in, enrollment and the certification bypass all set unbound session tokens.
 
 ## FIDO2 login
 
@@ -298,7 +385,7 @@ flowchart TB
   pstore --> checks
   jar --> checks
   plain --> checks
-  checks["require_pkce_for_client<br/>redirect_uri, scope, response_type"] --> sess{"session cookie<br/>hardware-verified?"}
+  checks["require_pkce_for_client<br/>redirect_uri, scope, response_type"] --> sess{"session cookie<br/>hardware-verified<br/>and unbound?"}
   sess -- "no" --> login["/login, browser WebAuthn"] --> sess
   sess -- "yes" --> code["issue_authorization_code<br/>binds code_challenge"]
   code --> mode{"response_mode"}
@@ -324,7 +411,7 @@ resolved address.
 
 The handler signature states the authentication a route demands.
 `extract_resource_token` is private to its module, so a handler obtains a validated
-token through one of three extractors. The choice declares the strength required.
+token through one of four extractors. The choice declares the strength required.
 
 - `AuthenticatedToken`: the token validated. An enrollment bootstrap session satisfies
   it. `/v1/credentials/github/status` is a public read route and names it.
@@ -335,6 +422,12 @@ token through one of three extractors. The choice declares the strength required
   minute rather than on a session that lives 8 hours by default. It rejects with
   RFC 9470 `insufficient_user_authentication` (401) instead. Both key-deletion handlers
   name it.
+- `OptionalAuthenticatedToken`: for routes where authentication is optional. It reads
+  only the `Authorization` header, never the cookie. No header yields `None`, but a
+  header carrying a rejected token is an error, not a downgrade to anonymous, and a
+  bound token still needs its proof. Both callers take it as a `Result` and decide:
+  RFC 7591 registration returns the rejection, and `/v1/auth/status` answers
+  `authenticated: false` for a 401 but passes `use_dpop_nonce` through.
 
 ```mermaid
 flowchart TB
@@ -438,12 +531,16 @@ The test `occ_conflict_is_the_only_retryable_service_error` pins both halves.
 
 | Concern | Path |
 |---|---|
+| Accept loop, PROXY protocol, connection timeouts | `src/infra/accept.rs` |
+| Connection caps | `src/infra/conn_caps.rs` |
+| Client IP for rate limit and audit | `src/infra/rate_limit.rs` (`client_ip_from_request`) |
 | Router, layer stack, route groups | `src/infra/router.rs` |
 | Proof types and the issuance chokepoint | `src/services/auth.rs` |
 | Single-use claim errors | `src/db/claim.rs` |
 | FIDO2 grant | `src/services/oidc/fido2_grant.rs` |
 | WebAuthn assertion and attestation | `src/crypto/webauthn_verify.rs` |
 | DPoP | `src/services/oidc/dpop.rs` |
+| `cnf` claim and key-possession checks | `src/services/oidc/claims.rs` |
 | Client auth: secret and mTLS | `src/services/oidc/token.rs` |
 | Client auth: `private_key_jwt` | `src/services/oidc/jwt_bearer/client_auth.rs` |
 | Client auth dispatch at the endpoints | `src/handlers/oidc/client_auth.rs` |
