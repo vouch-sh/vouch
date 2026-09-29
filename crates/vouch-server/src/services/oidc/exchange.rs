@@ -471,11 +471,10 @@ pub(crate) async fn exchange_token(
                 "User account is deactivated",
             ));
         }
-        // Delegation stays inside one tenant (#1617). Every org's access
-        // tokens share one signing key and issuer, so `decode_token` alone
-        // would accept an actor from another org and record a foreign
-        // principal in `act`. RFC 8693 is silent on tenancy; the boundary is
-        // ours. A user with no org pairs only with another user with no org.
+        // Delegation stays inside one tenant (#1617): an actor from another
+        // org would otherwise be recorded as a foreign principal in `act`.
+        // RFC 8693 is silent on tenancy; the boundary is ours. A user with no
+        // org pairs only with another user with no org.
         // RFC 8693 §2.2.2: an actor_token "unacceptable based on policy" is
         // reported as `invalid_request`.
         if actor_user.org_id != subject_user.org_id {
