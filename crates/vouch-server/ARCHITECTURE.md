@@ -1,27 +1,35 @@
 # vouch-server architecture
 
-How a request travels from the Axum listener, through the middleware stack, into a
+How a request travels from the accept loop, through the middleware stack, into a
 handler, past every proof and verification, and back out as a response.
 
 This document is for people reading or changing the code. It is **not** operator
-documentation. Deployment, configuration, endpoint tables, rate-limit tiers and request
-limits live in the [Vouch Server Operator Guide](../../docs/src/README.md).
+documentation. The [Vouch Server Operator Guide](../../docs/src/README.md) covers
+deployment, configuration, endpoint tables, rate-limit tiers and request limits.
 [Ports and Endpoints](../../docs/src/reference/ports-and-endpoints.md) lists every
 endpoint with its authentication type and rate-limit tier.
 [Behind a Reverse Proxy](../../docs/src/configuration/reverse-proxy.md) covers proxy
 deployment.
 
-This document covers the auth and credential paths. SCIM, the admin UI, GitHub webhooks
-and the SAML SP pass the same global stages and diverge at the route group.
+This document covers the authentication and credential paths. Four other surfaces pass
+the same global stages and diverge at the route group: SCIM (System for Cross-domain
+Identity Management) provisioning, the admin UI, GitHub webhooks, and the SAML (Security
+Assertion Markup Language) service provider.
 
-## Two registers
+## Runtime checks and compile-time checks
 
-Vouch enforces its security invariants in two registers. Neither is visible from the
+Vouch enforces its security invariants in two places. Reading one does not show you the
 other.
 
-**At runtime** the server validates seven kinds of proof: DPoP proofs, WebAuthn
-assertions, RFC 9421 message signatures, JWT-secured authorization requests, PKCE
-verifiers, mTLS certificates, and client secrets.
+**At runtime** the server validates seven kinds of proof:
+
+- DPoP (Demonstrating Proof-of-Possession) proofs;
+- WebAuthn assertions;
+- RFC 9421 HTTP message signatures;
+- JWT-secured authorization requests;
+- PKCE (Proof Key for Code Exchange) verifiers;
+- mTLS (mutual TLS) client certificates;
+- client secrets.
 
 **At compile time** one function mints access tokens: `create_oauth_access_token`. It
 takes a `TokenIssuanceProof`, a value that is not `Clone` and carries `#[must_use]`.
@@ -31,9 +39,62 @@ client-authentication claim, and a sender-constraint decision. Production builds
 A grant that skips its replay primitive has nothing to put in the field, so it does not
 compile.
 
-The second register does not appear in handler bodies. The enforcement lives in the
-signature of `create_oauth_access_token`. Reading a grant arm top-to-bottom will not
-show it.
+The compile-time check does not appear in handler bodies. It lives in the signature of
+`create_oauth_access_token`, so reading a grant arm top to bottom will not show it.
+
+## Before the router: the accept loop
+
+No listener uses `axum::serve` or `axum-server`. Neither installs a hyper `Timer`.
+Without one, hyper's HTTP/1 header read timeout becomes "no timeout", and a client that
+sends nothing holds its connection forever. Instead, the HTTPS, plain, redirect and mTLS
+listeners all run one accept loop in `infra/accept.rs`, which drives hyper directly.
+
+```mermaid
+flowchart TB
+  acc(["TCP accept"]) --> tot["total cap<br/>semaphore, VOUCH_MAX_CONNECTIONS"]
+  tot --> spawn["spawn a task for the connection"]
+  spawn --> px{"listener takes<br/>the PROXY protocol?"}
+  px -- "yes" --> src{"TCP peer in<br/>the source CIDRs?"}
+  src -- "no" --> drop1["close, nothing read"]
+  src -- "yes" --> hdr["read PROXY v2 header<br/>5 s"]
+  hdr -- "source address" --> peer["peer = Peer::Header"]
+  px -- "no" --> tcp["peer = Peer::Tcp"]
+  peer --> per["per-client cap<br/>VOUCH_MAX_CONNECTIONS_PER_IP"]
+  tcp --> per
+  per -- "over the cap" --> drop2["close"]
+  per --> hs["TLS handshake<br/>5 s"]
+  hs --> hy["hyper HTTP/1 or HTTP/2<br/>TokioTimer, 10 s header read and idle limit"]
+  hy --> stack(["global middleware stack"])
+```
+
+The loop spawns the connection's task before any per-connection I/O. The old mTLS
+listener ran the handshake inside `accept()`, so one stalled client blocked every new
+connection. Now a stalled handshake occupies only its own task.
+
+**The caps act before any TLS work.** The request rate limiter sees only requests that
+reach the router. It cannot see a client that opens connections and sends nothing. When
+the total semaphore runs out, each loop stops accepting. New connections then wait in
+the kernel backlog instead of being accepted and dropped. Every listener shares one
+`ConnCaps`, so a client cannot multiply its allowance by spreading across ports. The
+per-client cap counts an IPv6 client per /64.
+
+**The peer's source decides the exemption.** The per-client cap exempts a TCP peer
+inside `VOUCH_TRUSTED_PROXIES`, because behind a TLS-terminating proxy every client
+shares the proxy's address. It never exempts an address from a PROXY header. That
+address is the client, even when it falls inside the trusted range. A PROXY `LOCAL`
+header keeps the TCP peer, and so keeps its exemption.
+
+The PROXY header's source address becomes the peer for everything downstream: the
+per-client cap, the rate-limit key and the audit `client_ip`. The loop replays any bytes
+it read past the header, so the handshake sees the stream as the client sent it. The
+loop refuses v1 headers, a missing header and UDP addresses. It does not detect the
+header: a listener that takes the protocol requires it.
+
+**One function turns a request into a client IP.** `client_ip_from_request` is the only
+crate-visible path, and both the rate-limit key and the audit row read it. It walks
+`X-Forwarded-For` only for a peer on the HTTPS port. Vouch terminates TLS on the mTLS
+port itself, so no proxy can add that header there. Walking it would let a direct mTLS
+client inside `VOUCH_TRUSTED_PROXIES` choose its own rate-limit bucket.
 
 ## The global middleware stack
 
@@ -68,10 +129,10 @@ configured. CORS is **not** in that bundle. `build_api_cors_layer` and
 `build_ui_cors_layer` are applied inside the API and UI routers respectively, so the two
 groups get different CORS policies.
 
-**One ordering is load-bearing.** `metrics_middleware` records after
-`next.run(req).await` resolves. Placed inside `TimeoutLayer`, the timeout cancels that
-future and Prometheus never sees the request; commit `7bbcbb0f` shipped that bug. Placed
-outside, the 408 is counted. Two tests in `router.rs` hold the order:
+**One ordering decides correctness.** `metrics_middleware` records after
+`next.run(req).await` resolves. Inside `TimeoutLayer`, the timeout cancels that future and
+Prometheus never sees the request. Commit `7bbcbb0f` shipped that bug. Outside, the 408
+is counted. Two tests in `router.rs` hold the order:
 `timeout_records_408_in_metrics` asserts the recorded status is 408, and
 `build_app_timeout_is_innermost_relative_to_metrics` asserts the source position of the
 two calls.
@@ -109,17 +170,17 @@ flowchart TB
   end
 ```
 
-Per-endpoint tiers and the body-cap table live in the
-[operator reference](../../docs/src/reference/ports-and-endpoints.md); they are not
-duplicated here.
+The [operator reference](../../docs/src/reference/ports-and-endpoints.md) has the
+per-endpoint tiers and the body-cap table. This document does not repeat them.
 
 **Signature enforcement is default-deny within `/v1`.** `require_signature` matches the
-route template against `PUBLIC_V1_PATHS`. 5 templates pass unsigned; every other `/v1`
-path must be signed. Paths outside `/v1` are out of scope. With no matched template it
-falls back to the concrete URI and applies the same rule, so the failure mode is
-over-enforcement, never passthrough. A signature must cover `@method` and `@path`. A
-request with a non-empty body must also cover RFC 9530 `Content-Digest`. Bodies up to
-1 MiB are buffered to check it, and signatures older than 300 s are rejected.
+route template against `PUBLIC_V1_PATHS`. 5 templates pass unsigned, and every other
+`/v1` path must be signed. Paths outside `/v1` are out of scope. With no matched
+template it falls back to the concrete URI and applies the same rule, so the failure
+mode is over-enforcement, never passthrough. A signature must cover `@method` and
+`@path`. A request with a non-empty body must also cover RFC 9530 `Content-Digest`.
+Bodies up to 1 MiB are buffered to check it, and signatures older than 300 s are
+rejected.
 
 `maybe_rate_limit!` replaces all three limiters with a no-op when
 `VOUCH_CERTIFICATION_TEST_TOKEN` is set. That variable changes three things: it disables
@@ -149,7 +210,8 @@ flowchart TB
   w5 --> jw
   jw --> cap["ClientAuthProof"]
   sec["ClientSecretVerification<br/>MtlsCertVerification<br/>NoClientAuth witness"] --> cap
-  reg["client registration flags"] --> scv["SenderConstraintProof::validate"] --> scp["SenderConstraintProof"]
+  pres["SenderConstraints<br/>ValidatedDpopProof, CertThumbprint"] --> scv["SenderConstraintProof::validate"]
+  reg["client registration flags"] --> scv --> scp["SenderConstraintProof"]
   nrc["no registered client"] --> scn["SenderConstraintProof::no_registered_client"] --> scp
   gp --> tip["TokenIssuanceProof<br/>not Clone<br/>must_use"]
   cap --> tip
@@ -160,7 +222,7 @@ flowchart TB
 
 All three arrows into `TokenIssuanceProof` are required fields. A grant arm that skips
 its replay primitive has nothing for `grant`. One that skips the sender-constraint
-decision has nothing for `sender_constraint`. The build fails; no reviewer has to catch
+decision has nothing for `sender_constraint`. The build fails, so no reviewer has to catch
 it.
 
 `SenderConstraintProof` has two constructors. `validate` checks a registered client's
@@ -184,7 +246,7 @@ every endpoint that checks DPoP.
 | `AuthorizationCode` | `AuthCodeClaim` — the code was atomically claimed |
 | `Fido2Assertion` | `ChallengeStateClaim` — the challenge state JWT was marked consumed |
 | `DeviceCode` | `DeviceCodeClaim` — the device code transitioned to Consumed |
-| `EnrollmentBootstrap` | `OidcStateClaim` — closes the read-vs-consume TOCTOU window |
+| `EnrollmentBootstrap` | `OidcStateClaim` — closes the window between reading and consuming the state |
 | `EnrollmentComplete`, `BrowserLogin` | `ChallengeStateClaim` |
 | `ClientCredentials`, `TokenExchange` | none; replay protection rests on `ClientAuthProof` |
 | `CertificationBypass` | none; gated by an environment variable |
@@ -194,7 +256,7 @@ every endpoint that checks DPoP.
 and response timing are identical across all four, so a client cannot probe whether a
 code, challenge or jti exists. Preserve that property when adding a claim primitive.
 
-`ClientAuthProof` has 4 variants; the no-auth one has two named constructors.
+`ClientAuthProof` has 4 variants. The no-auth variant has two named constructors.
 `NoClientAuth::for_public_client` returns an error if the client is registered with any
 `token_endpoint_auth_method` other than `None`, so a confidential client cannot use the
 no-auth arm. `NoClientAuth::internal_endpoint` covers the 4 flows where the server is
@@ -204,15 +266,47 @@ one of them: it authenticates a registered client as the token endpoint does. **
 caller to `internal_endpoint` is an audit-relevant change.** Grep for it before merging.
 
 `SenderConstraintProof::validate` checks three registered requirements: FAPI 2.0
-§5.3.2.1, RFC 9449 §5, and RFC 8705 §3. `ParCreationProof` applies the same pattern to
-PAR storage, which issues no token and cannot use the token chokepoint.
+§5.3.2.1, RFC 9449 §5, and RFC 8705 §3. Its input, `SenderConstraints`, carries the
+evidence itself, not two booleans: a borrowed `ValidatedDpopProof` and the client
+certificate's `CertThumbprint`. `TokenBinding` borrows the same witnesses, so an issued
+`cnf` (confirmation) claim can only name a key this request proved. `ParCreationProof`
+applies the same pattern to PAR (Pushed Authorization Request) storage, which issues no
+token and cannot use the token chokepoint.
+
+### Token exchange keeps the subject's binding
+
+A token derived from a sender-constrained token stays bound to the same key, and only
+the holder of that key can derive it. `CnfClaim::confirmed_binding` enforces this. It
+takes the request's `SenderConstraints` and returns the binding the `cnf` names, or a
+`PossessionError` when the request is missing that key or proves a different one.
+`exchange_token` returns that error as `invalid_request`. Without the check, a stolen
+DPoP-bound token could be exchanged for a bearer token, or rebound to the thief's key.
+
+- **Subject token bound:** the issued token inherits the subject's binding, whatever the
+  client and the requested token type.
+- **Actor token bound:** the actor must prove its key, and the issued token is bound to
+  it. RFC 8693 §2.1 describes the actor as *"the party that is authorized to use the
+  requested security token"* (`specs/rfc/rfc8693.txt`).
+- **Bound subject with an actor:** refused. The actor does not hold the subject's key,
+  and only `may_act` (RFC 8693 §4.4) could authorize it. Vouch does not implement
+  `may_act`.
+- **Neither bound:** the client's own proof binds the token, as on any other grant. A
+  certificate binds it only when the client registered for certificate-bound tokens.
+
+`exchange_token` refuses a certificate-bound subject or actor token from a client
+registered for DPoP-bound tokens. It does not carry the certificate binding over.
+
+The authorization endpoint closes the same hole from the browser side. A session cookie
+carries no DPoP proof and the browser connection no client certificate, so
+`check_session_for_authorization` treats a cookie holding a bound token as signed out.
+Browser sign-in, enrollment and the certification bypass all set unbound session tokens.
 
 ## FIDO2 login
 
 `vouch login` runs this path. The CLI is not a browser and has no page origin, so
 `clientDataJSON.origin` is `https://{rp_id}` and the server compares against that string.
-`verify_login_assertion` passes `require_user_verification: true` as a literal, so a
-touch-only assertion is rejected for every client and every registration.
+`verify_login_assertion` passes `require_user_verification: true` as a literal. The
+server rejects a touch-only assertion for every client and every registration.
 
 ```mermaid
 sequenceDiagram
@@ -272,8 +366,8 @@ login. Writing it before the gate would hand that proof to a denied attempt.
 | 6 | clientDataJSON type is `webauthn.get`, challenge matches, origin matches | `InvalidClientData` / `ChallengeMismatch` / `InvalidOrigin` |
 | 7-8 | COSE signature over `authData \|\| SHA-256(clientDataJSON)` | `InvalidCoseKey` / `UnsupportedAlgorithm` / `SignatureInvalid` |
 
-Counter regression fails the ceremony. That is our choice rather than the
-specification's. WebAuthn Level 2 §7.2 leaves it open: *"Whether the Relying Party
+Counter regression fails the ceremony. That is our choice, not the specification's.
+WebAuthn Level 2 §7.2 leaves it open: *"Whether the Relying Party
 updates storedSignCount in this case, or not, or fails the authentication ceremony or
 not, is Relying Party-specific."* (`specs/w3c/webauthn-2.txt`). A stalled counter is as
 consistent with a malfunctioning authenticator as with a cloned one, and the code
@@ -282,10 +376,11 @@ declines to distinguish them. Credentials that have only ever reported 0 keep
 
 ## Authorization code: PAR, JAR, PKCE, JARM
 
-Request parameters reach `/oauth/authorize` from four sources: a pushed request
-(RFC 9126), an inline signed JWT (RFC 9101), an HTTPS `request_uri` the server fetches,
-or plain query parameters. The endpoint resolves one authoritative set before running any
-validation.
+This section covers PAR, JAR (JWT-Secured Authorization Request), PKCE and JARM
+(JWT-Secured Authorization Response Mode). Request parameters reach `/oauth/authorize`
+from four sources: a pushed request (RFC 9126), an inline signed JWT (RFC 9101), an
+HTTPS `request_uri` the server fetches, or plain query parameters. The endpoint resolves
+one authoritative set before running any validation.
 
 ```mermaid
 flowchart TB
@@ -298,7 +393,7 @@ flowchart TB
   pstore --> checks
   jar --> checks
   plain --> checks
-  checks["require_pkce_for_client<br/>redirect_uri, scope, response_type"] --> sess{"session cookie<br/>hardware-verified?"}
+  checks["require_pkce_for_client<br/>redirect_uri, scope, response_type"] --> sess{"session cookie<br/>hardware-verified<br/>and unbound?"}
   sess -- "no" --> login["/login, browser WebAuthn"] --> sess
   sess -- "yes" --> code["issue_authorization_code<br/>binds code_challenge"]
   code --> mode{"response_mode"}
@@ -314,17 +409,18 @@ flowchart TB
 ```
 
 All four parameter sources converge before validation runs, so a query-string parameter
-cannot weaken a pushed or signed one. `response_mode` in the query string is a hint; the
-mode used is the one resolved with the rest of the request. `request` and `request_uri`
-are mutually exclusive, and the handler rejects a request carrying both. An HTTPS
-`request_uri` is dialled only after `infra::ssrf::assert_public_destination` clears the
-resolved address.
+cannot weaken a pushed or signed one. `response_mode` in the query string is a hint. The
+endpoint uses the mode it resolved with the rest of the request. `request` and
+`request_uri` are mutually exclusive, and the handler rejects a request carrying both.
+The server dials an HTTPS `request_uri` only after
+`infra::ssrf::assert_public_destination` clears the resolved address. That check blocks
+server-side request forgery (SSRF) into private networks.
 
 ## Resource side: the extractor is the policy
 
 The handler signature states the authentication a route demands.
 `extract_resource_token` is private to its module, so a handler obtains a validated
-token through one of three extractors. The choice declares the strength required.
+token through one of four extractors. The choice declares the strength required.
 
 - `AuthenticatedToken`: the token validated. An enrollment bootstrap session satisfies
   it. `/v1/credentials/github/status` is a public read route and names it.
@@ -335,6 +431,12 @@ token through one of three extractors. The choice declares the strength required
   minute rather than on a session that lives 8 hours by default. It rejects with
   RFC 9470 `insufficient_user_authentication` (401) instead. Both key-deletion handlers
   name it.
+- `OptionalAuthenticatedToken`: for routes where authentication is optional. It reads
+  only the `Authorization` header, never the cookie. No header yields `None`, but a
+  header carrying a rejected token is an error, not a downgrade to anonymous, and a
+  bound token still needs its proof. Both callers take it as a `Result` and decide:
+  RFC 7591 registration returns the rejection, and `/v1/auth/status` answers
+  `authenticated: false` for a 401 but passes `use_dpop_nonce` through.
 
 ```mermaid
 flowchart TB
@@ -367,18 +469,20 @@ arrive from three sources, in precedence order: `Authorization: DPoP`,
 the token, not of the scheme it arrived under.
 
 **An untracked certificate cannot be revoked.** If `record_ssh_certificate_issuance`
-fails, the signed certificate is discarded and the request returns 500. The revocation
-record is the load-bearing write; the audit event beside it is the queryable one.
+fails, the handler discards the signed certificate and returns 500. Revocation depends on
+that record. The audit event beside it exists for queries.
 
 DPoP validation differs by endpoint, and the difference is which mechanism binds the
 proof. At `/oauth/token`, `NoncePolicy::Required` rejects a proof with no nonce and
 returns a fresh one, so a client cannot precompute proofs. At a resource endpoint
 `NoncePolicy::Optional` applies. The `ath` claim, the SHA-256 of the presented access
 token, already binds the proof to one token. Both paths insert the `jti` atomically,
-which is what prevents proof replay; a nonce is accepted until it expires, so one nonce
-serves a sequence of requests such as a device-code poll. RFC 9449 §11.1 allows that
-"as long as the jti value is tracked and duplicates are rejected for the lifetime of the
-nonce", so a nonce's validity is capped at the jti retention window. Nonces live 300 s,
+and that insert prevents proof replay. The server accepts a nonce until it expires, so
+one nonce serves a sequence of requests such as a device-code poll. RFC 9449 §11.1
+permits reuse: *"As long as the jti value is tracked and duplicates are rejected for the
+lifetime of the nonce, there is no additional risk of token replay."*
+(`specs/rfc/rfc9449.txt`). The server therefore caps a nonce's validity at the jti
+retention window. Nonces live 300 s,
 or `VOUCH_DPOP_MAX_AGE` + 60 s when that is shorter. Proofs older than
 `VOUCH_DPOP_MAX_AGE` (default 300 s) are rejected, as are proofs dated more than 60 s
 in the future.
@@ -411,12 +515,12 @@ flowchart LR
 
 Two audiences get two strings, never one. RFC 6749 §5.2 defines `error_description` as
 *"Human-readable ASCII [USASCII] text providing additional information, used to assist
-the client developer in understanding the error that occurred,"* and requires that its
-values *"MUST NOT include characters outside the set %x20-21 / %x23-5B / %x5D-7E."*
-(`specs/rfc/rfc6749.txt`). OAuth text stays ASCII English. Free-text template fields are
-typed `Tr<'static>` rather than `String`, so a bare literal fails to compile and every
-construction names a catalog key. `AppValidationError` carries both spellings:
-`message()` for the API, `localized()` for the page.
+the client developer in understanding the error that occurred."* The same section
+requires that its values *"MUST NOT include characters outside the set %x20-21 / %x23-5B
+/ %x5D-7E"* (`specs/rfc/rfc6749.txt`). OAuth text stays ASCII English. Free-text
+template fields are typed `Tr<'static>` rather than `String`, so a bare literal fails to
+compile and every construction names a catalog key. `AppValidationError` carries both
+spellings: `message()` for the API, `localized()` for the page.
 
 `OAuthForm` exists because axum's default rejection is the wrong shape. It rejects into
 the OAuth error envelope instead of `text/plain`. It answers 415 to any media type other
@@ -428,9 +532,10 @@ unrecognized one is ignored. `ValidJson` does the same for JSON bodies. Its call
 the browser WebAuthn completion endpoints, which read `errResp.message` from a JSON body
 and cannot see a plain-text rejection, and the CLI's key-registration completion.
 
-`OccConflict` is the only variant that reports itself retryable. Aurora DSQL offers no
-`SELECT … FOR UPDATE`. Cross-row invariants are therefore written as one transaction
-that version-bumps an owning document, wrapped in the single shared bounded-retry macro.
+`OccConflict` is the only variant that reports itself retryable. Aurora DSQL uses
+optimistic concurrency control (OCC) and offers no `SELECT … FOR UPDATE`. Code that
+guards a cross-row invariant therefore writes one transaction that version-bumps an
+owning document, wrapped in the single shared bounded-retry macro.
 A business-logic 409 is a `Conflict`, not an `OccConflict`, and propagates immediately.
 The test `occ_conflict_is_the_only_retryable_service_error` pins both halves.
 
@@ -438,12 +543,16 @@ The test `occ_conflict_is_the_only_retryable_service_error` pins both halves.
 
 | Concern | Path |
 |---|---|
+| Accept loop, PROXY protocol, connection timeouts | `src/infra/accept.rs` |
+| Connection caps | `src/infra/conn_caps.rs` |
+| Client IP for rate limit and audit | `src/infra/rate_limit.rs` (`client_ip_from_request`) |
 | Router, layer stack, route groups | `src/infra/router.rs` |
 | Proof types and the issuance chokepoint | `src/services/auth.rs` |
 | Single-use claim errors | `src/db/claim.rs` |
 | FIDO2 grant | `src/services/oidc/fido2_grant.rs` |
 | WebAuthn assertion and attestation | `src/crypto/webauthn_verify.rs` |
 | DPoP | `src/services/oidc/dpop.rs` |
+| `cnf` claim and key-possession checks | `src/services/oidc/claims.rs` |
 | Client auth: secret and mTLS | `src/services/oidc/token.rs` |
 | Client auth: `private_key_jwt` | `src/services/oidc/jwt_bearer/client_auth.rs` |
 | Client auth dispatch at the endpoints | `src/handlers/oidc/client_auth.rs` |
@@ -456,4 +565,4 @@ The test `occ_conflict_is_the_only_retryable_service_error` pins both halves.
 | RFC 9421 middleware and resolver | `../vouch-httpsig/`, `src/infra/httpsig.rs` |
 | Layer-boundary rules (enforced by test) | `tests/arch_boundaries.rs` |
 
-Line numbers move; the function and type names do not.
+Line numbers move. The function and type names do not.
