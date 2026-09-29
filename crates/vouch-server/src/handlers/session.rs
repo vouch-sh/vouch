@@ -9,6 +9,7 @@ use crate::error::{OAuthErrorCode, ServiceError};
 use crate::http::strip_auth_scheme;
 use crate::services::auth::{self, AccessTokenClaims, DecodedToken, ValidatedResourceToken};
 use crate::services::keys as key_svc;
+use crate::services::oidc::claims::PossessionError;
 use crate::services::oidc::dpop::{self, DpopError};
 use crate::services::oidc::mtls::ClientCertificate;
 use crate::services::oidc::resource;
@@ -16,7 +17,6 @@ use axum::extract::FromRequestParts;
 use axum::http::StatusCode;
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use std::sync::Arc;
-use subtle::ConstantTimeEq;
 use time::Duration;
 use vouch_common::protocol;
 
@@ -80,10 +80,6 @@ impl AuthContext {
 /// used for DPoP proof validation and audience coverage. Pass empty strings
 /// for cookie-only paths where DPoP validation is skipped (an empty `uri`
 /// means only deployment-root audiences pass the coverage check).
-#[expect(
-    clippy::too_many_lines,
-    reason = "linear FAPI 2.0 resource-token validation: decode, audience, session, DPoP, mTLS"
-)]
 async fn extract_resource_token(
     state: &AppState,
     headers: &axum::http::HeaderMap,
@@ -154,15 +150,11 @@ async fn extract_resource_token(
                     .await
                     {
                         Ok(validated) => {
-                            // Verify jkt matches
-                            let jkt = cnf.jkt.as_deref().unwrap_or("");
-                            let is_match: bool =
-                                validated.jkt.as_bytes().ct_eq(jkt.as_bytes()).into();
-                            if !is_match {
+                            if !cnf.confirms_dpop(&validated) {
                                 return Err(ServiceError::api(
                                     StatusCode::UNAUTHORIZED,
                                     "invalid_token",
-                                    "DPoP proof key does not match token binding",
+                                    PossessionError::DpopKeyMismatch.as_str(),
                                 ));
                             }
                             dpop_source = validated.source;
@@ -202,7 +194,7 @@ async fn extract_resource_token(
                     return Err(ServiceError::api(
                         StatusCode::UNAUTHORIZED,
                         "invalid_token",
-                        "Missing DPoP proof header for sender-constrained token",
+                        PossessionError::MissingDpopProof.as_str(),
                     ));
                 }
             }
@@ -239,30 +231,17 @@ async fn extract_resource_token(
         && cnf.jkt.is_none()
     // DPoP takes precedence
     {
-        let expected_thumbprint = cnf.x5t_s256.as_deref().unwrap_or("");
-        match client_cert {
-            Some(cert) => {
-                let is_match: bool = cert
-                    .thumbprint
-                    .as_str()
-                    .as_bytes()
-                    .ct_eq(expected_thumbprint.as_bytes())
-                    .into();
-                if !is_match {
-                    return Err(ServiceError::api(
-                        StatusCode::UNAUTHORIZED,
-                        "invalid_token",
-                        "Client certificate does not match token binding",
-                    ));
-                }
-            }
-            None => {
-                return Err(ServiceError::api(
-                    StatusCode::UNAUTHORIZED,
-                    "invalid_token",
-                    "mTLS certificate required for certificate-bound token",
-                ));
-            }
+        let error = match client_cert {
+            Some(cert) if cnf.confirms_certificate(&cert.thumbprint) => None,
+            Some(_) => Some(PossessionError::ClientCertificateMismatch),
+            None => Some(PossessionError::MissingClientCertificate),
+        };
+        if let Some(error) = error {
+            return Err(ServiceError::api(
+                StatusCode::UNAUTHORIZED,
+                "invalid_token",
+                error.as_str(),
+            ));
         }
     }
 

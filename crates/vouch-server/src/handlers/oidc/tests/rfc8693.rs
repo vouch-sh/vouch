@@ -7,6 +7,8 @@ use crate::db::documents::oauth::TokenExchangeDoc;
 use crate::db::{self, AuditEventFilter, CreateAuthenticatorParams};
 use crate::services::policy::events;
 use crate::test_utils::{self, TestSessionSpec};
+use aws_lc_rs::signature::EcdsaKeyPair;
+use base64::Engine;
 
 #[tokio::test]
 async fn test_token_exchange_requires_grant_type() {
@@ -3421,5 +3423,626 @@ async fn test_rfc8693_relogin_after_logout_re_enables_actor() {
     assert_eq!(
         claims["act"]["sub"], "actor-relogin@example.com",
         "the re-logged-in actor must appear in the act claim: {body}"
+    );
+}
+
+// ========================================================================
+// Sender-constrained subject and actor tokens
+// ========================================================================
+//
+// RFC 8693 §1 leaves proof-of-possession to deployment policy. Vouch applies
+// the RFC 9449 §7.1 resource-server check to the tokens an exchange consumes:
+// a sender-constrained subject or actor token is accepted only with the key
+// its `cnf` names, and the issued token stays bound to that key.
+
+/// A hardware-verified subject token bound to a fresh DPoP key, with that key.
+async fn dpop_bound_subject(
+    state: &std::sync::Arc<crate::AppState>,
+    label: &str,
+) -> (String, EcdsaKeyPair, serde_json::Value) {
+    let user = create_test_user(&state.store, &format!("{label}@example.com")).await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (key, jwk) = generate_dpop_key_pair();
+    let jkt = dpop_jkt(&jwk);
+    let token = create_test_session_with(
+        state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: test_utils::TestBinding::Dpop(&jkt),
+            ..Default::default()
+        },
+    )
+    .await;
+    (token, key, jwk)
+}
+
+/// A DPoP proof for `POST /oauth/token` signed by `key`, carrying a fresh
+/// server nonce.
+async fn token_endpoint_proof(
+    app: &axum::Router,
+    state: &std::sync::Arc<crate::AppState>,
+    key: &EcdsaKeyPair,
+    jwk: &serde_json::Value,
+) -> String {
+    let token_uri = format!("{}/oauth/token", state.config().base_url);
+    let nonce = acquire_dpop_nonce(app, key, jwk, "POST", &token_uri).await;
+    create_dpop_proof(key, jwk, "POST", &token_uri, Some(&nonce), None)
+}
+
+/// The advisory's reproduction: an unauthenticated dynamic registration of a
+/// non-FAPI token-exchange client, then an exchange of a DPoP-bound subject
+/// token with no DPoP proof. RFC 8693 §2.2.2: an unacceptable subject token
+/// MUST be reported as `invalid_request`. Neither token type may be minted.
+#[tokio::test]
+async fn test_exchange_rejects_dpop_bound_subject_without_proof() {
+    let (app, state) = test_app().await;
+    let (subject, _key, _jwk) = dpop_bound_subject(&state, "bound-no-proof").await;
+
+    let registration = serde_json::json!({
+        "client_name": "probe",
+        "grant_types": ["urn:ietf:params:oauth:grant-type:token-exchange"],
+        "response_types": [],
+        "token_endpoint_auth_method": "client_secret_basic",
+    });
+    let (status, body) =
+        http_post_json(&app, "/oauth/register", &registration.to_string(), &[]).await;
+    assert_eq!(status, StatusCode::CREATED, "registration: {body}");
+    let registered: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let basic = format!(
+        "Basic {}",
+        base64::engine::general_purpose::STANDARD.encode(format!(
+            "{}:{}",
+            registered["client_id"].as_str().expect("client_id"),
+            registered["client_secret"].as_str().expect("client_secret"),
+        ))
+    );
+
+    for requested in [
+        "urn:ietf:params:oauth:token-type:access_token",
+        ID_TOKEN_TYPE,
+    ] {
+        let (status, body) = http_post_form(
+            &app,
+            "/oauth/token",
+            &format!(
+                "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+                 &subject_token={subject}\
+                 &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+                 &requested_token_type={requested}\
+                 &scope=openid"
+            ),
+            &[("Authorization", &basic)],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "a DPoP-bound subject token must not be exchanged without a proof \
+             ({requested}): {body}"
+        );
+        let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(error["error"], "invalid_request", "{body}");
+        assert!(
+            error["error_description"]
+                .as_str()
+                .is_some_and(|d| d.starts_with("subject_token:")),
+            "the error must name the subject token: {body}"
+        );
+    }
+}
+
+/// A proof signed by a different key does not prove possession of the
+/// subject token's key, and must not rebind the token to the new key.
+#[tokio::test]
+async fn test_exchange_rejects_dpop_bound_subject_with_other_key() {
+    let (app, state) = test_app().await;
+    let (subject, _key, _jwk) = dpop_bound_subject(&state, "bound-other-key").await;
+    let owner = create_test_user(&state.store, "bound-other-key-client@example.com").await;
+    let client = create_test_oauth_client(&state.store, &owner.id).await;
+    let (other_key, other_jwk) = generate_dpop_key_pair();
+    let proof = token_endpoint_proof(&app, &state, &other_key, &other_jwk).await;
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={subject}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token"
+        ),
+        &[
+            ("Authorization", &client.basic_auth_header()),
+            ("DPoP", &proof),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["error"], "invalid_request", "{body}");
+    assert_eq!(
+        error["error_description"],
+        "subject_token: DPoP proof key does not match token binding"
+    );
+}
+
+/// The holder of the subject token's key may exchange it. The issued access
+/// token stays bound to that key, so it is refused as a bearer token; an ID
+/// token (the CLI's WIF path) is still issued.
+#[tokio::test]
+async fn test_exchange_of_dpop_bound_subject_with_matching_proof_stays_bound() {
+    let (app, state) = test_app().await;
+    let (subject, key, jwk) = dpop_bound_subject(&state, "bound-matching").await;
+    let owner = create_test_user(&state.store, "bound-matching-client@example.com").await;
+    let client = create_test_oauth_client(&state.store, &owner.id).await;
+    let auth_header = client.basic_auth_header();
+
+    let proof = token_endpoint_proof(&app, &state, &key, &jwk).await;
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={subject}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token"
+        ),
+        &[("Authorization", &auth_header), ("DPoP", &proof)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(response["token_type"], "DPoP", "{body}");
+    let issued = response["access_token"].as_str().expect("access_token");
+    assert_eq!(
+        decode_jwt_payload(issued)["cnf"]["jkt"],
+        dpop_jkt(&jwk),
+        "the exchanged token must stay bound to the subject token's key"
+    );
+
+    let (status, body) = http_get(
+        &app,
+        "/api/v1/applications",
+        &[("Authorization", &format!("Bearer {issued}"))],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "the exchanged token must not work as a bearer token: {body}"
+    );
+    assert!(
+        body.contains("Sender-constrained tokens must use DPoP authorization scheme"),
+        "the refusal must be the sender-constraint check: {body}"
+    );
+
+    let proof = token_endpoint_proof(&app, &state, &key, &jwk).await;
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={subject}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &requested_token_type={ID_TOKEN_TYPE}"
+        ),
+        &[("Authorization", &auth_header), ("DPoP", &proof)],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "ID-token exchange with the key: {body}"
+    );
+}
+
+/// A certificate-bound subject token is exchanged only over a connection
+/// presenting that certificate, whether or not the requesting client opted
+/// into certificate-bound tokens, and the issued token keeps the binding.
+#[tokio::test]
+async fn test_exchange_of_mtls_bound_subject_requires_its_certificate() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "bound-mtls@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let cert_der = test_utils::test_client_ca().issue("bound-mtls");
+    let thumbprint = cert_thumbprint(&cert_der);
+    let subject = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: test_utils::TestBinding::Mtls(&thumbprint),
+            ..Default::default()
+        },
+    )
+    .await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let auth_header = client.basic_auth_header();
+    let form = format!(
+        "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+         &subject_token={subject}\
+         &subject_token_type=urn:ietf:params:oauth:token-type:access_token"
+    );
+
+    let other_der = test_utils::test_client_ca().issue("bound-mtls-other");
+    for (cert, expected) in [
+        (
+            None,
+            "subject_token: mTLS certificate required for certificate-bound token",
+        ),
+        (
+            Some(other_der),
+            "subject_token: Client certificate does not match token binding",
+        ),
+    ] {
+        let (status, body) = http_post_form_with_cert(
+            &app,
+            "/oauth/token",
+            &form,
+            &[("Authorization", &auth_header)],
+            cert,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(error["error_description"], expected, "{body}");
+    }
+
+    let (status, body) = http_post_form_with_cert(
+        &app,
+        "/oauth/token",
+        &form,
+        &[("Authorization", &auth_header)],
+        Some(cert_der),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let issued = response["access_token"].as_str().expect("access_token");
+    assert_eq!(
+        decode_jwt_payload(issued)["cnf"]["x5t#S256"],
+        thumbprint.as_str(),
+        "the exchanged token must stay bound to the subject token's certificate"
+    );
+}
+
+/// A DPoP-bound actor token proves the actor only with the actor's key.
+#[tokio::test]
+async fn test_exchange_rejects_dpop_bound_actor_without_proof() {
+    let (app, state) = test_app().await;
+    let subject_user = create_test_user(&state.store, "actor-bound-subject@example.com").await;
+    let subject_auth = create_test_authenticator(&state.store, &subject_user.id).await;
+    let subject = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &subject_user.id,
+            email: &subject_user.email,
+            auth_id: Some(&subject_auth),
+            ..Default::default()
+        },
+    )
+    .await;
+    let (actor, _key, _jwk) = dpop_bound_subject(&state, "actor-bound-actor").await;
+    let client = create_test_oauth_client(&state.store, &subject_user.id).await;
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={subject}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &actor_token={actor}\
+             &actor_token_type=urn:ietf:params:oauth:token-type:access_token"
+        ),
+        &[("Authorization", &client.basic_auth_header())],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        error["error_description"],
+        "actor_token: Missing DPoP proof header for sender-constrained token"
+    );
+}
+
+/// Form body for an access-token exchange, with `extra` appended verbatim.
+fn exchange_form(subject_token: &str, extra: &str) -> String {
+    format!(
+        "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+         &subject_token={subject_token}\
+         &subject_token_type=urn:ietf:params:oauth:token-type:access_token{extra}"
+    )
+}
+
+/// The `error_description` of a 400 exchange response.
+fn exchange_rejection(status: StatusCode, body: &str) -> String {
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(body).expect("Valid JSON");
+    assert_eq!(error["error"], "invalid_request", "{body}");
+    error["error_description"]
+        .as_str()
+        .expect("error_description")
+        .to_string()
+}
+
+/// An unbound, hardware-verified access token for a fresh user.
+async fn unbound_token(state: &std::sync::Arc<crate::AppState>, label: &str) -> String {
+    let user = create_test_user(&state.store, &format!("{label}@example.com")).await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    create_test_session_with(
+        state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await
+}
+
+/// A DPoP-bound subject token presented with a client certificate but no
+/// DPoP proof: DPoP takes precedence, so the certificate proves nothing.
+#[tokio::test]
+async fn test_exchange_rejects_dpop_bound_subject_with_only_certificate() {
+    let (app, state) = test_app().await;
+    let (subject, _key, _jwk) = dpop_bound_subject(&state, "bound-cert-only").await;
+    let owner = create_test_user(&state.store, "bound-cert-only-client@example.com").await;
+    let client = create_test_oauth_client(&state.store, &owner.id).await;
+
+    let (status, body) = http_post_form_with_cert(
+        &app,
+        "/oauth/token",
+        &exchange_form(&subject, ""),
+        &[("Authorization", &client.basic_auth_header())],
+        Some(test_utils::test_client_ca().issue("bound-cert-only")),
+    )
+    .await;
+    assert_eq!(
+        exchange_rejection(status, &body),
+        "subject_token: Missing DPoP proof header for sender-constrained token"
+    );
+}
+
+/// An ID token (the WIF path) is minted only for the holder of the subject
+/// token's key.
+#[tokio::test]
+async fn test_exchange_rejects_id_token_request_with_other_key() {
+    let (app, state) = test_app().await;
+    let (subject, _key, _jwk) = dpop_bound_subject(&state, "bound-id-token-other").await;
+    let owner = create_test_user(&state.store, "bound-id-token-client@example.com").await;
+    let client = create_test_oauth_client(&state.store, &owner.id).await;
+    let (other_key, other_jwk) = generate_dpop_key_pair();
+    let proof = token_endpoint_proof(&app, &state, &other_key, &other_jwk).await;
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &exchange_form(&subject, &format!("&requested_token_type={ID_TOKEN_TYPE}")),
+        &[
+            ("Authorization", &client.basic_auth_header()),
+            ("DPoP", &proof),
+        ],
+    )
+    .await;
+    assert_eq!(
+        exchange_rejection(status, &body),
+        "subject_token: DPoP proof key does not match token binding"
+    );
+}
+
+/// A client registered for DPoP-bound tokens (RFC 9449 §5
+/// `dpop_bound_access_tokens`) cannot receive a certificate-bound token, so
+/// it may not exchange a certificate-bound subject token.
+#[tokio::test]
+async fn test_exchange_rejects_certificate_bound_subject_for_dpop_client() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "dpop-client-mtls-subject@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let cert_der = test_utils::test_client_ca().issue("dpop-client-mtls-subject");
+    let thumbprint = cert_thumbprint(&cert_der);
+    let subject = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: test_utils::TestBinding::Mtls(&thumbprint),
+            ..Default::default()
+        },
+    )
+    .await;
+    let client = test_utils::create_test_client(
+        &state.store,
+        &user.id,
+        test_utils::TestClientSpec {
+            dpop_bound_access_tokens: true,
+            ..Default::default()
+        },
+    )
+    .await;
+    let (key, jwk) = generate_dpop_key_pair();
+    let proof = token_endpoint_proof(&app, &state, &key, &jwk).await;
+
+    let (status, body) = http_post_form_with_cert(
+        &app,
+        "/oauth/token",
+        &exchange_form(&subject, ""),
+        &[
+            ("Authorization", &client.basic_auth_header()),
+            ("DPoP", &proof),
+        ],
+        Some(cert_der),
+    )
+    .await;
+    assert_eq!(
+        exchange_rejection(status, &body),
+        "subject_token: client requires DPoP-bound access tokens, \
+         but the token is certificate-bound"
+    );
+}
+
+/// RFC 8693 §4.4 `may_act` is how a subject token authorizes an actor that
+/// does not hold its key. Vouch does not implement `may_act`, so a
+/// sender-constrained subject token cannot be delegated, even by a request
+/// that proves the subject's key.
+#[tokio::test]
+async fn test_exchange_rejects_delegation_of_bound_subject() {
+    let (app, state) = test_app().await;
+    let (subject, key, jwk) = dpop_bound_subject(&state, "delegate-bound-subject").await;
+    let actor = unbound_token(&state, "delegate-bound-subject-actor").await;
+    let owner = create_test_user(&state.store, "delegate-bound-client@example.com").await;
+    let client = create_test_oauth_client(&state.store, &owner.id).await;
+    let proof = token_endpoint_proof(&app, &state, &key, &jwk).await;
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &exchange_form(
+            &subject,
+            &format!(
+                "&actor_token={actor}\
+                 &actor_token_type=urn:ietf:params:oauth:token-type:access_token"
+            ),
+        ),
+        &[
+            ("Authorization", &client.basic_auth_header()),
+            ("DPoP", &proof),
+        ],
+    )
+    .await;
+    assert_eq!(
+        exchange_rejection(status, &body),
+        "subject_token: a sender-constrained subject token cannot be delegated"
+    );
+}
+
+/// RFC 8693 §2.1: the actor "will be the party that is authorized to use the
+/// requested security token". A DPoP-bound actor proves its key, and the
+/// issued token is bound to it.
+#[tokio::test]
+async fn test_delegated_token_is_bound_to_dpop_actor_key() {
+    let (app, state) = test_app().await;
+    let subject = unbound_token(&state, "delegate-dpop-subject").await;
+    let (actor, key, jwk) = dpop_bound_subject(&state, "delegate-dpop-actor").await;
+    let owner = create_test_user(&state.store, "delegate-dpop-client@example.com").await;
+    let client = create_test_oauth_client(&state.store, &owner.id).await;
+    let proof = token_endpoint_proof(&app, &state, &key, &jwk).await;
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &exchange_form(
+            &subject,
+            &format!(
+                "&actor_token={actor}\
+                 &actor_token_type=urn:ietf:params:oauth:token-type:access_token"
+            ),
+        ),
+        &[
+            ("Authorization", &client.basic_auth_header()),
+            ("DPoP", &proof),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let issued = response["access_token"].as_str().expect("access_token");
+    assert_eq!(decode_jwt_payload(issued)["cnf"]["jkt"], dpop_jkt(&jwk));
+}
+
+/// A certificate-bound actor is bound into the issued token even when the
+/// requesting client did not opt into certificate-bound tokens.
+#[tokio::test]
+async fn test_delegated_token_is_bound_to_certificate_actor() {
+    let (app, state) = test_app().await;
+    let subject = unbound_token(&state, "delegate-mtls-subject").await;
+    let actor_user = create_test_user(&state.store, "delegate-mtls-actor@example.com").await;
+    let actor_auth = create_test_authenticator(&state.store, &actor_user.id).await;
+    let cert_der = test_utils::test_client_ca().issue("delegate-mtls-actor");
+    let thumbprint = cert_thumbprint(&cert_der);
+    let actor = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &actor_user.id,
+            email: &actor_user.email,
+            auth_id: Some(&actor_auth),
+            binding: test_utils::TestBinding::Mtls(&thumbprint),
+            ..Default::default()
+        },
+    )
+    .await;
+    let client = create_test_oauth_client(&state.store, &actor_user.id).await;
+    let form = exchange_form(
+        &subject,
+        &format!(
+            "&actor_token={actor}\
+             &actor_token_type=urn:ietf:params:oauth:token-type:access_token"
+        ),
+    );
+    let auth_header = client.basic_auth_header();
+
+    let (status, body) = http_post_form_with_cert(
+        &app,
+        "/oauth/token",
+        &form,
+        &[("Authorization", &auth_header)],
+        None,
+    )
+    .await;
+    assert_eq!(
+        exchange_rejection(status, &body),
+        "actor_token: mTLS certificate required for certificate-bound token"
+    );
+
+    let (status, body) = http_post_form_with_cert(
+        &app,
+        "/oauth/token",
+        &form,
+        &[("Authorization", &auth_header)],
+        Some(cert_der),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let issued = response["access_token"].as_str().expect("access_token");
+    assert_eq!(
+        decode_jwt_payload(issued)["cnf"]["x5t#S256"],
+        thumbprint.as_str()
+    );
+}
+
+/// A DPoP-bound actor token is refused with a proof from a different key.
+#[tokio::test]
+async fn test_exchange_rejects_dpop_bound_actor_with_other_key() {
+    let (app, state) = test_app().await;
+    let subject = unbound_token(&state, "delegate-other-key-subject").await;
+    let (actor, _key, _jwk) = dpop_bound_subject(&state, "delegate-other-key-actor").await;
+    let owner = create_test_user(&state.store, "delegate-other-key-client@example.com").await;
+    let client = create_test_oauth_client(&state.store, &owner.id).await;
+    let (other_key, other_jwk) = generate_dpop_key_pair();
+    let proof = token_endpoint_proof(&app, &state, &other_key, &other_jwk).await;
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &exchange_form(
+            &subject,
+            &format!(
+                "&actor_token={actor}\
+                 &actor_token_type=urn:ietf:params:oauth:token-type:access_token"
+            ),
+        ),
+        &[
+            ("Authorization", &client.basic_auth_header()),
+            ("DPoP", &proof),
+        ],
+    )
+    .await;
+    assert_eq!(
+        exchange_rejection(status, &body),
+        "actor_token: DPoP proof key does not match token binding"
     );
 }

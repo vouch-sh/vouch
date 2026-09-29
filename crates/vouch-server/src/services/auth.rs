@@ -507,11 +507,11 @@ impl SenderConstraintProof {
     /// requirement is unmet.
     pub(crate) fn validate(
         client: &db::OAuthClient,
-        constraints: SenderConstraints,
+        constraints: SenderConstraints<'_>,
     ) -> ServiceResult<Self> {
         fapi::validate_fapi_token_request(client, constraints)?;
 
-        if client.dpop_bound_access_tokens && !constraints.dpop {
+        if client.dpop_bound_access_tokens && constraints.dpop.is_none() {
             return Err(ServiceError::oauth(
                 OAuthErrorCode::InvalidRequest,
                 "Client requires DPoP-bound access tokens \
@@ -520,8 +520,8 @@ impl SenderConstraintProof {
         }
 
         if client.tls_client_certificate_bound_access_tokens
-            && !constraints.mtls_cert
-            && !constraints.dpop
+            && constraints.mtls_cert.is_none()
+            && constraints.dpop.is_none()
         {
             return Err(ServiceError::oauth(
                 OAuthErrorCode::InvalidRequest,

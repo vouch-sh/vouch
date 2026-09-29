@@ -1899,3 +1899,94 @@ async fn test_token_endpoint_auth_signing_algs_match_client_assertion_algorithms
         );
     }
 }
+
+// ========================================================================
+// DPoP-bound access tokens as the session cookie
+// ========================================================================
+//
+// A cookie cannot carry a DPoP proof, so a DPoP-bound access token in the
+// session cookie proves nothing about who holds its key. Accepting it would
+// let a stolen `vouch login` token mint an authorization code for any client,
+// and redeem it as an unbound token.
+
+/// `/oauth/authorize` treats a DPoP-bound session cookie as signed out: it
+/// sends the browser to sign in and issues no code.
+#[tokio::test]
+async fn test_authorize_ignores_dpop_bound_session_cookie() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "authorize-dpop-cookie@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let (_key, jwk) = generate_dpop_key_pair();
+    let jkt = dpop_jkt(&jwk);
+    let session = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Dpop(&jkt),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let location = authorize_location_with_session(&app, &client.client_id, &session).await;
+
+    assert!(
+        location.starts_with("/login?pending_auth="),
+        "a DPoP-bound session cookie must not authenticate /oauth/authorize: {location}"
+    );
+    assert!(
+        !location.contains("code="),
+        "no code may be issued: {location}"
+    );
+}
+
+/// The pending-authorization resume path applies the same rule.
+#[tokio::test]
+async fn test_authorize_resume_ignores_dpop_bound_session_cookie() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "authorize-resume-dpop@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let pending = authorize_location_with_session(&app, &client.client_id, "").await;
+    let pending_id = pending
+        .split("pending_auth=")
+        .nth(1)
+        .expect("signed-out authorize must redirect with pending_auth")
+        .split('&')
+        .next()
+        .expect("pending_auth value");
+
+    let (_key, jwk) = generate_dpop_key_pair();
+    let jkt = dpop_jkt(&jwk);
+    let session = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Dpop(&jkt),
+            ..Default::default()
+        },
+    )
+    .await;
+    let resumed = http_get_full(
+        &app,
+        &format!("/oauth/authorize?pending_auth={pending_id}"),
+        &[("Cookie", &format!("__Host-vouch_session={session}"))],
+    )
+    .await;
+    let location = resumed
+        .headers
+        .get("Location")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+
+    assert!(
+        !location.contains("code="),
+        "resuming with a DPoP-bound session cookie must not issue a code: {location}"
+    );
+}

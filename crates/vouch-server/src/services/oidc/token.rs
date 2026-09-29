@@ -1349,6 +1349,10 @@ pub struct OidcValidatedSession {
     pub scope: Option<ScopeSet>,
     /// The OAuth client_id from the access token (used for signed userinfo lookup).
     pub client_id: Option<String>,
+    /// The token's confirmation claim (RFC 7800). A caller that received the
+    /// token without a DPoP proof or client certificate must refuse it when
+    /// this is present.
+    pub cnf: Option<CnfClaim>,
 }
 
 /// Validate a session token and return the user, session, and authenticator.
@@ -1432,6 +1436,7 @@ pub async fn validate_session_token(
         scope: decoded.scope().cloned(),
         client_id,
         hardware_verified,
+        cnf: decoded.cnf().cloned(),
         // Only a verified session can carry a ceremony instant; an unverified
         // token never reports one, whatever its row holds.
         authenticated_at: session.authenticated_at.filter(|_| hardware_verified),
