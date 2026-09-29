@@ -1079,6 +1079,152 @@ mod tests {
         );
     }
 
+    /// Caps as `serve.rs` builds them for the port-80 redirect listener: even
+    /// in PROXY mode the trusted proxy stays exempt, because port 80 never
+    /// reads the PROXY header and its TCP peer is the proxy — see
+    /// `ConnCaps::for_http_redirect`.
+    fn caps_trusting_loopback_for_http(proxy_protocol: bool) -> Arc<ConnCaps> {
+        let mut config = test_config();
+        config.proxy_protocol = proxy_protocol;
+        config.trusted_proxies = vec!["127.0.0.1/32".parse().expect("CIDR")];
+        config.connection_caps = ConnCapConfig {
+            max_total: 100,
+            max_per_ip: 1,
+        };
+        let shared = ConnCaps::for_config(&config);
+        ConnCaps::for_http_redirect(&shared, &config)
+    }
+
+    /// A PROXY-off listener (port 80) sharing the PROXY-mode caps built by
+    /// `ConnCaps::for_config` (empty exempt list): the peer is the proxy since
+    /// no header is read, but the proxy is not exempt, so a second
+    /// `max_per_ip`-concurrent connection is closed before any response.
+    ///
+    /// This is the regression introduced by `5c2e5ac3` — it demonstrates *why*
+    /// the port-80 redirect listener must use `ConnCaps::for_http_redirect`
+    /// (which keeps the trusted proxy exempt) rather than the shared caps.
+    #[tokio::test]
+    async fn proxy_mode_caps_the_proxy_on_proxy_off_listener() {
+        let (addr, _shutdown, _server) =
+            start_with_caps(ConnLimits::DEFAULT, caps_trusting_loopback(true)).await;
+
+        let mut first = TcpStream::connect(addr).await.expect("connect");
+        let response = request_keep_alive(&mut first).await;
+        assert!(response.starts_with("HTTP/1.1 200"), "first: {response}");
+
+        let mut second = TcpStream::connect(addr).await.expect("connect");
+        let received = read_until_closed(&mut second)
+            .await
+            .expect("PROXY-mode caps close a proxy peer on a PROXY-off listener");
+        assert!(
+            received.is_empty(),
+            "closed before any response: {received:?}"
+        );
+    }
+
+    /// The port-80 redirect listener keeps the trusted proxy exempt even in
+    /// PROXY mode, because it never reads the PROXY header and its TCP peer is
+    /// the proxy. `docs/src/configuration/reverse-proxy.md`: "Port 80 never
+    /// takes the PROXY protocol." This is the fix for the regression above.
+    #[tokio::test]
+    async fn proxy_mode_keeps_trusted_proxy_exempt_on_proxy_off_listener() {
+        let (addr, _shutdown, _server) =
+            start_with_caps(ConnLimits::DEFAULT, caps_trusting_loopback_for_http(true)).await;
+
+        let mut first = TcpStream::connect(addr).await.expect("connect");
+        let response = request_keep_alive(&mut first).await;
+        assert!(
+            response.starts_with("HTTP/1.1 200"),
+            "first connection admitted: {response}"
+        );
+
+        let mut second = TcpStream::connect(addr).await.expect("connect");
+        let response = request_keep_alive(&mut second).await;
+        assert!(
+            response.starts_with("HTTP/1.1 200"),
+            "the trusted proxy is exempt on a PROXY-off listener even in PROXY mode; second: {response}"
+        );
+    }
+
+    /// End-to-end on the port-80 redirect path: the real `build_redirect_router`
+    /// (with the real `/health` and 308-redirect handlers, not a test stub),
+    /// served by `accept::serve` on a `ProxyProtocol::off()` listener with the
+    /// `for_http_redirect` caps that `serve_tls_on` builds for port 80 in PROXY
+    /// mode. The trusted proxy (loopback) stays exempt even in PROXY mode, so
+    /// two concurrent `max_per_ip`-consuming connections to `/health` both get
+    /// `200 OK` — not closed before any response. This is the port-80 path of
+    /// the e2e procedure in the test plan (step 3, PROXY mode on).
+    #[tokio::test]
+    async fn port_80_redirect_path_keeps_proxy_exempt_in_proxy_mode_e2e() {
+        use crate::build_redirect_router;
+        use crate::test_utils::test_app_state;
+
+        let mut config = test_config();
+        config.proxy_protocol = true;
+        config.trusted_proxies = vec!["127.0.0.1/32".parse().expect("CIDR")];
+        config.connection_caps = ConnCapConfig {
+            max_total: 100,
+            max_per_ip: 1,
+        };
+        // The exact caps `serve_tls_on` builds for port 80 in PROXY mode:
+        // shared total cap, separate per-IP view, trusted_proxies exempt.
+        let shared = ConnCaps::for_config(&config);
+        let caps = ConnCaps::for_http_redirect(&shared, &config);
+
+        let redirect_app = build_redirect_router(test_app_state().await);
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let shutdown = CancellationToken::new();
+        let server = tokio::spawn(serve(
+            listener,
+            ProxyProtocol::off(),
+            PlainHandshake,
+            redirect_app,
+            ConnLimits::DEFAULT,
+            caps,
+            shutdown.clone(),
+        ));
+
+        // Two keep-alive connections from the same loopback peer (the proxy).
+        // Both reach `/health` and get `200 OK` — the proxy is exempt on port 80
+        // even in PROXY mode, so the cap does not close the second one.
+        let mut first = TcpStream::connect(addr).await.expect("connect");
+        first
+            .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .expect("write");
+        let mut buf = [0u8; 64];
+        let n = tokio::time::timeout(BOUND, first.read(&mut buf))
+            .await
+            .expect("response within bound")
+            .expect("read");
+        let first_response = String::from_utf8_lossy(buf.get(..n).unwrap_or_default());
+        assert!(
+            first_response.starts_with("HTTP/1.1 200"),
+            "first /health on port 80 (PROXY mode, proxy exempt): {first_response}"
+        );
+
+        let mut second = TcpStream::connect(addr).await.expect("connect");
+        second
+            .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .expect("write");
+        let second_response = read_until_closed(&mut second)
+            .await
+            .expect("second /health response (proxy exempt on port 80 in PROXY mode)");
+        let second_response = String::from_utf8_lossy(&second_response);
+        assert!(
+            second_response.starts_with("HTTP/1.1 200"),
+            "second /health on port 80 (PROXY mode, proxy exempt): {second_response}"
+        );
+
+        shutdown.cancel();
+        tokio::time::timeout(BOUND, server)
+            .await
+            .expect("shutdown")
+            .expect("join");
+    }
+
     /// A request in flight, including its response body, keeps a connection
     /// from counting as idle; the idle clock starts once it ends.
     #[tokio::test(start_paused = true)]

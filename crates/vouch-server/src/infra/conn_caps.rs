@@ -14,11 +14,14 @@
 //! - **Per client**: open connections per client address, closed at once when
 //!   over the cap. IPv6 clients are counted per /64, since one host can use a
 //!   whole /64. Peers in `VOUCH_TRUSTED_PROXIES` are exempt: behind a proxy
-//!   that terminates TLS every client shares the proxy's address. With
-//!   `VOUCH_PROXY_PROTOCOL` on, no peer is exempt: the peer is the PROXY
-//!   header's source, which is the client, not the proxy.
+//!   that terminates TLS every client shares the proxy's address. On the
+//!   listeners that read the PROXY header (HTTPS, mTLS) with
+//!   `VOUCH_PROXY_PROTOCOL` on, no peer is exempt: the peer is the header's
+//!   source, which is the client, not the proxy. The port-80 redirect
+//!   listener never reads the header (its TCP peer is the proxy), so it keeps
+//!   the trusted proxy exempt regardless — see [`ConnCaps::for_http_redirect`].
 //!
-//! One [`ConnCaps`] is shared by every listener in the process, so a client
+//! The total cap (one semaphore) is shared by every listener, so a client
 //! cannot multiply its allowance by spreading over the HTTPS and mTLS ports.
 
 use std::collections::HashMap;
@@ -79,12 +82,37 @@ impl ConnCaps {
         })
     }
 
-    /// The caps for `config`, shared by every listener in the process.
+    /// The caps for `config`, used by the PROXY-protocol listeners (HTTPS,
+    /// mTLS) and the single plain listener. The exempt list comes from
+    /// [`ServerConfig::forwarded_for_proxies`]: empty with the PROXY
+    /// protocol on, since the header's source is the client, not the proxy.
     pub(crate) fn for_config(config: &ServerConfig) -> Arc<Self> {
         Self::new(
             config.connection_caps,
             config.forwarded_for_proxies().to_vec(),
         )
+    }
+
+    /// Caps for the port-80 HTTP→HTTPS redirect listener.
+    ///
+    /// Port 80 is wired with `ProxyProtocol::off()` (see `serve.rs` and
+    /// `docs/src/configuration/reverse-proxy.md`: "Port 80 never takes the
+    /// PROXY protocol"), so its TCP peer is the proxy, not the header's
+    /// client. The trusted proxy must therefore stay exempt even when
+    /// `VOUCH_PROXY_PROTOCOL` is on — otherwise the proxy's redirect
+    /// connections share one per-IP bucket and are dropped under load.
+    ///
+    /// The total cap is shared with `shared` (every listener draws from one
+    /// pool), but the per-IP map is not: the only peer on port 80 is the
+    /// exempt proxy, so the map is effectively empty and a client cannot
+    /// use port 80 to multiply a per-IP allowance counted on 443/mTLS.
+    pub(crate) fn for_http_redirect(shared: &Arc<Self>, config: &ServerConfig) -> Arc<Self> {
+        Arc::new(Self {
+            total: Arc::clone(&shared.total),
+            per_ip: Mutex::new(HashMap::new()),
+            max_per_ip: shared.max_per_ip,
+            exempt: config.trusted_proxies.clone(),
+        })
     }
 
     /// Wait until the total cap has room for one more connection.
@@ -191,6 +219,8 @@ impl Drop for ClientSlot {
 mod tests {
     use super::*;
 
+    use crate::test_utils::test_config;
+
     fn caps(max_total: u32, max_per_ip: u32, exempt: &[&str]) -> Arc<ConnCaps> {
         ConnCaps::new(
             ConnCapConfig {
@@ -275,6 +305,60 @@ mod tests {
         assert_eq!(caps.tracked_clients(), 3);
         drop(slots);
         assert_eq!(caps.tracked_clients(), 0);
+    }
+
+    /// `for_http_redirect` shares the total cap with the PROXY-protocol
+    /// listener caps (every listener draws from one semaphore) but keeps the
+    /// trusted proxies exempt even in PROXY mode, because the port-80
+    /// listener never reads the PROXY header and its TCP peer is the proxy.
+    #[tokio::test]
+    async fn for_http_redirect_shares_total_and_exempts_trusted_proxies() {
+        let mut config = test_config();
+        config.proxy_protocol = true;
+        config.trusted_proxies = vec!["10.0.0.0/8".parse().expect("CIDR")];
+        config.connection_caps = ConnCapConfig {
+            max_total: 2,
+            max_per_ip: 1,
+        };
+
+        let shared = ConnCaps::for_config(&config);
+        assert!(
+            shared.exempt.is_empty(),
+            "PROXY-mode listener caps (443/mTLS) exempt no one"
+        );
+
+        let http = ConnCaps::for_http_redirect(&shared, &config);
+        assert_eq!(
+            http.exempt.len(),
+            1,
+            "port-80 caps keep trusted_proxies exempt even in PROXY mode"
+        );
+
+        // The total cap is shared: holding a slot on `shared` reduces `http`'s
+        // available capacity, proving both draw from one semaphore.
+        assert_eq!(shared.available(), 2);
+        assert_eq!(http.available(), 2);
+        let _held = shared.reserve().await.expect("reserve");
+        assert_eq!(shared.available(), 1);
+        assert_eq!(http.available(), 1);
+
+        // The trusted proxy is exempt on the port-80 caps but capped on the
+        // 443/mTLS caps (empty exempt list, max_per_ip = 1).
+        let _exempt: Vec<_> = (0..3)
+            .map(|_| http.admit(ip("10.1.2.3")).expect("exempt on port 80"))
+            .collect();
+        assert_eq!(
+            http.tracked_clients(),
+            0,
+            "exempt proxy peers are not counted on port 80"
+        );
+        let _first = shared
+            .admit(ip("10.1.2.3"))
+            .expect("first 443 connection admitted");
+        assert!(
+            shared.admit(ip("10.1.2.3")).is_none(),
+            "second 443 connection capped (no exemption in PROXY mode)"
+        );
     }
 
     #[tokio::test(start_paused = true)]

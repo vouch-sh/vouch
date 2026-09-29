@@ -1230,6 +1230,11 @@ impl ServerConfig {
     /// only through these, and only these are exempt from the per-address
     /// connection cap; either use of `trusted_proxies` in PROXY mode would let
     /// a client inside that range choose its address or escape the cap.
+    ///
+    /// This is the exempt list for the listeners that read the PROXY header
+    /// (HTTPS, mTLS). The port-80 redirect listener never reads the header
+    /// (its peer is the proxy), so it uses [`ConnCaps::for_http_redirect`]
+    /// which keeps `trusted_proxies` exempt regardless of this setting.
     #[must_use]
     pub fn forwarded_for_proxies(&self) -> &[IpNet] {
         if self.proxy_protocol {

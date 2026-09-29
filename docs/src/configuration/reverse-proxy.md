@@ -155,8 +155,10 @@ terminates TLS connects from its own address on behalf of every client, so list 
 `VOUCH_TRUSTED_PROXIES`: trusted proxies are exempt from the per-address cap. Without that, the cap
 applies to the proxy itself and it will see refused connections under load. With NLB passthrough
 and client IP preservation, or with the PROXY protocol, the cap sees each real client and needs no
-configuration. With the PROXY protocol on, no address is exempt, including one inside
-`VOUCH_TRUSTED_PROXIES`: the header's source is the client, not the proxy.
+configuration. With the PROXY protocol on, no address is exempt on the listeners that read the
+header (HTTPS, mTLS), including one inside `VOUCH_TRUSTED_PROXIES`: the header's source is the
+client, not the proxy. The port-80 redirect listener never takes the PROXY protocol, so its peer
+is the proxy and the trusted proxy stays exempt there regardless.
 
 ## Example configurations
 

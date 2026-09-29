@@ -207,7 +207,15 @@ async fn serve_tls_on(
     // Spawn HTTP redirect server (port 80) - best effort, not fatal if fails
     let http_addr = addrs.http_redirect;
     let token_for_http = shutdown_token.clone();
-    let caps_for_http = Arc::clone(&caps);
+    // Port 80 never takes the PROXY protocol, so its TCP peer is the proxy,
+    // not the header's client. In PROXY mode the shared `caps` exempts no one
+    // (correct for 443/8443), so give port 80 its own per-IP view that keeps the
+    // trusted proxy exempt while sharing the total cap.
+    let caps_for_http = if config.proxy_protocol {
+        ConnCaps::for_http_redirect(&caps, config)
+    } else {
+        Arc::clone(&caps)
+    };
     let http_handle = tokio::spawn(async move {
         match tokio::net::TcpListener::bind(http_addr).await {
             Ok(listener) => {
