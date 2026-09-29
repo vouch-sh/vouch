@@ -16,17 +16,15 @@ A `DpopError` match arm uses a catch-all `Err(e)` that maps all variants — inc
 
 Key signal: a `match validate_dpop_*` or `match DpopError` that lacks an explicit `Err(e @ DpopError::Database(_))` arm before `Err(e)`.
 
-### Pattern 3: Silently returning `{"active": false}` on a server-side error
+### Pattern 3: Silently returning `{"active": false}` on signing failure
 
-`IntrospectionResult::inactive()` is the correct response only for expired/unknown tokens. Returning it from any error path — JWT signing failure after a successful introspection, or a DB error from the introspection service itself — misrepresents the token state and gives operators no signal of failure. Server-side failures must surface as HTTP 500 `server_error`.
+After a successful introspection result, if JWT signing fails, a handler that falls back to `Json(IntrospectionResult::inactive())` misrepresents a valid token as inactive. Signing failures must surface as HTTP 500 `server_error`.
 
-Key signals: a `match sign_introspection_jwt(...)` (previously `wrap_introspection_jwt`) whose `Err` arm produces `IntrospectionResult::inactive()` or any `active: false` response; or `svc_introspect(...).await` whose `Err` arm (or `.ok()` / `.unwrap_or(...)` collapse) yields `IntrospectionResult::inactive()`.
+Key signal: a `match sign_introspection_jwt(...)` (previously `wrap_introspection_jwt`) whose `Err` arm produces `IntrospectionResult::inactive()` or any `active: false` response.
 
 ### Pattern 4: Catch-all mapping `ClaimError::Database` to a 4xx
 
 `ClaimError` has three variants: `AlreadyConsumed` (→ 4xx), `InvalidInput` (→ 4xx), and `Database` (→ 500). A catch-all `Err(e)` arm after only `AlreadyConsumed` will silently map `Database` to the same 4xx as `InvalidInput`. Each `ClaimError` match must either handle all three variants explicitly or use `Database` as an intermediate arm before the catch-all.
-
-A related service-layer variant: producing the wrong `DpopError` variant in the first place. Mapping a `ClaimError::Database` (or any DB error) to `DpopError::InvalidFormat` in `services/oidc/dpop.rs` guarantees the handler classifies it as a 400 even with correct handler-side matching. DB errors must be raised as `DpopError::Database(_)` at the point of production.
 
 ### Pattern 5: Using `into_response()` instead of `into_oauth_response()` for OAuth endpoints
 
@@ -97,23 +95,6 @@ if let Err(e) = commit_jti(&state, pending_jti).await {
     .into_oauth_response()
     .into_response();
 }
-```
-
-**DB error from introspection service returning `{"active": false}` (issue #540)**
-
-```rust
-// VIOLATION: Err discarded, DB failure reported as inactive token
-let result = match svc_introspect(&state, ...).await {
-    Ok(r) => r,
-    Err(_) => IntrospectionResult::inactive(),
-};
-```
-
-**DPoP DB failure raised as `InvalidFormat` in the service layer (issue #427)**
-
-```rust
-// VIOLATION in dpop.rs: DB error → InvalidFormat → 400 in handler
-Err(e) => return Err(DpopError::InvalidFormat(format!("JTI check failed: {e}"))),
 ```
 
 **`into_response()` instead of `into_oauth_response()` on an OAuth endpoint (fixed in 91a00b3)**
@@ -201,23 +182,13 @@ Err(e) => {
 }
 ```
 
-**`DpopError::Database` variant raised explicitly in the service layer:**
-
-```rust
-Err(db::claim::ClaimError::Database(msg)) => {
-    return Err(DpopError::Database(format!("JTI check failed: {msg}")));
-}
-```
-
 ## Scope
 
 All files under:
 
-- `crates/vouch-server/src/handlers/oidc/` — primary scope: `token.rs`, `par.rs`, `userinfo.rs`, `introspect.rs`, `authorize.rs`, `logout.rs`, and any future handler files in this directory
+- `crates/vouch-server/src/handlers/oidc/` — primary scope: `token.rs`, `par.rs`, `userinfo.rs`, `introspect.rs`, `authorize.rs`
 - `crates/vouch-server/src/handlers/session.rs` — DPoP validation on the session resource-auth path
-- `crates/vouch-server/src/services/oidc/dpop.rs` — `DpopError` variant routing, and where variants are produced from `ClaimError`
-- `crates/vouch-server/src/services/oidc/introspection.rs` — where `IntrospectionResult::inactive()` is constructed
-- `crates/vouch-server/src/services/oidc/token.rs` — `ClientAuthError::into_service_error` and `commit_jti`
-- `crates/vouch-server/src/db/claim.rs` — `ClaimError` definition (verify `Database` variant remains distinct)
+- `crates/vouch-server/src/services/oidc/dpop.rs` — `DpopError` variant routing
+- `crates/vouch-server/src/services/oidc/token.rs` — `ClientAuthError::into_service_error`
 
 Out of scope: non-OAuth HTTP API handlers, CLI code, agent code.

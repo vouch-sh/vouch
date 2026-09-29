@@ -9,51 +9,12 @@
 
 use axum::http::StatusCode;
 
+use crate::db;
+use crate::error::ServiceError;
+use crate::handlers::session;
+use crate::services::oidc::mtls;
 use crate::test_utils::*;
-
-/// Generate a self-signed DER certificate with the given CN for test use.
-fn make_test_cert_der(cn: &str) -> Vec<u8> {
-    use der::{Decode, Encode};
-    use p256::ecdsa::SigningKey;
-    use spki::EncodePublicKey;
-    use x509_cert::builder::{Builder as _, CertificateBuilder, Profile};
-    use x509_cert::serial_number::SerialNumber;
-    use x509_cert::time::Validity;
-
-    let key = SigningKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
-    let cn_oid = der::oid::ObjectIdentifier::new_unwrap("2.5.4.3");
-    let cn_value = der::asn1::Utf8StringRef::new(cn).expect("CN");
-    let atv = x509_cert::attr::AttributeTypeAndValue {
-        oid: cn_oid,
-        value: der::asn1::Any::from(cn_value),
-    };
-    let mut rdn = der::asn1::SetOfVec::new();
-    rdn.insert(atv).expect("rdn");
-    let subject =
-        x509_cert::name::RdnSequence(vec![x509_cert::name::RelativeDistinguishedName(rdn)]);
-    let validity = Validity::from_now(core::time::Duration::from_secs(86400)).expect("validity");
-    let serial = SerialNumber::new(&[1u8]).expect("serial");
-    let spki_der = key.verifying_key().to_public_key_der().expect("spki");
-    let spki = spki::SubjectPublicKeyInfoOwned::from_der(spki_der.as_ref()).expect("parse spki");
-
-    CertificateBuilder::new(
-        Profile::Leaf {
-            issuer: subject.clone(),
-            enable_key_agreement: false,
-            enable_key_encipherment: false,
-        },
-        serial,
-        validity,
-        subject,
-        spki,
-        &key,
-    )
-    .expect("builder")
-    .build::<p256::ecdsa::DerSignature>()
-    .expect("build")
-    .to_der()
-    .expect("der")
-}
+use vouch_common::jwk::JwkThumbprintKey;
 
 /// Normal (non-DPoP) token via cookie should succeed.
 #[tokio::test]
@@ -61,7 +22,16 @@ async fn test_cookie_session_normal_token_succeeds() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "cookie-ok@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let cookie = format!("{}={token}", vouch_common::SESSION_COOKIE_NAME);
     let (status, _body) = http_get(&app, "/api/v1/applications", &[("Cookie", &cookie)]).await;
@@ -75,12 +45,15 @@ async fn test_cookie_session_dpop_bound_token_rejected() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "cookie-dpop@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session_with_dpop(
+    let token = create_test_session_with(
         &state,
-        &user.id,
-        &user.email,
-        &auth_id,
-        "fake-jkt-thumbprint",
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Dpop("fake-jkt-thumbprint"),
+            ..Default::default()
+        },
     )
     .await;
 
@@ -101,12 +74,15 @@ async fn test_bearer_dpop_bound_token_rejected() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "bearer-dpop@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session_with_dpop(
+    let token = create_test_session_with(
         &state,
-        &user.id,
-        &user.email,
-        &auth_id,
-        "fake-jkt-thumbprint",
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Dpop("fake-jkt-thumbprint"),
+            ..Default::default()
+        },
     )
     .await;
 
@@ -128,12 +104,15 @@ async fn test_mtls_bound_token_without_cert_rejected() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "bearer-mtls@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session_with_mtls(
+    let token = create_test_session_with(
         &state,
-        &user.id,
-        &user.email,
-        &auth_id,
-        &crate::services::oidc::mtls::compute_cert_thumbprint(b"fake-cert-der"),
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Mtls(&mtls::compute_cert_thumbprint(b"fake-cert-der")),
+            ..Default::default()
+        },
     )
     .await;
 
@@ -157,13 +136,20 @@ async fn test_mtls_bound_token_with_matching_cert_succeeds() {
 
     // Generate a self-signed client certificate for binding
     let cert_der = make_test_cert_der("test-mtls");
-    let cert =
-        crate::services::oidc::mtls::parse_client_certificate(&cert_der).expect("parse cert");
+    let cert = mtls::parse_client_certificate(&cert_der).expect("parse cert");
 
     // Issue a token bound to this cert's thumbprint
-    let token =
-        create_test_session_with_mtls(&state, &user.id, &user.email, &auth_id, &cert.thumbprint)
-            .await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Mtls(&cert.thumbprint),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Call extract_resource_token directly with the matching cert
     let mut headers = axum::http::HeaderMap::new();
@@ -172,13 +158,14 @@ async fn test_mtls_bound_token_with_matching_cert_succeeds() {
         format!("Bearer {token}").parse().expect("header value"),
     );
     let jar = axum_extra::extract::cookie::CookieJar::new();
-    let result = crate::handlers::session::extract_resource_token(
+    let result = session::extract_resource_token(
         &state,
         &headers,
         &jar,
         "GET",
         "/api/v1/applications",
         Some(&cert),
+        test_arrival(),
     )
     .await;
 
@@ -201,15 +188,21 @@ async fn test_mtls_bound_token_with_wrong_cert_rejected() {
     // thumbprint but we present cert_b.
     let cert_a_der = make_test_cert_der("client-a");
     let cert_b_der = make_test_cert_der("client-b");
-    let cert_a =
-        crate::services::oidc::mtls::parse_client_certificate(&cert_a_der).expect("parse cert A");
-    let cert_b =
-        crate::services::oidc::mtls::parse_client_certificate(&cert_b_der).expect("parse cert B");
+    let cert_a = mtls::parse_client_certificate(&cert_a_der).expect("parse cert A");
+    let cert_b = mtls::parse_client_certificate(&cert_b_der).expect("parse cert B");
 
     // Token is bound to cert_a's thumbprint
-    let token =
-        create_test_session_with_mtls(&state, &user.id, &user.email, &auth_id, &cert_a.thumbprint)
-            .await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Mtls(&cert_a.thumbprint),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Present cert_b (wrong cert)
     let mut headers = axum::http::HeaderMap::new();
@@ -218,13 +211,14 @@ async fn test_mtls_bound_token_with_wrong_cert_rejected() {
         format!("Bearer {token}").parse().expect("header value"),
     );
     let jar = axum_extra::extract::cookie::CookieJar::new();
-    let result = crate::handlers::session::extract_resource_token(
+    let result = session::extract_resource_token(
         &state,
         &headers,
         &jar,
         "GET",
         "/api/v1/applications",
         Some(&cert_b),
+        test_arrival(),
     )
     .await;
 
@@ -232,7 +226,7 @@ async fn test_mtls_bound_token_with_wrong_cert_rejected() {
     assert!(
         matches!(
             &err,
-            crate::error::ServiceError::Api { status, .. }
+            ServiceError::Api { status, .. }
             if *status == StatusCode::UNAUTHORIZED
         ),
         "Expected 401, got: {err:?}"
@@ -251,12 +245,15 @@ async fn test_dpop_takes_precedence_over_mtls() {
 
     // Create a DPoP-bound token (jkt is set; mTLS thumbprint is not set via
     // create_oauth_access_token because dpop_jkt takes precedence)
-    let token = create_test_session_with_dpop(
+    let token = create_test_session_with(
         &state,
-        &user.id,
-        &user.email,
-        &auth_id,
-        "fake-dpop-jkt-thumbprint",
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Dpop("fake-dpop-jkt-thumbprint"),
+            ..Default::default()
+        },
     )
     .await;
 
@@ -303,7 +300,7 @@ fn generate_dpop_key_pair() -> (aws_lc_rs::signature::EcdsaKeyPair, serde_json::
 /// RFC 7638 JWK thumbprint for a DPoP public JWK (canonical JSON of
 /// crv, kty, x, y → base64url SHA-256).
 fn dpop_jkt(jwk: &serde_json::Value) -> String {
-    vouch_common::jwk::JwkThumbprintKey::from_json(jwk)
+    JwkThumbprintKey::from_json(jwk)
         .expect("test JWK carries the required members")
         .thumbprint()
 }
@@ -369,7 +366,17 @@ async fn setup_dpop_resource_token(
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let (key, jwk) = generate_dpop_key_pair();
     let jkt = dpop_jkt(&jwk);
-    let token = create_test_session_with_dpop(state, &user.id, &user.email, &auth_id, &jkt).await;
+    let token = create_test_session_with(
+        state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Dpop(&jkt),
+            ..Default::default()
+        },
+    )
+    .await;
     let resource_uri = format!("{}/api/v1/applications", state.config().base_url);
     (key, jwk, token, resource_uri)
 }
@@ -383,13 +390,13 @@ async fn test_dpop_use_nonce_at_resource_returns_nonce_header() {
     let (key, jwk, token, resource_uri) =
         setup_dpop_resource_token(&state, "dpop-usenonce@example.com").await;
 
-    // Generate a nonce and consume it, simulating a replayed nonce.
-    let nonce = crate::db::generate_dpop_nonce(&state.store, 300)
+    // Delete the nonce so the request presents one the server does not hold.
+    let nonce = db::generate_dpop_nonce(&state.store, 300)
         .await
         .expect("generate nonce");
-    crate::db::validate_and_consume_dpop_nonce(&state.store, &nonce)
+    db::delete_dpop_nonce(&state.store, &nonce)
         .await
-        .expect("consume nonce");
+        .expect("delete nonce");
 
     // DPoP proof reuses the consumed nonce.
     let proof = create_dpop_proof(&key, &jwk, "GET", &resource_uri, Some(&nonce), Some(&token));
@@ -430,18 +437,47 @@ async fn test_dpop_use_nonce_at_resource_returns_nonce_header() {
     );
 }
 
-/// RFC 9449 retry flow at a resource endpoint: a valid request consumes
-/// the nonce; replaying the nonce yields `use_dpop_nonce` + a fresh nonce;
-/// retrying with the fresh nonce succeeds. This is the end-to-end contract
-/// the bug broke.
+/// RFC 9449 §8: "The intent is that clients need to keep only one nonce value
+/// and servers need to keep a window of recent nonces." One nonce serves a
+/// sequence of requests, each with its own `jti`, until it expires.
 #[tokio::test]
-async fn test_dpop_nonce_replay_retry_flow_succeeds() {
+async fn test_dpop_nonce_serves_repeated_requests_until_it_expires() {
+    let (app, state) = test_app().await;
+    let (key, jwk, token, resource_uri) =
+        setup_dpop_resource_token(&state, "dpop-nonce-window@example.com").await;
+    let nonce = db::generate_dpop_nonce(&state.store, 300)
+        .await
+        .expect("generate nonce");
+    let auth = format!("DPoP {token}");
+
+    for request in 0..3 {
+        let proof = create_dpop_proof(&key, &jwk, "GET", &resource_uri, Some(&nonce), Some(&token));
+        let response = http_get_full(
+            &app,
+            "/api/v1/applications",
+            &[("Authorization", &auth), ("DPoP", &proof)],
+        )
+        .await;
+        assert_eq!(
+            response.status,
+            StatusCode::OK,
+            "request {request} with the held nonce: {}",
+            response.body
+        );
+    }
+}
+
+/// RFC 9449 retry flow at a resource endpoint: a request with a nonce the
+/// server does not know yields `use_dpop_nonce` and a fresh nonce, and
+/// retrying with that nonce succeeds.
+#[tokio::test]
+async fn test_dpop_unknown_nonce_retry_flow_succeeds() {
     let (app, state) = test_app().await;
     let (key, jwk, token, resource_uri) =
         setup_dpop_resource_token(&state, "dpop-retry@example.com").await;
 
     // 1. Valid request with a fresh nonce → 200 (consumes the nonce).
-    let nonce = crate::db::generate_dpop_nonce(&state.store, 300)
+    let nonce = db::generate_dpop_nonce(&state.store, 300)
         .await
         .expect("generate nonce");
     let proof1 = create_dpop_proof(&key, &jwk, "GET", &resource_uri, Some(&nonce), Some(&token));
@@ -459,8 +495,15 @@ async fn test_dpop_nonce_replay_retry_flow_succeeds() {
         resp1.body
     );
 
-    // 2. Replay the same nonce (fresh jti) → 401 use_dpop_nonce + fresh nonce.
-    let proof2 = create_dpop_proof(&key, &jwk, "GET", &resource_uri, Some(&nonce), Some(&token));
+    // 2. An unknown nonce → use_dpop_nonce + a fresh nonce.
+    let proof2 = create_dpop_proof(
+        &key,
+        &jwk,
+        "GET",
+        &resource_uri,
+        Some("unknown-nonce"),
+        Some(&token),
+    );
     let resp2 = http_get_full(
         &app,
         "/api/v1/applications",
@@ -470,7 +513,7 @@ async fn test_dpop_nonce_replay_retry_flow_succeeds() {
     assert_eq!(
         resp2.status,
         StatusCode::UNAUTHORIZED,
-        "replayed nonce must be rejected with 401: {}",
+        "an unknown nonce must be rejected: {}",
         resp2.body
     );
     let fresh_nonce = resp2
@@ -480,7 +523,7 @@ async fn test_dpop_nonce_replay_retry_flow_succeeds() {
         .expect("DPoP-Nonce header on use_dpop_nonce");
     assert_ne!(
         fresh_nonce, nonce,
-        "fresh nonce must differ from replayed one"
+        "fresh nonce must differ from the one held"
     );
     let body2: serde_json::Value =
         serde_json::from_str(&resp2.body).expect("valid JSON error body");
@@ -548,5 +591,67 @@ async fn test_dpop_non_use_nonce_error_omits_nonce_header() {
         body.get("code").and_then(|v| v.as_str()),
         Some("invalid_token"),
         "non-UseNonce DPoP errors must remain invalid_token, got: {body}"
+    );
+}
+
+/// Contract: the strict API path (`extract_session_from_cookie`) and the
+/// admin-UI path (`get_resource_auth_context`) must agree on a DPoP-bound
+/// cookie token — both must reject it. Before the fix the strict path
+/// returned `Err` ("Sender-constrained") while the UI path returned an
+/// authenticated `AuthContext`; this test pins the symmetry.
+#[tokio::test]
+async fn test_get_resource_auth_context_rejects_dpop_bound_cookie() {
+    use axum_extra::extract::cookie::CookieJar;
+
+    let (_app, state) = test_app().await;
+    let user = create_test_user(&state.store, "ctx-dpop@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Dpop("fake-dpop-jkt-thumbprint"),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let jar = CookieJar::from_headers(&axum::http::HeaderMap::new());
+    let jar = jar.add(axum_extra::extract::cookie::Cookie::new(
+        vouch_common::SESSION_COOKIE_NAME,
+        token.to_string(),
+    ));
+
+    // Strict path: rejection.
+    let strict = super::extract_session_from_cookie(&state, &jar, test_arrival()).await;
+    assert!(strict.is_err(), "strict path must reject DPoP-bound cookie");
+
+    // UI path: unauthenticated context.
+    let auth = super::get_resource_auth_context(&state, &jar, test_arrival()).await;
+    assert!(
+        !auth.authenticated,
+        "UI path must treat DPoP-bound cookie as unauthenticated"
+    );
+    assert!(auth.user_id.is_none(), "no user_id on rejected cookie");
+    assert!(!auth.is_org_admin, "no admin flag on rejected cookie");
+}
+
+/// The session cookie's `Max-Age` is derived from the minted token's own
+/// `expires_in`, so a lifetime ceiling applied at issuance (the RFC 8693
+/// exchange path caps by the subject token's remaining TTL) reaches the
+/// cookie too, instead of being re-derived from `session_hours` at the
+/// call site and drifting from the token it carries.
+#[test]
+fn test_session_cookie_max_age_tracks_minted_lifetime() {
+    use super::{create_session_cookie, session_cookie_max_age};
+
+    let cookie = create_session_cookie("tok", session_cookie_max_age(60));
+    assert_eq!(cookie.max_age().map(|d| d.whole_seconds()), Some(60));
+    assert_eq!(
+        session_cookie_max_age(u64::MAX),
+        i64::MAX,
+        "saturates, never wraps"
     );
 }

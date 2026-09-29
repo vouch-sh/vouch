@@ -390,7 +390,6 @@ oidc-core-1_0#3.1.2.6#864d8636	MUST NOT	If the Redirection URI is invalid, the A
 oidc-core-1_0#3.1.2.6#97d0f0eb	MUST	REQUIRED if the Authorization Request included the "state" parameter.
 oidc-core-1_0#3.1.2.6#ec9e8fe1	SHOULD NOT	Other parameters SHOULD NOT be returned.
 oidc-core-1_0#3.1.2.7#601bd222	MUST	When using the Authorization Code Flow, the Client MUST validate the response according to RFC 6749, especially Sections 4.1.2 and 10.12.
-oidc-core-1_0#3.1.3.1#3f3ba9e3	MUST	If the Client is a Confidential Client, then it MUST authenticate to the Token Endpoint using the authentication method registered for its "client_id", as descr
 oidc-core-1_0#3.1.3.2#1e5f8d00	MUST	The Authorization Server MUST validate the Token Request as follows: o Ensure the Authorization Code was issued to the authenticated Client.
 oidc-core-1_0#3.1.3.2#81faf28f	MUST	The Authorization Server MUST validate the Token Request as follows: o If possible, verify that the Authorization Code has not been previously used.
 oidc-core-1_0#3.1.3.2#af35bfb8	MUST	The Authorization Server MUST validate the Token Request as follows: o Ensure that the "redirect_uri" parameter value is identical to the "redirect_uri" paramet
@@ -851,8 +850,6 @@ rfc4253#9#9feb5824	MUST NOT	Either party MAY initiate the re-exchange, but roles
 rfc4253#9#e6684f2b	SHOULD	It is RECOMMENDED that the keys be changed after each gigabyte of transmitted data or after each hour of connection time, whichever comes sooner.
 rfc4514#1#b5e187ce	SHOULD	Section 2 details the RECOMMENDED algorithm for converting a DN from its ASN.1 structured representation to a string.
 rfc4514#1#f7d75506	MUST	While other documents may define other algorithms for converting a DN from its ASN.1 structured representation to a string, all algorithms MUST produce strings 
-rfc4514#2#da69d549	MUST	Other documents may describe other algorithms for converting a distinguished name to a string, but only strings that conform to the grammar defined in Section 3
-rfc4514#2#fe9bbbfc	SHOULD	This section defines the RECOMMENDED algorithm for converting a distinguished name from an ASN.1-structured representation to a UTF-8 [RFC3629] encoded Unicode 
 rfc4514#2.3#eb364a2b	SHOULD	However, implementations SHOULD provide a mechanism to allow their knowledge of registered short names to be updated.
 rfc4514#3#10bc3561	MUST	Implementations MUST recognize AttributeType name strings (descriptors) listed in the following table, but MAY recognize other name strings.
 rfc4514#3#b8ea25a2	SHOULD	However, as there is no requirement that alternative DN string representations be recognized (and, if so, how), implementations SHOULD only generate DN strings 
@@ -955,11 +952,6 @@ rfc5280#4.2.1.11#b193806b	MUST	That is, either the inhibitPolicyMapping field or
 rfc5280#4.2.1.11#e1af336f	MUST	Conforming CAs MUST mark this extension as critical.
 rfc5280#4.2.1.11#f877e7e3	MUST	Applications that support the inhibitPolicyMapping field MUST also implement support for the policyMappings extension.
 rfc5280#4.2.1.11#ff311ff7	MUST	If the policyConstraints extension is marked as critical and the inhibitPolicyMapping field is present, applications that do not implement support for the inhib
-rfc5280#4.2.1.12#00713d0e	SHOULD NOT	Conforming CAs SHOULD NOT mark this extension as critical if the anyExtendedKeyUsage KeyPurposeId is present.
-rfc5280#4.2.1.12#0766d238	MUST NOT	If there is no purpose consistent with both extensions, then the certificate MUST NOT be used for any purpose.
-rfc5280#4.2.1.12#15c8cd4b	MUST	Object identifiers used to identify key purposes MUST be assigned in accordance with IANA or ITU-T Recommendation X.660 [X.660].
-rfc5280#4.2.1.12#c5854943	MUST	If a certificate contains both a key usage extension and an extended key usage extension, then both extensions MUST be processed independently and the certifica
-rfc5280#4.2.1.12#fb5c62fe	MUST	If the extension is present, then the certificate MUST only be used for one of the purposes indicated.
 rfc5280#4.2.1.13#3a1d4ff5	SHOULD	When present, DistributionPointName SHOULD include at least one LDAP or HTTP URI.
 rfc5280#4.2.1.13#524d9299	MUST NOT	The DistributionPointName MUST NOT use the nameRelativeToCRLIssuer alternative when cRLIssuer contains more than one distinguished name.
 rfc5280#4.2.1.13#5e12133d	SHOULD NOT	Conforming CAs SHOULD NOT use nameRelativeToCRLIssuer to specify distribution point names.
@@ -1007,26 +999,6 @@ rfc5280#4.2.1.4#feb6c1d9	MUST	When qualifiers are used with the special policy a
 rfc5280#4.2.1.5#71c70a07	SHOULD	Conforming CAs SHOULD mark this extension as critical.
 rfc5280#4.2.1.5#f6508aec	SHOULD	Each issuerDomainPolicy named in the policy mappings extension SHOULD also be asserted in a certificate policies extension in the same certificate.
 rfc5280#4.2.1.5#fcf953e5	MUST NOT	Policies MUST NOT be mapped either to or from the special value anyPolicy (Section 4.2.1.4).
-rfc5280#4.2.1.6#022ba562	MUST NOT	addition, while the string " " is a legal domain name, subjectAltName extensions with a dNSName of " " MUST NOT be used.
-rfc5280#4.2.1.6#0354d481	MUST	If the subject field contains an empty sequence, then the issuing CA MUST include a subjectAltName extension that is marked as critical.
-rfc5280#4.2.1.6#0d12130d	MUST	Because the subject alternative name is considered to be definitively bound to the public key, all parts of the subject alternative name MUST be verified by the
-rfc5280#4.2.1.6#1d7a5c2e	MUST NOT	Finally, the use of the DNS representation for Internet mail addresses (subscriber.example.com instead of subscriber@example.com) MUST NOT be used; such identit
-rfc5280#4.2.1.6#27bf357f	MUST	When the subjectAltName extension contains an Internet mail address, the address MUST be stored in the rfc822Name.
-rfc5280#4.2.1.6#292e8234	MUST	The name MUST include both a scheme (e.g., "http" or "ftp") and a scheme-specific-part.
-rfc5280#4.2.1.6#2e8360c6	MUST	When the subjectAltName extension contains a domain name system label, the domain name MUST be stored in the dNSName (an IA5String).
-rfc5280#4.2.1.6#4d2d1ee8	MUST	For IP version 6, as specified in [RFC2460], the octet string MUST contain exactly sixteen octets.
-rfc5280#4.2.1.6#697dc166	SHOULD	When including the subjectAltName extension in a certificate that has a non-empty subject distinguished name, conforming CAs SHOULD mark the subjectAltName exte
-rfc5280#4.2.1.6#6d6e6bda	MUST	If the subjectAltName extension is present, the sequence MUST contain at least one entry.
-rfc5280#4.2.1.6#6f5e42a5	MUST	The DN MUST be unique for each subject entity certified by the one CA as defined by the issuer field.
-rfc5280#4.2.1.6#788c06db	MUST	Further, if the only subject identity included in the certificate is an alternative name form (e.g., an electronic mail address), then the subject distinguished
-rfc5280#4.2.1.6#813038c6	MUST	Whenever such identities are to be bound into a certificate, the subject alternative name (or issuer alternative name) extension MUST be used; however, a DNS na
-rfc5280#4.2.1.6#95697efe	MUST	The name MUST NOT be a relative URI, and it MUST follow the URI syntax and encoding rules specified in [RFC3986].
-rfc5280#4.2.1.6#a863229e	MUST	When the subjectAltName extension contains a URI, the name MUST be stored in the uniformResourceIdentifier (an IA5String).
-rfc5280#4.2.1.6#b34f466f	MUST	For IP version 4, as specified in [RFC791], the octet string MUST contain exactly four octets.
-rfc5280#4.2.1.6#bd35e5a2	MUST	The name MUST be in the "preferred name syntax", as specified by Section 3.5 of [RFC1034] and as modified by Section 2.1 of [RFC1123].
-rfc5280#4.2.1.6#bdf8b166	MUST	When the subjectAltName extension contains an iPAddress, the address MUST be stored in the octet string in "network byte order", as specified in [RFC791].
-rfc5280#4.2.1.6#c4e8c54b	MUST	URIs that include an authority ([RFC3986], Section 3.2) MUST include a fully qualified domain name or IP address as the host.
-rfc5280#4.2.1.6#ce2ce51f	MUST NOT	Unlike the subject field, conforming CAs MUST NOT issue certificates with subjectAltNames containing empty GeneralName fields.
 rfc5280#4.2.1.7#03093f03	SHOULD	Where present, conforming CAs SHOULD mark this extension as non- critical.
 rfc5280#4.2.1.7#d55bcb82	MUST	Issuer alternative name MUST be encoded as in 4.2.1.6.
 rfc5280#4.2.1.8#e5eeb562	MUST	Conforming CAs MUST mark this extension as non-critical.
@@ -1135,17 +1107,8 @@ rfc5280#5.3.2#48b526af	SHOULD NOT	When a revocation is first posted by a CRL iss
 rfc5280#5.3.3#0212e485	MUST	CRL issuers MUST mark this extension as critical since an implementation that ignored this extension could not correctly attribute CRL entries to certificates.
 rfc5280#5.3.3#4f7c0255	MUST	Conforming CRL issuers MUST include in this extension the distinguished name (DN) from the issuer field of the certificate that corresponds to this CRL entry.
 rfc5280#5.3.3#e1367b23	MUST	The encoding of the DN MUST be identical to the encoding used in the certificate.
-rfc5280#6#de69a19a	MUST	Conforming implementations of this specification are not required to implement this algorithm, but MUST provide functionality equivalent to the external behavio
-rfc5280#6.1#479df5da	MUST NOT	A certificate MUST NOT appear more than once in a prospective certification path.
-rfc5280#6.1#f3aeeaef	MUST	Note that clients MUST reject the certificate if it contains an unsupported critical extension.
-rfc5280#6.1#fe16e729	MUST	A conforming implementation MUST include an X.509 path processing procedure that is functionally equivalent to the external behavior of this algorithm.
 rfc5280#6.1.1#30bbae8c	MUST	(h) initial-permitted-subtrees, which indicates for each name type (e.g., X.500 distinguished names, email addresses, or IP addresses) a set of subtrees within 
 rfc5280#6.1.2#10b0d6f9	MUST	(b) permitted_subtrees: a set of root names for each name type (e.g., X.500 distinguished names, email addresses, or IP addresses) defining a set of subtrees wi
-rfc5280#6.1.3#8e401b43	MUST	(a) Verify the basic certificate information. The certificate MUST satisfy each of the following: (1) The signature on the certificate can be verified using wor
-rfc5280#6.1.3#91988766	MUST	The certificate MUST satisfy each of the following:
-rfc5280#6.1.3#97003592	MUST	(a) Verify the basic certificate information. The certificate MUST satisfy each of the following: (3) At the current time, the certificate is not revoked. This 
-rfc5280#6.1.3#b889d273	MUST	(a) Verify the basic certificate information. The certificate MUST satisfy each of the following: (4) The certificate issuer name is the working_issuer_name.
-rfc5280#6.1.3#d5ec7c9b	MUST	(a) Verify the basic certificate information. The certificate MUST satisfy each of the following: (2) The certificate validity period includes the current time.
 rfc5280#6.1.4#1ef08509	MUST	(If certificate i is a version 1 or version 2 certificate, then the application MUST either verify that certificate i is a CA certificate through out-of-band me
 rfc5280#6.3#718aa5d0	MUST	Conforming implementations that support CRLs are not required to implement this algorithm, but they MUST be functionally equivalent to the external behavior res
 rfc5280#6.3.3#f8a07955	MUST	The trust anchor for the certification path MUST be the same as the trust anchor used to validate the target certificate.
@@ -1394,11 +1357,6 @@ rfc6749#2.2#da74fbb8	SHOULD	The authorization server SHOULD document the size of
 rfc6749#2.3.2#32ff2ae9	MUST	When using other authentication methods, the authorization server MUST define a mapping between the client identifier (registration record) and authentication s
 rfc6749#3.1.1#00ec783f	MUST	The value MUST be one of "code" for requesting an authorization code as described by Section 4.1.1, "token" for requesting an access token (implicit grant) as d
 rfc6749#3.1.1#b261c7f4	MUST	If an authorization request is missing the "response_type" parameter, or if the response type is not understood, the authorization server MUST return an error r
-rfc6749#3.2.1#25aa19e0	MUST	Confidential clients or other clients issued client credentials MUST authenticate with the authorization server as described in Section 2.3 when making requests
-rfc6749#3.2.1#27720e9f	MUST	Confidential clients or other clients issued client credentials MUST authenticate with the authorization server as described in Section 2.3 when making requests
-rfc6749#3.2.1#73d36e6e	MUST	In the "authorization_code" "grant_type" request to the token endpoint, an unauthenticated client MUST send its "client_id" to prevent itself from inadvertently
-rfc6749#3.2.1#78dfd839	MUST	Confidential clients or other clients issued client credentials MUST authenticate with the authorization server as described in Section 2.3 when making requests
-rfc6749#3.2.1#84dd07cb	MUST	Confidential clients or other clients issued client credentials MUST authenticate with the authorization server as described in Section 2.3 when making requests
 rfc6749#3.3#2e348962	SHOULD	The authorization server SHOULD document its scope requirements and default value (if defined).
 rfc6749#3.3#445806b1	MUST	If the client omits the scope parameter when requesting authorization, the authorization server MUST either process the request using a pre-defined default valu
 rfc6749#3.3#cbdd0232	MUST	If the issued access token scope is different from the one requested by the client, the authorization server MUST include the "scope" response parameter to info
@@ -1761,14 +1719,6 @@ rfc7591#2.3#c99e07e7	SHOULD	It is RECOMMENDED that software statements be digita
 rfc7591#2.3#eb2faebc	SHOULD	It is RECOMMENDED that software statements contain the "software_id" claim to allow authorization servers to correlate different instances of software using the
 rfc7591#4.1.1#fa462cba	SHOULD NOT	Names that match other registered names in a case- insensitive manner SHOULD NOT be accepted.
 rfc7591#4.2.1#fa462cba	SHOULD NOT	Names that match other registered names in a case- insensitive manner SHOULD NOT be accepted.
-rfc7592#5#5675aca4	MUST	As the registration access tokens are relatively long-term credentials, and since the registration access token is a Bearer Token and acts as the sole authentic
-rfc7592#5#6dc34f4d	MUST	If a client is deprovisioned from a server, any outstanding registration access token for that client MUST be invalidated at the same time.
-rfc7592#5#9b8f8d0f	MUST	The authorization server MUST treat all such requests as if the registration access token was invalid by returning an HTTP 401 Unauthorized error, as described.
-rfc7592#5#a340e56d	MUST	When using TLS, the client MUST perform a TLS/SSL server certificate check, per RFC 6125 [RFC6125].
-rfc7592#5#a41ac113	MUST	Since requests to the client configuration endpoint result in the transmission of clear-text credentials (in the HTTP request and response), the authorization s
-rfc7592#5#b14b62a2	MUST	The server MUST support TLS 1.2 [RFC5246] and MAY support additional transport-layer security mechanisms meeting its security requirements.
-rfc7592#5#bb368785	SHOULD NOT	While the client secret can expire, the registration access token SHOULD NOT expire while a client is still actively registered.
-rfc7592#5#da65d890	MUST	Since possession of the registration access token authorizes the holder to potentially read, modify, or delete a client's registration (including its credential
 rfc7617#2.1#ac61c9b6	MUST	For the password, recipients MUST support all characters defined in the "OpaqueString" profile defined in Section 4.2 of [RFC7613].
 rfc7617#2.1#f5b6336e	MUST	For the user-id, recipients MUST support all characters defined in the "UsernameCasePreserved" profile defined in Section 3.3 of [RFC7613], with the exception o
 rfc7617#2.2#6aa53f19	SHOULD	A client SHOULD assume that resources identified by URIs with a prefix-match of the authentication scope are also within the protection space specified by the r
@@ -1804,8 +1754,6 @@ rfc7643#10.3.1#8bf90464	MUST	An RFC is REQUIRED for the registration of new valu
 rfc7643#10.3.1#d175cedd	MUST	An RFC specifying one or more new schema URIs MUST include the completed registration templates, which MAY be expanded with additional information.
 rfc7643#10.3.1#ebe74f17	MUST	Registration of new "core" schemas (e.g., in the namespace "urn:ietf:params:scim:schemas:core") and "API" schemas (e.g., in the namespace "urn:ietf:params:scim:
 rfc7643#10.3.1#f8744a01	MUST	An RFC is also REQUIRED for registration of SCIM schema URIs that modify SCIM schema previously documented in an existing RFC.
-rfc7643#2.1#1997f848	MUST	Attribute names MUST conform to the following ABNF rules:
-rfc7643#2.1#43bb637c	MUST	SCIM resources are represented in JSON [RFC7159] format and MUST specify schema via the "schemas" attribute per Section 3.
 rfc7643#2.3#601b7094	SHOULD NOT	SCIM extensions SHOULD NOT introduce new data types.
 rfc7643#2.3.4#ca7ec281	MUST NOT	The JSON format is defined in Section 6 of [RFC7159], with the additional constraint that the value MUST NOT contain fractional or exponent parts.
 rfc7643#2.3.5#8fd469d8	MUST	The attribute value MUST be encoded as a valid xsd:dateTime as specified in Section 3.3.7 of [XML-Schema] and MUST include both a date and a time.
@@ -1828,24 +1776,6 @@ rfc7643#2.5#0f579275	MUST	Unassigned attributes, the null value, or an empty arr
 rfc7643#3.3#01ed5142	SHOULD	Schema extensions SHOULD avoid redefining any attributes defined in this specification and SHOULD follow conventions defined in this specification.
 rfc7643#3.3#2a06b145	MUST	The "schemas" attribute MUST contain at least one value, which SHALL be the base schema for the resource.
 rfc7643#3.3#5ea4e62e	MUST	Except for the base object schema, the schema extension URI SHALL be used as a JSON container to distinguish attributes belonging to the extension namespace fro
-rfc7643#4.1.1#009a3e3e	SHOULD	The name SHOULD be the full name of the User being described, if known (e.g., "Babs Jensen" or "Ms.
-rfc7643#4.1.1#0dddc61b	SHOULD	If both variants are returned, they SHOULD be describing the same name, with the formatted name indicating how the component attributes should be combined.
-rfc7643#4.1.1#14b5a89d	MUST	This identifier MUST be unique across the service provider's entire set of Users.
-rfc7643#4.1.1#41cc7d21	MUST NOT	password This attribute is intended to be used as a means to set, replace, or compare (i.e., filter for equality) a password. The cleartext value or the hashed 
-rfc7643#4.1.1#457e1e2f	SHOULD	When a password is set or changed by the client, the cleartext password SHOULD be processed by the service provider as follows:
-rfc7643#4.1.1#564dcf6e	MUST NOT	The mutability of the password attribute is "writeOnly", indicating that the value MUST NOT be returned by a service provider in any form (the attribute charact
-rfc7643#4.1.1#77fc815c	MUST NOT	password This attribute is intended to be used as a means to set, replace, or compare (i.e., filter for equality) a password. The cleartext value or the hashed 
-rfc7643#4.1.1#857bf288	SHOULD	The value provided SHOULD be the primary textual label by which this User is normally displayed by the service provider when presenting it to end-users.
-rfc7643#4.1.1#861b7776	MUST	If the value needs to be temporarily persisted for a period of time (e.g., because of a workflow) before provisioning, then the value MUST be protected by some 
-rfc7643#4.1.1#8a029714	MUST NOT	password This attribute is intended to be used as a means to set, replace, or compare (i.e., filter for equality) a password. The cleartext value or the hashed 
-rfc7643#4.1.1#8fa61f37	SHOULD	If a service provider holds the value locally, the value SHOULD be hashed.
-rfc7643#4.1.1#a336cfec	SHOULD NOT	This attribute SHOULD NOT be used to represent a User's username (e.g., bjensen or mpepperidge).
-rfc7643#4.1.1#a5791973	MUST NOT	password This attribute is intended to be used as a means to set, replace, or compare (i.e., filter for equality) a password. The cleartext value or the hashed 
-rfc7643#4.1.1#b0f2033f	MUST	This attribute is REQUIRED and is case insensitive.
-rfc7643#4.1.1#ce557f18	MUST NOT	The cleartext value or the hashed value of a password SHALL NOT be returnable by a service provider.
-rfc7643#4.1.1#d8bc116a	MUST NOT	password This attribute is intended to be used as a means to set, replace, or compare (i.e., filter for equality) a password. The cleartext value or the hashed 
-rfc7643#4.1.1#f0e6868b	MUST	Each User MUST include a non-empty userName value.
-rfc7643#4.1.1#fc0159f4	MUST	A service provider that immediately passes the cleartext value on to another system or programming interface MUST pass the value directly over a secured connect
 rfc7643#4.1.2#1c910004	SHOULD	No official canonicalization rules exist for all instant messaging addresses, but service providers SHOULD, when appropriate, remove all whitespace and convert 
 rfc7643#4.1.2#20f1c101	SHOULD	The value SHOULD be specified according to [RFC5321].
 rfc7643#4.1.2#2cb64b14	SHOULD	The value SHOULD be specified according to the format defined in [RFC3966], e.g., 'tel:+1-201-555-0123'.
@@ -1901,9 +1831,6 @@ rfc7644#3.1#03d52a21	SHOULD NOT	Similarly, a SCIM client SHOULD NOT expect a ser
 rfc7644#3.1#89b119b9	MUST	SCIM responses SHALL reflect resource state as interpreted by the SCIM service provider.
 rfc7644#3.1#bebc5fa9	MUST	As with a SCIM resource, a SCIM message is a JSON object [RFC7159] that contains a "schemas" attribute with a URI whose namespace prefix MUST begin with "urn:ie
 rfc7644#3.1#d032bc2d	MUST NOT	As SCIM protocol messages are fixed and defined by SCIM specifications and registered extensions, SCIM message schemas using the above prefix URN SHALL NOT be d
-rfc7644#3.10#b569e446	SHOULD	Clients MAY omit core schema attribute URN prefixes but SHOULD fully qualify extended attributes with the associated schema extension URN to avoid naming confli
-rfc7644#3.10#d397ae67	SHOULD	o A service provider that does NOT support this feature SHOULD respond with HTTP status code 501 (Not Implemented).
-rfc7644#3.10#eecd0bf6	MUST	In any response, the HTTP "Location" header MUST be the permanent location of the aliased resource associated with the authenticated subject.
 rfc7644#3.13#456137c0	SHOULD	When omitted, service providers SHOULD perform the operation using the most recent SCIM protocol version supported by the service provider.
 rfc7644#3.13#c444c334	MUST	If specified, the version identifier MUST appear in the URL path immediately preceding the resource endpoint and conform to the following scheme: the character 
 rfc7644#3.13#dad06db6	MUST	When specified, service providers MUST perform the operation using the desired version or reject the request.
@@ -1920,13 +1847,6 @@ rfc7644#3.4.3#96ad7c0d	MUST	Attribute names MUST be in standard attribute notati
 rfc7644#3.4.3#d2b52a31	MUST	This parameter SHALL have no effect on attributes whose schema "returned" setting is "always" (see Sections 2.2 and 7 of [RFC7643]).
 rfc7644#3.4.3#f1c351b3	MUST	The inclusion of "/.search" on the end of a valid SCIM endpoint SHALL be used to indicate that the HTTP POST verb is intended to be a query operation.
 rfc7644#3.4.3#fad30ead	MUST	The filter string MUST be a valid filter (Section 3.4.2.2) expression.
-rfc7644#3.5.1#0b24e69d	MUST	readWrite, writeOnly Any values provided SHALL replace the existing attribute values.
-rfc7644#3.5.1#0cabfdc8	MUST	Service providers MAY take into account whether or not a client has access to, or understands, all of the resource's attributes when deciding whether non-assert
-rfc7644#3.5.1#9d892308	MUST NOT	Because SCIM resource identifiers are assigned by the service provider, HTTP PUT MUST NOT be used to create new resources.
-rfc7644#3.5.1#c4f5f493	MUST	readOnly Any values provided SHALL be ignored.
-rfc7644#3.5.1#d50f2dbc	MUST	If an attribute is "required", clients MUST specify the attribute in the PUT request.
-rfc7644#3.5.1#ed5525ac	MUST	immutable If one or more values are already set for the attribute, the input value(s) MUST match, or HTTP status code 400 SHOULD be returned with a "scimType" e
-rfc7644#3.5.1#ef51cf83	MUST	If the service provider has no existing values, the new value(s) SHALL be applied.
 rfc7644#3.7#18ed8d0b	MUST	REQUIRED in a response, except in the event of a POST failure.
 rfc7644#3.7#60407dab	MUST	If "method" is "POST", the value must specify a resource type endpoint, e.g., /Users or /Groups, whereas all other "method" values must specify the path to a sp
 rfc7644#3.7#807eae83	MUST	REQUIRED in a request when "method" is "POST", "PUT", or "PATCH".
@@ -2001,11 +1921,6 @@ rfc8032#8.3#a1fa4ee2	SHOULD NOT	Contexts SHOULD NOT be used opportunistically, a
 rfc8032#8.5#53db1afb	SHOULD NOT	These variants SHOULD NOT be used.
 rfc8032#8.5#b90d9214	SHOULD	In summary, if a high 128-bit security level is enough, use of Ed25519 is RECOMMENDED; otherwise, Ed448 is RECOMMENDED.
 rfc8032#8.7#b1d4110e	MUST	In particular, unless the underlying protocol does not require it, the receiver MUST buffer the entire message (or enough information to reconstruct it, e.g., c
-rfc8037#2#406f588a	MUST	o The parameter "kty" MUST be "OKP".
-rfc8037#2#6b2a6dfa	MUST NOT	This parameter MUST NOT be present for public keys.
-rfc8037#2#8baf35c8	MUST	o The parameter "crv" MUST be present and contain the subtype of the key (from the "JSON Web Elliptic Curve" registry).
-rfc8037#2#96fccb82	MUST	o The parameter "x" MUST be present and contain the public key encoded using the base64url [RFC4648] encoding.
-rfc8037#2#fee54005	MUST	o The parameter "d" MUST be present for private keys and contain the private key encoded using the base64url encoding.
 rfc8037#3.1#a409ef41	MUST NOT	These subtypes MUST NOT be used for Elliptic Curve Diffie-Hellman Ephemeral Static (ECDH-ES).
 rfc8037#3.2#03bfecd0	MUST NOT	These subtypes MUST NOT be used for signing.
 rfc8037#4#44565ba9	MUST	If key generation or batch signature verification is performed, a well-seeded cryptographic random number generator is REQUIRED.
@@ -2022,11 +1937,6 @@ rfc8252#8.10#41d1cae1	MUST	The native app MUST store the redirect URI used in th
 rfc8252#8.12#1dbf7504	MUST NOT	This best current practice requires that native apps MUST NOT use embedded user-agents to perform authorization requests and allows that authorization endpoints
 rfc8252#8.2#0ae73ded	SHOULD NOT	However, as the implicit flow cannot be protected by PKCE [RFC7636] (which is required in Section 8.1), the use of the Implicit Flow with native apps is NOT REC
 rfc8252#8.3#53880f7a	SHOULD NOT	While redirect URIs using localhost (i.e., "http://localhost:{port}/{path}") function similarly to loopback IP redirects described in Section 7.3, the use of lo
-rfc8252#8.4#072fec68	SHOULD	For private-use URI scheme-based redirects, authorization servers SHOULD enforce the requirement in Section 7.1 that clients use schemes that are reverse domain
-rfc8252#8.4#2910ef69	MUST	Authorization servers MUST record the client type in the client registration details in order to identify and process requests accordingly.
-rfc8252#8.4#42ceb57b	MUST	Authorization servers MUST require clients to register their complete redirect URI (including the path component) and reject authorization requests that specify
-rfc8252#8.4#d1c27b7e	MUST	Except when using a mechanism like Dynamic Client Registration [RFC7591] to provision per-instance secrets, native apps are classified as public clients, as def
-rfc8252#8.4#f2283544	SHOULD	At a minimum, any private-use URI scheme that doesn't contain a period character (".") SHOULD be rejected.
 rfc8252#8.5#308d1203	SHOULD NOT	For this reason, and those stated in Section 5.3.1 of [RFC6819], it is NOT RECOMMENDED for authorization servers to require client.
 rfc8252#8.5#4bb8b131	MUST	Authorization servers that still require a statically included shared secret for native app clients MUST treat the client as a public client (as defined by Sect
 rfc8252#8.6#03566363	SHOULD	This includes the case where the user has previously approved an authorization request for a given client id -- unless the identity of the client can be proven,
@@ -2055,14 +1965,10 @@ rfc8414#6.1#cebb45a2	MUST	To protect against information disclosure and tamperin
 rfc8414#6.2#c52a5346	MUST	TLS certificate checking MUST be performed by the client, as described in Section 6.1, when making an authorization server metadata request.
 rfc8414#6.2#e2a2583e	MUST	To prevent this, the client MUST ensure that the issuer identifier URL it is using as the prefix for the metadata request exactly matches the value of the "issu
 rfc8628#5.1#047c935e	SHOULD	The user code SHOULD have enough entropy that, when combined with rate-limiting and other mitigations, a brute-force attack becomes infeasible.
-rfc8628#5.2#c2d84f9e	SHOULD	As the device code is not displayed to the user and thus there are no usability considerations on the length, a very high entropy code SHOULD be used.
 rfc8628#5.4#978bf787	SHOULD	To mitigate such an attack, it is RECOMMENDED to inform the user that they are authorizing a device during the user- interaction step (see Section 3.3) and to c
 rfc8628#5.4#def2895d	SHOULD	The authorization server SHOULD display information about the device so that the user could notice if a software client was attempting to impersonate a hardware
 rfc8628#5.5#fc8dab50	SHOULD	Devices SHOULD take into account the operating environment when considering how to communicate the code to the user to reduce the chances it will be observed by
 rfc8628#5.7#08d60057	SHOULD	To mitigate an attack in which a malicious user can bootstrap their credentials on a device not in their control, it is RECOMMENDED that any chosen communicatio
-rfc8693#2.2.2#90069c53	MUST	If the request itself is not valid or if either the "subject_token" or "actor_token" are invalid for any reason, or are unacceptable based on policy, the author
-rfc8693#2.2.2#97677945	SHOULD	If the authorization server is unwilling or unable to issue a token for any target service indicated by the "resource" or "audience" parameters, the "invalid_ta
-rfc8693#2.2.2#9c878927	MUST	The value of the "error" parameter MUST be the "invalid_request" error code.
 rfc8693#4#5e0c0c44	MUST	For the purpose of applying access control policy, the consumer of a token MUST only consider the token's top-level claims and the party identified as the curre
 rfc8693#6#95614386	MUST	Tokens employed in the context of the functionality described herein may contain privacy-sensitive information and, to prevent disclosure of such information to
 rfc8693#6#e59b1faa	MUST	In cases where it is desirable to prevent disclosure of certain information to the client, the token MUST be encrypted to its intended recipient.
@@ -2095,11 +2001,6 @@ rfc9068#2.2.3#024093d5	SHOULD	An authorization server wanting to include such at
 rfc9068#2.2.3#1f6a5735	SHOULD	Authorization servers SHOULD encode the corresponding claim values according to the guidance defined in [RFC7643].
 rfc9068#2.2.3#81bd6f2b	SHOULD	If an authorization request includes a scope parameter, the corresponding issued JWT access token SHOULD include a "scope" claim as defined in Section 4.2 of [R
 rfc9068#2.2.3#b5b6c478	MUST	All the individual scope strings in the "scope" claim MUST have meaning for the resources indicated in the "aud" claim.
-rfc9068#3#57090adf	SHOULD	If the values in the "scope" parameter refer to different default resource indicator values, the authorization server SHOULD reject the request with "invalid_sc
-rfc9068#3#b9182efc	SHOULD	If the request includes a "resource" parameter (as defined in [RFC8707]), the resulting JWT access token "aud" claim SHOULD have the same value as the "resource
-rfc9068#3#d80fe36b	MUST	If the request does not include a "resource" parameter, the authorization server MUST use a default resource indicator in the "aud" claim.
-rfc9068#3#de585cd8	MUST NOT	The authorization server MUST NOT issue a JWT access token if the authorization granted by the token would be ambiguous.
-rfc9068#3#ee138bbb	SHOULD	If a "scope" parameter is present in the request, the authorization server SHOULD use it to infer the value of the default resource indicator to be used in the 
 rfc9068#5#09f3f45a	MUST	To prevent cross-JWT confusion, authorization servers MUST use a distinct identifier as an "aud" claim value to uniquely identify access tokens issued by the sa
 rfc9068#6#83465a25	MUST NOT	The client MUST NOT inspect the content of the access token: the authorization server and the resource server might decide to change the token format at any tim
 rfc9101#10.3#d996357b	SHOULD	It is RECOMMENDED by this specification to use this practice for the following endpoints defined in [RFC6749], [RFC6750], and [RFC8414]:
@@ -2683,7 +2584,6 @@ rfc9421#6.4.1#af4dfdc9	MUST	MUST be one of the values "Request", "Response", or 
 rfc9421#6.4.1#c1ab9b58	MUST	The name MUST be unique within the context of the registry.
 rfc9421#6.5.1#b52445d6	MUST	The name MUST be an ASCII string that conforms to the key ABNF rule defined in Section 3.1.2 of [STRUCTURED-FIELDS] and SHOULD NOT exceed 20 characters in lengt
 rfc9421#6.5.1#c1ab9b58	MUST	The name MUST be unique within the context of the registry.
-rfc9449#11.1#98fa6e38	MUST	To limit this, servers MUST only accept DPoP proofs for a limited time after their creation (preferably only for a relatively brief period on the order of secon
 rfc9449#11.2#9b6c65b3	SHOULD NOT	Deployments that do not utilize the nonce mechanism SHOULD NOT issue long-lived DPoP constrained access tokens, preferring instead to use short-lived access tok
 rfc9449#11.3#39a4c7a6	MUST NOT	A server MUST NOT accept any DPoP proofs without the nonce claim when a DPoP nonce has been provided to the client.
 rfc9449#11.5#03c4af6f	MUST	Servers accepting signed DPoP proof JWTs MUST verify that the typ field is dpop+jwt in the headers of the JWTs to ensure that adversaries cannot use JWTs create
@@ -3708,19 +3608,6 @@ xmldsig-core1#4.6#11f2cbdd	MUST	Note, if the application wishes to exclude the <
 xmldsig-core1#4.6#20aa0b58	MUST	This attribute is purely advisory; no validation of the MimeType information is required by this specification.
 xmldsig-core1#4.6#a2710f5a	SHOULD	Applications which require normative type and encoding information for signature validation should specify Transforms with well defined resulting types and/or e
 xmldsig-core1#5.2#d2376ee1	MUST	<complexType name="SignaturePropertyType" mixed="true"> <choice maxOccurs="unbounded"> <any namespace="##other" processContents="lax" /> <!-- (1,1) elements fro
-xmldsig-core1#6.1#1bf573ef	MUST	3 Exclusive XML Canonicalization 1.0 (with comments) http://www.w3.org/2001/10/xml-exc-c14n#WithComments Transform Required.
-xmldsig-core1#6.1#28c96088	SHOULD	2 HMAC-SHA256 http://www.w3.org/2001/04/xmldsig-more#hmac-sha256 Recommended.
-xmldsig-core1#6.1#46e71c16	MUST	3 SHA512 http://www.w3.org/2001/04/xmlenc#sha512 Encoding Required.
-xmldsig-core1#6.1#5385ebaa	MUST	This may be implemented via the XPath specification specified in 6.6.4: Enveloped Signature Transform; it must have the same effect as that specified by the XPa
-xmldsig-core1#6.1#81e3ba60	SHOULD	2 Enveloped Signature (**note) http://www.w3.org/2000/09/xmldsig#enveloped-signature Recommended.
-xmldsig-core1#6.1#92000f4d	MUST	9 DSAwithSHA256 http://www.w3.org/2009/xmldsig11#dsa-sha256 [section 6.4.1 DSA] Canonicalization Required.
-xmldsig-core1#6.1#94139a07	SHOULD	3 DSAwithSHA1 (signature verification) http://www.w3.org/2000/09/xmldsig#dsa-sha1 [section 6.4.1 DSA] Recommended.
-xmldsig-core1#6.1#bb740908	SHOULD	3 Exclusive XML Canonicalization 1.0 (omit comments) http://www.w3.org/2001/10/xml-exc-c14n# Recommended.
-xmldsig-core1#6.1#c3e5b78a	SHOULD	Use of XPath filter is recommended over use of XSLT.
-xmldsig-core1#6.1#d5e00ab8	MUST	Such parameter elements have a descriptive element name, which is frequently algorithm specific, and must be in the XML Signature namespace or an algorithm spec
-xmldsig-core1#6.1#ddbfe736	MUST	1 base64 (*note) http://www.w3.org/2000/09/xmldsig#base64 MAC Required.
-xmldsig-core1#6.1#e3cff523	SHOULD	When using transforms, we RECOMMEND selecting the least expressive choice that still accomplishes the needs of the use case at hand: Use of XPath filter 2.0 is 
-xmldsig-core1#6.1#e9a94cc7	MUST	1 HMAC-SHA224 http://www.w3.org/2001/04/xmldsig-more#hmac-sha224 Signature Required.
 xmldsig-core1#6.2#264ed95c	SHOULD	Use of SHA-256 is strongly recommended over SHA-1 because recent advances in cryptanalysis (see e.g. [SHA-1-Analysis]) have cast doubt on the long-term collisio
 xmldsig-core1#6.2#bcc1446c	SHOULD NOT	Digest algorithms that are known not to be collision resistant should not be used in DigestMethod elements.
 xmldsig-core1#6.2#c2534a3a	MUST	Therefore, SHA-1 support is required in this specification only for backwards-compatibility reasons.

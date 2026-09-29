@@ -11,6 +11,19 @@ on:
         required: true
         type: string
 
+# Serialize AMI builds: a run in progress is never cancelled (that would leave
+# orphaned builder instances, snapshots and half-published SSM parameters);
+# later runs queue behind it instead.
+#
+# queue: max keeps up to 100 runs pending and processes them FIFO. Without it
+# only one run may be pending, so a third trigger arriving while one run is
+# building and another is queued would silently cancel the queued one -- a
+# release could ship with no AMI ever built for it.
+concurrency:
+  group: build-ami
+  queue: max
+  cancel-in-progress: false
+
 permissions: {}
 
 env:
@@ -103,7 +116,7 @@ jobs:
           echo "Building AMI for tag ${TAG} (version ${VERSION})"
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ vars.ASSUME_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
@@ -114,8 +127,8 @@ jobs:
         id: regions
         run: |
           # Target regions to copy AMIs to (source region is us-east-1)
-          echo 'copy_regions=["us-west-2","eu-central-1","eu-west-3"]' >> "$GITHUB_OUTPUT"
-          echo 'all_regions=["us-east-1","us-west-2","eu-central-1","eu-west-3"]' >> "$GITHUB_OUTPUT"
+          echo 'copy_regions=["us-west-2"]' >> "$GITHUB_OUTPUT"
+          echo 'all_regions=["us-east-1","us-west-2"]' >> "$GITHUB_OUTPUT"
 
       - name: Set S3 paths
         id: s3
@@ -155,8 +168,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - arch: x86_64
-            instance_type: m5.xlarge
           - arch: arm64
             instance_type: m6g.xlarge
     outputs:
@@ -172,7 +183,7 @@ jobs:
           persist-credentials: false
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ vars.ASSUME_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
@@ -253,7 +264,9 @@ jobs:
             if [ "$attempt" -eq 120 ]; then
               echo "Build timed out after 1 hour"
               # Try to get logs anyway
-              aws s3 cp "s3://${S3_BUCKET}/${S3_PREFIX}/build.log" /tmp/build.log 2>/dev/null && cat /tmp/build.log || true
+              if aws s3 cp "s3://${S3_BUCKET}/${S3_PREFIX}/build.log" /tmp/build.log 2>/dev/null; then
+                cat /tmp/build.log || true
+              fi
               exit 1
             fi
 
@@ -427,12 +440,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: [x86_64, arm64]
+        arch: [arm64]
         region: ${{ fromJSON(needs.prepare.outputs.copy_regions) }}
 
     steps:
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ vars.ASSUME_ROLE_ARN }}
           aws-region: us-east-1
@@ -510,12 +523,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: [x86_64, arm64]
+        arch: [arm64]
         region: ${{ fromJSON(needs.prepare.outputs.all_regions) }}
 
     steps:
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ vars.ASSUME_ROLE_ARN }}
           aws-region: ${{ matrix.region }}
@@ -581,7 +594,7 @@ jobs:
 
     steps:
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ vars.ASSUME_ROLE_ARN }}
           aws-region: us-east-1
@@ -604,7 +617,7 @@ jobs:
           EOF
 
           for region in $(echo "$ALL_REGIONS" | jq -r '.[]'); do
-            for arch in x86_64 arm64; do
+            for arch in arm64; do
               AMI_ID=$(aws ec2 describe-images \
                 --region "${region}" \
                 --filters "Name=name,Values=vouch-server-${VERSION}-${arch}" \
@@ -622,7 +635,7 @@ jobs:
           |--------------|--------------------|--------------------------|-----------------------|
           EOF
 
-          for arch in x86_64 arm64; do
+          for arch in arm64; do
             AMI_ID=$(aws ec2 describe-images \
               --region us-east-1 \
               --filters "Name=name,Values=vouch-server-${VERSION}-${arch}" \
@@ -662,7 +675,7 @@ jobs:
           # Launch instance with configuration
           aws ec2 run-instances \
             --image-id <AMI_ID> \
-            --instance-type t3.medium \
+            --instance-type m6g.large \
             --metadata-options 'HttpTokens=required,InstanceMetadataTags=enabled' \
             --tag-specifications 'ResourceType=instance,Tags=[{Key=VouchConfigParameter,Value=/vouch-server/config}]'
           ```
@@ -673,13 +686,12 @@ jobs:
 
           | Parameter | Description |
           |-----------|-------------|
-          | `/vouch-server/ami/x86_64/latest` | Latest x86_64 AMI ID |
           | `/vouch-server/ami/arm64/latest` | Latest arm64 AMI ID |
 
           ```bash
           # Query latest AMI in your region
           AMI_ID=$(aws ssm get-parameter \
-            --name "/vouch-server/ami/x86_64/latest" \
+            --name "/vouch-server/ami/arm64/latest" \
             --query 'Parameter.Value' --output text)
           ```
           EOF

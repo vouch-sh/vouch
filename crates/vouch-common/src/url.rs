@@ -120,9 +120,61 @@ pub fn normalize_git_host(host: &str) -> String {
     strip_default_https_port(host).to_ascii_lowercase()
 }
 
+/// The environment variable that allows plain-HTTP server URLs to
+/// non-loopback hosts, read by both the CLI and the agent.
+pub const ALLOW_INSECURE_ENV: &str = "VOUCH_ALLOW_INSECURE";
+
+/// Parse a [`ALLOW_INSECURE_ENV`] value.
+///
+/// `1`, `true`, `yes`, and `on` enable insecure URLs; `0`, `false`, `no`,
+/// `off`, and the empty string disable them (case-insensitive, surrounding
+/// whitespace ignored). The CLI and the agent both read the variable through
+/// this function, so one value means the same thing to each.
+///
+/// # Errors
+///
+/// Returns a message naming the accepted values for anything else, so a typo
+/// is reported rather than read as either answer.
+pub fn parse_allow_insecure(value: &str) -> Result<bool, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "" | "0" | "false" | "no" | "off" => Ok(false),
+        other => Err(format!(
+            "invalid {ALLOW_INSECURE_ENV} value {other:?}: use 1, true, yes, or on to \
+             allow insecure HTTP, or 0, false, no, or off to refuse it"
+        )),
+    }
+}
+
+/// Read [`ALLOW_INSECURE_ENV`] from the environment with
+/// [`parse_allow_insecure`]. Unset means `false`.
+///
+/// # Errors
+///
+/// Returns the [`parse_allow_insecure`] message for a value it does not accept.
+pub fn allow_insecure_from_env() -> Result<bool, String> {
+    match std::env::var_os(ALLOW_INSECURE_ENV) {
+        None => Ok(false),
+        Some(value) => parse_allow_insecure(&value.to_string_lossy()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_allow_insecure_reads_true_false_and_rejects_other_values() {
+        for value in ["1", "true", "TRUE", "yes", "on", " On "] {
+            assert_eq!(parse_allow_insecure(value), Ok(true), "{value:?}");
+        }
+        for value in ["", "0", "false", "False", "no", "off", " 0 "] {
+            assert_eq!(parse_allow_insecure(value), Ok(false), "{value:?}");
+        }
+        for value in ["2", "enabled", "tru", "-1"] {
+            assert!(parse_allow_insecure(value).is_err(), "{value:?}");
+        }
+    }
 
     #[test]
     fn strip_default_https_port_removes_443() {

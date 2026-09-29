@@ -60,9 +60,6 @@ impl TryFrom<Document<AuthenticatorDoc>> for Authenticator {
 }
 
 /// Result of looking up an authenticator with its owning user.
-///
-/// Built from the denormalized `user_email` on `AuthenticatorDoc`,
-/// so no JOIN is needed.
 #[derive(Debug)]
 pub struct AuthenticatorWithUser {
     pub authenticator: Authenticator,
@@ -70,17 +67,25 @@ pub struct AuthenticatorWithUser {
 }
 
 /// Parameters for creating a new authenticator.
-///
-/// `user_email` is denormalized into the document to eliminate JOINs.
 pub struct CreateAuthenticatorParams<'a> {
     pub user_id: &'a str,
-    pub user_email: &'a str,
     pub name: &'a str,
     pub credential_id: &'a [u8],
     pub public_key: &'a [u8],
     pub aaguid: Option<&'a str>,
     pub user_handle: Option<&'a [u8]>,
     pub attestation_verified: bool,
+    /// The verified `authData.signCount` from the registration ceremony
+    /// (WebAuthn L2 §7.1 step 23: "Associate the `credentialId` with a new
+    /// stored signature counter value initialized to the value of
+    /// `authData.signCount`"). The first assertion's clone-detection guard
+    /// (`webauthn_verify::verify_assertion_inner`) runs against this
+    /// stored value, so it must reflect the registration `signCount` — not
+    /// a hardcoded `0` — for the spec-permitted global-counter
+    /// authenticator class that reports a non-zero value at make. `0` is
+    /// the spec-correct value for per-credential-counter (CTAP 2.1+) and
+    /// counter-less authenticators; pass it through unchanged for those.
+    pub counter: u32,
 }
 
 /// Create a new authenticator.
@@ -90,11 +95,23 @@ pub async fn create_authenticator(
 ) -> Result<String> {
     let doc = AuthenticatorDoc {
         user_id: params.user_id.to_string(),
-        user_email: params.user_email.to_string(),
+        user_email: String::new(),
         name: params.name.to_string(),
         credential_id: URL_SAFE_NO_PAD.encode(params.credential_id),
         public_key: URL_SAFE_NO_PAD.encode(params.public_key),
-        counter: 0,
+        // WebAuthn counter is u32; stored bit-identical as i32 (the column
+        // type, see `AuthenticatorDoc::counter`). Real authenticators never
+        // approach 2^31 uses, and the bitwise reinterpret preserves DB
+        // monotonicity comparisons — see `update_authenticator_counter`'s
+        // callers in `services/oidc/fido2_grant.rs` and
+        // `handlers/browser_login.rs`, which use the same `cast_signed`
+        // for assertion counters. The registration value initializes the
+        // stored counter to `authData.signCount` (WebAuthn L2 §7.1 step
+        // 23) rather than `0`, so the first assertion's clone-detection
+        // check (`webauthn_verify::verify_assertion_inner` at the
+        // `stored_counter != 0 && counter <= stored_counter` guard) runs
+        // against a spec-correct baseline.
+        counter: params.counter.cast_signed(),
         aaguid: params.aaguid.map(String::from),
         user_handle: params.user_handle.map(|h| URL_SAFE_NO_PAD.encode(h)),
         attestation_verified: params.attestation_verified,
@@ -130,8 +147,7 @@ pub async fn get_authenticator_by_credential_id(
 
 /// Get an authenticator and its owning user by credential ID.
 ///
-/// Uses denormalized `user_email` in `AuthenticatorDoc` instead of a JOIN.
-/// Falls back to user lookup by ID to populate full user record.
+/// Looks up the full user record by ID after resolving the authenticator.
 pub async fn get_authenticator_with_user_by_credential_id(
     store: &DocumentStore,
     credential_id: &[u8],
@@ -176,6 +192,15 @@ pub async fn get_authenticator_by_id(
 /// parallel authentication flows never regress the counter. A missing
 /// authenticator is warned and ignored (the caller should not fail an
 /// ongoing authentication solely due to a missing counter record).
+///
+/// The max runs in `u32` space. WebAuthn `signCount` is a `u32`
+/// (WebAuthn L2 §6.1) stored bit-identically in an `i32` column via
+/// `cast_signed`, so every value at or above 2^31 is a negative `i32`.
+/// Comparing those as signed inverts the order across that boundary: a
+/// stored `0x7FFF_FFFF` would beat an incoming `0x8000_0000`, freezing the
+/// counter at 2^31-1 for the rest of the credential's life, and a stored
+/// high-bit value would lose to any low incoming one, regressing the
+/// baseline the clone-detection guard compares against.
 pub async fn update_authenticator_counter(
     store: &DocumentStore,
     authenticator_id: &str,
@@ -183,7 +208,8 @@ pub async fn update_authenticator_counter(
 ) -> Result<()> {
     let found = store
         .modify::<AuthenticatorDoc, _>(authenticator_id, |data| {
-            data.counter = std::cmp::max(data.counter, counter);
+            data.counter =
+                std::cmp::max(data.counter.cast_unsigned(), counter.cast_unsigned()).cast_signed();
         })
         .await?;
     if !found {
@@ -211,37 +237,35 @@ fn detach_authenticator_from_device_auth(d: &mut DeviceAuthRequestDoc) {
     }
 }
 
-/// Delete an authenticator by ID.
+/// Delete an authenticator by ID, cascading to what referenced it.
 ///
-/// Performs application-level cascade deletes:
+/// Application-level cascade, in order:
 /// 1. Void device_auth_request approvals that referenced this authenticator
 /// 2. Delete sessions using this authenticator
 /// 3. Delete the authenticator
-pub async fn delete_authenticator(store: &DocumentStore, authenticator_id: &str) -> Result<u64> {
-    store
-        .update_by_index::<DeviceAuthRequestDoc, _>(
-            "authenticator_id",
-            authenticator_id,
-            detach_authenticator_from_device_auth,
-        )
-        .await?;
-
-    // 2. Delete sessions using this authenticator
-    store
-        .delete_by_index::<SessionDoc>("authenticator_id", authenticator_id)
-        .await?;
-
-    // 3. Delete the authenticator
-    store.delete(authenticator_id).await?;
-    Ok(1)
-}
-
-/// Cascade-delete an authenticator within an open transaction.
 ///
-/// Same steps as [`delete_authenticator`], but executed against a caller-owned
-/// `StoreTransaction` so the cascade can be composed with additional checks
-/// (e.g. last-key guard plus User-doc version bump) in a single atomic unit.
-pub async fn delete_authenticator_in_tx(
+/// Takes the caller's transaction because a half-applied cascade is a broken
+/// state: sessions left alive for a key that no longer exists, or a key
+/// removed while a device authorization still points at it. That, and so the
+/// cascade composes with whatever invariant the caller holds around it — the
+/// last-key guard and User-doc version bump in `services::keys::delete_key`,
+/// the full account teardown in `delete_user`, or removing a member's whole
+/// key set as one unit.
+///
+/// The detach step (1) is a `StoreTransaction::update_by_index`, whose every
+/// write is guarded by the version read from the index. A `Consumed` row that
+/// `try_consume_device_auth` committed between this transaction's read and
+/// its write is therefore never overwritten with the stale `Authorized →
+/// Denied` view — the guarded `UPDATE` matches zero rows, the operation
+/// fails with a retryable `VersionConflict`, and the entry point's
+/// `with_dsql_retry!` re-runs the whole cascade against the fresh row, which
+/// `detach_authenticator_from_device_auth` leaves `Consumed`. Consumed
+/// requests thus keep their attribution for the replay-revocation sweep
+/// (`handlers::device::revoke_sessions_for_device_replay` only fires on
+/// `Consumed`; RFC 6749 §10.5 defense-in-depth). Every caller must run
+/// inside `with_dsql_retry!` — `services::keys::delete_key`, `delete_user`,
+/// and the admin `revoke_member_credentials` handler all do.
+pub async fn delete_authenticator(
     tx: &mut StoreTransaction<'_>,
     authenticator_id: &str,
 ) -> Result<()> {

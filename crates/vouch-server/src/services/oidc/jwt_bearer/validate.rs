@@ -7,14 +7,21 @@
 use crate::crypto::alg::JwsAlgorithm;
 use crate::crypto::jwt::{HeaderAlg, Jws, JwsError};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
-use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 /// Clock skew tolerance in seconds.
 ///
 /// 10 seconds is the FAPI 2.0 recommended tolerance. Modern NTP-synced
 /// systems should not drift beyond this.
-const CLOCK_SKEW_SECONDS: i64 = 10;
+///
+/// Exposed `pub(crate)` so the JTI replay-prevention record
+/// (`PendingJti::commit` in `jwt_bearer::client_auth`)
+/// can derive its retention horizon from the *same* skew the validator
+/// applies to `exp`. The record must outlive the validator's
+/// `exp + CLOCK_SKEW_SECONDS` acceptance window, so the two values must
+/// never drift apart — sharing the constant makes that a compile-time
+/// guarantee (RFC 7523 §3 item 7).
+pub(crate) const CLOCK_SKEW_SECONDS: i64 = 10;
 
 /// JWT assertion claims (RFC 7523 Section 3).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -193,6 +200,8 @@ pub fn validate_client_assertion_algorithm(
 /// * `algorithm` - The expected algorithm
 /// * `expected_audiences` - Acceptable audience values (token endpoint URL, base URL, etc.)
 /// * `max_lifetime_seconds` - Maximum allowed assertion lifetime
+/// * `now` - Unix seconds the temporal claims are judged against (the
+///   request's [`crate::arrival::ArrivalTime`] in production)
 ///
 /// # Returns
 /// The validated assertion claims.
@@ -203,6 +212,7 @@ pub fn validate_jwt_assertion(
     algorithm: jsonwebtoken::Algorithm,
     expected_audiences: &[&str],
     max_lifetime_seconds: i64,
+    now: i64,
 ) -> ServiceResult<ValidatedJwtAssertion> {
     // Build validation settings
     let mut validation = jsonwebtoken::Validation::new(algorithm);
@@ -224,7 +234,6 @@ pub fn validate_jwt_assertion(
         )?;
 
     let claims = token_data.claims;
-    let now = Timestamp::now().as_second();
 
     // Validate expiration (RFC 7523 Section 3: MUST reject expired JWTs)
     if claims.exp < now.saturating_sub(CLOCK_SKEW_SECONDS) {
@@ -316,6 +325,7 @@ mod tests {
     use super::*;
     use base64::Engine as _;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use jiff::Timestamp;
 
     // RFC 8725 §3.9: the audience claim may be a single string.
     #[test]
@@ -595,6 +605,7 @@ mod tests {
             jsonwebtoken::Algorithm::ES256,
             TEST_AUDIENCES,
             MAX_LIFETIME,
+            jiff::Timestamp::now().as_second(),
         );
 
         let validated = result.expect("valid JWT assertion should pass");
@@ -623,6 +634,7 @@ mod tests {
             jsonwebtoken::Algorithm::ES256,
             TEST_AUDIENCES,
             MAX_LIFETIME,
+            jiff::Timestamp::now().as_second(),
         );
 
         assert!(result.is_err(), "Expired JWT must be rejected");
@@ -654,6 +666,7 @@ mod tests {
             jsonwebtoken::Algorithm::ES256,
             TEST_AUDIENCES,
             MAX_LIFETIME,
+            jiff::Timestamp::now().as_second(),
         );
 
         assert!(
@@ -682,6 +695,7 @@ mod tests {
             jsonwebtoken::Algorithm::ES256,
             TEST_AUDIENCES,
             MAX_LIFETIME,
+            jiff::Timestamp::now().as_second(),
         );
 
         assert!(result.is_err(), "Future nbf must be rejected");
@@ -712,6 +726,7 @@ mod tests {
             jsonwebtoken::Algorithm::ES256,
             TEST_AUDIENCES,
             MAX_LIFETIME,
+            jiff::Timestamp::now().as_second(),
         );
 
         assert!(
@@ -741,6 +756,7 @@ mod tests {
             jsonwebtoken::Algorithm::ES256,
             TEST_AUDIENCES,
             MAX_LIFETIME,
+            jiff::Timestamp::now().as_second(),
         );
 
         assert!(result.is_err(), "Future iat must be rejected");
@@ -773,6 +789,7 @@ mod tests {
             jsonwebtoken::Algorithm::ES256,
             TEST_AUDIENCES,
             max_lifetime,
+            jiff::Timestamp::now().as_second(),
         );
 
         assert!(result.is_err(), "Excessive lifetime must be rejected");
@@ -805,6 +822,7 @@ mod tests {
             jsonwebtoken::Algorithm::ES256,
             TEST_AUDIENCES,
             max_lifetime,
+            jiff::Timestamp::now().as_second(),
         );
 
         assert!(
@@ -832,6 +850,7 @@ mod tests {
             jsonwebtoken::Algorithm::ES256,
             TEST_AUDIENCES,
             MAX_LIFETIME,
+            jiff::Timestamp::now().as_second(),
         );
 
         assert!(result.is_err(), "Wrong audience must be rejected");
@@ -875,6 +894,7 @@ mod tests {
             jsonwebtoken::Algorithm::ES256,
             fapi_audiences,
             MAX_LIFETIME,
+            jiff::Timestamp::now().as_second(),
         );
 
         assert!(
@@ -910,6 +930,7 @@ mod tests {
             jsonwebtoken::Algorithm::ES256,
             fapi_audiences,
             MAX_LIFETIME,
+            jiff::Timestamp::now().as_second(),
         );
 
         assert!(
@@ -941,6 +962,7 @@ mod tests {
             jsonwebtoken::Algorithm::ES256,
             TEST_AUDIENCES,
             MAX_LIFETIME,
+            jiff::Timestamp::now().as_second(),
         );
 
         assert!(
@@ -969,6 +991,7 @@ mod tests {
             jsonwebtoken::Algorithm::ES256,
             TEST_AUDIENCES,
             MAX_LIFETIME,
+            jiff::Timestamp::now().as_second(),
         );
 
         assert!(result.is_err(), "Wrong signing key must be rejected");

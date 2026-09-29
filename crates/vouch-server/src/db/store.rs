@@ -94,6 +94,54 @@ pub struct InvalidIndexValue {
     pub field: &'static str,
 }
 
+/// A document changed between an index read and the guarded write that
+/// followed it: the row's `version` no longer matched the one read.
+///
+/// Raised by [`StoreTransaction::update_by_index`] so the caller's
+/// transaction aborts instead of overwriting the newer row with stale data.
+/// [`crate::db::pool::is_retryable_db_error`] treats it as a transient
+/// conflict, so an enclosing `with_dsql_retry!` re-runs the whole operation
+/// against the fresh row — the same shape as an application-level
+/// `compare_and_update` loss.
+#[derive(Debug, thiserror::Error)]
+#[error("document `{id}` was modified concurrently (expected version {expected})")]
+pub(crate) struct VersionConflict {
+    /// The document whose version moved under the writer.
+    pub id: String,
+    /// The version the writer read and expected to still hold.
+    pub expected: i32,
+}
+
+/// Maximum documents per `update_by_index` batch.
+///
+/// [`StoreTransaction::update_by_index`] processes matching documents in
+/// groups of this size, keeping every batch within the caller's single
+/// transaction but performing each batch's index maintenance with one
+/// set-based `DELETE` and one multi-row `INSERT`, so the operation's
+/// statement count tracks the number of documents (roughly one `UPDATE` per
+/// doc) rather than ~5× it. 500 docs × ~3 statements keeps a transaction
+/// well within DSQL's 3,000-statement-per-transaction budget.
+/// [`DocumentStore::update_by_index`] is the same operation in a transaction
+/// of its own.
+const UPDATE_BY_INDEX_BATCH: usize = 500;
+
+/// Reject an index entry whose value contains a NUL (0x00) byte.
+///
+/// Postgres and Aurora DSQL reject 0x00 in `text` columns while SQLite stores
+/// it, so the store refuses it up front to behave identically on every
+/// backend and crypto mode. Shared by the per-entry [`build_index_insert`]
+/// and the batched multi-row insert in [`StoreTransaction::update_by_index`].
+///
+/// # Errors
+///
+/// Returns [`InvalidIndexValue`] if the entry's value contains a NUL byte.
+fn validate_index_entry(entry: &super::document_type::IndexEntry) -> Result<()> {
+    if entry.value.contains('\0') {
+        return Err(InvalidIndexValue { field: entry.field }.into());
+    }
+    Ok(())
+}
+
 /// Build an INSERT statement for a single document index entry.
 ///
 /// Used by both `DocumentStore` and `StoreTransaction` write paths to avoid
@@ -107,9 +155,7 @@ fn build_index_insert(
     doc_id: &str,
     entry: &super::document_type::IndexEntry,
 ) -> Result<sea_query::InsertStatement> {
-    if entry.value.contains('\0') {
-        return Err(InvalidIndexValue { field: entry.field }.into());
-    }
+    validate_index_entry(entry)?;
     let index_id = uuid::Uuid::now_v7().to_string();
     let hashed_value = crypto.hmac_index(&entry.value);
     let stmt = Query::insert()
@@ -292,6 +338,18 @@ fn index_value_condition<T: sea_query::IntoIden>(
 // DocumentStore
 // ============================================================================
 
+/// Outcome of [`DocumentStore::transition`].
+#[derive(Debug)]
+pub enum Transition<A, R> {
+    /// The precondition held on the row version that was written; the
+    /// mutation committed.
+    Applied(A),
+    /// The precondition rejected the current row; nothing was written.
+    Rejected(R),
+    /// No document with that id exists.
+    NotFound,
+}
+
 /// Core abstraction for the encrypted document store.
 ///
 /// Wraps a database pool and a crypto implementation. All serialization,
@@ -303,9 +361,77 @@ pub struct DocumentStore {
     /// See [`ModifyTestHook`]. Compiled out of non-test builds.
     #[cfg(test)]
     modify_test_hook: Option<ModifyTestHook>,
+    /// See [`CompareAndUpdateTestHook`]. Compiled out of non-test builds.
+    #[cfg(test)]
+    compare_and_update_test_hook: Option<CompareAndUpdateTestHook>,
     /// See [`DeleteTestHook`]. Compiled out of non-test builds.
     #[cfg(test)]
     delete_test_hook: Option<DeleteTestHook>,
+    /// See [`LastAdminCountTestHook`]. Compiled out of non-test builds.
+    #[cfg(test)]
+    last_admin_count_test_hook: Option<LastAdminCountTestHook>,
+    /// See [`PostSecretRevokeTestHook`]. Compiled out of non-test builds.
+    #[cfg(test)]
+    post_secret_revoke_test_hook: Option<PostSecretRevokeTestHook>,
+    /// See [`GetUserByIdTestHook`]. Compiled out of non-test builds.
+    #[cfg(test)]
+    get_user_by_id_test_hook: Option<GetUserByIdTestHook>,
+    /// Test-only fault-injection budget for [`DocumentStore::delete`]: the
+    /// next `n` `delete` calls succeed (each consuming one unit), after which
+    /// every subsequent `delete` returns a non-retryable `Err` before opening
+    /// its transaction. Mirrors the existing test hook pattern and is compiled
+    /// out of non-test builds, so production behavior is unchanged. See
+    /// [`Self::set_delete_remaining_successes`].
+    #[cfg(test)]
+    delete_remaining_successes: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+    /// Test-only fault-injection budget for [`DocumentStore::update_last_used_at`]:
+    /// the next `n` `update_last_used_at` calls succeed (each consuming one
+    /// unit), after which every subsequent `update_last_used_at` returns a
+    /// non-retryable `Err` before opening its transaction — exercising the
+    /// caller's best-effort error-handling contract without a real DB outage.
+    /// Mirrors the test hook pattern and is compiled out of non-test builds,
+    /// so production behavior is unchanged. See
+    /// [`Self::set_last_used_remaining_successes`].
+    #[cfg(test)]
+    last_used_remaining_successes: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+    /// Test-only seam for [`StoreTransaction::update_by_index`]: ids whose
+    /// `version` is bumped once, inside the transaction, between the index
+    /// read and the guarded writes. To the transaction that is exactly what a
+    /// row a concurrent writer committed in that window looks like on
+    /// PostgreSQL READ COMMITTED. Drained on first use so a retried
+    /// transaction runs clean. Compiled out of non-test builds. See
+    /// [`Self::set_update_by_index_stale_once`].
+    #[cfg(test)]
+    update_by_index_stale_once: Option<Arc<std::sync::Mutex<Vec<String>>>>,
+    /// Test-only seam for [`StoreTransaction::delete`]: ids whose document
+    /// row is removed once, inside the transaction, just before the delete
+    /// statement runs. To the transaction that is exactly what a concurrent
+    /// delete committed after its existence check looks like on PostgreSQL
+    /// READ COMMITTED. Drained on first use. Compiled out of non-test builds.
+    /// See [`Self::set_delete_vanished_once`].
+    #[cfg(test)]
+    delete_vanished_once: Option<Arc<std::sync::Mutex<Vec<String>>>>,
+    /// Test-only fault-injection budget for [`DocumentStore::delete_by_index`]:
+    /// the next `n` `delete_by_index` calls succeed (each consuming one
+    /// unit), after which every subsequent `delete_by_index` returns a
+    /// non-retryable `Err` before opening its transaction. Mirrors the
+    /// existing [`Self::delete_remaining_successes`] test hook and is
+    /// compiled out of non-test builds, so production behavior is unchanged.
+    /// See [`Self::set_delete_by_index_remaining_successes`].
+    #[cfg(test)]
+    delete_by_index_remaining_successes: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+    /// Test-only fault-injection budget for [`DocumentStore::find_all`]: the
+    /// next `n` `find_all` calls succeed (each consuming one unit), after
+    /// which every subsequent `find_all` returns a non-retryable `Err` before
+    /// issuing its query. Mirrors the existing
+    /// [`Self::delete_remaining_successes`] test hook and is compiled out of
+    /// non-test builds, so production behavior is unchanged. Read paths
+    /// (`find_all`, `find_one`, `find_by_id`, `find_paginated`) are not wrapped
+    /// in `with_dsql_retry!`, so a transient DB `Err` escapes immediately to
+    /// the caller — this seam reproduces that exact control-flow shape without
+    /// a real DB outage. See [`Self::set_find_remaining_successes`].
+    #[cfg(test)]
+    find_remaining_successes: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
 }
 
 /// Boxed future returned by a [`ModifyTestHook`].
@@ -313,14 +439,31 @@ pub struct DocumentStore {
 pub(crate) type ModifyHookFuture =
     std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>;
 
-/// Test-only hook invoked inside [`DocumentStore::modify`] between the
-/// internal read and the compare-and-update, receiving `(doc_id, attempt)`.
+/// Test-only hook invoked inside [`DocumentStore::transition`] (and so
+/// [`DocumentStore::modify`]) between the internal read and the
+/// compare-and-update, receiving `(doc_id, attempt)`.
 ///
 /// Lets tests deterministically interleave a concurrent write into the OCC
 /// window (forcing a version-conflict retry) without relying on
 /// task-scheduling races.
 #[cfg(test)]
 pub(crate) type ModifyTestHook = Arc<dyn Fn(&str, u32) -> ModifyHookFuture + Send + Sync>;
+
+/// Test-only hook invoked inside [`DocumentStore::compare_and_update`] right
+/// before the version-guarded `UPDATE` runs, receiving the `doc_id`.
+///
+/// Lets tests deterministically interleave a concurrent write (through a
+/// hookless store clone) that bumps the document's version, so the guarded
+/// `UPDATE` matches zero rows and `compare_and_update` returns `Ok(false)` —
+/// exactly what a real concurrent writer that won the version race looks like
+/// to the single-shot CAS — without relying on task-scheduling races. Unlike
+/// [`ModifyTestHook`], `compare_and_update` is single-shot (it does not loop on
+/// `Ok(false)`), so a one-shot hook is sufficient; tests that must fire exactly
+/// once guard with their own `AtomicBool`. Mirrors [`ModifyTestHook`] for the
+/// blind-CAS path used by the preconfigured-policy toggle (and other
+/// `compare_and_update` callers).
+#[cfg(test)]
+pub(crate) type CompareAndUpdateTestHook = Arc<dyn Fn(&str) -> ModifyHookFuture + Send + Sync>;
 
 /// Boxed future returned by a [`DeleteTestHook`].
 #[cfg(test)]
@@ -337,6 +480,56 @@ pub(crate) type DeleteHookFuture =
 #[cfg(test)]
 pub(crate) type DeleteTestHook = Arc<dyn Fn(&str) -> DeleteHookFuture + Send + Sync>;
 
+/// Test-only hook invoked inside [`crate::db::update_scim_user`] and
+/// [`demote_or_deactivate_member`](crate::db::demote_or_deactivate_member)
+/// right after the transaction begins and before its first read, receiving
+/// the `user_id` being updated.
+///
+/// A write the hook commits is visible to the in-transaction last-admin count,
+/// which runs after `revoke_user_access` / `revoke_then_persist` has
+/// committed; tests deactivate a sibling admin (the calling admin, on the
+/// admin `deactivate_member` path) here to make that count refuse.
+#[cfg(test)]
+pub(crate) type LastAdminCountTestHook = Arc<dyn Fn(&str) -> DeleteHookFuture + Send + Sync>;
+
+/// Test-only hook invoked inside
+/// [`delete_oauth_client_and_revoke_sessions`](crate::db::delete_oauth_client_and_revoke_sessions)
+/// after [`revoke_all_oauth_client_secrets`](crate::db::revoke_all_oauth_client_secrets)
+/// commits and *before* the session sweeps run, receiving the OAuth
+/// `client_id`.
+///
+/// Lets db tests deterministically interleave a concurrent
+/// [`validate_oauth_client_credentials`](crate::db::validate_oauth_client_credentials)
+/// call followed by a `store.insert(SessionDoc)` attempt into the window the
+/// fix closes: at that instant the secrets are already commit-revoked, so a
+/// *new* validation must read `revoked_at == Some(...)` and return `None`.
+/// Without the revoke-secrets-first ordering the same injection point sits
+/// before the secret revoke (or before `delete_oauth_client`'s hard-delete),
+/// so the validation succeeds and the inserted session escapes both sweeps.
+///
+/// Compiled out of non-test builds, so production pays nothing. The shape
+/// matches [`DeleteTestHook`].
+#[cfg(test)]
+pub(crate) type PostSecretRevokeTestHook = Arc<dyn Fn(&str) -> DeleteHookFuture + Send + Sync>;
+
+/// Test-only seam for [`get_user_by_id`](super::users::get_user_by_id): a
+/// synchronous predicate that, when it returns `true` for `user_id`,
+/// short-circuits that read to `Ok(None)`.
+///
+/// [`crate::handlers::extractors::SignedInSession`] calls
+/// `load_active_user` (one `get_user_by_id` read) and then several web
+/// handlers issue a *second* `get_user_by_id` to resolve the caller's
+/// `org_id`. A concurrent `delete_user` that commits between those two reads
+/// makes the second read return `Ok(None)`, which the handlers used to map
+/// to `None` — persisting an organization-scoped OAuth client with a NULL
+/// `org_id`. This hook lets a handler test deterministically reproduce that
+/// race through the full router (the existing `modify_test_hook` /`
+/// delete_test_hook` seams fire only inside writes, and there is no write
+/// between the two reads). Compiled out of non-test builds, so production
+/// pays nothing. See [`Self::set_get_user_by_id_test_hook`].
+#[cfg(test)]
+pub(crate) type GetUserByIdTestHook = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
 impl DocumentStore {
     /// Create a new document store.
     #[must_use]
@@ -347,8 +540,46 @@ impl DocumentStore {
             #[cfg(test)]
             modify_test_hook: None,
             #[cfg(test)]
+            compare_and_update_test_hook: None,
+            #[cfg(test)]
             delete_test_hook: None,
+            #[cfg(test)]
+            last_admin_count_test_hook: None,
+            #[cfg(test)]
+            post_secret_revoke_test_hook: None,
+            #[cfg(test)]
+            get_user_by_id_test_hook: None,
+            #[cfg(test)]
+            delete_remaining_successes: None,
+            #[cfg(test)]
+            last_used_remaining_successes: None,
+            #[cfg(test)]
+            update_by_index_stale_once: None,
+            #[cfg(test)]
+            delete_vanished_once: None,
+            #[cfg(test)]
+            delete_by_index_remaining_successes: None,
+            #[cfg(test)]
+            find_remaining_successes: None,
         }
+    }
+
+    /// Install the [`StoreTransaction::update_by_index`] stale-row seam: the
+    /// next transactional `update_by_index` on this store (or any
+    /// transaction it begins) bumps the `version` of every listed id after
+    /// reading the index and before writing, so those rows look concurrently
+    /// modified. Consumed on first use. See the field doc for the rationale.
+    #[cfg(test)]
+    pub(crate) fn set_update_by_index_stale_once(&mut self, ids: Vec<String>) {
+        self.update_by_index_stale_once = Some(Arc::new(std::sync::Mutex::new(ids)));
+    }
+
+    /// Install the [`StoreTransaction::delete`] vanished-row seam: the next
+    /// transactional delete of each listed id finds the row already gone.
+    /// Consumed on first use. See the field doc for the rationale.
+    #[cfg(test)]
+    pub(crate) fn set_delete_vanished_once(&mut self, ids: Vec<String>) {
+        self.delete_vanished_once = Some(Arc::new(std::sync::Mutex::new(ids)));
     }
 
     /// Install a hook that runs inside `modify` between the read and the CAS.
@@ -357,17 +588,26 @@ impl DocumentStore {
         self.modify_test_hook = Some(hook);
     }
 
-    /// Install a hook that runs inside `delete_user` after the transaction
-    /// begins but before the existence check. Lets handler tests simulate a
-    /// concurrent delete that wins the race.
+    /// Install a hook that runs inside `compare_and_update` right before the
+    /// version-guarded `UPDATE` executes, so a hookless concurrent writer can
+    /// bump the document's version and force `Ok(false)`.
+    #[cfg(test)]
+    pub(crate) fn set_compare_and_update_test_hook(&mut self, hook: CompareAndUpdateTestHook) {
+        self.compare_and_update_test_hook = Some(hook);
+    }
+
+    /// Install a hook that runs inside `delete_user` / `delete_scim_group`
+    /// after the transaction begins but before the existence check. Lets
+    /// handler tests simulate a concurrent delete that wins the race.
     #[cfg(test)]
     pub(crate) fn set_delete_test_hook(&mut self, hook: DeleteTestHook) {
         self.delete_test_hook = Some(hook);
     }
 
     /// Run the installed `delete_test_hook` for `id`, if any. Invoked by
-    /// `delete_user` after the transaction begins and before the existence
-    /// check. No-op in non-test builds and when no hook is installed.
+    /// `delete_user` and `delete_scim_group` after the transaction begins and
+    /// before the existence check. No-op in non-test builds and when no hook
+    /// is installed.
     #[cfg(test)]
     pub(crate) async fn run_delete_test_hook(&self, id: &str) {
         if let Some(hook) = &self.delete_test_hook {
@@ -375,10 +615,277 @@ impl DocumentStore {
         }
     }
 
+    /// Install the [`LastAdminCountTestHook`] seam for
+    /// [`update_scim_user`](super::scim::update_scim_user) and
+    /// [`demote_or_deactivate_member`](super::users::demote_or_deactivate_member).
+    #[cfg(test)]
+    pub(crate) fn set_last_admin_count_test_hook(&mut self, hook: LastAdminCountTestHook) {
+        self.last_admin_count_test_hook = Some(hook);
+    }
+
+    /// Run the installed `last_admin_count_test_hook` for `id`, if any.
+    #[cfg(test)]
+    pub(crate) async fn run_last_admin_count_test_hook(&self, id: &str) {
+        if let Some(hook) = &self.last_admin_count_test_hook {
+            hook(id).await;
+        }
+    }
+
+    /// Install the [`GetUserByIdTestHook`] seam for
+    /// [`get_user_by_id`](super::users::get_user_by_id). Lets handler tests
+    /// deterministically drive the "user vanished between the
+    /// [`SignedInSession`](crate::handlers::extractors::SignedInSession)
+    /// extractor's `load_active_user` read and a handler's second
+    /// `get_user_by_id` read" race through the full router — the only path
+    /// the org-scoped-app/NULL-org_id bug takes.
+    #[cfg(test)]
+    pub(crate) fn set_get_user_by_id_test_hook(&mut self, hook: GetUserByIdTestHook) {
+        self.get_user_by_id_test_hook = Some(hook);
+    }
+
+    /// Run the installed `get_user_by_id_test_hook` for `user_id`, returning
+    /// `true` when the read should short-circuit to `Ok(None)` (simulating a
+    /// concurrent `delete_user` that committed between two reads). No-op
+    /// (`false`) in non-test builds and when no hook is installed.
+    #[cfg(test)]
+    pub(crate) fn run_get_user_by_id_test_hook(&self, user_id: &str) -> bool {
+        self.get_user_by_id_test_hook
+            .as_ref()
+            .is_some_and(|hook| hook(user_id))
+    }
+
+    /// Install a hook that runs inside
+    /// [`delete_oauth_client_and_revoke_sessions`](crate::db::delete_oauth_client_and_revoke_sessions)
+    /// after [`revoke_all_oauth_client_secrets`](crate::db::revoke_all_oauth_client_secrets)
+    /// commits and before the session sweeps. Lets db tests deterministically
+    /// interleave a concurrent `validate_oauth_client_credentials` + session
+    /// insert into the issuance-window the secret-revoke closes, mirroring
+    /// the §2a interleaving in the bug report.
+    #[cfg(test)]
+    pub(crate) fn set_post_secret_revoke_test_hook(&mut self, hook: PostSecretRevokeTestHook) {
+        self.post_secret_revoke_test_hook = Some(hook);
+    }
+
+    /// Run the installed `post_secret_revoke_test_hook` for `client_id`, if
+    /// any. Invoked by `delete_oauth_client_and_revoke_sessions` after the
+    /// `revoke_all_oauth_client_secrets` commit and before the first session
+    /// sweep. No-op in non-test builds and when no hook is installed.
+    #[cfg(test)]
+    pub(crate) async fn run_post_secret_revoke_test_hook(&self, client_id: &str) {
+        if let Some(hook) = &self.post_secret_revoke_test_hook {
+            hook(client_id).await;
+        }
+    }
+
+    /// Test-only fault injection: limit the number of successful `delete`
+    /// calls to `successes`, after which every subsequent `delete` returns a
+    /// non-retryable `Err` before opening its transaction. The fault fires at
+    /// the entry to `delete`, so the exercised control-flow shape is "one
+    /// delete commits, a later delete fails before committing" — exactly the
+    /// shape `delete_sessions_for_code_replay` must handle to avoid leaving a
+    /// DB-deleted session cached as a stale `Hit`. Absent in non-test builds.
+    #[cfg(test)]
+    pub(crate) fn set_delete_remaining_successes(&mut self, successes: u64) {
+        use std::sync::atomic::AtomicU64;
+        self.delete_remaining_successes = Some(Arc::new(AtomicU64::new(successes)));
+    }
+
+    /// Consume one unit of the test-only delete-success budget, returning
+    /// `Ok` while budget remains and a non-retryable `Err` once it is
+    /// exhausted. No-op (`Ok`) when [`Self::set_delete_remaining_successes`]
+    /// was not called (no budget installed). The CAS loop avoids underflow if
+    /// a budget is shared via [`Clone`]. See [`Self::set_delete_remaining_successes`].
+    #[cfg(test)]
+    fn consume_delete_success_budget(&self) -> Result<()> {
+        use std::sync::atomic::Ordering;
+        let Some(budget) = &self.delete_remaining_successes else {
+            return Ok(());
+        };
+        loop {
+            let current = budget.load(Ordering::Acquire);
+            // `checked_sub` keeps this clippy-arithmetic-side-effects-clean; the
+            // `None` case is `current == 0` (budget exhausted) and faults.
+            let Some(next) = current.checked_sub(1) else {
+                return Err(anyhow::anyhow!(
+                    "injected delete fault: remaining-successes budget exhausted"
+                ));
+            };
+            if budget
+                .compare_exchange(current, next, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Test-only fault injection: limit the number of successful
+    /// `update_last_used_at` calls to `successes`, after which every
+    /// subsequent `update_last_used_at` returns a non-retryable `Err` before
+    /// opening its transaction. The fault fires at the entry to
+    /// `update_last_used_at`, so the exercised control-flow shape is "the
+    /// observational `last_used_at` write fails" — exactly the shape the
+    /// `authenticate_client` secret branch and SCIM callers must treat as
+    /// best-effort (swallow and continue) rather than fail the request. Absent
+    /// in non-test builds.
+    #[cfg(test)]
+    pub(crate) fn set_last_used_remaining_successes(&mut self, successes: u64) {
+        use std::sync::atomic::AtomicU64;
+        self.last_used_remaining_successes = Some(Arc::new(AtomicU64::new(successes)));
+    }
+
+    /// Consume one unit of the test-only `update_last_used_at` success budget,
+    /// returning `Ok` while budget remains and a non-retryable `Err` once it
+    /// is exhausted. No-op (`Ok`) when [`Self::set_last_used_remaining_successes`]
+    /// was not called (no budget installed). The CAS loop avoids underflow if
+    /// a budget is shared via [`Clone`]. See
+    /// [`Self::set_last_used_remaining_successes`].
+    #[cfg(test)]
+    fn consume_last_used_success_budget(&self) -> Result<()> {
+        use std::sync::atomic::Ordering;
+        let Some(budget) = &self.last_used_remaining_successes else {
+            return Ok(());
+        };
+        loop {
+            let current = budget.load(Ordering::Acquire);
+            // `checked_sub` keeps this clippy-arithmetic-side-effects-clean; the
+            // `None` case is `current == 0` (budget exhausted) and faults.
+            let Some(next) = current.checked_sub(1) else {
+                return Err(anyhow::anyhow!(
+                    "injected last_used fault: remaining-successes budget exhausted"
+                ));
+            };
+            if budget
+                .compare_exchange(current, next, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Test-only fault injection: limit the number of successful
+    /// [`DocumentStore::delete_by_index`] calls to `successes`, after which
+    /// every subsequent `delete_by_index` returns a non-retryable `Err` before
+    /// opening its transaction. The fault fires at the entry to
+    /// `delete_by_index`, so the exercised control-flow shape is "one
+    /// `delete_by_index` commits, a later `delete_by_index` fails before
+    /// committing" — exactly the shape
+    /// `delete_oauth_client_and_revoke_sessions` must handle to avoid leaving
+    /// a DB-deleted session cached as a stale `Hit` when its companion
+    /// `invalidate_for_user`/`invalidate_for_client` is skipped on the second
+    /// delete's `Err`. Absent in non-test builds.
+    #[cfg(test)]
+    pub(crate) fn set_delete_by_index_remaining_successes(&mut self, successes: u64) {
+        use std::sync::atomic::AtomicU64;
+        self.delete_by_index_remaining_successes = Some(Arc::new(AtomicU64::new(successes)));
+    }
+
+    /// Consume one unit of the test-only `delete_by_index` success budget,
+    /// returning `Ok` while budget remains and a non-retryable `Err` once it
+    /// is exhausted. No-op (`Ok`) when
+    /// [`Self::set_delete_by_index_remaining_successes`] was not called (no
+    /// budget installed). The CAS loop avoids underflow if a budget is shared
+    /// via [`Clone`]. See [`Self::set_delete_by_index_remaining_successes`].
+    #[cfg(test)]
+    fn consume_delete_by_index_success_budget(&self) -> Result<()> {
+        use std::sync::atomic::Ordering;
+        let Some(budget) = &self.delete_by_index_remaining_successes else {
+            return Ok(());
+        };
+        loop {
+            let current = budget.load(Ordering::Acquire);
+            // `checked_sub` keeps this clippy-arithmetic-side-effects-clean; the
+            // `None` case is `current == 0` (budget exhausted) and faults.
+            let Some(next) = current.checked_sub(1) else {
+                return Err(anyhow::anyhow!(
+                    "injected delete_by_index fault: remaining-successes budget exhausted"
+                ));
+            };
+            if budget
+                .compare_exchange(current, next, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Test-only fault injection: limit the number of successful
+    /// [`DocumentStore::find_all`] calls to `successes`, after which every
+    /// subsequent `find_all` returns a non-retryable `Err` before issuing its
+    /// query. The fault fires at the entry to `find_all`, so the exercised
+    /// control-flow shape is "the indexed read returns `Err`" — exactly the
+    /// shape a transient DB read failure (pool exhaustion, connection loss,
+    /// DSQL OCC abort, `SQLITE_BUSY`) presents to callers like
+    /// [`crate::db::get_authenticators_for_user`], which the IdP callback
+    /// reads session authenticator claims through. Read paths are not wrapped
+    /// in `with_dsql_retry!`, so this `Err` escapes to the caller with no
+    /// retry; the seam lets a regression test assert the caller fails closed
+    /// rather than silently degrading the session. Absent in non-test builds.
+    #[cfg(test)]
+    pub(crate) fn set_find_remaining_successes(&mut self, successes: u64) {
+        use std::sync::atomic::AtomicU64;
+        self.find_remaining_successes = Some(Arc::new(AtomicU64::new(successes)));
+    }
+
+    /// Consume one unit of the test-only `find_all` success budget, returning
+    /// `Ok` while budget remains and a non-retryable `Err` once it is
+    /// exhausted. No-op (`Ok`) when [`Self::set_find_remaining_successes`] was
+    /// not called (no budget installed). The CAS loop avoids underflow if a
+    /// budget is shared via [`Clone`]. See [`Self::set_find_remaining_successes`].
+    #[cfg(test)]
+    fn consume_find_success_budget(&self) -> Result<()> {
+        use std::sync::atomic::Ordering;
+        let Some(budget) = &self.find_remaining_successes else {
+            return Ok(());
+        };
+        loop {
+            let current = budget.load(Ordering::Acquire);
+            // `checked_sub` keeps this clippy-arithmetic-side-effects-clean; the
+            // `None` case is `current == 0` (budget exhausted) and faults.
+            let Some(next) = current.checked_sub(1) else {
+                return Err(anyhow::anyhow!(
+                    "injected find_all fault: remaining-successes budget exhausted"
+                ));
+            };
+            if budget
+                .compare_exchange(current, next, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                return Ok(());
+            }
+        }
+    }
+
     /// Access the underlying pool (for migrations and raw queries).
     #[must_use]
     pub fn pool(&self) -> &Pool {
         &self.pool
+    }
+
+    /// Test-only: overwrite a document's `created_at` stamp.
+    ///
+    /// Rows are stamped from the ambient clock, so a test that needs two rows
+    /// in a chosen order within one second places them with this rather than
+    /// waiting on the wall clock.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database write fails.
+    #[cfg(test)]
+    pub(crate) async fn set_created_at_for_test(
+        &self,
+        id: &str,
+        created_at: Timestamp,
+    ) -> Result<u64> {
+        let stmt = Query::update()
+            .table(Documents::Table)
+            .value(Documents::CreatedAt, created_at.to_string())
+            .and_where(Expr::col(Documents::Id).eq(id))
+            .to_owned();
+        let result = crate::db_execute!(&self.pool, stmt)?;
+        Ok(result.rows_affected())
     }
 
     /// Whether documents are encrypted at rest (vs. the dev plaintext mode).
@@ -411,6 +918,12 @@ impl DocumentStore {
         Ok(StoreTransaction {
             tx,
             crypto: &self.crypto,
+            #[cfg(test)]
+            statement_count: 0,
+            #[cfg(test)]
+            update_by_index_stale_once: self.update_by_index_stale_once.clone(),
+            #[cfg(test)]
+            delete_vanished_once: self.delete_vanished_once.clone(),
         })
     }
 
@@ -458,6 +971,10 @@ impl DocumentStore {
     /// # Errors
     ///
     /// Returns an error if serialization, encryption, or the database write fails.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "stamps the row's created_at and updated_at"
+    )]
     pub async fn upsert<T: DocumentType>(&self, id: &str, doc: &T) -> Result<()> {
         crate::with_dsql_retry!(async {
             let SerializedDoc {
@@ -631,6 +1148,10 @@ impl DocumentStore {
         field: &str,
         value: &str,
     ) -> Result<Vec<Document<T>>> {
+        #[cfg(test)]
+        {
+            self.consume_find_success_budget()?;
+        }
         let index_cond = index_value_condition(&*self.crypto, DocumentIndexes::Table, value);
 
         let stmt = Query::select()
@@ -790,7 +1311,12 @@ impl DocumentStore {
     /// # Errors
     ///
     /// Returns an error if the database write fails.
+    #[expect(clippy::disallowed_methods, reason = "stamps the row's last_used_at")]
     pub async fn update_last_used_at(&self, id: &str) -> Result<()> {
+        #[cfg(test)]
+        {
+            self.consume_last_used_success_budget()?;
+        }
         crate::with_dsql_retry!(async {
             let now_str = Timestamp::now().to_string();
             let stmt = {
@@ -810,7 +1336,7 @@ impl DocumentStore {
     /// On version conflict the document is re-read and the modifier is
     /// re-applied, up to [`MAX_DSQL_RETRIES`](super::pool::MAX_DSQL_RETRIES)
     /// times.  Transient DSQL errors are handled by `compare_and_update`
-    /// internally.
+    /// internally. An unconditional [`Self::transition`].
     ///
     /// Returns `false` if the document does not exist.
     ///
@@ -822,9 +1348,81 @@ impl DocumentStore {
         T: DocumentType,
         F: Fn(&mut T),
     {
+        match self
+            .transition::<T, (), std::convert::Infallible, _>(id, |data| {
+                modifier(data);
+                Ok(())
+            })
+            .await?
+        {
+            Transition::Applied(()) => Ok(true),
+            Transition::NotFound => Ok(false),
+            Transition::Rejected(never) => match never {},
+        }
+    }
+
+    /// Read a document, let `decide` check a precondition and mutate it, and
+    /// write it back under optimistic concurrency — re-reading and deciding
+    /// again on every version conflict, up to
+    /// [`MAX_DSQL_RETRIES`](super::pool::MAX_DSQL_RETRIES) times.
+    ///
+    /// This is the primitive for every single-use or state-machine document
+    /// (device-auth requests, OIDC states, authorization codes, PAR
+    /// requests): `decide` returns `Ok(a)` to commit the mutation it made or
+    /// `Err(r)` to leave the row untouched. Because the precondition is
+    /// re-evaluated against the freshly read row on each attempt, two
+    /// properties hold at once:
+    ///
+    /// - **exactly one winner** — of two concurrent callers, the loser's
+    ///   retry reads the winner's write and its precondition rejects it;
+    /// - **benign writers are invisible** — a concurrent write that bumps the
+    ///   version without changing what the precondition looks at (a
+    ///   device-code poll stamping `last_poll_at`, a cascade clearing an
+    ///   unrelated field) costs a retry, not a spurious failure.
+    ///
+    /// A single-shot `get` + `compare_and_update` that bails on `false`
+    /// conflates the two, which is how a valid device approval came to fail
+    /// whenever the CLI's poll landed inside its read-to-write window.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a read or write fails, or if the version conflict
+    /// persists after retries.
+    pub async fn transition<T, A, R, F>(&self, id: &str, decide: F) -> Result<Transition<A, R>>
+    where
+        T: DocumentType,
+        F: Fn(&mut T) -> std::result::Result<A, R>,
+    {
+        Ok(match self.transition_versioned(id, decide).await? {
+            Transition::Applied((applied, _version)) => Transition::Applied(applied),
+            Transition::Rejected(rejected) => Transition::Rejected(rejected),
+            Transition::NotFound => Transition::NotFound,
+        })
+    }
+
+    /// [`Self::transition`], also returning the version the applied write
+    /// committed.
+    ///
+    /// For a caller that may need to undo its own write later: a
+    /// compare-and-set against this version succeeds only if nothing else
+    /// has written the document since, so the undo cannot overwrite a
+    /// concurrent writer's decision.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::transition`].
+    pub async fn transition_versioned<T, A, R, F>(
+        &self,
+        id: &str,
+        decide: F,
+    ) -> Result<Transition<(A, i32), R>>
+    where
+        T: DocumentType,
+        F: Fn(&mut T) -> std::result::Result<A, R>,
+    {
         for attempt in 0..=super::pool::MAX_DSQL_RETRIES {
             let Some(doc) = self.get::<T>(id).await? else {
-                return Ok(false);
+                return Ok(Transition::NotFound);
             };
             #[cfg(test)]
             if let Some(hook) = &self.modify_test_hook {
@@ -832,12 +1430,20 @@ impl DocumentStore {
             }
             let version = doc.version;
             let mut data = doc.data;
-            modifier(&mut data);
+            let applied = match decide(&mut data) {
+                Ok(applied) => applied,
+                Err(rejected) => return Ok(Transition::Rejected(rejected)),
+            };
             if self.compare_and_update(id, version, &data).await? {
-                return Ok(true);
+                // `compare_and_update` writes `expected_version + 1`.
+                return Ok(Transition::Applied((applied, version.saturating_add(1))));
             }
             if attempt < super::pool::MAX_DSQL_RETRIES {
-                tracing::debug!(doc_id = id, attempt, "version conflict in modify, retrying");
+                tracing::debug!(
+                    doc_id = id,
+                    attempt,
+                    "version conflict in transition, retrying"
+                );
                 tokio::time::sleep(super::pool::retry_backoff(attempt)).await;
             }
         }
@@ -854,6 +1460,10 @@ impl DocumentStore {
     ///
     /// Returns an error if serialization, encryption, or the database
     /// write fails.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "OCC retry re-reads the clock per attempt"
+    )]
     pub async fn compare_and_update<T: DocumentType>(
         &self,
         id: &str,
@@ -873,6 +1483,15 @@ impl DocumentStore {
             let encapped: Option<&str> = encrypted.encapped_key.as_deref();
             let expires_str = expires.map(|ts| ts.to_string());
             let expires_ref: Option<&str> = expires_str.as_deref();
+
+            // Test seam: let a hookless concurrent writer bump this row's
+            // version (or otherwise mutate it) before the guarded UPDATE
+            // runs, so the CAS observes a version mismatch and returns
+            // `Ok(false)`. No-op in non-test builds and when no hook is set.
+            #[cfg(test)]
+            if let Some(hook) = &self.compare_and_update_test_hook {
+                hook(id).await;
+            }
 
             let mut tx = self.pool.begin().await?;
 
@@ -925,32 +1544,33 @@ impl DocumentStore {
 
     /// Update all documents matching an index, applying a modifier function.
     ///
-    /// Decrypts each matching document, applies the modifier, re-encrypts,
-    /// and updates within batched transactions. Each batch processes up to
-    /// 500 documents (~3 statements per doc) to stay within DSQL's
-    /// 3,000-statement transaction limit.
+    /// [`StoreTransaction::update_by_index`] in a transaction of its own:
+    /// every matching document is read, modified, and written back under the
+    /// same per-row version guard, so a row another writer changed between
+    /// the read and the write is never overwritten with stale data — the
+    /// transaction aborts on the [`VersionConflict`] and is retried from a
+    /// fresh read (up to [`MAX_DSQL_RETRIES`](super::pool::MAX_DSQL_RETRIES)).
+    ///
+    /// The whole set commits atomically, so the statement budget is that of
+    /// one transaction (~1 statement per document plus 2 per 500-document
+    /// batch); this suits the bounded sets it is used on, such as one
+    /// client's secrets.
     ///
     /// Returns the number of documents updated.
     ///
     /// # Errors
     ///
-    /// Returns an error if any read/write operation fails.
+    /// Returns an error if any read/write operation fails, or if the version
+    /// conflict persists after retries.
     pub async fn update_by_index<T, F>(&self, field: &str, value: &str, modifier: F) -> Result<u64>
     where
         T: DocumentType,
         F: Fn(&mut T),
     {
         crate::with_dsql_retry!(async {
-            let mut docs = self.find_all::<T>(field, value).await?;
-            let count = docs.len() as u64;
-            for batch in docs.chunks_mut(500) {
-                let mut tx = self.begin().await?;
-                for doc in batch.iter_mut() {
-                    modifier(&mut doc.data);
-                    tx.update(&doc.id, &doc.data).await?;
-                }
-                tx.commit().await?;
-            }
+            let mut tx = self.begin().await?;
+            let count = tx.update_by_index::<T, _>(field, value, &modifier).await?;
+            tx.commit().await?;
             Ok(count)
         })
     }
@@ -959,16 +1579,22 @@ impl DocumentStore {
     // Delete
     // ========================================================================
 
-    /// Delete a document by ID (and its index entries).
+    /// Delete a document by ID (and its index entries). Returns whether this
+    /// call removed the document row; `false` when it was already gone.
     ///
     /// # Errors
     ///
     /// Returns an error if the database operation fails.
-    pub async fn delete(&self, id: &str) -> Result<()> {
+    pub async fn delete(&self, id: &str) -> Result<bool> {
+        #[cfg(test)]
+        {
+            self.consume_delete_success_budget()?;
+        }
         crate::with_dsql_retry!(async {
             let mut tx = self.begin().await?;
-            tx.delete(id).await?;
-            tx.commit().await
+            let removed = tx.delete(id).await?;
+            tx.commit().await?;
+            Ok(removed)
         })
     }
 
@@ -995,6 +1621,10 @@ impl DocumentStore {
     ///
     /// Returns an error if the database operation fails.
     pub async fn delete_by_index<T: DocumentType>(&self, field: &str, value: &str) -> Result<u64> {
+        #[cfg(test)]
+        {
+            self.consume_delete_by_index_success_budget()?;
+        }
         crate::with_dsql_retry!(async {
             let mut tx = self.begin().await?;
             let total = tx.delete_by_index::<T>(field, value).await?;
@@ -1014,45 +1644,56 @@ impl DocumentStore {
     /// # Errors
     ///
     /// Returns an error if the database operation fails.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "background sweep cutoff, serves no request"
+    )]
     pub async fn delete_expired(&self, doc_type: &str) -> Result<u64> {
         crate::with_dsql_retry!(async {
-            let now = jiff::Timestamp::now().to_string();
-
-            // Find expired document IDs
-            let select_stmt = Query::select()
-                .column(Documents::Id)
-                .from(Documents::Table)
-                .and_where(Expr::col(Documents::DocType).eq(doc_type))
-                .and_where(Expr::col(Documents::ExpiresAt).is_not_null())
-                .and_where(Expr::col(Documents::ExpiresAt).lt(now.as_str()))
-                .to_owned();
-
-            let rows: Vec<IdRow> = crate::db_fetch_all!(&self.pool, select_stmt, IdRow)?;
-
-            let total = rows.len() as u64;
-            // Batch deletes: 1,000 docs per tx (2 DELETE statements each)
-            for batch in rows.chunks(1000) {
-                let ids: Vec<sea_query::Value> =
-                    batch.iter().map(|r| r.id.as_str().into()).collect();
-
-                let mut tx = self.pool.begin().await?;
-
-                let del_idx = Query::delete()
-                    .from_table(DocumentIndexes::Table)
-                    .and_where(Expr::col(DocumentIndexes::DocumentId).is_in(ids.clone()))
-                    .to_owned();
-                crate::tx_execute!(tx, del_idx)?;
-
-                let del_doc = Query::delete()
-                    .from_table(Documents::Table)
-                    .and_where(Expr::col(Documents::Id).is_in(ids))
-                    .to_owned();
-                crate::tx_execute!(tx, del_doc)?;
-
-                tx.commit().await?;
-            }
-            Ok(total)
+            let now = jiff::Timestamp::now();
+            self.delete_expired_before(doc_type, &now).await
         })
+    }
+
+    /// One attempt of [`delete_expired`](Self::delete_expired) against an
+    /// explicit cutoff, so a test can place the cutoff inside the same second
+    /// as a row's `expires_at`.
+    async fn delete_expired_before(&self, doc_type: &str, now: &Timestamp) -> Result<u64> {
+        let now = TimestampSeconds::from(now);
+
+        // Find expired document IDs
+        let select_stmt = Query::select()
+            .column(Documents::Id)
+            .from(Documents::Table)
+            .and_where(Expr::col(Documents::DocType).eq(doc_type))
+            .and_where(Expr::col(Documents::ExpiresAt).is_not_null())
+            .and_where(Expr::col(Documents::ExpiresAt).lt(now))
+            .to_owned();
+
+        let rows: Vec<IdRow> = crate::db_fetch_all!(&self.pool, select_stmt, IdRow)?;
+
+        let total = rows.len() as u64;
+        // Batch deletes: 1,000 docs per tx (2 DELETE statements each)
+        for batch in rows.chunks(1000) {
+            let ids: Vec<sea_query::Value> = batch.iter().map(|r| r.id.as_str().into()).collect();
+
+            let mut tx = self.pool.begin().await?;
+
+            let del_idx = Query::delete()
+                .from_table(DocumentIndexes::Table)
+                .and_where(Expr::col(DocumentIndexes::DocumentId).is_in(ids.clone()))
+                .to_owned();
+            crate::tx_execute!(tx, del_idx)?;
+
+            let del_doc = Query::delete()
+                .from_table(Documents::Table)
+                .and_where(Expr::col(Documents::Id).is_in(ids))
+                .to_owned();
+            crate::tx_execute!(tx, del_doc)?;
+
+            tx.commit().await?;
+        }
+        Ok(total)
     }
 
     // ========================================================================
@@ -1252,6 +1893,20 @@ impl std::fmt::Debug for DocumentStore {
 pub struct StoreTransaction<'a> {
     tx: super::pool::Transaction<'a>,
     crypto: &'a Arc<dyn DocumentCrypto>,
+    /// Test-only count of write statements issued by [`Self::update_by_index`],
+    /// so the budget-regression test can assert the cascade's statement count
+    /// scales with the document count (~1 per doc) rather than ~5× it.
+    /// Compiled out of non-test builds.
+    #[cfg(test)]
+    statement_count: u64,
+    /// See [`DocumentStore::set_update_by_index_stale_once`]. Compiled out of
+    /// non-test builds.
+    #[cfg(test)]
+    update_by_index_stale_once: Option<Arc<std::sync::Mutex<Vec<String>>>>,
+    /// See [`DocumentStore::set_delete_vanished_once`]. Compiled out of
+    /// non-test builds.
+    #[cfg(test)]
+    delete_vanished_once: Option<Arc<std::sync::Mutex<Vec<String>>>>,
 }
 
 impl StoreTransaction<'_> {
@@ -1285,6 +1940,10 @@ impl StoreTransaction<'_> {
     ///
     /// Returns an error if serialization, encryption, or the database write
     /// fails.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "stamps the row's created_at and updated_at"
+    )]
     pub async fn insert_with_id<T: DocumentType>(
         &mut self,
         id: &str,
@@ -1452,6 +2111,7 @@ impl StoreTransaction<'_> {
     ///
     /// Returns an error if serialization, encryption, or the database write
     /// fails.
+    #[expect(clippy::disallowed_methods, reason = "stamps the row's updated_at")]
     pub async fn update<T: DocumentType>(&mut self, id: &str, doc: &T) -> Result<()> {
         let SerializedDoc {
             encrypted,
@@ -1506,12 +2166,17 @@ impl StoreTransaction<'_> {
     // ========================================================================
 
     /// Delete a document by ID (and its index entries) within this
-    /// transaction.
+    /// transaction. Returns whether this statement removed the document row.
+    ///
+    /// The row count is the only reliable "I deleted it" signal: an earlier
+    /// `get` in the same transaction does not stop a concurrent transaction
+    /// from deleting the row first under READ COMMITTED, and the losing
+    /// DELETE then affects no rows without erroring.
     ///
     /// # Errors
     ///
     /// Returns an error if the database operation fails.
-    pub async fn delete(&mut self, id: &str) -> Result<()> {
+    pub async fn delete(&mut self, id: &str) -> Result<bool> {
         let delete_idx_stmt = Query::delete()
             .from_table(DocumentIndexes::Table)
             .and_where(Expr::col(DocumentIndexes::DocumentId).eq(id))
@@ -1524,9 +2189,27 @@ impl StoreTransaction<'_> {
             .and_where(Expr::col(Documents::Id).eq(id))
             .to_owned();
 
-        crate::tx_execute!(self.tx, delete_doc_stmt)?;
+        // Test-only: remove the row first, as a concurrent delete would.
+        // See `DocumentStore::set_delete_vanished_once`.
+        #[cfg(test)]
+        {
+            let vanished = self
+                .delete_vanished_once
+                .as_ref()
+                .and_then(|list| {
+                    let mut ids = list.lock().ok()?;
+                    let pos = ids.iter().position(|v| v == id)?;
+                    Some(ids.remove(pos))
+                })
+                .is_some();
+            if vanished {
+                crate::tx_execute!(self.tx, delete_doc_stmt.clone())?;
+            }
+        }
 
-        Ok(())
+        let result = crate::tx_execute!(self.tx, delete_doc_stmt)?;
+
+        Ok(result.rows_affected() == 1)
     }
 
     /// Atomically delete a document by ID if it exists and is not expired.
@@ -1555,7 +2238,7 @@ impl StoreTransaction<'_> {
             .from_table(Documents::Table)
             .and_where(Expr::col(Documents::Id).eq(id))
             .and_where(Expr::col(Documents::ExpiresAt).is_not_null())
-            .and_where(Expr::col(Documents::ExpiresAt).gt(now.to_string()))
+            .and_where(Expr::col(Documents::ExpiresAt).gt(TimestampSeconds::from(now)))
             .to_owned();
         let result = crate::tx_execute!(self.tx, delete_doc_stmt)?;
         let won = result.rows_affected() == 1;
@@ -1659,11 +2342,42 @@ impl StoreTransaction<'_> {
     /// Update all documents matching an index within this transaction.
     ///
     /// Decrypts each matching document, applies the modifier, re-encrypts,
-    /// and updates. Returns the number of documents updated.
+    /// and updates. Index maintenance is performed once per batch with
+    /// set-based SQL — one `DELETE … WHERE document_id IN (…)` plus one
+    /// multi-row `INSERT` — rather than once per document, mirroring
+    /// [`Self::delete_by_index`]. This keeps the whole operation inside the
+    /// caller's single transaction (preserving the all-or-nothing atomicity
+    /// the revocation cascade relies on — a half-applied revoke must not
+    /// leave working keys) while bounding the transaction's statement count
+    /// to roughly the number of documents instead of roughly five times it,
+    /// so the cascade stays within DSQL's 3,000-statement-per-transaction
+    /// budget on the realistic in-flight device-auth sizes the revoke path
+    /// reaches. The standalone [`DocumentStore::update_by_index`] runs the
+    /// same operation in a transaction of its own.
+    ///
+    /// Every write is guarded by the version read from the index: the
+    /// `UPDATE` matches only `version = <read>`, so a row a concurrent
+    /// writer committed between this transaction's read and its write is
+    /// left as that writer left it and the whole operation fails with
+    /// [`VersionConflict`] instead of silently overwriting it (the
+    /// lost-update that let a `Consumed` device-auth row be regressed to
+    /// `Denied` by the authenticator-deletion cascade). The error is
+    /// retryable, so callers run inside `with_dsql_retry!` and re-run the
+    /// cascade against the fresh row.
+    ///
+    /// Returns the number of documents updated.
     ///
     /// # Errors
     ///
-    /// Returns an error if any read/write operation fails.
+    /// Returns an error if any read/write operation fails, if a modified
+    /// document emits an index value containing a NUL byte ([`InvalidIndexValue`]),
+    /// or if a matched document changed since it was read ([`VersionConflict`]).
+    /// Any error aborts the caller's transaction — the transaction is rolled
+    /// back when dropped, so no partial batch is ever persisted.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "OCC retry re-reads the clock per attempt"
+    )]
     pub async fn update_by_index<T, F>(
         &mut self,
         field: &str,
@@ -1674,13 +2388,147 @@ impl StoreTransaction<'_> {
         T: DocumentType,
         F: Fn(&mut T),
     {
-        let docs = self.find_all::<T>(field, value).await?;
+        let mut docs = self.find_all::<T>(field, value).await?;
         let count = docs.len() as u64;
-        for mut doc in docs {
-            modifier(&mut doc.data);
-            self.update(&doc.id, &doc.data).await?;
+        let now_str = Timestamp::now().to_string();
+
+        // Test-only: make the listed rows look concurrently modified by
+        // bumping their version now, after the read above and before any
+        // guarded write below. See `DocumentStore::set_update_by_index_stale_once`.
+        #[cfg(test)]
+        {
+            let stale: Vec<String> = self
+                .update_by_index_stale_once
+                .as_ref()
+                .and_then(|list| list.lock().ok().map(|mut ids| ids.drain(..).collect()))
+                .unwrap_or_default();
+            for id in stale {
+                let bump = Query::update()
+                    .table(Documents::Table)
+                    .value(Documents::Version, Expr::col(Documents::Version).add(1))
+                    .and_where(Expr::col(Documents::Id).eq(id.as_str()))
+                    .to_owned();
+                crate::tx_execute!(self.tx, bump)?;
+            }
         }
+
+        for batch in docs.chunks_mut(UPDATE_BY_INDEX_BATCH) {
+            // Apply the modifier and serialise each document before issuing
+            // any writes for the batch. A serialisation error or a NUL index
+            // value (see [`validate_index_entry`]) therefore fails fast and
+            // leaves the transaction untouched for this batch.
+            let mut prepared: Vec<(String, i32, SerializedDoc)> = Vec::with_capacity(batch.len());
+            for doc in batch.iter_mut() {
+                modifier(&mut doc.data);
+                let serialized = serialize_and_encrypt(self.crypto, &doc.id, &doc.data)?;
+                for entry in &serialized.indexes {
+                    validate_index_entry(entry)?;
+                }
+                prepared.push((doc.id.clone(), doc.version, serialized));
+            }
+
+            // Per-document `UPDATE`: each document's re-encrypted data differs,
+            // so this cannot be collapsed into one statement the way the index
+            // maintenance below can. Each is guarded by the version read from
+            // the index, exactly as `compare_and_update` is: zero rows
+            // affected means another writer committed first, and the whole
+            // operation fails rather than overwriting that write.
+            for (id, version, serialized) in &prepared {
+                let encapped: Option<&str> = serialized.encrypted.encapped_key.as_deref();
+                let expires_ref: Option<&str> = serialized.expires_str.as_deref();
+                let update_stmt = {
+                    let mut q = Query::update();
+                    q.table(Documents::Table)
+                        .value(
+                            Documents::Data,
+                            Expr::val(serialized.encrypted.data.as_str()),
+                        )
+                        .value(Documents::EncappedKey, Expr::val(encapped))
+                        .value(Documents::ExpiresAt, Expr::val(expires_ref))
+                        .value(
+                            Documents::SchemaVersion,
+                            Expr::val(T::CURRENT_VERSION.cast_signed()),
+                        )
+                        .value(Documents::UpdatedAt, Expr::val(now_str.as_str()))
+                        .value(Documents::Version, Expr::val(version.saturating_add(1)))
+                        .and_where(Expr::col(Documents::Id).eq(id.as_str()))
+                        .and_where(Expr::col(Documents::Version).eq(*version));
+                    q.to_owned()
+                };
+                let result = crate::tx_execute!(self.tx, update_stmt)?;
+                #[cfg(test)]
+                {
+                    self.statement_count = self.statement_count.saturating_add(1);
+                }
+                if result.rows_affected() == 0 {
+                    return Err(VersionConflict {
+                        id: id.clone(),
+                        expected: *version,
+                    }
+                    .into());
+                }
+            }
+
+            // One set-based `DELETE` of every old index row for the batch.
+            let ids: Vec<sea_query::Value> = prepared
+                .iter()
+                .map(|(id, _, _)| id.as_str().into())
+                .collect();
+            let delete_idx_stmt = Query::delete()
+                .from_table(DocumentIndexes::Table)
+                .and_where(Expr::col(DocumentIndexes::DocumentId).is_in(ids))
+                .to_owned();
+            crate::tx_execute!(self.tx, delete_idx_stmt)?;
+            #[cfg(test)]
+            {
+                self.statement_count = self.statement_count.saturating_add(1);
+            }
+
+            // One multi-row `INSERT` of every new index row for the batch.
+            // Guarded by `total_entries` so a document type that emits no
+            // index entries does not produce an empty `INSERT`.
+            let total_entries: usize = prepared.iter().map(|(_, _, s)| s.indexes.len()).sum();
+            if total_entries > 0 {
+                let mut insert_idx_stmt = Query::insert()
+                    .into_table(DocumentIndexes::Table)
+                    .columns([
+                        DocumentIndexes::Id,
+                        DocumentIndexes::DocumentId,
+                        DocumentIndexes::IndexField,
+                        DocumentIndexes::IndexValue,
+                    ])
+                    .to_owned();
+                for (id, _, serialized) in &prepared {
+                    for entry in &serialized.indexes {
+                        let index_id = uuid::Uuid::now_v7().to_string();
+                        let hashed = self.crypto.hmac_index(&entry.value);
+                        insert_idx_stmt.values([
+                            index_id.as_str().into(),
+                            id.as_str().into(),
+                            entry.field.into(),
+                            hashed.as_str().into(),
+                        ])?;
+                    }
+                }
+                crate::tx_execute!(self.tx, insert_idx_stmt)?;
+                #[cfg(test)]
+                {
+                    self.statement_count = self.statement_count.saturating_add(1);
+                }
+            }
+        }
+
         Ok(count)
+    }
+
+    /// Test-only count of write statements issued by the most recent
+    /// [`Self::update_by_index`] call on this transaction, used by the
+    /// budget-regression test to assert the cascade's statement count scales
+    /// with the document count rather than ~5× it. Compiled out of non-test
+    /// builds.
+    #[cfg(test)]
+    pub(crate) fn update_by_index_statement_count(&self) -> u64 {
+        self.statement_count
     }
 
     // ========================================================================
@@ -1698,6 +2546,10 @@ impl StoreTransaction<'_> {
     ///
     /// Returns an error if serialization, encryption, or the database
     /// write fails.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "OCC retry re-reads the clock per attempt"
+    )]
     pub async fn compare_and_update<T: DocumentType>(
         &mut self,
         id: &str,
@@ -1755,6 +2607,42 @@ impl StoreTransaction<'_> {
         }
 
         Ok(true)
+    }
+}
+
+/// An instant as the text of its whole second in UTC, e.g. `2026-01-01T13:00:16`,
+/// for a lexicographic comparison against a `TEXT` timestamp column
+/// (`expires_at`, `created_at`).
+///
+/// Columns hold [`jiff::Timestamp::to_string`] output, which trims trailing
+/// zero fractional digits: `…16Z`, `…16.5Z`, and `…16.537239482Z` are all
+/// valid. Byte order matches time order only when one string is a prefix of
+/// the other. A bound of `…16.537239482Z` sorts a row of `…16.5Z` as later
+/// because `'Z'` > `'3'`. The whole second is a prefix of every value in that
+/// second, so it sorts correctly on both sides. Rows in that second compare at
+/// whole-second granularity: an expiry check accepts them for up to 1 s more,
+/// and a sweep leaves them for the next pass.
+///
+/// It is built only from a [`Timestamp`], because only
+/// [`jiff::Timestamp::to_string`] guarantees the UTC `…Z` form the comparison
+/// relies on: an RFC 3339 string with an offset compares shifted by it.
+pub(crate) struct TimestampSeconds(String);
+
+impl From<&Timestamp> for TimestampSeconds {
+    fn from(instant: &Timestamp) -> Self {
+        let text = instant.to_string();
+        let text = text.strip_suffix('Z').unwrap_or(&text);
+        let whole_seconds = match text.split_once('.') {
+            Some((whole_seconds, _fraction)) => whole_seconds,
+            None => text,
+        };
+        Self(whole_seconds.to_owned())
+    }
+}
+
+impl From<TimestampSeconds> for sea_query::Value {
+    fn from(seconds: TimestampSeconds) -> Self {
+        seconds.0.into()
     }
 }
 

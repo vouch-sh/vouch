@@ -156,6 +156,10 @@ pub fn start_cleanup_task(
 }
 
 /// Run all cleanup tasks once.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "background task, serving no request"
+)]
 pub async fn run_cleanup(
     store: &DocumentStore,
     audit: &AuditStore,
@@ -226,6 +230,10 @@ pub async fn run_cleanup(
     cleanup_and_log!(
         db::delete_expired_dpop_nonces(store, &now_str),
         "expired DPoP nonces"
+    );
+    cleanup_and_log!(
+        db::delete_expired_signature_nonces(store),
+        "expired signature nonces"
     );
     cleanup_and_log!(
         db::delete_expired_dpop_jtis(store, &now_str),
@@ -308,17 +316,14 @@ async fn gc_stale_additional_domains(
                 None
             }
         };
-        if let Err(e) = audit
-            .insert_event_with_domain(
+        audit
+            .record_event_with_domain(
                 db::AuditEventKind::OrgDomainExpired,
                 None,
                 org_domain.as_deref(),
                 &data,
             )
-            .await
-        {
-            tracing::warn!(error = %e, "failed to write org_domain_expired audit event");
-        }
+            .await;
     }
     Ok(())
 }
@@ -434,17 +439,14 @@ async fn recheck_one(store: &DocumentStore, audit: &AuditStore, rec: db::Verifie
                 org_id: &rec.org_id,
                 reason: "consecutive_dns_recheck_failures",
             };
-            if let Err(e) = audit
-                .insert_event_with_domain(
+            audit
+                .record_event_with_domain(
                     db::AuditEventKind::OrgDomainUnverified,
                     None,
                     org_domain.as_deref(),
                     &data,
                 )
-                .await
-            {
-                tracing::warn!(error = %e, "failed to write org_domain_unverified audit event");
-            }
+                .await;
             if let Some(label) = released_subdomain {
                 let data = OrgSubdomainCleanupData {
                     action: "release_subdomain",
@@ -452,20 +454,14 @@ async fn recheck_one(store: &DocumentStore, audit: &AuditStore, rec: db::Verifie
                     org_id: &rec.org_id,
                     reason: "backing_domain_unverified",
                 };
-                if let Err(e) = audit
-                    .insert_event_with_domain(
+                audit
+                    .record_event_with_domain(
                         db::AuditEventKind::OrgSubdomainReleased,
                         None,
                         org_domain.as_deref(),
                         &data,
                     )
-                    .await
-                {
-                    tracing::warn!(
-                        error = %e,
-                        "failed to write org_subdomain_released audit event"
-                    );
-                }
+                    .await;
             }
         }
         Ok(_) => {}
@@ -489,6 +485,8 @@ async fn recheck_one(store: &DocumentStore, audit: &AuditStore, rec: db::Verifie
 )]
 mod tests {
     use super::*;
+    use crate::crypto::document_crypto::DocumentCrypto;
+    use crate::test_utils;
 
     /// Regression test for the NULL-`email_domain` bug: `gc_stale_additional_domains`
     /// writes `org_domain_expired` with no user/email of its own, so without
@@ -502,9 +500,8 @@ mod tests {
         };
         use std::sync::Arc;
 
-        let pool = crate::test_utils::test_db().await;
-        let crypto: Arc<dyn crate::crypto::document_crypto::DocumentCrypto> =
-            Arc::new(PlaintextDocumentCrypto);
+        let pool = test_utils::test_db().await;
+        let crypto: Arc<dyn DocumentCrypto> = Arc::new(PlaintextDocumentCrypto);
         let store = DocumentStore::new(pool.clone(), crypto.clone());
         let audit = AuditStore::new(pool, crypto);
 
@@ -572,9 +569,8 @@ mod tests {
         use crate::crypto::document_crypto::PlaintextDocumentCrypto;
         use std::sync::Arc;
 
-        let pool = crate::test_utils::test_db().await;
-        let crypto: Arc<dyn crate::crypto::document_crypto::DocumentCrypto> =
-            Arc::new(PlaintextDocumentCrypto);
+        let pool = test_utils::test_db().await;
+        let crypto: Arc<dyn DocumentCrypto> = Arc::new(PlaintextDocumentCrypto);
         let store = DocumentStore::new(pool.clone(), crypto.clone());
         let audit = AuditStore::new(pool, crypto);
 

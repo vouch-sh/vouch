@@ -4,7 +4,7 @@
 use super::helpers::*;
 
 // ========================================================================
-// P1: OIDC Core 1.0 — ID Token Claims
+// OIDC Core 1.0 — ID Token Claims
 // ========================================================================
 
 #[tokio::test]
@@ -39,32 +39,18 @@ async fn test_oidc_id_token_nonce_echo() {
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let test_nonce = "unique-nonce-value-12345";
-    let scope_set = ScopeSet::parse("openid");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
             nonce: Some(test_nonce),
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+            ..Default::default()
         },
     )
-    .await
-    .expect("Failed to issue code");
+    .await;
 
     let auth_header = client.basic_auth_header();
     let (status, body) = http_post_form(
@@ -108,6 +94,46 @@ async fn test_oidc_id_token_required_claims() {
     assert!(claims.get("aud").is_some(), "ID token must have aud");
     assert!(claims.get("exp").is_some(), "ID token must have exp");
     assert!(claims.get("iat").is_some(), "ID token must have iat");
+}
+
+/// The ID token's `exp` must not exceed the access token's `exp` for the same
+/// authorization-code token response. Commit addbaecd anchored the access
+/// token's `exp` on `ArrivalTime` but left the ID token's `exp` on
+/// `Timestamp::now()`, so the two reads lived on different clocks and the ID
+/// token's `exp` could drift past the access token's `exp` by the latency
+/// between the two mints. With the fix both temporal claims share one arrival
+/// instant and have the same lifetime, so the two `exp` values agree.
+#[tokio::test]
+async fn test_oidc_auth_code_id_token_exp_not_after_access_token_exp() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "id-vs-access@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let (access_token, id_token) =
+        issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
+
+    let access_claims = decode_jwt_payload(&access_token);
+    let id_claims = decode_jwt_payload(&id_token);
+    let access_exp = access_claims["exp"]
+        .as_i64()
+        .expect("access token exp present");
+    let id_exp = id_claims["exp"].as_i64().expect("ID token exp present");
+
+    assert!(
+        id_exp <= access_exp,
+        "ID token exp ({id_exp}) must not exceed the access token exp ({access_exp}) \
+         for one token response — both are anchored on the request's arrival"
+    );
+    // Both derive from the same `arrival.as_second() + expires_in`, so they
+    // must be exactly equal (the access token route has no separate round
+    // trip that would shift itself relative to arrival).
+    assert_eq!(
+        id_exp, access_exp,
+        "ID token exp and access token exp should agree exactly — both derived \
+         from the same arrival instant and the same expires_in"
+    );
 }
 
 #[tokio::test]
@@ -186,32 +212,14 @@ async fn test_oidc_scope_based_claim_filtering() {
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
     // Issue with "openid email" scope
-    let scope_set = ScopeSet::parse("openid email");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
-        },
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec::default(),
     )
-    .await
-    .expect("Failed to issue code");
+    .await;
 
     let auth_header = client.basic_auth_header();
     let (status, body) = http_post_form(
@@ -384,34 +392,20 @@ async fn test_oidc_nonce_echo_in_id_token() {
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let nonce_value = "test-nonce-abc123";
-    let scope_set = ScopeSet::parse("openid");
 
     // Issue code with nonce
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
             nonce: Some(nonce_value),
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+            ..Default::default()
         },
     )
-    .await
-    .expect("Failed to issue code with nonce");
+    .await;
 
     let auth_header = client.basic_auth_header();
     let (status, body) = http_post_form(

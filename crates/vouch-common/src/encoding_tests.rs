@@ -274,38 +274,6 @@ mod tests {
     }
 
     // =========================================================================
-    // LowerHex Formatting Tests
-    // =========================================================================
-
-    #[test]
-    fn test_lowerhex_formatting() {
-        let encoded: Encoded<TestData, Raw> = Encoded::from_raw(vec![0xAB, 0xCD, 0xEF]);
-        let hex = format!("{:x}", encoded);
-        assert_eq!(hex, "abcdef");
-    }
-
-    #[test]
-    fn test_lowerhex_empty() {
-        let encoded: Encoded<TestData, Raw> = Encoded::from_raw(vec![]);
-        let hex = format!("{:x}", encoded);
-        assert_eq!(hex, "");
-    }
-
-    #[test]
-    fn test_lowerhex_single_byte() {
-        let encoded: Encoded<TestData, Raw> = Encoded::from_raw(vec![0x0F]);
-        let hex = format!("{:x}", encoded);
-        assert_eq!(hex, "0f"); // Should be zero-padded
-    }
-
-    #[test]
-    fn test_lowerhex_all_zeros() {
-        let encoded: Encoded<TestData, Raw> = Encoded::from_raw(vec![0x00, 0x00, 0x00]);
-        let hex = format!("{:x}", encoded);
-        assert_eq!(hex, "000000");
-    }
-
-    // =========================================================================
     // Hash Implementation Tests
     // =========================================================================
 

@@ -102,14 +102,3 @@ async fn test_challenge_state_concurrent_calls_produce_one_row() {
         }
     }
 }
-
-#[test]
-fn test_scim_filter_parse_korean_value() {
-    use crate::db::scim::{ScimFilterOp, parse_scim_filter};
-
-    let result = parse_scim_filter(r#"userName eq "사용자@example.com""#, "userName")
-        .expect("parse should succeed");
-    let filter = result.expect("filter should be present");
-    assert_eq!(filter.op, ScimFilterOp::Eq);
-    assert_eq!(filter.value, "사용자@example.com");
-}

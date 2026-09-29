@@ -7,17 +7,20 @@
 //!
 //! - [`types`] - SCIM types (error, list, user, group)
 //! - [`discovery`] - Discovery endpoints (ServiceProviderConfig, Schemas, ResourceTypes)
+//! - [`extract`] - Extractors and middleware that keep every error in SCIM format
 //! - [`patch`] - Table-driven applier shared by User and Group PATCH
 //! - [`users`] - User CRUD operations
 //! - [`groups`] - Group CRUD operations
 
 pub(crate) mod discovery;
+pub(crate) mod extract;
 pub(crate) mod groups;
 pub(crate) mod patch;
 pub(crate) mod types;
 pub(crate) mod urn;
 pub(crate) mod users;
 
+use crate::arrival::ArrivalTime;
 use aws_lc_rs::digest::{self, SHA256};
 use axum::{
     Json,
@@ -33,9 +36,13 @@ use vouch_common::protocol;
 pub(crate) use types::*;
 
 // Re-export handlers
+use crate::http;
+use crate::scim_filter::{self, AttrExp, FilterError};
 pub(crate) use discovery::{resource_types, schemas, service_provider_config};
-pub(crate) use groups::{create_group, delete_group, get_group, list_groups, patch_group};
-pub(crate) use users::{create_user, delete_user, get_user, list_users, patch_user};
+pub(crate) use groups::{
+    create_group, delete_group, get_group, list_groups, patch_group, put_group,
+};
+pub(crate) use users::{create_user, delete_user, get_user, list_users, patch_user, put_user};
 
 // ============================================================================
 // Input Validation
@@ -51,24 +58,22 @@ const MAX_FILTER_LEN: usize = 1024;
 /// is rejected up-front to avoid expensive OFFSET scans.
 const MAX_START_INDEX: usize = 10_001;
 
-/// Validate a SCIM resource ID path parameter.
-/// All resource IDs are UUID v7; reject anything that doesn't parse.
-fn validate_resource_id(id: &str) -> Result<(), (StatusCode, Json<ScimError>)> {
-    if uuid::Uuid::try_parse(id).is_err() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ScimError::new(400, "Invalid resource ID format")),
-        ));
-    }
-    Ok(())
-}
-
-/// Validate SCIM list query parameters.
-/// Enforces length bounds on `filter` and range bounds on `startIndex`.
-fn validate_list_params(
+/// Validate SCIM list query parameters and parse `filter` into the
+/// resource's list filter `F`, whose core schema is `schema_urn`.
+///
+/// Enforces length bounds on `filter` and range bounds on `startIndex`. A
+/// filter that does not parse, or names an attribute or operator `F` does not
+/// support, is 400 `invalidFilter` (RFC 7644 §3.12 Table 9) rather than being
+/// dropped: §3.4.2.2 says "When specified, only those resources matching the
+/// filter expression SHALL be returned."
+fn validate_list_params<F>(
     filter: Option<&str>,
     start_index: usize,
-) -> Result<(), (StatusCode, Json<ScimError>)> {
+    schema_urn: &str,
+) -> Result<Option<F>, (StatusCode, Json<ScimError>)>
+where
+    F: for<'f> TryFrom<AttrExp<'f>, Error = FilterError>,
+{
     if let Some(f) = filter
         && f.len() > MAX_FILTER_LEN
     {
@@ -83,7 +88,15 @@ fn validate_list_params(
             Json(ScimError::new(400, "startIndex exceeds maximum value")),
         ));
     }
-    Ok(())
+    filter
+        .map(|f| scim_filter::parse(f, schema_urn).and_then(F::try_from))
+        .transpose()
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ScimError::new(400, e.to_string()).with_type("invalidFilter")),
+            )
+        })
 }
 
 /// SCIM 400 response for a write the document store rejected because an
@@ -147,9 +160,14 @@ impl ScimAuth {
 /// SCIM endpoints require authentication via OAuth 2.0 Bearer Token
 /// (RFC 6750). The token is validated against the SCIM token store.
 /// Returns the token ID and scope for authorization checks.
+///
+/// Takes the request's [`ArrivalTime`] because the token-expiry comparison
+/// decides this request, so it reads the same instant as every other
+/// temporal check serving it.
 pub(crate) async fn authenticate_scim(
     state: &AppState,
     headers: &HeaderMap,
+    arrival: ArrivalTime,
 ) -> Result<ScimAuth, (StatusCode, Json<ScimError>)> {
     let auth_header = headers
         .get("authorization")
@@ -161,8 +179,8 @@ pub(crate) async fn authenticate_scim(
             )
         })?;
 
-    let token = crate::http::strip_auth_scheme(auth_header, protocol::AUTH_SCHEME_BEARER)
-        .ok_or_else(|| {
+    let token =
+        http::strip_auth_scheme(auth_header, protocol::AUTH_SCHEME_BEARER).ok_or_else(|| {
             (
                 StatusCode::UNAUTHORIZED,
                 Json(ScimError::new(401, "Invalid Authorization header format")),
@@ -171,7 +189,7 @@ pub(crate) async fn authenticate_scim(
     let token_hash = hex::encode(digest::digest(&SHA256, token.as_bytes()));
 
     // Verify token exists and is valid
-    let token_record = db::get_scim_token_by_hash(&state.store, &token_hash)
+    let token_record = db::get_scim_token_by_hash(&state.store, &token_hash, arrival.timestamp())
         .await
         .map_err(|_| {
             (

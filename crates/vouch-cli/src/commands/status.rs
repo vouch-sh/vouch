@@ -13,6 +13,7 @@ use crate::integrations::{
     AwsIntegration, CargoIntegration, DockerIntegration, EksIntegration, GitHubIntegration,
     LABEL_WIDTH, SshIntegration, SsmIntegration, print_integration_status,
 };
+use crate::server_url::{InsecureOptIn, ServerUrl};
 use crate::style;
 use vouch_cli::{tr, tr_args};
 
@@ -88,12 +89,19 @@ pub(crate) fn print_shell(
 }
 
 /// Run the status command.
-pub(crate) async fn run(server: &str, mode: OutputFormat) -> Result<()> {
+pub(crate) async fn run(
+    server: &ServerUrl,
+    opt_in: InsecureOptIn,
+    mode: OutputFormat,
+) -> Result<()> {
     // First, try to get status from the agent (Unix only)
     #[cfg(unix)]
-    if agent_status(server, mode).await? {
+    if agent_status(server, opt_in, mode).await? {
         return Ok(());
     }
+    // Only the agent path reads stored server URLs that need the opt-in.
+    #[cfg(not(unix))]
+    let _ = opt_in;
 
     server_status(server, mode).await
 }
@@ -133,12 +141,23 @@ fn report_unauthenticated(
 /// not authenticated, or expired) and `false` when the caller should fall
 /// back to the config/server check.
 #[cfg(unix)]
-async fn agent_status(server: &str, mode: OutputFormat) -> Result<bool> {
+async fn agent_status(
+    server: &ServerUrl,
+    opt_in: InsecureOptIn,
+    mode: OutputFormat,
+) -> Result<bool> {
     match get_session_from_agent().await {
         Ok(session) => {
             // Prefer the server URL from the agent (it knows the real server),
-            // falling back to the CLI-resolved server URL.
-            let effective_server = session.server_url.as_deref().unwrap_or(server);
+            // falling back to the CLI-resolved server URL. The agent's URL is
+            // stored state, not this invocation's input, so it is judged with
+            // this invocation's opt-in before a token is sent to it.
+            let agent_server = session
+                .server_url
+                .as_deref()
+                .map(|url| ServerUrl::parse(url, opt_in.allowed()?))
+                .transpose()?;
+            let effective_server = agent_server.as_ref().unwrap_or(server);
             match mode {
                 OutputFormat::Json => {
                     print_json(&StatusJson {
@@ -156,7 +175,7 @@ async fn agent_status(server: &str, mode: OutputFormat) -> Result<bool> {
                     );
                 }
                 OutputFormat::Human => {
-                    print_agent_session(effective_server, &session)?;
+                    print_agent_session(effective_server.as_str(), &session)?;
                     println!();
                     print_all_integrations(effective_server).await;
                 }
@@ -195,9 +214,9 @@ async fn agent_status(server: &str, mode: OutputFormat) -> Result<bool> {
 }
 
 /// Report status from the stored token and the server's /v1/auth/status.
-async fn server_status(server: &str, mode: OutputFormat) -> Result<()> {
+async fn server_status(server: &ServerUrl, mode: OutputFormat) -> Result<()> {
     let mut config = Config::load()?;
-    config.set_server_url(server);
+    config.set_server_url(server.as_str());
 
     if config.token().is_none() {
         report_unauthenticated(
@@ -259,7 +278,7 @@ async fn server_status(server: &str, mode: OutputFormat) -> Result<()> {
 }
 
 /// Print a human-readable report for a server-verified session (no agent).
-async fn print_server_session(server: &str, status: &SessionStatus) -> Result<()> {
+async fn print_server_session(server: &ServerUrl, status: &SessionStatus) -> Result<()> {
     println!(
         "{} ({server})",
         style::bold_green(&tr!("status-authenticated"))
@@ -375,7 +394,7 @@ fn print_expiry(expires_in: u64) -> Result<()> {
 ///
 /// Starts the GitHub HTTP request early so network latency overlaps with
 /// local integration checks.
-async fn print_all_integrations(server: &str) {
+async fn print_all_integrations(server: &ServerUrl) {
     // Start GitHub check early (network call)
     let github = GitHubIntegration::new(server);
     let github_future = github.check_and_print();

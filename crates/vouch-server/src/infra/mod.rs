@@ -5,10 +5,14 @@
 //! These modules handle operational concerns for running the server binary.
 //! They are not part of the business logic or HTTP handler layers.
 
+pub(crate) mod accept;
 pub mod bootstrap;
 pub mod cleanup;
+pub mod conn_caps;
 pub mod csp;
+pub(crate) mod csrf;
 pub mod dns;
+pub(crate) mod egress;
 pub mod generate_document_key;
 pub mod httpsig;
 pub mod i18n;

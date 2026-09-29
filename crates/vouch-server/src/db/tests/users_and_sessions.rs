@@ -7,6 +7,9 @@
 )]
 
 use super::*;
+use crate::db::organizations;
+use crate::db::store::DocumentStore;
+use crate::test_utils::test_arrival;
 
 #[tokio::test]
 async fn test_upsert_and_get_user() {
@@ -120,18 +123,18 @@ async fn test_session_lifecycle() {
         .await
         .expect("Failed to create user");
 
-    // Create authenticator (with user_email parameter)
+    // Create authenticator
     let auth_id = create_authenticator(
         &store,
         &CreateAuthenticatorParams {
             user_id: &user_id,
-            user_email: "session@example.com",
             name: "Test Key",
             credential_id: b"test-cred-id",
             public_key: &[0u8; 32],
             aaguid: None,
             user_handle: Some(user_id.as_bytes()),
             attestation_verified: false,
+            counter: 0,
         },
     )
     .await
@@ -151,6 +154,9 @@ async fn test_session_lifecycle() {
             authorization_details: None,
             hardware_aaguid: None,
             org_domain: None,
+            client_id: None,
+            source_code_hash: None,
+            authenticated_at: None,
         },
     )
     .await
@@ -171,7 +177,11 @@ async fn test_session_lifecycle() {
         .await
         .expect("Failed to delete session");
 
-    assert!(deleted);
+    assert_eq!(
+        deleted.map(|s| s.user_id),
+        Some(user_id.clone()),
+        "the deleted row is returned"
+    );
 
     // Session should no longer exist
     let session = get_session_by_token_hash(&store, token_hash, jiff::Timestamp::now())
@@ -206,6 +216,9 @@ async fn test_session_expiry_boundary() {
             authorization_details: None,
             hardware_aaguid: None,
             org_domain: None,
+            client_id: None,
+            source_code_hash: None,
+            authenticated_at: None,
         },
     )
     .await
@@ -234,4 +247,880 @@ async fn test_session_expiry_boundary() {
         .await
         .expect("query should succeed");
     assert!(session.is_none(), "session must be expired 1s after expiry");
+}
+
+/// The cached lookup applies the same boundary: a session cached while live
+/// is not returned from the cache once `arrival` reaches its `expires_at`,
+/// though the cache entry is still within its TTL.
+#[tokio::test]
+async fn test_session_cache_hit_expiry_boundary() {
+    use crate::arrival::ArrivalTime;
+
+    let (store, _audit) = test_db().await;
+    let (user_id, _) = upsert_user(&store, "cache-expiry@example.com", None)
+        .await
+        .expect("Failed to create user");
+    let expires_at: jiff::Timestamp = "2030-01-01T00:00:00Z".parse().unwrap();
+    let token_hash = "cache_expiry_boundary_token";
+    create_session(
+        &store,
+        &CreateSessionParams {
+            user_id: &user_id,
+            user_email: "cache-expiry@example.com",
+            token_hash,
+            authenticator_id: None,
+            expires_at,
+            session_type: SessionPurpose::OAuthAccessToken,
+            authorization_details: None,
+            hardware_aaguid: None,
+            org_domain: None,
+            client_id: None,
+            source_code_hash: None,
+            authenticated_at: None,
+        },
+    )
+    .await
+    .expect("Failed to create session");
+
+    let cache = SessionCache::new(100, 30);
+    let at = |offset_secs: i64| {
+        ArrivalTime::for_test(
+            expires_at
+                .checked_add(jiff::Span::new().seconds(offset_secs))
+                .unwrap(),
+        )
+    };
+    let lookup = |arrival| cache.get_session_by_token_hash(&store, token_hash, arrival);
+
+    // Warms the cache with the live session.
+    assert!(
+        lookup(at(-1)).await.expect("lookup").is_some(),
+        "session must be valid 1s before expiry"
+    );
+    assert!(
+        lookup(at(0)).await.expect("lookup").is_none(),
+        "a cache hit must be expired at expires_at"
+    );
+    assert!(
+        lookup(at(1)).await.expect("lookup").is_none(),
+        "a cache hit must be expired 1s after expiry"
+    );
+    assert!(
+        lookup(at(-1)).await.expect("lookup").is_some(),
+        "the entry is still cached and valid before expiry"
+    );
+}
+
+/// Helper: create an OAuth access-token session for `user_id` with a given
+/// `token_hash` and optional `source_code_hash`, returning the session id.
+async fn create_oauth_session(
+    store: &DocumentStore,
+    user_id: &str,
+    email: &str,
+    token_hash: &str,
+    source_code_hash: Option<&str>,
+) -> String {
+    create_session(
+        store,
+        &CreateSessionParams {
+            user_id,
+            user_email: email,
+            token_hash,
+            authenticator_id: None,
+            expires_at: "2099-12-31T23:59:59Z".parse().unwrap(),
+            session_type: SessionPurpose::OAuthAccessToken,
+            authorization_details: None,
+            hardware_aaguid: None,
+            org_domain: None,
+            client_id: None,
+            source_code_hash,
+            authenticated_at: None,
+        },
+    )
+    .await
+    .expect("create session")
+}
+
+/// RFC 6749 Section 10.5: "the authorization server SHOULD attempt to revoke
+/// all access tokens already granted based on the compromised authorization
+/// code." Revocation deletes only the sessions issued from the replayed code,
+/// leaving the user's other sessions — from other codes, and from grants with
+/// no single-use code — intact.
+#[tokio::test]
+async fn test_replay_revocation_targets_only_the_replayed_code() {
+    let (store, _audit) = test_db().await;
+    let (user_id, _) = upsert_user(&store, "replay@example.com", None)
+        .await
+        .expect("create user");
+
+    // Two sessions issued from authorization code A.
+    let s_a1 = create_oauth_session(
+        &store,
+        &user_id,
+        "replay@example.com",
+        "hash-a1",
+        Some("code-A"),
+    )
+    .await;
+    let _s_a2 = create_oauth_session(
+        &store,
+        &user_id,
+        "replay@example.com",
+        "hash-a2",
+        Some("code-A"),
+    )
+    .await;
+    // A session issued from a different authorization code B.
+    let _s_b = create_oauth_session(
+        &store,
+        &user_id,
+        "replay@example.com",
+        "hash-b",
+        Some("code-B"),
+    )
+    .await;
+    // A session from a grant with no single-use code (FIDO2 / browser login).
+    let _s_none =
+        create_oauth_session(&store, &user_id, "replay@example.com", "hash-none", None).await;
+
+    // Replay detection for code A revokes only the code-A sessions.
+    let revoked = delete_sessions_for_code_replay(&store, "code-A")
+        .await
+        .expect("replay revocation");
+    assert_eq!(
+        revoked.len(),
+        2,
+        "only the two sessions issued from code-A must be returned: {revoked:?}"
+    );
+    assert!(
+        revoked.contains(&"hash-a1".to_string()) && revoked.contains(&"hash-a2".to_string()),
+        "returned token hashes must be exactly the code-A sessions: {revoked:?}"
+    );
+
+    // Code-A sessions are gone.
+    assert!(
+        get_session_by_token_hash(&store, "hash-a1", jiff::Timestamp::now())
+            .await
+            .expect("lookup a1")
+            .is_none(),
+        "code-A session a1 must be revoked"
+    );
+    assert!(
+        get_session_by_token_hash(&store, "hash-a2", jiff::Timestamp::now())
+            .await
+            .expect("lookup a2")
+            .is_none(),
+        "code-A session a2 must be revoked"
+    );
+
+    // Code-B session survives — a replay of one code must not log the user
+    // out of tokens issued from unrelated codes.
+    assert!(
+        get_session_by_token_hash(&store, "hash-b", jiff::Timestamp::now())
+            .await
+            .expect("lookup b")
+            .is_some(),
+        "code-B session must survive a code-A replay"
+    );
+
+    // The no-code session survives — grants without a single-use code are
+    // never targeted by replay-based revocation.
+    assert!(
+        get_session_by_token_hash(&store, "hash-none", jiff::Timestamp::now())
+            .await
+            .expect("lookup none")
+            .is_some(),
+        "no-code session must survive a code replay"
+    );
+
+    // Deleting the code-A sessions again is a no-op (already gone), not an error.
+    let again = delete_sessions_for_code_replay(&store, "code-A")
+        .await
+        .expect("idempotent replay revocation");
+    assert!(
+        again.is_empty(),
+        "second revocation of code-A must find nothing"
+    );
+    let _ = s_a1; // suppress unused binding warning
+}
+
+/// A replay of a code that no session was issued from (e.g., the legitimate
+/// exchange failed after consuming the code) revokes nothing and does not
+/// touch unrelated sessions.
+#[tokio::test]
+async fn test_replay_revocation_for_unknown_code_is_noop() {
+    let (store, _audit) = test_db().await;
+    let (user_id, _) = upsert_user(&store, "noop-replay@example.com", None)
+        .await
+        .expect("create user");
+    let _s = create_oauth_session(
+        &store,
+        &user_id,
+        "noop-replay@example.com",
+        "hash-x",
+        Some("code-X"),
+    )
+    .await;
+
+    let revoked = delete_sessions_for_code_replay(&store, "never-issued")
+        .await
+        .expect("revocation lookup");
+    assert!(revoked.is_empty(), "no sessions match an unknown code");
+
+    assert!(
+        get_session_by_token_hash(&store, "hash-x", jiff::Timestamp::now())
+            .await
+            .expect("lookup")
+            .is_some(),
+        "unrelated session must be untouched"
+    );
+}
+
+/// Regression test for the cache/DB desync fixed by making
+/// `delete_sessions_for_code_replay` best-effort.
+///
+/// When at least two OAuth sessions share a `source_code_hash` (the
+/// ≥2-session shape produced by RFC 8693 token exchange at
+/// `services/oidc/exchange.rs`) and a per-session delete fails partway through
+/// the revocation loop, the committed deletes' token hashes must still be
+/// returned on the `Ok` arm so the caller's `Ok`-arm cache invalidation runs.
+/// The old code propagated `Err` on the failing delete and discarded the
+/// already-committed deletes' hashes, so the caller's log-only `Err` arm left a
+/// DB-deleted session cached as a stale `Hit` for up to the cache TTL — a
+/// request presenting that token then authenticated against a row the server
+/// had already deleted.
+///
+/// `set_delete_remaining_successes(1)` faults the *second* `store.delete` in
+/// the loop, exercising the "one delete commits, a later delete fails before
+/// committing" control-flow shape without a real DB outage. The assertions
+/// below pin the post-fix behavior; under the old code this test fails at
+/// `result.is_ok()` (the function used to return `Err`).
+#[tokio::test]
+async fn test_replay_revocation_partial_failure_still_invalidates_committed_deletes() {
+    let (mut store, _audit) = test_db().await;
+    let (user_id, _) = upsert_user(&store, "partial-replay@example.com", None)
+        .await
+        .expect("create user");
+
+    // Two OAuth access-token sessions issued from the same replayed code "code-P"
+    // — the ≥2-session shape that makes a mid-loop delete failure observable.
+    create_oauth_session(
+        &store,
+        &user_id,
+        "partial-replay@example.com",
+        "hash-p1",
+        Some("code-P"),
+    )
+    .await;
+    create_oauth_session(
+        &store,
+        &user_id,
+        "partial-replay@example.com",
+        "hash-p2",
+        Some("code-P"),
+    )
+    .await;
+
+    // Populate the session cache with `Hit`s for both, mirroring the
+    // precondition an RFC 8693 exchange establishes when it looks up the
+    // subject token: that lookup freshly populates the subject session's
+    // cache entry at the instant the second session is created.
+    let cache = SessionCache::new(100, 30);
+    assert!(
+        cache
+            .get_session_by_token_hash(&store, "hash-p1", test_arrival())
+            .await
+            .expect("cache lookup p1")
+            .is_some(),
+        "hash-p1 must start as a cache Hit"
+    );
+    assert!(
+        cache
+            .get_session_by_token_hash(&store, "hash-p2", test_arrival())
+            .await
+            .expect("cache lookup p2")
+            .is_some(),
+        "hash-p2 must start as a cache Hit"
+    );
+
+    // Fault the second `store.delete` so the first delete commits and the
+    // second returns a non-retryable `Err` before opening its transaction.
+    store.set_delete_remaining_successes(1);
+
+    // Run the real caller match logic from `services/oidc/token.rs`: invalidate
+    // each returned hash on `Ok`, log only on `Err`.
+    let result = delete_sessions_for_code_replay(&store, "code-P").await;
+    assert!(
+        result.is_ok(),
+        "best-effort revocation must return Ok on partial delete failure, not \
+         discard the already-committed deletes' hashes: {result:?}"
+    );
+    let token_hashes = result.expect("checked Ok above");
+    assert_eq!(
+        token_hashes.len(),
+        1,
+        "only the one successfully-deleted session's hash is returned: {token_hashes:?}"
+    );
+    let committed_hash = token_hashes
+        .first()
+        .expect("len == 1 checked above")
+        .as_str();
+    let surviving_hash = if committed_hash == "hash-p1" {
+        "hash-p2"
+    } else {
+        "hash-p1"
+    };
+
+    // The committed-deleted session is gone from the DB; the session whose
+    // delete failed is still present.
+    assert!(
+        get_session_by_token_hash(&store, committed_hash, jiff::Timestamp::now())
+            .await
+            .expect("db lookup committed")
+            .is_none(),
+        "the committed delete must be gone from the DB"
+    );
+    assert!(
+        get_session_by_token_hash(&store, surviving_hash, jiff::Timestamp::now())
+            .await
+            .expect("db lookup surviving")
+            .is_some(),
+        "the session whose delete failed must remain in the DB"
+    );
+
+    // Run the caller's `Ok`-arm cache invalidation against the returned hash.
+    cache.invalidate(committed_hash);
+
+    // The committed-deleted session is no longer served as a stale `Hit`: the
+    // cache misses through to the DB, which returns `None`. Under the old code
+    // the function returned `Err` and the caller never invalidated, so this
+    // lookup would return `Some` from the stale `Hit` (the bug).
+    assert!(
+        cache
+            .get_session_by_token_hash(&store, committed_hash, test_arrival())
+            .await
+            .expect("cache re-lookup committed")
+            .is_none(),
+        "a DB-deleted session must not be served from a stale cache Hit"
+    );
+
+    // The session whose delete failed stays cached — it is still a valid row.
+    assert!(
+        cache
+            .get_session_by_token_hash(&store, surviving_hash, test_arrival())
+            .await
+            .expect("cache re-lookup surviving")
+            .is_some(),
+        "the session whose delete failed must remain a cache Hit"
+    );
+}
+
+/// A per-session delete failure on the *first* iteration (budget 0) deletes
+/// nothing, returns an empty `Ok`, and leaves both sessions cached + in the
+/// DB — the no-progress extreme of the best-effort loop, mirroring the
+/// "replay of a code whose sessions were never enumerated before the fault"
+/// edge of the contract.
+#[tokio::test]
+async fn test_replay_revocation_first_delete_fails_is_empty_ok() {
+    let (mut store, _audit) = test_db().await;
+    let (user_id, _) = upsert_user(&store, "first-fail@example.com", None)
+        .await
+        .expect("create user");
+    create_oauth_session(
+        &store,
+        &user_id,
+        "first-fail@example.com",
+        "hash-f1",
+        Some("code-F"),
+    )
+    .await;
+    create_oauth_session(
+        &store,
+        &user_id,
+        "first-fail@example.com",
+        "hash-f2",
+        Some("code-F"),
+    )
+    .await;
+
+    // Fault every delete (budget 0): no delete commits.
+    store.set_delete_remaining_successes(0);
+
+    let result = delete_sessions_for_code_replay(&store, "code-F").await;
+    assert!(
+        result.is_ok(),
+        "best-effort revocation must return Ok even when no delete succeeds: {result:?}"
+    );
+    assert!(
+        result.as_ref().expect("Ok").is_empty(),
+        "no successful deletes means no hashes returned"
+    );
+
+    // Both sessions survive in the DB.
+    assert!(
+        get_session_by_token_hash(&store, "hash-f1", jiff::Timestamp::now())
+            .await
+            .expect("lookup f1")
+            .is_some(),
+        "no deletes committed, so hash-f1 must remain"
+    );
+    assert!(
+        get_session_by_token_hash(&store, "hash-f2", jiff::Timestamp::now())
+            .await
+            .expect("lookup f2")
+            .is_some(),
+        "no deletes committed, so hash-f2 must remain"
+    );
+}
+
+/// `delete_sessions_for_oauth_client` deletes only sessions tagged with the
+/// given `client_id`, leaving other clients' sessions and pre-migration rows
+/// (whose `client_id` deserialized to `None`) intact. This is the db-level
+/// half of `revoke_tokens_api`'s user-issued-token revocation.
+#[tokio::test]
+async fn test_delete_sessions_for_oauth_client_targets_only_that_client() {
+    let (store, _audit) = test_db().await;
+    let (user_id, _) = upsert_user(&store, "revoke-client@example.com", None)
+        .await
+        .expect("create user");
+
+    async fn mk(store: &DocumentStore, user_id: &str, client_id: Option<&str>, hash: &str) {
+        create_session(
+            store,
+            &CreateSessionParams {
+                user_id,
+                user_email: "revoke-client@example.com",
+                token_hash: hash,
+                authenticator_id: None,
+                expires_at: "2099-12-31T23:59:59Z".parse().unwrap(),
+                session_type: SessionPurpose::OAuthAccessToken,
+                authorization_details: None,
+                hardware_aaguid: None,
+                org_domain: None,
+                client_id,
+                source_code_hash: None,
+                authenticated_at: None,
+            },
+        )
+        .await
+        .expect("create session");
+    }
+    // Two sessions for the primary client, one for a different client, and a
+    // pre-migration row (no `client_id` tag, as if issued before the index).
+    mk(&store, &user_id, Some("client-primary"), "hash-primary1").await;
+    mk(&store, &user_id, Some("client-primary"), "hash-primary2").await;
+    mk(&store, &user_id, Some("client-other"), "hash-other").await;
+    mk(&store, &user_id, None, "hash-legacy").await;
+
+    let deleted = delete_sessions_for_oauth_client(&store, "client-primary")
+        .await
+        .expect("delete for client-primary");
+    assert_eq!(
+        deleted, 2,
+        "exactly the two client-primary sessions should be deleted"
+    );
+
+    // The primary client's sessions are gone.
+    assert!(
+        get_session_by_token_hash(&store, "hash-primary1", jiff::Timestamp::now())
+            .await
+            .expect("lookup primary1")
+            .is_none(),
+        "client-primary session hash-primary1 must be deleted"
+    );
+    assert!(
+        get_session_by_token_hash(&store, "hash-primary2", jiff::Timestamp::now())
+            .await
+            .expect("lookup primary2")
+            .is_none(),
+        "client-primary session hash-primary2 must be deleted"
+    );
+
+    // Other clients and pre-migration rows survive.
+    assert!(
+        get_session_by_token_hash(&store, "hash-other", jiff::Timestamp::now())
+            .await
+            .expect("lookup other")
+            .is_some(),
+        "other client's session must survive revoking client-primary"
+    );
+    assert!(
+        get_session_by_token_hash(&store, "hash-legacy", jiff::Timestamp::now())
+            .await
+            .expect("lookup legacy")
+            .is_some(),
+        "pre-migration session (no client_id) must survive client-scoped revocation"
+    );
+
+    // A second call is a no-op (idempotent): nothing left to delete.
+    let deleted_again = delete_sessions_for_oauth_client(&store, "client-primary")
+        .await
+        .expect("delete for client-primary again");
+    assert_eq!(deleted_again, 0, "re-deleting an empty index is a no-op");
+}
+
+// ============================================================================
+// Last-admin floor (#1285)
+// ============================================================================
+
+/// Create an org with `n` active admins; returns (org_id, admin_ids).
+async fn org_with_admins(store: &DocumentStore, domain: &str, n: usize) -> (String, Vec<String>) {
+    let org = organizations::create_organization(store, domain, Some("Floor Org"), None)
+        .await
+        .expect("create org");
+    let mut ids = Vec::new();
+    for i in 0..n {
+        let (id, _) = upsert_user_with_org(
+            store,
+            &format!("admin{i}@{domain}"),
+            Some(&format!("Admin {i}")),
+            Some(&org.id),
+            true,
+        )
+        .await
+        .expect("create admin");
+        ids.push(id);
+    }
+    (org.id, ids)
+}
+
+#[tokio::test]
+async fn test_demote_refuses_the_last_admin() {
+    let (store, _audit) = test_db().await;
+    let (_org_id, admins) = org_with_admins(&store, "last-admin-demote.example", 2).await;
+
+    // Two admins: demoting one is fine.
+    assert!(
+        demote_or_deactivate_member(
+            &store,
+            admins.get(1).expect("second admin"),
+            MemberDowngrade::Demote
+        )
+        .await
+        .expect("first demote succeeds")
+    );
+
+    // One left: demoting them would leave the org unadministrable.
+    let err = demote_or_deactivate_member(
+        &store,
+        admins.first().expect("first admin"),
+        MemberDowngrade::Demote,
+    )
+    .await
+    .expect_err("demoting the last admin must be refused");
+    assert!(
+        matches!(err, MemberDowngradeError::LastAdmin),
+        "got {err:?}"
+    );
+
+    let still_admin = get_user_by_id(&store, admins.first().expect("first admin"))
+        .await
+        .expect("read admin")
+        .expect("admin exists");
+    assert!(
+        still_admin.is_org_admin,
+        "the refused demote must not apply"
+    );
+}
+
+#[tokio::test]
+async fn test_deactivate_refuses_the_last_admin() {
+    let (store, _audit) = test_db().await;
+    let (_org_id, admins) = org_with_admins(&store, "last-admin-deactivate.example", 1).await;
+
+    let err = demote_or_deactivate_member(
+        &store,
+        admins.first().expect("first admin"),
+        MemberDowngrade::Deactivate,
+    )
+    .await
+    .expect_err("deactivating the last admin must be refused");
+    assert!(
+        matches!(err, MemberDowngradeError::LastAdmin),
+        "got {err:?}"
+    );
+
+    let still_active = get_user_by_id(&store, admins.first().expect("first admin"))
+        .await
+        .expect("read admin")
+        .expect("admin exists");
+    assert!(still_active.active, "the refused deactivate must not apply");
+    assert!(still_active.is_org_admin);
+}
+
+#[tokio::test]
+async fn test_floor_does_not_block_non_admin_members() {
+    let (store, _audit) = test_db().await;
+    let (org_id, _admins) = org_with_admins(&store, "floor-nonadmin.example", 1).await;
+    let (member_id, _) = upsert_user_with_org(
+        &store,
+        "member@floor-nonadmin.example",
+        Some("Member"),
+        Some(&org_id),
+        false,
+    )
+    .await
+    .expect("create member");
+
+    // The floor counts admins, so a plain member is unaffected by it even
+    // though the org has exactly one admin.
+    assert!(
+        demote_or_deactivate_member(&store, &member_id, MemberDowngrade::Deactivate)
+            .await
+            .expect("deactivating a non-admin is always allowed")
+    );
+}
+
+#[tokio::test]
+async fn test_downgrade_reports_missing_member() {
+    let (store, _audit) = test_db().await;
+    assert!(
+        !demote_or_deactivate_member(&store, "no-such-user", MemberDowngrade::Demote)
+            .await
+            .expect("a missing member is not an error")
+    );
+}
+
+// ===========================================================================
+// Expiry-agnostic lookup (`find_session_by_token_hash`) — the root-cause
+// regression for the "Logout audit event silently dropped when the session
+// is expired but still present in the DB" bug.
+//
+// `delete_session_by_token_hash` deletes purely on the `token_hash` index
+// with no expiry check, so it can delete an expired-but-present row, and it
+// returns that row so the caller has its `user_id`/`user_email` for the
+// `Logout` audit event. `get_session_by_token_hash` filters on
+// `expires_at > now` and returns `None` for the same row.
+// ===========================================================================
+
+/// `find_session_by_token_hash` returns a row that `get_session_by_token_hash`
+/// filters out as expired — the exact divergence that dropped the audit event.
+#[tokio::test]
+async fn test_find_session_by_token_hash_returns_expired_row() {
+    let (store, _audit) = test_db().await;
+    let (user_id, _) = upsert_user(&store, "find-expired@example.com", None)
+        .await
+        .expect("create user");
+
+    // A row that has already expired by one second.
+    let expires_at: jiff::Timestamp = "2020-01-01T00:00:00Z".parse().unwrap();
+    let just_after = expires_at
+        .checked_add(jiff::Span::new().seconds(1))
+        .unwrap();
+    let token_hash = "find_expired_token";
+    create_session(
+        &store,
+        &CreateSessionParams {
+            user_id: &user_id,
+            user_email: "find-expired@example.com",
+            token_hash,
+            authenticator_id: None,
+            expires_at,
+            session_type: SessionPurpose::OAuthAccessToken,
+            authorization_details: None,
+            hardware_aaguid: None,
+            org_domain: None,
+            client_id: None,
+            source_code_hash: None,
+            authenticated_at: None,
+        },
+    )
+    .await
+    .expect("create session");
+
+    // The filtering lookup returns `None` for this row.
+    let filtered = get_session_by_token_hash(&store, token_hash, just_after)
+        .await
+        .expect("filtered query");
+    assert!(filtered.is_none(), "expired row must be filtered out");
+
+    // The expiry-agnostic lookup returns the row.
+    let found = find_session_by_token_hash(&store, token_hash)
+        .await
+        .expect("expiry-agnostic query");
+    let session = found.expect("expired-but-present row must be returned");
+    assert_eq!(session.user_id, user_id);
+    assert_eq!(session.user_email, "find-expired@example.com");
+
+    // Deleting it returns the row too: the audit context (`user_id` /
+    // `user_email`) every logout path records its `Logout` event from.
+    let deleted = delete_session_by_token_hash(&store, token_hash)
+        .await
+        .expect("delete")
+        .expect("expired-but-present row must be deleted and returned");
+    assert_eq!(deleted.user_id, user_id);
+    assert_eq!(deleted.user_email, "find-expired@example.com");
+    assert_eq!(session.token_hash, token_hash);
+}
+
+/// `find_session_by_token_hash` returns `None` for a token hash that has no
+/// row at all, and `delete_session_by_token_hash` returns no row, so no
+/// `Logout` audit event is recorded.
+#[tokio::test]
+async fn test_find_session_by_token_hash_returns_none_when_absent() {
+    let (store, _audit) = test_db().await;
+    let found = find_session_by_token_hash(&store, "no-such-token-hash")
+        .await
+        .expect("absent query");
+    assert!(found.is_none(), "an absent row must return None");
+
+    let deleted = delete_session_by_token_hash(&store, "no-such-token-hash")
+        .await
+        .expect("absent delete");
+    assert!(deleted.is_none(), "deleting an absent row returns no row");
+}
+
+/// `find_session_by_token_hash` also returns live rows.
+#[tokio::test]
+async fn test_find_session_by_token_hash_returns_live_row() {
+    let (store, _audit) = test_db().await;
+    let (user_id, _) = upsert_user(&store, "find-live@example.com", None)
+        .await
+        .expect("create user");
+
+    let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().unwrap();
+    let token_hash = "find_live_token";
+    create_session(
+        &store,
+        &CreateSessionParams {
+            user_id: &user_id,
+            user_email: "find-live@example.com",
+            token_hash,
+            authenticator_id: None,
+            expires_at,
+            session_type: SessionPurpose::OAuthAccessToken,
+            authorization_details: None,
+            hardware_aaguid: None,
+            org_domain: None,
+            client_id: None,
+            source_code_hash: None,
+            authenticated_at: None,
+        },
+    )
+    .await
+    .expect("create session");
+
+    let found = find_session_by_token_hash(&store, token_hash)
+        .await
+        .expect("live query");
+    let session = found.expect("live row must be returned");
+    assert_eq!(session.user_id, user_id);
+
+    // And the filtering lookup agrees for the live row.
+    let filtered = get_session_by_token_hash(&store, token_hash, jiff::Timestamp::now())
+        .await
+        .expect("filtered live query");
+    assert!(
+        filtered.is_some(),
+        "live row must also be returned by the filtering lookup"
+    );
+}
+
+// ===========================================================================
+// Concurrent revocation: only the row-deleting transaction returns `Some`
+// (and so only it records a `Logout` audit event). This mirrors the losing-side
+// tests for `delete_custom_policy` / `delete_scim_token` / `delete_scim_group`
+// / `delete_user` in `concurrency.rs`, and additionally wires the real
+// `AuditStore` insert path (no dedup key) to prove the duplicate audit row is
+// suppressed.
+// ===========================================================================
+
+/// Two concurrent revokes of the same `token_hash` must not produce two
+/// `Logout` audit events: the losing revoker — its `DELETE` removed nothing
+/// because a concurrent winner already deleted the row — returns `None`, so
+/// its caller skips the audit. Only the winning revoker records `Logout`.
+///
+/// The `set_delete_vanished_once` seam removes the row inside the loser's
+/// `StoreTransaction::delete`, after its `find_all` read it, deterministically
+/// reproducing a concurrent winner's `DELETE` under `READ COMMITTED`. The
+/// winner's delete is the seam; the winner's `Logout` audit is the explicit
+/// `record_auth_event` below.
+#[tokio::test]
+async fn test_logout_audit_duplicated_when_revocation_loses_race() {
+    let (store, audit) = test_db().await;
+    let (user_id, _) = upsert_user(&store, "race-audit@example.com", None)
+        .await
+        .expect("create user");
+    let session_id = create_session(
+        &store,
+        &CreateSessionParams {
+            user_id: &user_id,
+            user_email: "race-audit@example.com",
+            token_hash: "race-audit-hash",
+            authenticator_id: None,
+            expires_at: "2099-12-31T23:59:59Z".parse().unwrap(),
+            session_type: SessionPurpose::OAuthAccessToken,
+            authorization_details: None,
+            hardware_aaguid: None,
+            org_domain: None,
+            client_id: None,
+            source_code_hash: None,
+            authenticated_at: None,
+        },
+    )
+    .await
+    .expect("create session");
+
+    // The winning revoker deleted the row (the seam below stands in for that
+    // deletion) and recorded its own legitimate `Logout` audit.
+    record_auth_event(
+        &audit,
+        AuthEventParams {
+            user_id: Principal::Verified(user_id.clone()),
+            event_type: AuthEventType::Logout,
+            success: true,
+            ..Default::default()
+        },
+        Some("race-audit@example.com".to_string()),
+    )
+    .await;
+
+    // The losing revoker: `find_all` sees the row, its `tx.delete` removes
+    // nothing (the seam removed the row first, as a concurrent winner would).
+    let mut loser_store = store.clone();
+    loser_store.set_delete_vanished_once(vec![session_id]);
+    let loser_deleted = delete_session_by_token_hash(&loser_store, "race-audit-hash")
+        .await
+        .expect("delete must not error");
+    assert!(
+        loser_deleted.is_none(),
+        "the losing revoker (deleted nothing) must report None, got {loser_deleted:?}"
+    );
+
+    // Each caller records a `Logout` audit on `Some`; the loser would record a
+    // duplicate here. Under the bug it does.
+    if let Some(session) = &loser_deleted {
+        record_auth_event(
+            &audit,
+            AuthEventParams {
+                user_id: Principal::Verified(session.user_id.clone()),
+                event_type: AuthEventType::Logout,
+                success: true,
+                ..Default::default()
+            },
+            Some(session.user_email.clone()),
+        )
+        .await;
+    }
+
+    let logout_count = audit
+        .query_events(&AuditEventFilter {
+            event_types: Some(vec![AuditEventKind::Logout.as_str().to_string()]),
+            user_id: Some(user_id),
+            ..AuditEventFilter::default()
+        })
+        .await
+        .expect("query audit events")
+        .len();
+    assert_eq!(
+        logout_count, 1,
+        "exactly one Logout audit row (the winner's)"
+    );
+
+    assert!(
+        find_session_by_token_hash(&store, "race-audit-hash")
+            .await
+            .expect("find")
+            .is_none()
+    );
 }

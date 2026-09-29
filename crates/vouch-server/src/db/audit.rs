@@ -11,11 +11,12 @@ use anyhow::{Context, Result};
 use jiff::Timestamp;
 use sea_query::{Expr, ExprTrait, Iden, Order, Query};
 
-use serde::Serialize;
-
 use super::documents::audit::{AuditData, CredentialAuditDetails, CredentialAuditEnvelope};
 use super::pool::Pool;
+use super::store::TimestampSeconds;
 use crate::crypto::document_crypto::DocumentCrypto;
+use crate::db::documents::audit::CredentialAuditPayload;
+use crate::email::Email;
 
 // ============================================================================
 // Schema Iden Enum
@@ -93,7 +94,7 @@ macro_rules! audit_event_kinds {
     ($($(#[$attr:meta])* $variant:ident => $name:literal, $retention:ident, $group:ident;)+) => {
         /// Every audit event type the server writes.
         ///
-        /// This is the single registry: [`AuditStore::insert_event`] only
+        /// This is the single registry: [`AuditStore::record_event`] only
         /// accepts these kinds, the cleanup task derives retention from
         /// [`Self::retention`], and the operator documentation
         /// (`docs/src/admin/audit.md`) is generated from [`Self::group`] plus
@@ -148,6 +149,7 @@ audit_event_kinds! {
     Logout => "logout", AuthEvents, Authentication;
     KeyRegistered => "key_registered", AuthEvents, Authentication;
     KeyRemoved => "key_removed", AuthEvents, Authentication;
+    KeyRenamed => "key_renamed", AuthEvents, Authentication;
     DeviceAuthApproved => "device_auth_approved", AuthEvents, Authentication;
     KeyRegistrationReplay => "key_registration_replay", AuthEvents, Authentication;
     // Upstream identity binding (issuer/subject account linking)
@@ -266,12 +268,10 @@ pub struct AuditEventFilter {
     /// verified additional domains (see `Organization::matching_email_domains`),
     /// not a single caller-chosen domain.
     pub email_domains: Option<Vec<String>>,
-    /// Filter events created strictly after this timestamp (RFC 3339,
-    /// matching [`jiff::Timestamp::to_string`] output).
-    pub since: Option<String>,
-    /// Filter events created strictly before this timestamp (RFC 3339,
-    /// matching [`jiff::Timestamp::to_string`] output).
-    pub until: Option<String>,
+    /// Filter events created strictly after this instant.
+    pub since: Option<Timestamp>,
+    /// Filter events created strictly before this instant.
+    pub until: Option<Timestamp>,
     /// Cursor for pagination: only return events with ID less than this
     /// (events are ordered newest-first, so "before" means older events).
     pub before_id: Option<String>,
@@ -316,102 +316,99 @@ impl AuditStore {
     /// in a `text` column or bind parameter is a hard error on
     /// Postgres/DSQL (issue #883).
     fn email_hmac(&self, email: &str) -> Option<String> {
-        let canonical = crate::email::Email::new(email);
+        let canonical = Email::new(email);
         if canonical.as_str().contains('\0') {
             return None;
         }
         Some(self.crypto.hmac_index(canonical.as_str()))
     }
 
-    /// Insert a new audit event with a typed `data` payload.
+    /// Record an audit event with a typed `data` payload; best-effort.
     ///
     /// `email` is masked to domain-only and HMAC-hashed for correlation.
     /// `data` must be one of the vetted payload structs in
     /// [`crate::db::documents::audit`] — [`AuditData`] is sealed there, so
     /// an ad hoc `serde_json::json!` literal cannot be passed.
     ///
-    /// # Errors
-    ///
-    /// Returns an error if serialization or the database write fails.
-    pub async fn insert_event<D: AuditData>(
+    /// An audit write must never fail the operation it records, so a
+    /// failed write is logged with the wire `event_type` and swallowed.
+    pub async fn record_event<D: AuditData>(
         &self,
         kind: AuditEventKind,
         user_id: Option<&str>,
         email: Option<&str>,
         data: &D,
-    ) -> Result<String> {
-        let data_json = serde_json::to_string(data).context("serialize audit data payload")?;
-        self.insert_event_json(kind, user_id, email, &data_json)
-            .await
-    }
-
-    /// Crate-internal raw-JSON insert path behind [`Self::insert_event`].
-    ///
-    /// `pub(super)` because only two write sites assemble their payload as
-    /// a `serde_json::Value`: `insert_auth_event`'s geo-field merge in
-    /// `db/config.rs` and the flattened envelope in
-    /// [`Self::log_credential_event`]. Everything outside `db` must go
-    /// through a typed [`AuditData`] payload.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database write fails.
-    pub(super) async fn insert_event_json(
-        &self,
-        kind: AuditEventKind,
-        user_id: Option<&str>,
-        email: Option<&str>,
-        data_json: &str,
-    ) -> Result<String> {
-        let email_domain = email.and_then(crate::email::Email::domain_of);
+    ) {
+        let email_domain = email.and_then(Email::domain_of);
         let email_hmac = email.and_then(|e| self.email_hmac(e));
-
-        self.insert_event_raw(
+        self.record_best_effort(
             kind,
             user_id,
             email_domain.as_deref(),
             email_hmac.as_deref(),
-            jiff::Timestamp::now(),
-            data_json,
+            data,
         )
-        .await
+        .await;
     }
 
-    /// Insert a new audit event with an explicit `email_domain`, bypassing
-    /// the email→domain derivation in [`Self::insert_event`].
+    /// Record an audit event with an explicit `org_domain`, bypassing the
+    /// email→domain derivation in [`Self::record_event`]; best-effort.
     ///
     /// Used by write sites that act on behalf of an organization rather
     /// than a specific user — SCIM operations, org-lifecycle cleanup
-    /// events — and so have no email to derive a domain from. Without
-    /// this, those events are written with a NULL `email_domain` and are
-    /// invisible to org-scoped audit reads.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if serialization or the database write fails.
-    pub async fn insert_event_with_domain<D: AuditData>(
+    /// events — and so have no email to derive a domain from: the org's
+    /// primary email domain is stamped into `email_domain` instead.
+    /// Without it, those events are written with a NULL `email_domain`
+    /// and are invisible to org-scoped audit reads.
+    pub async fn record_event_with_domain<D: AuditData>(
+        &self,
+        kind: AuditEventKind,
+        user_id: Option<&str>,
+        org_domain: Option<&str>,
+        data: &D,
+    ) {
+        self.record_best_effort(kind, user_id, org_domain, None, data)
+            .await;
+    }
+
+    /// Shared swallow-and-log behind [`Self::record_event`] and
+    /// [`Self::record_event_with_domain`] — the one place audit write
+    /// failures are formatted.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "stamps the audit row's created_at"
+    )]
+    async fn record_best_effort<D: AuditData>(
         &self,
         kind: AuditEventKind,
         user_id: Option<&str>,
         email_domain: Option<&str>,
+        email_hmac: Option<&str>,
         data: &D,
-    ) -> Result<String> {
-        let data_json = serde_json::to_string(data).context("serialize audit data payload")?;
-        self.insert_event_raw(
-            kind,
-            user_id,
-            email_domain,
-            None,
-            jiff::Timestamp::now(),
-            &data_json,
-        )
-        .await
+    ) {
+        let result = match serde_json::to_string(data).context("serialize audit data payload") {
+            Ok(data_json) => self
+                .insert_event_raw(
+                    kind,
+                    user_id,
+                    email_domain,
+                    email_hmac,
+                    jiff::Timestamp::now(),
+                    &data_json,
+                )
+                .await
+                .map(|_| ()),
+            Err(e) => Err(e),
+        };
+        if let Err(e) = result {
+            tracing::warn!(error = %e, event_type = kind.as_str(), "failed to write audit event");
+        }
     }
 
     /// Insert an audit event with an explicit `created_at`.
     ///
     /// Test-only: backdates events past the audit events API's 30-second
-    /// lag window ([`crate::handlers::admin::audit_api`]) without a test
+    /// lag window ([`crate::handlers::api::org::audit`]) without a test
     /// needing to actually wait.
     ///
     /// # Errors
@@ -427,6 +424,27 @@ impl AuditStore {
     ) -> Result<String> {
         self.insert_event_raw(kind, None, email_domain, None, created_at, data_json)
             .await
+    }
+
+    /// Rewrite `created_at` on every stored event.
+    ///
+    /// Test-only: lets an end-to-end test drive a real handler that stamps
+    /// `now` on its audit row, then move that row behind the audit events
+    /// API's lag window ([`crate::handlers::api::org::audit`]) without
+    /// waiting the window out.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database write fails.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn backdate_events_for_test(&self, created_at: jiff::Timestamp) -> Result<u64> {
+        let stmt = Query::update()
+            .table(AuditEvents::Table)
+            .value(AuditEvents::CreatedAt, created_at.to_string())
+            .to_owned();
+
+        let result = crate::db_execute!(&self.pool, stmt)?;
+        Ok(result.rows_affected())
     }
 
     /// Test-only: like [`Self::insert_event_for_test`] but with a user id,
@@ -448,7 +466,7 @@ impl AuditStore {
     }
 
     /// Test-only raw-JSON insert with the email→domain/HMAC derivation of
-    /// [`Self::insert_event`]. Tests legitimately seed arbitrary, legacy,
+    /// [`Self::record_event`]. Tests legitimately seed arbitrary, legacy,
     /// and malformed payloads that no vetted [`AuditData`] struct should
     /// ever describe.
     ///
@@ -456,6 +474,10 @@ impl AuditStore {
     ///
     /// Returns an error if the database write fails.
     #[cfg(any(test, feature = "test-utils"))]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test fixture stamps its own instant"
+    )]
     pub async fn insert_json_event_for_test(
         &self,
         kind: AuditEventKind,
@@ -463,12 +485,21 @@ impl AuditStore {
         email: Option<&str>,
         data_json: &str,
     ) -> Result<String> {
-        self.insert_event_json(kind, user_id, email, data_json)
-            .await
+        let email_domain = email.and_then(Email::domain_of);
+        let email_hmac = email.and_then(|e| self.email_hmac(e));
+        self.insert_event_raw(
+            kind,
+            user_id,
+            email_domain.as_deref(),
+            email_hmac.as_deref(),
+            jiff::Timestamp::now(),
+            data_json,
+        )
+        .await
     }
 
-    /// Shared insert path for [`Self::insert_event`],
-    /// [`Self::insert_event_with_domain`], and (test-only)
+    /// Shared insert path for [`Self::record_event`],
+    /// [`Self::record_event_with_domain`], and (test-only)
     /// [`Self::insert_event_for_test`].
     async fn insert_event_raw(
         &self,
@@ -512,11 +543,7 @@ impl AuditStore {
 
     /// Log a credential-issuance audit event: the shared envelope flattened
     /// with the kind-specific details, written under the details' registry
-    /// kind ([`CredentialAuditDetails::KIND`]).
-    ///
-    /// Best-effort: audit writes must never fail the credential operation
-    /// that already succeeded, so failures are logged and swallowed here
-    /// instead of at every call site.
+    /// kind ([`CredentialAuditDetails::KIND`]); best-effort.
     pub async fn log_credential_event<D: CredentialAuditDetails>(
         &self,
         user_id: &str,
@@ -524,31 +551,12 @@ impl AuditStore {
         envelope: CredentialAuditEnvelope,
         details: &D,
     ) {
-        #[derive(serde::Serialize)]
-        struct Payload<'a, D: Serialize> {
-            #[serde(flatten)]
-            envelope: &'a CredentialAuditEnvelope,
-            #[serde(flatten)]
-            details: &'a D,
-        }
-
-        let result = match serde_json::to_string(&Payload {
+        let payload = CredentialAuditPayload {
             envelope: &envelope,
             details,
-        }) {
-            Ok(data_json) => {
-                self.insert_event_json(D::KIND, Some(user_id), Some(user_email), &data_json)
-                    .await
-            }
-            Err(e) => Err(e.into()),
         };
-        if let Err(e) = result {
-            tracing::warn!(
-                error = %e,
-                event_type = D::KIND.as_str(),
-                "failed to write credential audit event"
-            );
-        }
+        self.record_event(D::KIND, Some(user_id), Some(user_email), &payload)
+            .await;
     }
 
     /// Query audit events with optional filters.
@@ -597,10 +605,10 @@ impl AuditStore {
                 );
             }
             if let Some(ref since) = filter.since {
-                q.and_where(Expr::col(AuditEvents::CreatedAt).gt(normalize_timestamp_bound(since)));
+                q.and_where(Expr::col(AuditEvents::CreatedAt).gt(TimestampSeconds::from(since)));
             }
             if let Some(ref until) = filter.until {
-                q.and_where(Expr::col(AuditEvents::CreatedAt).lt(normalize_timestamp_bound(until)));
+                q.and_where(Expr::col(AuditEvents::CreatedAt).lt(TimestampSeconds::from(until)));
             }
 
             // `after_id` (forward/ascending polling) takes precedence over
@@ -663,11 +671,11 @@ impl AuditStore {
     /// # Errors
     ///
     /// Returns an error if the delete fails.
-    pub async fn delete_old_events(&self, kind: AuditEventKind, before: &str) -> Result<u64> {
+    pub async fn delete_old_events(&self, kind: AuditEventKind, before: Timestamp) -> Result<u64> {
         let stmt = Query::delete()
             .from_table(AuditEvents::Table)
             .and_where(Expr::col(AuditEvents::EventType).eq(kind.as_str()))
-            .and_where(Expr::col(AuditEvents::CreatedAt).lt(normalize_timestamp_bound(before)))
+            .and_where(Expr::col(AuditEvents::CreatedAt).lt(TimestampSeconds::from(&before)))
             .to_owned();
 
         let result = crate::db_execute!(&self.pool, stmt)?;
@@ -694,7 +702,7 @@ impl AuditStore {
                 Retention::Keep => None,
             };
             if let Some(cutoff) = cutoff {
-                let deleted = self.delete_old_events(*kind, &cutoff.to_string()).await?;
+                let deleted = self.delete_old_events(*kind, cutoff).await?;
                 total = total.saturating_add(deleted);
             }
         }
@@ -715,44 +723,6 @@ impl std::fmt::Debug for AuditStore {
 // ============================================================================
 // Helpers
 // ============================================================================
-
-/// Normalize a `since`/`until`/cleanup-cutoff timestamp bound for
-/// lexicographic comparison against the `created_at` column, by truncating
-/// it to whole-second precision (dropping any fractional-second component
-/// and the trailing `Z`).
-///
-/// `created_at` is stored as [`jiff::Timestamp::to_string`] output, which
-/// trims trailing zero fractional-second digits to a *variable* width — one
-/// row might store `...T00:00:00.5Z` (500ms) and another `...T00:00:00Z`
-/// (exactly on the second) or `...T00:00:00.537239482Z` (full nanosecond
-/// precision). Comparing two such strings lexicographically is only
-/// guaranteed correct when one is a zero-padding-equivalent prefix of the
-/// other; it silently breaks whenever the digits actually differ at a
-/// shared position. Concrete counterexample: bound `...16.537239482` (no Z)
-/// vs row `...16.5Z` — chronologically 0.5 < 0.537239482, so the row is
-/// *earlier*, but lexicographically `'Z'` (0x5A) > `'3'` (0x33) at the
-/// second differing character, so the row compares as *greater*. Because
-/// the id-based forward cursor never retries a skipped id, a row wrongly
-/// excluded from an `until`/lag-window comparison this way is lost
-/// permanently, not just delayed.
-///
-/// Truncating the *bound* to whole seconds sidesteps the ambiguity
-/// entirely: a bound with no fractional part at all is always a strict
-/// string prefix of every `created_at` value in that same second
-/// (fractional or not), which sorts correctly on both sides of the
-/// comparison. The cost is that rows within the bound's own second are
-/// compared at second granularity — for `until`, this makes the effective
-/// cutoff up to ~1s more conservative (never less), which only strengthens
-/// the "never return events newer than the lag window" guarantee and
-/// self-corrects on the next poll as `now` advances; for `since`, it makes
-/// the filter up to ~1s more inclusive at the boundary, never lossy.
-fn normalize_timestamp_bound(bound: &str) -> &str {
-    let bound = bound.strip_suffix('Z').unwrap_or(bound);
-    match bound.split_once('.') {
-        Some((whole_seconds, _fraction)) => whole_seconds,
-        None => bound,
-    }
-}
 
 /// Convert a raw row to an `AuditEvent`.
 fn raw_to_audit_event(row: RawAuditRow) -> Result<AuditEvent> {
@@ -785,9 +755,11 @@ fn raw_to_audit_event(row: RawAuditRow) -> Result<AuditEvent> {
 mod tests {
     use super::*;
     use crate::crypto::document_crypto::PlaintextDocumentCrypto;
+    use crate::db::ScimAuditData;
+    use crate::db::pool::PoolConfig;
 
     async fn test_audit() -> AuditStore {
-        let pool = Pool::connect("sqlite::memory:", &crate::db::pool::PoolConfig::default())
+        let pool = Pool::connect("sqlite::memory:", &PoolConfig::default())
             .await
             .unwrap();
 
@@ -887,7 +859,10 @@ mod tests {
 
         // Delete events before far future should delete everything
         let deleted = audit
-            .delete_old_events(AuditEventKind::LoginSuccess, "2099-01-01T00:00:00Z")
+            .delete_old_events(
+                AuditEventKind::LoginSuccess,
+                "2099-01-01T00:00:00Z".parse().unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(deleted, 1);
@@ -1087,25 +1062,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn insert_event_with_domain_stamps_domain_without_email() {
+    async fn record_event_with_domain_stamps_domain_without_email() {
         let audit = test_audit().await;
 
-        let id = audit
-            .insert_event_with_domain(
+        audit
+            .record_event_with_domain(
                 AuditEventKind::ScimOperation,
                 None,
                 Some("example.com"),
-                &super::super::documents::audit::ScimAuditData {
-                    operation: "create".to_string(),
-                    resource_type: "User".to_string(),
-                    resource_id: "u-1".to_string(),
+                &ScimAuditData {
+                    operation: "create",
+                    resource_type: "User",
+                    resource_id: "u-1",
                     actor_token_id: None,
                     details: None,
+                    refusal: None,
                 },
             )
-            .await
-            .unwrap();
-        assert!(!id.is_empty());
+            .await;
 
         let events = audit
             .query_events(&AuditEventFilter::default())
@@ -1219,7 +1193,7 @@ mod tests {
         // A bound far in the past excludes everything.
         let events = audit
             .query_events(&AuditEventFilter {
-                until: Some("2000-01-01T00:00:00Z".to_string()),
+                until: Some("2000-01-01T00:00:00Z".parse().unwrap()),
                 ..AuditEventFilter::default()
             })
             .await
@@ -1232,7 +1206,7 @@ mod tests {
         // A bound far in the future includes it.
         let events = audit
             .query_events(&AuditEventFilter {
-                until: Some("2999-01-01T00:00:00Z".to_string()),
+                until: Some("2999-01-01T00:00:00Z".parse().unwrap()),
                 ..AuditEventFilter::default()
             })
             .await
@@ -1285,7 +1259,7 @@ mod tests {
         // security audit log, versus silently dropping sub-second events.
         let events = audit
             .query_events(&AuditEventFilter {
-                since: Some("2026-01-01T00:00:00Z".to_string()),
+                since: Some("2026-01-01T00:00:00Z".parse().unwrap()),
                 ..AuditEventFilter::default()
             })
             .await
@@ -1335,7 +1309,7 @@ mod tests {
 
         let events = audit
             .query_events(&AuditEventFilter {
-                until: Some("2026-01-01T00:00:16.537239482Z".to_string()),
+                until: Some("2026-01-01T00:00:16.537239482Z".parse().unwrap()),
                 ..AuditEventFilter::default()
             })
             .await
@@ -1348,7 +1322,7 @@ mod tests {
 
         let events = audit
             .query_events(&AuditEventFilter {
-                until: Some("2026-01-01T00:00:17.000000000Z".to_string()),
+                until: Some("2026-01-01T00:00:17.000000000Z".parse().unwrap()),
                 ..AuditEventFilter::default()
             })
             .await

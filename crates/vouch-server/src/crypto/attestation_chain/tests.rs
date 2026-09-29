@@ -8,8 +8,13 @@
 //! a pinned Yubico root, and no test can mint a certificate under those roots.
 //! So the requirements that apply to the leaf are exercised against
 //! [`check_attestation_cert_requirements`] and [`extract_aaguid_from_cert`]
-//! directly, and the whole-chain tests assert the outcomes reachable without a
-//! trusted signature — ordering, and the rejection itself.
+//! directly, and the synthetic whole-chain tests assert the outcomes reachable
+//! without a trusted signature — ordering, and the rejection itself.
+//!
+//! The exception is the "Real hardware" section at the end, which runs a
+//! captured YubiKey attestation through the full function. It is the only
+//! coverage of a successful chain, and therefore the only test that fails if a
+//! pinned root is dropped or corrupted.
 
 #![expect(
     clippy::expect_used,
@@ -479,4 +484,93 @@ fn der_wrap(tag: u8, content: &[u8]) -> Vec<u8> {
     }
     out.extend_from_slice(content);
     out
+}
+
+// ============================================================================
+// Real hardware
+//
+// Everything above builds certificates with a freshly generated key, which by
+// construction cannot chain to `PINNED_ROOTS`. These two tests use a capture
+// from a physical YubiKey 5C Nano FIPS (Enterprise) and are the only ones that
+// exercise a pinned root, so they are what fails if one is dropped, reordered,
+// or corrupted. See `fixtures/README.md` for provenance and how to regenerate.
+// ============================================================================
+
+/// AAGUID of the YubiKey the fixture was captured from.
+const FIXTURE_AAGUID: &str = "28969c24-0487-4a46-be39-37bc6337a24f";
+
+/// Decode the fixture and return its x5c chain plus the authData AAGUID.
+fn real_attestation_fixture() -> (Vec<Vec<u8>>, String) {
+    use base64::Engine as _;
+
+    let b64 = include_str!("fixtures/yubikey-5c-nano-fips-enterprise.attestation.b64");
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(b64.trim())
+        .expect("fixture is valid base64url");
+
+    let value: ciborium::Value = ciborium::from_reader(raw.as_slice()).expect("fixture is CBOR");
+    let map = value.as_map().expect("attestation object is a CBOR map");
+
+    let auth_data = map
+        .iter()
+        .find(|(k, _)| k.as_text() == Some("authData"))
+        .and_then(|(_, v)| v.as_bytes())
+        .expect("fixture has authData");
+    let aaguid =
+        vouch_common::extract_aaguid_from_auth_data(auth_data).expect("authData carries an AAGUID");
+
+    let certs = map
+        .iter()
+        .find(|(k, _)| k.as_text() == Some("attStmt"))
+        .and_then(|(_, v)| v.as_map())
+        .expect("fixture has attStmt")
+        .iter()
+        .find(|(k, _)| k.as_text() == Some("x5c"))
+        .and_then(|(_, v)| v.as_array())
+        .expect("fixture has x5c")
+        .iter()
+        .map(|c| c.as_bytes().expect("x5c element is a byte string").clone())
+        .collect();
+
+    (certs, aaguid)
+}
+
+/// A genuine YubiKey attestation chains to a pinned root, and the leaf's
+/// `id-fido-gen-ce-aaguid` extension names the model. This is the end-to-end
+/// evidence that the shipped root list matches real hardware.
+#[test]
+fn real_yubikey_chain_validates_against_a_pinned_root() {
+    let (certs, auth_data_aaguid) = real_attestation_fixture();
+    assert_eq!(
+        auth_data_aaguid, FIXTURE_AAGUID,
+        "fixture authData AAGUID drifted"
+    );
+
+    let proof = validate_attestation_chain(&certs, Some(&auth_data_aaguid))
+        .expect("a genuine YubiKey chain must validate against the pinned roots");
+
+    assert_eq!(
+        proof.cert_aaguid(),
+        Some(FIXTURE_AAGUID),
+        "the leaf certificate must name the authenticator model"
+    );
+}
+
+/// WebAuthn Level 2 section 8.2, verification procedure step 2: "If attestnCert
+/// contains an extension with OID 1.3.6.1.4.1.45724.1.1.4 (id-fido-gen-ce-aaguid)
+/// verify that the value of this extension matches the aaguid in
+/// authenticatorData." A forged authData AAGUID must not survive a real chain.
+#[test]
+fn real_yubikey_chain_rejects_mismatched_auth_data_aaguid() {
+    let (certs, _) = real_attestation_fixture();
+    let forged = "73bb0cd4-e502-49b8-9c6f-b59445bf720b";
+    assert_ne!(forged, FIXTURE_AAGUID);
+
+    let err = validate_attestation_chain(&certs, Some(forged))
+        .expect_err("an authData AAGUID the certificate does not vouch for must be rejected");
+
+    assert!(
+        matches!(err, AttestationChainError::AaguidMismatch { .. }),
+        "expected AaguidMismatch, got {err:?}"
+    );
 }

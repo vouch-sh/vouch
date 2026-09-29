@@ -2,6 +2,7 @@
 //! RFC 8725 — JWT Best Current Practices tests.
 
 use super::helpers::*;
+use crate::crypto::jwt::JwtType;
 
 #[tokio::test]
 async fn test_rfc8725_cross_type_token_substitution() {
@@ -15,7 +16,7 @@ async fn test_rfc8725_cross_type_token_substitution() {
         .state_signer
         .encode_state_token(
             &serde_json::json!({"sub": "user-1", "exp": 9_999_999_999i64, "iat": 1_000_000_000i64}),
-            crate::crypto::jwt::JwtType::RegistrationState,
+            JwtType::RegistrationState,
         )
         .await
         .expect("encode state token");
@@ -35,7 +36,16 @@ async fn test_rfc8725_cross_type_token_substitution() {
     // Valid OAuth access token (ES256, at+jwt) should work
     let user = create_test_user(&state.store, "cross-type@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let (status, _body) = http_get(
         &app,
@@ -109,12 +119,12 @@ async fn test_rfc8725_hs256_state_tokens_all_rejected_at_resource_endpoints() {
     let (app, state) = test_app().await;
 
     let hs256_types = [
-        crate::crypto::jwt::JwtType::AuthorizationCode,
-        crate::crypto::jwt::JwtType::RegistrationState,
-        crate::crypto::jwt::JwtType::BrowserRegistrationState,
-        crate::crypto::jwt::JwtType::BrowserAuthenticationState,
-        crate::crypto::jwt::JwtType::GitHubState,
-        crate::crypto::jwt::JwtType::Fido2ChallengeState,
+        JwtType::AuthorizationCode,
+        JwtType::RegistrationState,
+        JwtType::BrowserRegistrationState,
+        JwtType::BrowserAuthenticationState,
+        JwtType::GitHubState,
+        JwtType::Fido2ChallengeState,
     ];
 
     for jwt_type in hs256_types {
@@ -193,7 +203,16 @@ async fn test_rfc8725_access_token_not_accepted_at_par_as_id_token() {
     let user = create_test_user(&state.store, "par-hint@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Submit an access token as id_token_hint to PAR endpoint
     // (the token is valid ES256 but the endpoint should not be confused)

@@ -85,12 +85,6 @@ impl std::str::FromStr for AccessScope {
     }
 }
 
-impl std::fmt::Display for AccessScope {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
 /// OAuth 2.0 client application type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OAuthClientType {
@@ -127,6 +121,38 @@ impl OAuthClientType {
     pub fn requires_pkce(&self) -> bool {
         matches!(self, Self::Native | Self::Spa)
     }
+
+    /// The grants an application of this type is created able to use.
+    ///
+    /// Self-service application creation has no grant-types field — the
+    /// operator picks an application type, and the type is the statement of
+    /// intent: a Service application exists to do machine-to-machine calls, a
+    /// Native one runs on a device that may have no browser. Deriving the list
+    /// here keeps that intent in one place, and gives
+    /// [`crate::db::OAuthClient::is_authorized_for_grant`] something better
+    /// than RFC 7591 §2's registration default to resolve an absent list with.
+    ///
+    /// RFC 7591 §2's default (`["authorization_code"]`) governs a *dynamic
+    /// registration* that omitted the field — a client that could have said
+    /// otherwise and chose not to. A self-service application was never asked,
+    /// so applying that default to it says something the operator never did.
+    #[must_use]
+    pub fn default_grant_types(&self) -> &'static [&'static str] {
+        use vouch_common::protocol;
+        match self {
+            // Browser-redirect clients; the code grant is the only one they
+            // are created for.
+            Self::Web | Self::Spa => &[protocol::GRANT_TYPE_AUTHORIZATION_CODE],
+            // Installed applications: the code grant when a browser is
+            // available, RFC 8628 when one is not.
+            Self::Native => &[
+                protocol::GRANT_TYPE_AUTHORIZATION_CODE,
+                protocol::GRANT_TYPE_DEVICE_CODE,
+            ],
+            // Machine-to-machine: no user, so no code and no device flow.
+            Self::Service => &[protocol::GRANT_TYPE_CLIENT_CREDENTIALS],
+        }
+    }
 }
 
 impl std::str::FromStr for OAuthClientType {
@@ -144,12 +170,6 @@ impl std::str::FromStr for OAuthClientType {
         } else {
             Err(OAuthDocumentParseError::ClientType(s.to_string()))
         }
-    }
-}
-
-impl std::fmt::Display for OAuthClientType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
     }
 }
 
@@ -187,6 +207,28 @@ impl TokenEndpointAuthMethod {
         }
     }
 
+    /// Returns `true` for the methods whose credential is a `client_secret`.
+    ///
+    /// OIDC Core 1.0 §9: `client_secret_basic` and `client_secret_post` are
+    /// for "Clients that have received a "client_secret" value from the
+    /// Authorization Server". Every other method presents a key, a
+    /// certificate, or nothing, so a secret row on such a client is never a
+    /// credential. `client_secret_jwt` is not registrable here.
+    #[must_use]
+    pub fn uses_client_secret(&self) -> bool {
+        matches!(self, Self::ClientSecretBasic | Self::ClientSecretPost)
+    }
+
+    /// Returns `true` when a `client_secret` row authenticates a client
+    /// registered with this method under `fapi_profile`: the method uses a
+    /// secret and the client is not FAPI, whose clients `authenticate_client`
+    /// refuses a secret from. A secret row on any other client is dead, so
+    /// it may be revoked down to zero and no new one is offered.
+    #[must_use]
+    pub fn secret_is_credential(self, fapi_profile: FapiProfile) -> bool {
+        self.uses_client_secret() && fapi_profile == FapiProfile::None
+    }
+
     /// Returns `true` for the auth methods FAPI 2.0 clients may use:
     /// `private_key_jwt` (client-assertion signing) or mTLS
     /// (`tls_client_auth`, `self_signed_tls_client_auth`).
@@ -220,12 +262,6 @@ impl std::str::FromStr for TokenEndpointAuthMethod {
                 s.to_string(),
             ))
         }
-    }
-}
-
-impl std::fmt::Display for TokenEndpointAuthMethod {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
     }
 }
 
@@ -420,19 +456,19 @@ pub struct OAuthClientDoc {
     /// that were created before RS256 support was added.
     #[serde(default)]
     pub id_token_signed_response_alg: JwsAlgorithm,
-    /// RFC 8705 Section 2.1.1: subject DN for tls_client_auth.
+    /// RFC 8705 Section 2.1.2: subject DN for tls_client_auth.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_client_auth_subject_dn: Option<String>,
-    /// RFC 8705 Section 2.1.1: SAN DNS name for tls_client_auth.
+    /// RFC 8705 Section 2.1.2: SAN DNS name for tls_client_auth.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_client_auth_san_dns: Option<String>,
-    /// RFC 8705 Section 2.1.1: SAN URI for tls_client_auth.
+    /// RFC 8705 Section 2.1.2: SAN URI for tls_client_auth.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_client_auth_san_uri: Option<String>,
-    /// RFC 8705 Section 2.1.1: SAN IP for tls_client_auth.
+    /// RFC 8705 Section 2.1.2: SAN IP for tls_client_auth.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_client_auth_san_ip: Option<String>,
-    /// RFC 8705 Section 2.1.1: SAN email for tls_client_auth.
+    /// RFC 8705 Section 2.1.2: SAN email for tls_client_auth.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_client_auth_san_email: Option<String>,
     /// RFC 8705 Section 3: certificate-bound access tokens.
@@ -513,6 +549,30 @@ pub struct OAuthClientSecretDoc {
     pub description: Option<String>,
     pub expires_at: Option<Timestamp>,
     pub revoked_at: Option<Timestamp>,
+}
+
+impl OAuthClientSecretDoc {
+    /// Whether this secret is active: not revoked and not expired at `now`.
+    ///
+    /// The single definition of "active secret". The cap and floor guards in
+    /// `db::oauth` and `OAuthClientSecret::is_valid` all call it, so the
+    /// counted set and the authenticating set cannot drift apart.
+    #[must_use]
+    pub fn is_valid(&self, now: &Timestamp) -> bool {
+        is_secret_active(self.revoked_at, self.expires_at, now)
+    }
+}
+
+/// Shared "active secret" predicate over the two fields that decide it.
+///
+/// A secret expiring exactly at `now` is already inactive.
+#[must_use]
+pub(crate) fn is_secret_active(
+    revoked_at: Option<Timestamp>,
+    expires_at: Option<Timestamp>,
+    now: &Timestamp,
+) -> bool {
+    revoked_at.is_none() && expires_at.is_none_or(|exp| exp > *now)
 }
 
 impl DocumentType for OAuthClientSecretDoc {

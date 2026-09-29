@@ -4,7 +4,6 @@
 //! no arguments and flags nonzero codes) and clap's usage-error code 2 on Unix.
 
 #![expect(clippy::unwrap_used, reason = "test code")]
-
 #[test]
 fn bare_invocation_prints_help_with_platform_exit_code() {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_vouch"))

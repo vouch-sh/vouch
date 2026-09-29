@@ -6,7 +6,6 @@
     clippy::print_stderr,
     reason = "stdout and stderr are this binary's user interface"
 )]
-
 // Avoid musl's default allocator due to lackluster performance
 // https://nickb.dev/blog/default-musl-allocator-considered-harmful-to-performance
 #[cfg(target_env = "musl")]
@@ -17,11 +16,19 @@ use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand};
 use std::process::ExitCode;
 use tracing_subscriber::EnvFilter;
+use vouch_cli::fapi::key_store;
+use vouch_cli::i18n;
+use vouch_common::paths;
+
+use crate::exit_code::CliError;
 // Bring the i18n macros into the binary crate root so submodules under the
 // `vouch` binary (e.g. `fido2/unix.rs`, which is compiled into both the lib
 // and the bin) can reference them as `crate::tr!` regardless of compilation
 // context.
 pub(crate) use vouch_cli::{tr, tr_args, tr_eprintln, tr_println};
+// Validated server URLs live in the library so its FAPI helpers can require
+// them too; re-exported so `crate::server_url` paths resolve unchanged.
+pub(crate) use vouch_cli::server_url;
 
 mod client;
 mod commands;
@@ -36,7 +43,6 @@ mod fido2;
 mod git_config;
 mod install_path;
 mod integrations;
-mod server_url;
 mod session;
 mod style;
 mod utils;
@@ -74,7 +80,7 @@ async fn check_docker_credential_invocation(argv0: &str) -> Result<bool> {
 
         // The symlink carries no arguments; the profile comes from the anchor
         // `vouch setup docker` recorded for the registry.
-        commands::credential::docker::run(&operation, None)
+        commands::credential::docker::run(&operation, None, InsecureOptIn::Env)
             .await
             .map_err(|e| {
                 anyhow::anyhow!(tr_args!("err-docker-credential-vouch", e = e.to_string()))
@@ -104,7 +110,7 @@ async fn check_git_remote_codecommit_invocation(argv0: &str) -> Result<bool> {
         let url = std::env::args().nth(2).unwrap_or_default();
 
         if remote_name.is_empty() || url.is_empty() {
-            return Err(crate::exit_code::CliError::ConfigError(
+            return Err(CliError::ConfigError(
                 "usage: git-remote-codecommit <remote-name> <url>\n\
                  This is a git remote helper. Use it via:\n  \
                  git clone codecommit://[profile@]repo-name\n  \
@@ -114,7 +120,7 @@ async fn check_git_remote_codecommit_invocation(argv0: &str) -> Result<bool> {
             .into());
         }
 
-        commands::credential::codecommit::run_remote_helper(&remote_name, &url)
+        commands::credential::codecommit::run_remote_helper(&remote_name, &url, InsecureOptIn::Env)
             .await
             .map_err(|e| {
                 anyhow::anyhow!(tr_args!("err-git-remote-codecommit", e = e.to_string()))
@@ -136,9 +142,14 @@ async fn check_keyring_invocation(argv0: &str) -> Result<bool> {
         let service_url = std::env::args().nth(2);
         let username = std::env::args().nth(3);
 
-        commands::credential::pip::run(&operation, service_url.as_deref(), username.as_deref())
-            .await
-            .map_err(|e| anyhow::anyhow!(tr_args!("err-keyring", e = e.to_string())))?;
+        commands::credential::pip::run(
+            &operation,
+            service_url.as_deref(),
+            username.as_deref(),
+            InsecureOptIn::Env,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!(tr_args!("err-keyring", e = e.to_string())))?;
 
         return Ok(true);
     }
@@ -166,9 +177,11 @@ async fn check_pnpm_tokenhelper_invocation(argv0: &str) -> Result<bool> {
         let profile = flag("--profile");
 
         // Resolve session to get server URL
-        let session = crate::session::resolve_session().await.map_err(|e| {
-            anyhow::anyhow!(tr_args!("err-vouch-pnpm-tokenhelper", e = e.to_string()))
-        })?;
+        let session = session::resolve_session(InsecureOptIn::Env)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(tr_args!("err-vouch-pnpm-tokenhelper", e = e.to_string()))
+            })?;
 
         commands::credential::codeartifact::run(
             &session.server_url,
@@ -202,7 +215,16 @@ struct Cli {
     server: Option<String>,
 
     /// Allow insecure HTTP connections to non-localhost servers.
-    #[arg(long, env = "VOUCH_ALLOW_INSECURE", global = true, hide = true)]
+    ///
+    /// Parsed by the same function the agent reads `VOUCH_ALLOW_INSECURE`
+    /// with, so `1` and `true` both enable it and `0` and `false` both refuse.
+    #[arg(
+        long,
+        env = "VOUCH_ALLOW_INSECURE",
+        global = true,
+        hide = true,
+        value_parser = vouch_common::parse_allow_insecure
+    )]
     allow_insecure: bool,
 
     /// Enable verbose output.
@@ -471,6 +493,7 @@ use commands::aws::AwsCommands;
 use commands::credential::CredentialCommands;
 use commands::keys::KeysCommands;
 use commands::setup::SetupCommands;
+use server_url::InsecureOptIn;
 
 /// Stack reserve for the thread that runs the CLI. Building the clap command
 /// tree in an unoptimized build needs more than the 1 MiB Windows reserves
@@ -519,7 +542,7 @@ async fn init_and_dispatch_helper_binaries(config: Option<&config::Config>) -> R
 
     // Register the platform-native keyring store. Non-fatal: keychain access
     // already falls back to file storage in fapi::key_store when unavailable.
-    if let Err(e) = vouch_cli::fapi::key_store::init_default_store() {
+    if let Err(e) = key_store::init_default_store() {
         tracing::debug!("Could not initialize keyring store: {e}");
     }
 
@@ -564,7 +587,7 @@ fn resolve_server_url(cli: &Cli, config: &config::Config) -> Result<server_url::
 async fn run() -> Result<()> {
     // Relocate any legacy ~/.vouch/ files into the XDG base directories before
     // the config is read. Idempotent and a no-op once migrated / for new installs.
-    vouch_common::paths::migrate_legacy_layout();
+    paths::migrate_legacy_layout();
 
     let config = config::Config::load();
 
@@ -575,8 +598,8 @@ async fn run() -> Result<()> {
     // Install the negotiated locale into the OnceLock before `Cli::parse()`
     // expands the `tr!()` calls embedded in the clap derive attributes. The
     // pre-scan honors `--lang` from argv since clap hasn't parsed it yet.
-    let preferred = vouch_cli::i18n::preresolve_lang_from_argv_and_env();
-    vouch_cli::i18n::init(preferred)?;
+    let preferred = i18n::preresolve_lang_from_argv_and_env();
+    i18n::init(preferred)?;
 
     // On Windows, a bare `vouch` prints help and exits 0: the winget
     // validation pipeline runs the portable exe with no arguments and flags
@@ -604,7 +627,8 @@ async fn run() -> Result<()> {
 
     let config = config?;
     let server = resolve_server_url(&cli, &config)?;
-    let server = server.as_str();
+    let server = &server;
+    let opt_in = InsecureOptIn::Cli(cli.allow_insecure);
 
     match cli.command {
         Commands::Enroll => commands::enroll::run(server).await,
@@ -613,7 +637,7 @@ async fn run() -> Result<()> {
         }
         Commands::Login { timeout } => commands::login::run(server, timeout).await,
         Commands::Status { format } => {
-            commands::status::run(server, format.unwrap_or_default()).await
+            commands::status::run(server, opt_in, format.unwrap_or_default()).await
         }
         Commands::Logout => commands::logout::run(server).await,
         Commands::Env {
@@ -687,14 +711,14 @@ async fn run() -> Result<()> {
                 commands::credential::ssh::run(server, key.as_deref(), force).await
             }
             CredentialCommands::Github { operation } => {
-                commands::credential::github::run(&operation).await
+                commands::credential::github::run(&operation, opt_in).await
             }
             CredentialCommands::Docker { operation, profile } => {
-                commands::credential::docker::run(&operation, profile.as_deref()).await
+                commands::credential::docker::run(&operation, profile.as_deref(), opt_in).await
             }
-            CredentialCommands::Cargo { .. } => commands::credential::cargo::run().await,
+            CredentialCommands::Cargo { .. } => commands::credential::cargo::run(opt_in).await,
             CredentialCommands::Codecommit { operation, profile } => {
-                commands::credential::codecommit::run(&operation, profile.as_deref()).await
+                commands::credential::codecommit::run(&operation, profile.as_deref(), opt_in).await
             }
             CredentialCommands::Pip {
                 operation,
@@ -705,6 +729,7 @@ async fn run() -> Result<()> {
                     &operation,
                     service_url.as_deref(),
                     username.as_deref(),
+                    opt_in,
                 )
                 .await
             }
@@ -808,7 +833,7 @@ async fn run() -> Result<()> {
                 commands::setup::ssh::run(server, hosts.as_deref()).await
             }
             SetupCommands::Github { host, configure } => {
-                commands::setup::github::run(&host, configure).await
+                commands::setup::github::run(server, &host, configure).await
             }
             SetupCommands::Eks {
                 cluster,
@@ -833,7 +858,7 @@ async fn run() -> Result<()> {
                 kubeconfig,
             } => {
                 commands::setup::kubernetes::run(
-                    server,
+                    server.as_str(),
                     &cluster,
                     &k8s_server,
                     certificate_authority.as_deref(),
@@ -946,6 +971,59 @@ async fn run() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::credential::aws::test_support::ENV_LOCK;
+
+    // -- VOUCH_ALLOW_INSECURE --
+
+    /// `VOUCH_ALLOW_INSECURE` is parsed by `vouch_common::parse_allow_insecure`,
+    /// the function the agent reads it with. `1`, the value the CLI's own
+    /// messages give, parses on every subcommand, `0` and `false` refuse, and
+    /// an unrecognized value is a parse error rather than either answer.
+    #[tokio::test]
+    #[expect(
+        unsafe_code,
+        reason = "env mutation under ENV_LOCK; the prior value is restored before asserting"
+    )]
+    async fn test_allow_insecure_env_values() {
+        let _guard = ENV_LOCK.lock().await;
+        let prior = std::env::var_os("VOUCH_ALLOW_INSECURE");
+        let mut outcomes = Vec::new();
+        for value in ["1", "true", "0", "false", "maybe"] {
+            // SAFETY: ENV_LOCK serialises env mutation in this test binary.
+            unsafe { std::env::set_var("VOUCH_ALLOW_INSECURE", value) };
+            let parsed = Cli::try_parse_from(["vouch", "doctor"]).map(|cli| cli.allow_insecure);
+            outcomes.push((value, parsed.ok()));
+        }
+        // SAFETY: as above; restores the prior value before any assertion.
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var("VOUCH_ALLOW_INSECURE", value),
+                None => std::env::remove_var("VOUCH_ALLOW_INSECURE"),
+            }
+        }
+
+        assert_eq!(
+            outcomes,
+            vec![
+                ("1", Some(true)),
+                ("true", Some(true)),
+                ("0", Some(false)),
+                ("false", Some(false)),
+                ("maybe", None),
+            ]
+        );
+    }
+
+    /// The `--allow-insecure` flag still takes no value. Holds `ENV_LOCK`
+    /// because clap also reads `VOUCH_ALLOW_INSECURE`.
+    #[tokio::test]
+    async fn test_allow_insecure_flag() {
+        let _guard = ENV_LOCK.lock().await;
+        let parsed = Cli::try_parse_from(["vouch", "--allow-insecure", "doctor"])
+            .map(|cli| cli.allow_insecure)
+            .ok();
+        assert_eq!(parsed, Some(true));
+    }
 
     // -- uses_server --
 

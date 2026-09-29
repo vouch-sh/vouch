@@ -21,8 +21,8 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use vouch_server::db::{self, AuditEventKind, CreateAuthenticatorParams};
-use vouch_server::test_utils::build_client_assertion;
+use vouch_server::db::{self, AuditEventKind, CreateAuthenticatorParams, TokenEndpointAuthMethod};
+use vouch_server::test_utils::{self, TestOAuthClient, build_client_assertion};
 use vouch_tests::{IntegrationMockDevice, TestHarness};
 
 // ── Shared helpers ───────────────────────────────────────────────────────
@@ -46,8 +46,22 @@ async fn seed_event(
         .expect("seed audit event");
 }
 
-/// Assert an OAuth error response is a policy denial.
-fn assert_access_denied(status: u16, json: &serde_json::Value, context: &str) {
+/// Assert an OAuth error response is a policy denial on the exchange grant.
+/// RFC 8693 §2.2.2: a subject token "unacceptable based on policy" MUST be
+/// reported with the `invalid_request` error code.
+fn assert_exchange_policy_denied(status: u16, json: &serde_json::Value, context: &str) {
+    assert_eq!(status, 400, "{context}: expected denial. Response: {json}");
+    assert_eq!(
+        json["error"].as_str().unwrap_or(""),
+        "invalid_request",
+        "{context}: expected invalid_request. Response: {json}"
+    );
+}
+
+/// Assert an OAuth error response is a policy denial on the FIDO2 assertion
+/// grant, which keeps `access_denied` (RFC 8693 §2.2.2 governs only the
+/// exchange grant).
+fn assert_login_policy_denied(status: u16, json: &serde_json::Value, context: &str) {
     assert_eq!(status, 400, "{context}: expected denial. Response: {json}");
     assert_eq!(
         json["error"].as_str().unwrap_or(""),
@@ -127,7 +141,7 @@ async fn test_exchange_step_up_denies_without_recent_login() {
     )
     .await;
     let (status, json) = do_exchange(&harness, &token, &auth).await;
-    assert_access_denied(status, &json, "exchange without any login history");
+    assert_exchange_policy_denied(status, &json, "exchange without any login history");
     assert!(
         json["error_description"]
             .as_str()
@@ -166,7 +180,7 @@ async fn test_exchange_step_up_denies_with_stale_login() {
     .await;
     seed_event(&harness, AuditEventKind::LoginSuccess, &user.id, 1800, "{}").await;
     let (status, json) = do_exchange(&harness, &token, &auth).await;
-    assert_access_denied(status, &json, "exchange with a 30-minute-old login");
+    assert_exchange_policy_denied(status, &json, "exchange with a 30-minute-old login");
 }
 
 /// Another user's fresh login must not satisfy this user's window
@@ -189,7 +203,7 @@ async fn test_exchange_step_up_ignores_other_users_logins() {
         .expect("other user");
     seed_event(&harness, AuditEventKind::LoginSuccess, &other.id, 60, "{}").await;
     let (status, json) = do_exchange(&harness, &token, &auth).await;
-    assert_access_denied(status, &json, "another principal's login must not count");
+    assert_exchange_policy_denied(status, &json, "another principal's login must not count");
 }
 
 // ── Token exchange: logout invalidates ───────────────────────────────────
@@ -206,7 +220,7 @@ async fn test_logout_invalidates_exchange_denies_after_logout() {
     seed_event(&harness, AuditEventKind::LoginSuccess, &user.id, 600, "{}").await;
     seed_event(&harness, AuditEventKind::Logout, &user.id, 300, "{}").await;
     let (status, json) = do_exchange(&harness, &token, &auth).await;
-    assert_access_denied(status, &json, "exchange after logout");
+    assert_exchange_policy_denied(status, &json, "exchange after logout");
 }
 
 /// logout → re-login → exchange is allowed again.
@@ -269,7 +283,7 @@ async fn test_exchange_ip_consistency_denies_different_ip() {
     )
     .await;
     let (status, json) = do_exchange(&harness, &token, &auth).await;
-    assert_access_denied(status, &json, "different-IP login must not satisfy the pin");
+    assert_exchange_policy_denied(status, &json, "different-IP login must not satisfy the pin");
 }
 
 // ── FIDO2 grant: aggregation policies ────────────────────────────────────
@@ -277,10 +291,7 @@ async fn test_exchange_ip_consistency_denies_different_ip() {
 // The helpers below are duplicated from fido2_posture_e2e.rs (separate
 // test binaries cannot share modules without a support-crate refactor).
 
-async fn create_jwt_client(
-    harness: &TestHarness,
-    user_id: &str,
-) -> (vouch_server::test_utils::TestOAuthClient, Vec<u8>) {
+async fn create_jwt_client(harness: &TestHarness, user_id: &str) -> (TestOAuthClient, Vec<u8>) {
     use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, KeyPair};
     use vouch_server::test_utils::{TestClientSpec, TestJwks};
 
@@ -296,15 +307,13 @@ async fn create_jwt_client(
     let jwks = serde_json::json!({
         "keys": [{ "kty": "EC", "crv": "P-256", "alg": "ES256", "kid": "test-key-1", "x": x, "y": y }]
     });
-    let client = vouch_server::test_utils::create_test_client(
+    let client = test_utils::create_test_client(
         &harness.state.store,
         user_id,
         TestClientSpec {
             name: "Temporal E2E Client".to_string(),
             jwks: TestJwks::Custom(jwks),
-            token_endpoint_auth_method: Some(
-                vouch_server::db::TokenEndpointAuthMethod::PrivateKeyJwt,
-            ),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
             ..Default::default()
         },
     )
@@ -315,7 +324,6 @@ async fn create_jwt_client(
 async fn register_mock_device_in_db(
     harness: &TestHarness,
     user_id: &str,
-    user_email: &str,
     device: &IntegrationMockDevice,
 ) -> String {
     let user_handle = uuid::Uuid::parse_str(user_id)
@@ -326,22 +334,36 @@ async fn register_mock_device_in_db(
         &harness.state.store,
         &CreateAuthenticatorParams {
             user_id,
-            user_email,
             name: "Mock FIDO2 Key",
             credential_id: &device.credential_id(),
             public_key: &device.inner_public_key_cose(),
             aaguid: None,
             user_handle: Some(&user_handle),
             attestation_verified: false,
+            counter: 0,
         },
     )
     .await
     .expect("Failed to create authenticator for mock device")
 }
 
-async fn get_challenge(harness: &TestHarness) -> (Vec<u8>, String) {
+async fn get_challenge(
+    harness: &TestHarness,
+    client: &TestOAuthClient,
+    pkcs8: &[u8],
+) -> (Vec<u8>, String) {
+    let client_assertion = build_client_assertion(
+        &client.client_id,
+        "https://test.example.com/oauth/token",
+        pkcs8,
+        None,
+    );
+    let body = format!(
+        "client_assertion_type=urn%3Aietf%3Aparams%3Aoauth%3Aclient-assertion-type%3Ajwt-bearer\
+         &client_assertion={client_assertion}"
+    );
     let response = harness
-        .post_form("/oauth/fido2/challenge", "")
+        .post_form("/oauth/fido2/challenge", &body)
         .await
         .expect("Failed to get challenge");
     assert_eq!(response.status, 200);
@@ -361,22 +383,41 @@ async fn fido2_grant(
     harness: &TestHarness,
     device: &IntegrationMockDevice,
     user_id: &str,
-    client: &vouch_server::test_utils::TestOAuthClient,
+    client: &TestOAuthClient,
     pkcs8: &[u8],
 ) -> (u16, serde_json::Value) {
-    let (challenge, state_jwt) = get_challenge(harness).await;
+    signed_grant(harness, device, user_id, client, pkcs8, false).await
+}
+
+/// Run the FIDO2 assertion grant with `device`'s assertion but the given
+/// `user_handle`, optionally corrupting the signature. The request is
+/// well-formed, so it reaches the authenticator lookup and, when that
+/// passes, signature verification.
+async fn signed_grant(
+    harness: &TestHarness,
+    device: &IntegrationMockDevice,
+    user_handle: &str,
+    client: &TestOAuthClient,
+    pkcs8: &[u8],
+    tamper_signature: bool,
+) -> (u16, serde_json::Value) {
+    let (challenge, state_jwt) = get_challenge(harness, client, pkcs8).await;
     let auth_result = device
         .authenticate("test.example.com", &challenge)
         .expect("Mock device authentication failed");
-    let user_handle = uuid::Uuid::parse_str(user_id)
-        .expect("user_id must be a UUID")
+    let user_handle = uuid::Uuid::parse_str(user_handle)
+        .expect("user_handle must be a UUID")
         .as_bytes()
         .to_vec();
+    let mut signature = auth_result.signature.as_bytes().to_vec();
+    if tamper_signature && let Some(last) = signature.last_mut() {
+        *last ^= 0x01;
+    }
     let assertion_payload = serde_json::json!({
         "state": state_jwt,
         "credential_id": URL_SAFE_NO_PAD.encode(&auth_result.credential_id),
         "authenticator_data": URL_SAFE_NO_PAD.encode(&auth_result.authenticator_data),
-        "signature": URL_SAFE_NO_PAD.encode(&auth_result.signature),
+        "signature": URL_SAFE_NO_PAD.encode(&signature),
         "client_data_json": URL_SAFE_NO_PAD.encode(&auth_result.client_data_json),
         "user_handle": URL_SAFE_NO_PAD.encode(&user_handle),
     });
@@ -412,10 +453,46 @@ async fn grant_scenario(
     TestHarness,
     db::User,
     IntegrationMockDevice,
-    vouch_server::test_utils::TestOAuthClient,
+    TestOAuthClient,
     Vec<u8>,
 ) {
-    let harness = TestHarness::new().await;
+    grant_scenario_on(TestHarness::new().await, slugs, domain, email).await
+}
+
+/// [`grant_scenario`] with the per-IP auth rate limiter off, for tests that
+/// drive more grants than its burst (8 requests, and each grant is two).
+///
+/// Setting `certification_test_token` is what disables the limiter in the
+/// router; neither the FIDO2 assertion grant nor the temporal policies read
+/// it, so it does not change the behaviour under test. Spacing requests out
+/// with sleeps instead would make the tests wait on the wall clock.
+async fn unthrottled_grant_scenario(
+    slugs: &[&str],
+    domain: &str,
+    email: &str,
+) -> (
+    TestHarness,
+    db::User,
+    IntegrationMockDevice,
+    TestOAuthClient,
+    Vec<u8>,
+) {
+    let (_, state) = test_utils::test_app_with_certification().await;
+    grant_scenario_on(TestHarness::from_state(state), slugs, domain, email).await
+}
+
+async fn grant_scenario_on(
+    harness: TestHarness,
+    slugs: &[&str],
+    domain: &str,
+    email: &str,
+) -> (
+    TestHarness,
+    db::User,
+    IntegrationMockDevice,
+    TestOAuthClient,
+    Vec<u8>,
+) {
     let org = harness.create_org(domain).await.expect("create org");
     let user = harness
         .create_user_in_org(email, &org.id, false)
@@ -429,7 +506,7 @@ async fn grant_scenario(
     .await
     .expect("activate slugs");
     let device = IntegrationMockDevice::new();
-    register_mock_device_in_db(&harness, &user.id, &user.email, &device).await;
+    register_mock_device_in_db(&harness, &user.id, &device).await;
     let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
     (harness, user, device, client, pkcs8)
 }
@@ -454,7 +531,7 @@ async fn test_failed_login_burst_denies_grant() {
         .await;
     }
     let (status, json) = fido2_grant(&harness, &device, &user.id, &client, &pkcs8).await;
-    assert_access_denied(status, &json, "5 failed logins in 10m");
+    assert_login_policy_denied(status, &json, "5 failed logins in 10m");
     assert!(
         json["error_description"]
             .as_str()
@@ -515,7 +592,7 @@ async fn test_issuance_rate_limit_denies_at_cap() {
         .await;
     }
     let (status, json) = fido2_grant(&harness, &device, &user.id, &client, &pkcs8).await;
-    assert_access_denied(status, &json, "10 issuances in 1h");
+    assert_login_policy_denied(status, &json, "10 issuances in 1h");
     assert!(
         json["error_description"]
             .as_str()
@@ -564,5 +641,335 @@ async fn test_issuance_rate_limit_under_cap_allows_and_records() {
         rows.len(),
         10,
         "the FIDO2 grant must write an oauth_token_issued audit row"
+    );
+}
+
+// ── failed_login_burst counts only verified principals ───────────────────
+//
+// A `login_failed` row feeds `failed_login_burst` through its `user_id`
+// column. The column may name a user only when the server verified that
+// user: a WebAuthn assertion whose signature checked out, or an IdP callback.
+// Everything the lookup and signature check see before that (the
+// `user_handle`, the credential ID) is request-supplied, and WebAuthn does
+// not treat credential IDs as secrets, so none of it may pin rows on a user.
+
+/// Every `login_failed` row, in insertion order.
+async fn all_login_failed(harness: &TestHarness) -> Vec<db::AuditEvent> {
+    harness
+        .state
+        .audit
+        .query_events(&db::AuditEventFilter {
+            event_types: Some(vec!["login_failed".to_string()]),
+            ..db::AuditEventFilter::default()
+        })
+        .await
+        .expect("query audit")
+}
+
+/// Setup shared by the unverified-refusal tests: a victim in an org with
+/// `failed_login_burst` active, and an attacker in another org with their
+/// own registered key and FAPI client.
+struct LockoutScenario {
+    harness: TestHarness,
+    victim: db::User,
+    victim_device: IntegrationMockDevice,
+    victim_client: TestOAuthClient,
+    victim_pkcs8: Vec<u8>,
+    attacker: db::User,
+    attacker_device: IntegrationMockDevice,
+    attacker_client: TestOAuthClient,
+    attacker_pkcs8: Vec<u8>,
+}
+
+async fn lockout_scenario(tag: &str) -> LockoutScenario {
+    let (harness, victim, victim_device, victim_client, victim_pkcs8) = unthrottled_grant_scenario(
+        &["failed_login_burst"],
+        &format!("{tag}-victim.example.com"),
+        &format!("victim@{tag}-victim.example.com"),
+    )
+    .await;
+    let attacker_org = harness
+        .create_org(&format!("{tag}-attacker.example.com"))
+        .await
+        .expect("attacker org");
+    let attacker = harness
+        .create_user_in_org(
+            &format!("attacker@{tag}-attacker.example.com"),
+            &attacker_org.id,
+            false,
+        )
+        .await
+        .expect("attacker user");
+    let attacker_device = IntegrationMockDevice::new();
+    register_mock_device_in_db(&harness, &attacker.id, &attacker_device).await;
+    let (attacker_client, attacker_pkcs8) = create_jwt_client(&harness, &attacker.id).await;
+    LockoutScenario {
+        harness,
+        victim,
+        victim_device,
+        victim_client,
+        victim_pkcs8,
+        attacker,
+        attacker_device,
+        attacker_client,
+        attacker_pkcs8,
+    }
+}
+
+/// How the attacker's grant is forged.
+#[derive(Debug, Clone, Copy)]
+enum Forgery {
+    /// A credential ID that names no stored credential, with the victim's
+    /// id as `user_handle`.
+    UnknownCredential,
+    /// The attacker's own registered credential with the victim's id as
+    /// `user_handle`.
+    ForgedUserHandle,
+    /// The victim's credential ID (not a secret) with the attacker's id as
+    /// `user_handle`.
+    VictimCredentialId,
+    /// The victim's credential ID and `user_handle` with a signature that
+    /// does not verify.
+    BadSignature,
+}
+
+/// Five forged grants of one kind must each be refused, leave no
+/// `login_failed` row naming anyone, and leave the victim able to log in.
+async fn assert_forgery_cannot_lock_out(forgery: Forgery, tag: &str) {
+    let sc = Box::pin(lockout_scenario(tag)).await;
+    let unregistered = IntegrationMockDevice::new();
+    for i in 0..5 {
+        let (status, json) = match forgery {
+            Forgery::UnknownCredential => {
+                signed_grant(
+                    &sc.harness,
+                    &unregistered,
+                    &sc.victim.id,
+                    &sc.attacker_client,
+                    &sc.attacker_pkcs8,
+                    false,
+                )
+                .await
+            }
+            Forgery::ForgedUserHandle => {
+                signed_grant(
+                    &sc.harness,
+                    &sc.attacker_device,
+                    &sc.victim.id,
+                    &sc.attacker_client,
+                    &sc.attacker_pkcs8,
+                    false,
+                )
+                .await
+            }
+            Forgery::VictimCredentialId => {
+                signed_grant(
+                    &sc.harness,
+                    &sc.victim_device,
+                    &sc.attacker.id,
+                    &sc.attacker_client,
+                    &sc.attacker_pkcs8,
+                    false,
+                )
+                .await
+            }
+            Forgery::BadSignature => {
+                signed_grant(
+                    &sc.harness,
+                    &sc.victim_device,
+                    &sc.victim.id,
+                    &sc.attacker_client,
+                    &sc.attacker_pkcs8,
+                    true,
+                )
+                .await
+            }
+        };
+        assert_eq!(
+            status, 400,
+            "{forgery:?} grant #{i} must be refused: {json}"
+        );
+        assert_eq!(
+            json["error"].as_str().unwrap_or(""),
+            "invalid_grant",
+            "{forgery:?} grant #{i} must be invalid_grant: {json}"
+        );
+    }
+
+    // The refusals stay in the audit trail, but none names a user: the
+    // `user_id` column is what `failed_login_burst` counts.
+    let rows = all_login_failed(&sc.harness).await;
+    assert_eq!(
+        rows.len(),
+        5,
+        "{forgery:?}: each refusal leaves one login_failed row: {rows:?}"
+    );
+    assert!(
+        rows.iter().all(|r| r.user_id.is_none()),
+        "{forgery:?}: no refusal before a verified signature may be attributed: {rows:?}"
+    );
+    for row in &rows {
+        let data: serde_json::Value = serde_json::from_str(&row.data).expect("payload JSON");
+        assert!(
+            data.get("user_id").is_none(),
+            "{forgery:?}: the payload must not name an attributed user: {data}"
+        );
+        assert!(
+            data.get("asserted_user_id")
+                .and_then(|v| v.as_str())
+                .is_some(),
+            "{forgery:?}: the asserted user_handle is kept for forensics: {data}"
+        );
+    }
+
+    let (status, json) = fido2_grant(
+        &sc.harness,
+        &sc.victim_device,
+        &sc.victim.id,
+        &sc.victim_client,
+        &sc.victim_pkcs8,
+    )
+    .await;
+    assert_eq!(
+        status, 200,
+        "{forgery:?}: five forged grants must not lock the victim out: {json}"
+    );
+    assert!(
+        json.get("access_token").is_some(),
+        "{forgery:?}: the victim's grant must issue a token: {json}"
+    );
+}
+
+#[tokio::test]
+async fn test_failed_login_burst_ignores_unknown_credential() {
+    Box::pin(assert_forgery_cannot_lock_out(
+        Forgery::UnknownCredential,
+        "unknown-cred",
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn test_failed_login_burst_ignores_forged_user_handle() {
+    Box::pin(assert_forgery_cannot_lock_out(
+        Forgery::ForgedUserHandle,
+        "forged-handle",
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn test_failed_login_burst_ignores_presented_victim_credential_id() {
+    Box::pin(assert_forgery_cannot_lock_out(
+        Forgery::VictimCredentialId,
+        "victim-cred",
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn test_failed_login_burst_ignores_bad_signature() {
+    Box::pin(assert_forgery_cannot_lock_out(
+        Forgery::BadSignature,
+        "bad-sig",
+    ))
+    .await;
+}
+
+/// A storage fault during the authenticator lookup is a 5xx, not an
+/// authentication refusal: it writes no `login_failed` row, so five of them
+/// cannot deny the grant that follows the repair.
+#[tokio::test]
+async fn test_failed_login_burst_ignores_storage_faults() {
+    let (harness, user, device, client, pkcs8) = unthrottled_grant_scenario(
+        &["failed_login_burst"],
+        "storage-fault-burst.example.com",
+        "storage-fault-burst@storage-fault-burst.example.com",
+    )
+    .await;
+    let auth_id = db::get_authenticators_for_user(&harness.state.store, &user.id)
+        .await
+        .expect("list authenticators")
+        .first()
+        .expect("registered authenticator")
+        .id
+        .clone();
+
+    // Each grant's lookup now fails at the storage layer.
+    test_utils::corrupt_document(&harness.state.store, &auth_id).await;
+    for i in 0..5 {
+        let (status, json) = fido2_grant(&harness, &device, &user.id, &client, &pkcs8).await;
+        assert_eq!(status, 500, "storage fault #{i} must be a 5xx: {json}");
+        assert_eq!(
+            json["error"].as_str().unwrap_or(""),
+            "server_error",
+            "storage fault #{i} must report server_error: {json}"
+        );
+    }
+    let rows = all_login_failed(&harness).await;
+    assert!(
+        rows.is_empty(),
+        "a storage fault must not be recorded as a login failure: {rows:?}"
+    );
+
+    // Repair the record; the next grant must not be denied.
+    test_utils::remove_test_authenticator(&harness.state.store, &auth_id).await;
+    register_mock_device_in_db(&harness, &user.id, &device).await;
+    let (status, json) = fido2_grant(&harness, &device, &user.id, &client, &pkcs8).await;
+    assert_eq!(
+        status, 200,
+        "storage faults must not deny the next grant: {json}"
+    );
+}
+
+/// A refusal after the assertion verified is the user's own, so it stays
+/// attributed and counts: the posture denial `failed_login_burst` itself
+/// issues lands in the user's history as a sixth failure.
+#[tokio::test]
+async fn test_verified_policy_denial_is_attributed_to_the_user() {
+    let (harness, user, device, client, pkcs8) = grant_scenario(
+        &["failed_login_burst"],
+        "verified-denial.example.com",
+        "verified-denial@verified-denial.example.com",
+    )
+    .await;
+    for i in 0..5_i64 {
+        seed_event(
+            &harness,
+            AuditEventKind::LoginFailed,
+            &user.id,
+            120 + i,
+            "{}",
+        )
+        .await;
+    }
+    let (status, json) = fido2_grant(&harness, &device, &user.id, &client, &pkcs8).await;
+    assert_login_policy_denied(status, &json, "5 failed logins in 10m");
+
+    let rows = harness
+        .state
+        .audit
+        .query_events(&db::AuditEventFilter {
+            event_types: Some(vec!["login_failed".to_string()]),
+            user_id: Some(user.id.clone()),
+            ..db::AuditEventFilter::default()
+        })
+        .await
+        .expect("query audit");
+    assert_eq!(
+        rows.len(),
+        6,
+        "the verified denial must be attributed to the user: {rows:?}"
+    );
+    let denial = rows
+        .iter()
+        .find(|r| r.data.contains("posture policy denied"))
+        .expect("posture denial row");
+    let data: serde_json::Value = serde_json::from_str(&denial.data).expect("payload JSON");
+    assert_eq!(data["user_id"].as_str(), Some(user.id.as_str()), "{data}");
+    assert_eq!(
+        denial.email_domain.as_deref(),
+        Some("verified-denial.example.com"),
+        "the verified denial lands in the user's org feed"
     );
 }

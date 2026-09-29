@@ -6,13 +6,13 @@
 //! - RFC 7662 - OAuth 2.0 Token Introspection
 
 use crate::AppState;
+use crate::arrival::ArrivalTime;
 use crate::db::ClientInfo;
 use crate::error::ServiceError;
-use crate::handlers::extractors::OAuthForm;
+use crate::handlers::extractors::{OAuthForm, OptionalClientCert};
 use crate::services::oidc::introspection::{
     introspect_token as svc_introspect, revoke_token as svc_revoke, sign_introspection_jwt,
 };
-use crate::services::oidc::token::ClientAuthError;
 use axum::{
     Json,
     extract::State,
@@ -154,20 +154,23 @@ impl ClientAuthFields for IntrospectRequest {
 /// Returns 200 OK regardless of whether the token was valid (security best practice).
 /// Supports `client_secret_basic`, `client_secret_post`, and `private_key_jwt` auth.
 pub(crate) async fn revoke(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     client_info: ClientInfo,
+    client_cert: OptionalClientCert,
     headers: HeaderMap,
     OAuthForm(params): OAuthForm<RevokeRequest>,
 ) -> Response {
     // RFC 7009 Section 2.1: Authenticate the calling client.
-    // Supports client_secret_basic, client_secret_post, and private_key_jwt.
     let auth = match extract_client_auth(&headers, &params) {
         Ok(auth) => auth,
         Err(response) => return response,
     };
 
-    let (caller_client_id, pending_jti) = match complete_client_auth(&state, auth).await {
-        Ok(Some(a)) => (a.client_id, a.pending_jti),
+    // A replayed `private_key_jwt` assertion fails here, before `svc_revoke`
+    // deletes anything.
+    let caller_client_id = match complete_client_auth(&state, auth, &client_cert, arrival).await {
+        Ok(Some(a)) => a.client_id,
         Ok(None) => {
             // No credentials provided → 401 with the shared challenge.
             return with_client_auth_challenge(
@@ -187,22 +190,6 @@ pub(crate) async fn revoke(
     )
     .await;
 
-    // Commit JTI after revocation so clients can retry on failure.
-    if let Some(p) = pending_jti {
-        match p.commit(&state).await {
-            Ok(_claim) => {}
-            Err(ClientAuthError::InvalidCredentials) => {
-                // JTI was already used — reject so the client generates a new assertion.
-                return StatusCode::UNAUTHORIZED.into_response();
-            }
-            Err(e) => {
-                // Transient DB error. Revocation already succeeded — return 200
-                // per RFC 7009 §2 and log for ops visibility.
-                tracing::warn!("JTI commit failed for revoke (revocation succeeded): {e:?}");
-            }
-        }
-    }
-
     // Always return 200 per RFC 7009 Section 2 (for valid clients)
     StatusCode::OK.into_response()
 }
@@ -214,19 +201,21 @@ pub(crate) async fn revoke(
 /// credentials, or `private_key_jwt` (RFC 7523).
 /// Returns token metadata if valid, or `{"active": false}` if invalid or auth fails.
 pub(crate) async fn introspect(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
+    client_cert: OptionalClientCert,
     headers: HeaderMap,
     OAuthForm(params): OAuthForm<IntrospectRequest>,
 ) -> Response {
     // RFC 7662 Section 2.1: The introspection endpoint MUST authenticate the caller.
-    // Supports client_secret_basic, client_secret_post, and private_key_jwt.
     let auth = match extract_client_auth(&headers, &params) {
         Ok(auth) => auth,
         Err(response) => return response,
     };
 
-    let (authenticated_client, pending_jti) = match complete_client_auth(&state, auth).await {
-        Ok(Some(a)) => (a.client.client, a.pending_jti),
+    let authenticated_client = match complete_client_auth(&state, auth, &client_cert, arrival).await
+    {
+        Ok(Some(a)) => a.client,
         Ok(None) => {
             // No credentials provided → 401 with the shared challenge.
             return with_client_auth_challenge(
@@ -249,6 +238,7 @@ pub(crate) async fn introspect(
         params.token.expose_secret(),
         params.token_type_hint.as_deref(),
         Some(client_id.as_str()),
+        arrival,
     )
     .await
     {
@@ -258,23 +248,6 @@ pub(crate) async fn introspect(
             return introspect_error_response(e);
         }
     };
-
-    // Commit JTI after introspection so clients can retry on failure.
-    if let Some(p) = pending_jti {
-        match p.commit(&state).await {
-            Ok(_claim) => {}
-            Err(ClientAuthError::InvalidCredentials) => {
-                // JTI was already used — reject so the client generates a new assertion.
-                return StatusCode::UNAUTHORIZED.into_response();
-            }
-            Err(e) => {
-                // Transient DB error. Introspection already succeeded — return the
-                // result per defense-in-depth: prefer denying replay over dropping
-                // a valid response. Log for ops visibility.
-                tracing::warn!("JTI commit failed for introspect (returning result anyway): {e:?}");
-            }
-        }
-    }
 
     if wants_jwt {
         let jwt_result =

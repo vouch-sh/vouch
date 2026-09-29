@@ -9,12 +9,15 @@
 //! Per RFC 6749 Section 4.4.3, no refresh token is included in the response.
 
 use crate::AppState;
-use crate::db::{OAuthClient, SessionPurpose};
-use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
+use crate::arrival::ArrivalTime;
+use crate::assurance::HardwareVerification;
+use crate::db::SessionPurpose;
+use crate::error::ServiceResult;
 use crate::services::auth::{
     CreateOAuthTokenParams, TokenBinding, TokenIssuanceProof, create_oauth_access_token,
 };
 use crate::services::oidc::ScopeSet;
+use crate::services::oidc::validated_client::ValidatedOAuthClient;
 use std::sync::Arc;
 
 /// Result of a client credentials grant exchange.
@@ -37,28 +40,14 @@ pub struct ClientCredentialsResult {
 /// * `requested_scope` - Optional scope requested by the client
 /// * `mtls_cert_thumbprint` - RFC 8705 certificate thumbprint for token binding (if applicable)
 ///
-/// # Errors
-/// Returns `unauthorized_client` if the client does not have the
-/// `client_credentials` grant type registered.
 pub(crate) async fn exchange_client_credentials(
     state: &Arc<AppState>,
-    client: &OAuthClient,
+    client: &ValidatedOAuthClient,
     requested_scope: Option<&str>,
     binding: TokenBinding<'_>,
     proof: TokenIssuanceProof,
+    arrival: ArrivalTime,
 ) -> ServiceResult<ClientCredentialsResult> {
-    // Verify client has client_credentials in its registered grant_types
-    let has_grant = client
-        .grant_types
-        .as_ref()
-        .is_some_and(|gts| gts.iter().any(|g| g == "client_credentials"));
-    if !has_grant {
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::UnauthorizedClient,
-            "Client is not authorized for client_credentials grant",
-        ));
-    }
-
     // Filter out openid and email scopes — neither is meaningful without a user.
     let scope = requested_scope.map(|s| {
         let requested = ScopeSet::parse(s);
@@ -80,14 +69,16 @@ pub(crate) async fn exchange_client_credentials(
             binding,
             act: None,
             audience: None,
-            auth_time: None,
-            hardware_verification: crate::services::auth::HardwareVerification::NotVerified,
+            max_lifetime_secs: None,
+            hardware_verification: HardwareVerification::NotVerified,
             session_purpose: SessionPurpose::M2MAccessToken,
             authorization_details: None,
             hardware_aaguid: None,
             org_domain: None,
+            source_code_hash: None,
         },
         proof,
+        arrival,
     )
     .await?;
 
@@ -111,8 +102,13 @@ pub(crate) async fn exchange_client_credentials(
 )]
 mod tests {
     use super::*;
-    use crate::services::auth::{ClientAuthProof, GrantProof, SenderConstraintProof};
-    use crate::services::oidc::OAuthScope;
+    use crate::db::{self, AccessScope, OAuthClientType, TokenEndpointAuthMethod};
+    use crate::services::auth::{
+        self, ClientAuthProof, DecodedToken, GrantProof, SenderConstraintProof,
+    };
+    use crate::services::oidc::token::MtlsCertVerification;
+    use crate::services::oidc::{OAuthScope, mtls};
+    use crate::test_utils::test_arrival;
     use secrecy::ExposeSecret;
 
     #[test]
@@ -142,18 +138,18 @@ mod tests {
         let state = test_app_state().await;
 
         // Create an OAuth client with the client_credentials grant type
-        let (client_record, _client_id) = crate::db::create_oauth_client(
+        let (client_record, _client_id) = db::create_oauth_client(
             &state.store,
             &CreateOAuthClientParams {
                 user_id: None,
                 name: "mtls-cc-test",
                 description: None,
-                application_type: crate::db::OAuthClientType::Web,
+                application_type: OAuthClientType::Web,
                 redirect_uris: &[],
-                access_scope: crate::db::AccessScope::Organization,
+                access_scope: AccessScope::Organization,
                 org_id: None,
                 resource_uris: &[],
-                token_endpoint_auth_method: crate::db::TokenEndpointAuthMethod::ClientSecretBasic,
+                token_endpoint_auth_method: TokenEndpointAuthMethod::ClientSecretBasic,
                 keys: None,
                 fapi_profile: None,
                 dpop_bound_access_tokens: None,
@@ -185,26 +181,25 @@ mod tests {
 
         let client = client_record;
 
-        let thumbprint = crate::services::oidc::mtls::compute_cert_thumbprint(b"test-cert-der");
+        let thumbprint = mtls::compute_cert_thumbprint(b"test-cert-der");
         let result = exchange_client_credentials(
             &state,
-            &client,
+            &ValidatedOAuthClient::for_test(client),
             None,
             TokenBinding::MutualTls(&thumbprint),
             TokenIssuanceProof {
                 grant: GrantProof::ClientCredentials,
-                client_auth: ClientAuthProof::MutualTls(
-                    crate::services::oidc::token::MtlsCertVerification::for_testing(),
-                ),
+                client_auth: ClientAuthProof::MutualTls(MtlsCertVerification::for_testing()),
                 sender_constraint: SenderConstraintProof::no_registered_client(),
             },
+            test_arrival(),
         )
         .await
         .expect("exchange_client_credentials");
 
         // Decode the access token JWT and verify the cnf claim
         let config = state.config();
-        let decoded = crate::services::auth::decode_token(
+        let decoded = auth::decode_token(
             result.access_token.expose_secret(),
             &state.oidc_key,
             &config.base_url,
@@ -212,7 +207,7 @@ mod tests {
         .expect("decode access token");
 
         let cnf = match decoded {
-            crate::services::auth::DecodedToken::AccessToken(claims) => claims
+            DecodedToken::AccessToken(claims) => claims
                 .cnf
                 .expect("cnf claim must be present for mTLS-bound token"),
         };

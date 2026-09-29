@@ -21,11 +21,13 @@ pub enum DeviceAuthStatus {
 
 /// A device authorization request (RFC 8628).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeviceAuthRequestDoc {
+pub(crate) struct DeviceAuthRequestDoc {
     pub device_code_hash: String,
     pub user_code: String,
     pub status: DeviceAuthStatus,
-    /// OAuth client_id that initiated this device authorization.
+    /// OAuth client_id that initiated this device authorization. Always
+    /// written; the default keeps rows without it deserializable during a
+    /// rolling deploy, and `DeviceAuthRequest::from_doc` refuses them.
     #[serde(default)]
     pub client_id: Option<String>,
     pub user_id: Option<String>,
@@ -39,6 +41,14 @@ pub struct DeviceAuthRequestDoc {
     /// deploy; the default treats those as unverified.
     #[serde(default)]
     pub hardware_verified: bool,
+    /// Full-precision instant of the WebAuthn ceremony that approved this
+    /// request. The device-code grant stamps its whole second as the issued
+    /// token's `auth_time` and copies the full instant onto the session row.
+    /// `Some` whenever `hardware_verified` and this version wrote the row;
+    /// `None` on rows predating the field, which freshness gates read as
+    /// epoch (step-up or re-authentication required).
+    #[serde(default)]
+    pub authenticated_at: Option<Timestamp>,
     pub expires_at: Timestamp,
     pub interval_seconds: i32,
     pub last_poll_at: Option<Timestamp>,
@@ -85,7 +95,7 @@ impl DocumentType for DeviceAuthRequestDoc {
 
 /// An OIDC state for the device auth browser flow.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OidcStateDoc {
+pub(crate) struct OidcStateDoc {
     pub state: String,
     pub device_auth_id: String,
     pub nonce: String,

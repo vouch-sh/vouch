@@ -14,11 +14,20 @@ default_stages: [pre-commit]
 # quote can be verified with sha256 — trailing-whitespace, end-of-file-fixer, and
 # mixed-line-ending would auto-fix that fidelity away. Spec text also carries
 # example PEM private-key blocks that trip detect-private-key.
+#
+# The two detail-*rules skills are generated on the Detail side and written here
+# by `detail rules pull`, which emits files without a trailing newline. The
+# hygiene hooks "fix" that on commit and the next pull reverts it, so every sync
+# carries unrelated whitespace churn. They are excluded for the same reason as
+# specs/: the upstream tool owns the bytes. `detail-triage` is repo-owned and
+# stays covered.
 exclude: |
   (?x)^(
     crates/vouch-server/static/css/output\.css|
     crates/vouch-server/data/.*\.mmdb|
-    specs/.*
+    specs/.*|
+    \.claude/skills/detail-rules/.*|
+    \.claude/skills/detail-create-rules/.*
   )$
 
 repos:
@@ -38,7 +47,10 @@ repos:
       - id: check-toml
       - id: detect-private-key
         # Verified test vectors, PEM-header marker strings, and doc examples —
-        # not real secrets (see first-run audit).
+        # not real secrets (see first-run audit). test_utils.rs holds a
+        # throwaway RSA key for GitHub App JWT tests and the P-256 key behind
+        # `test_tls_acceptor`, which in-process TLS test servers share instead
+        # of carrying their own copy. pq_tls.rs holds its own throwaway key.
         exclude: |
           (?x)^(
             crates/vouch-httpsig/tests/rfc9421_vectors\.rs|
@@ -47,6 +59,8 @@ repos:
             crates/vouch-server/src/infra/s3_config\.rs|
             crates/vouch-server/src/crypto/keys\.rs|
             crates/vouch-server/src/crypto/pem\.rs|
+            crates/vouch-server/src/handlers/oidc/tests/rfc9101\.rs|
+            crates/vouch-server/src/test_utils\.rs|
             crates/vouch-tests/tests/pq_tls\.rs
           )$
       - id: mixed-line-ending
@@ -79,7 +93,17 @@ repos:
       # pre-existing findings block a commit only when that workflow is edited.
       - id: actionlint
         name: actionlint
-        entry: actionlint
+        # actionlint 1.7.12 does not recognise GitHub's `$/` self-repository
+        # `uses:` syntax (added 2026-07-30) and reports it as a malformed
+        # reusable-workflow reference. The pattern matches only `$/`-prefixed
+        # values, so a genuinely malformed reference still fails. Support is
+        # in rhysd/actionlint#732 — drop this flag once it ships.
+        #
+        # The same lag applies to `concurrency.queue` (added 2026-05-07), used
+        # by ami.yml to queue AMI builds. The pattern names that one key, so an
+        # actually-misspelled concurrency key still fails. Tracked upstream in
+        # rhysd/actionlint#657 — drop this flag once it ships.
+        entry: actionlint -ignore 'reusable workflow call "\$/[^"]+" at "uses" is not following the format' -ignore 'unexpected key "queue" for "concurrency" section'
         language: system
         files: ^\.github/workflows/.*\.ya?ml$
 

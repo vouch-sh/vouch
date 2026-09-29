@@ -123,10 +123,34 @@ http://localhost:3000/logged-out"></textarea>
                 </div>
                 </fieldset>
 
-                <!-- FAPI JWKS fields (shown when FAPI selected) -->
+                <!-- Client authentication (Standard profile only; FAPI always uses private_key_jwt) -->
+                <fieldset id="auth-method-section" class="mt-4">
+                <legend class="block text-sm font-medium text-gray-300 mb-2">{{ self.tr("apps-create-auth-label") }}</legend>
+                <div class="space-y-3">
+                    <label class="flex items-start p-3 border border-vouch-border rounded-lg cursor-pointer hover:bg-vouch-raised transition-colors">
+                        <input type="radio" name="token_endpoint_auth_method" value="" checked
+                            class="mt-0.5 h-4 w-4 text-vouch-accent border-vouch-border">
+                        <div class="ml-3">
+                            <span class="block text-sm font-medium text-gray-200">{{ self.tr("apps-create-auth-secret") }}</span>
+                            <span class="block text-sm text-gray-400">{{ self.tr("apps-create-auth-secret-desc") }}</span>
+                        </div>
+                    </label>
+                    <label class="flex items-start p-3 border border-vouch-border rounded-lg cursor-pointer hover:bg-vouch-raised transition-colors">
+                        <input type="radio" name="token_endpoint_auth_method" value="private_key_jwt"
+                            class="mt-0.5 h-4 w-4 text-vouch-accent border-vouch-border">
+                        <div class="ml-3">
+                            <span class="block text-sm font-medium text-gray-200">{{ self.tr("apps-create-auth-key") }}</span>
+                            <span class="block text-sm text-gray-400">{{ self.tr("apps-create-auth-key-desc") }}</span>
+                        </div>
+                    </label>
+                </div>
+                </fieldset>
+
+                <!-- JWKS fields (shown when the application authenticates with a key: FAPI or private_key_jwt) -->
                 <div id="fapi-jwks-section" class="hidden mt-4 space-y-4 pl-4 border-l-2 border-vouch-accent/30">
                     <div class="p-3 bg-vouch-raised border border-vouch-border rounded-lg">
-                        <p class="text-sm text-gray-400">{{ self.tr("apps-create-fapi-jwks-info") }}</p>
+                        <p id="fapi-jwks-info" class="text-sm text-gray-400">{{ self.tr("apps-create-fapi-jwks-info") }}</p>
+                        <p id="key-jwks-info" class="hidden text-sm text-gray-400">{{ self.tr("apps-create-key-jwks-info") }}</p>
                     </div>
                     <div>
                         <label for="jwks" class="block text-sm font-medium text-gray-300">{{ self.tr("apps-create-jwks-label") }}</label>

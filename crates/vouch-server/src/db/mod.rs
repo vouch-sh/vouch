@@ -14,6 +14,20 @@
 //! - `sqlite` (default): Uses SQLite for development and testing
 //! - `postgres`: Uses PostgreSQL/Aurora DSQL for production
 
+// The db layer stamps the timestamps it writes — `created_at`, `expires_at`,
+// `last_used_at` — and re-reads the clock inside optimistic-concurrency retry
+// closures, which need a fresh reading per attempt rather than a stale captured
+// one. Neither is a request-path comparison, so those sites carry an
+// expectation for `disallowed_methods`. A comparison that decides a request
+// takes `crate::arrival::ArrivalTime` instead; see `arrival.rs`.
+//
+// Each expectation is written on the function that stamps, never on the `mod`
+// declaration. A module-wide expectation covers whatever the module later
+// grows, and what these modules grew was request-deciding expiry comparisons
+// reading their own clock — the nonce consume, the authorization-code
+// consume, the PAR and pending-auth lookups, the SCIM token lookup — none of
+// which the lint could report while the exemption was granted per module.
+
 pub(crate) mod audit;
 mod authenticators;
 mod authorization_codes;
@@ -24,7 +38,7 @@ mod credentials;
 mod device_auth;
 pub(crate) mod document_type;
 pub(crate) mod documents;
-mod dpop;
+pub(crate) mod dpop;
 pub(crate) mod dsql;
 mod enrollment;
 mod github;
@@ -47,9 +61,11 @@ pub use store::{InvalidIndexValue, StoreTransaction};
 
 // Re-export user types and functions
 pub use users::{
-    User, delete_user, get_user_by_email, get_user_by_id, get_user_github_refresh_token,
-    get_users_by_ids, get_users_by_org_paginated, update_user_active_status,
-    update_user_admin_status, update_user_github_identity,
+    DeleteUserError, GitHubLink, LastAdminGuard, MemberDowngrade, MemberDowngradeError,
+    RefreshOutcome, User, delete_user, demote_or_deactivate_member, get_user_by_email,
+    get_user_by_id, get_user_github_link, get_user_org_domain, get_users_by_ids,
+    get_users_by_org_paginated, is_last_active_org_admin, update_user_active_status,
+    update_user_admin_status, update_user_github_identity, update_user_github_refresh_token,
 };
 
 // Re-export user test helpers (only available in tests)
@@ -59,17 +75,17 @@ pub use users::{upsert_user, upsert_user_with_org};
 // Re-export session types and functions
 pub use sessions::{
     CreateSessionParams, Session, SessionCache, SessionPurpose, create_session,
-    delete_expired_sessions, delete_oauth_sessions_for_user, delete_session_by_token_hash,
-    delete_sessions_for_user, get_session_by_token_hash,
+    delete_expired_sessions, delete_session_by_token_hash, delete_sessions_for_code_replay,
+    delete_sessions_for_oauth_client, delete_sessions_for_user, find_session_by_token_hash,
+    get_session_by_token_hash,
 };
 
 // Re-export authenticator types and functions
 pub use authenticators::{
     Authenticator, AuthenticatorWithUser, CreateAuthenticatorParams, count_authenticators_for_user,
-    create_authenticator, delete_authenticator, delete_authenticator_in_tx,
-    get_authenticator_by_credential_id, get_authenticator_by_id,
-    get_authenticator_with_user_by_credential_id, get_authenticators_for_user,
-    update_authenticator_counter, update_authenticator_name,
+    create_authenticator, delete_authenticator, get_authenticator_by_credential_id,
+    get_authenticator_by_id, get_authenticator_with_user_by_credential_id,
+    get_authenticators_for_user, update_authenticator_counter, update_authenticator_name,
 };
 
 // Re-export organization types and functions
@@ -78,17 +94,16 @@ pub use documents::organization::{
     UNVERIFY_FAILURE_THRESHOLD,
 };
 pub use organizations::{
-    AddDomainError, AddedDomain, DomainRemovalSummary, DomainValidationError,
+    AddDomainError, AddedDomain, Domain, DomainRemovalSummary, DomainValidationError,
     MAX_ADDITIONAL_DOMAINS, MarkVerifiedError, Organization, RESERVED_SUBDOMAIN_LABELS,
     RecheckEffect, RecheckOutcome, SUBDOMAIN_REUSE_COOLDOWN_SECS, StaleDomainRemoval,
     SubdomainClaimError, SubdomainLabelError, VerifiedDomainRecord, add_additional_domain,
     any_subdomain_claimed, claim_subdomain, cleanup_stale_additional_domains,
     deterministic_org_key_id, eligible_subdomain_labels, find_org_by_subdomain,
     get_org_signing_key, get_organization, get_organization_domain, get_verification_token,
-    ineligible_subdomain_candidates, list_additional_domains, list_all_verified_additional_domains,
-    list_org_signing_keys, mark_additional_domain_verified, normalize_domain,
-    record_recheck_result, release_subdomain, remove_additional_domain, try_insert_org_signing_key,
-    unicode_form, validate_subdomain_label,
+    ineligible_subdomain_candidates, list_all_verified_additional_domains, list_org_signing_keys,
+    mark_additional_domain_verified, record_recheck_result, release_subdomain,
+    remove_additional_domain, try_insert_org_signing_key, unicode_form, validate_subdomain_label,
 };
 
 // Re-export organization test helpers (only available in tests)
@@ -99,11 +114,11 @@ pub use organizations::create_organization;
 #[cfg(test)]
 pub use device_auth::deny_device_auth;
 pub use device_auth::{
-    AuthorizeDeviceAuthParams, DeviceAuthApproval, DeviceAuthRequest, DeviceAuthState,
-    DeviceAuthStatus, OidcState, authorize_device_auth, create_device_auth_request,
+    AuthorizeDeviceAuthParams, DeviceApproval, DeviceAuthRequest, DeviceAuthState,
+    DeviceAuthStatus, OidcState, StoredApproval, authorize_device_auth, create_device_auth_request,
     create_oidc_state, delete_expired_device_auth_requests, delete_expired_oidc_states,
-    get_device_auth_by_code_hash, get_device_auth_by_user_code, get_oidc_state,
-    try_consume_device_auth, try_consume_oidc_state, update_device_auth_poll_time,
+    get_device_auth_by_code_hash, get_device_auth_by_user_code, try_consume_device_auth,
+    try_consume_oidc_state, update_device_auth_poll_time,
 };
 pub(crate) use device_auth::{DeviceCodeClaim, OidcStateClaim, get_device_auth_by_id};
 
@@ -111,24 +126,26 @@ pub(crate) use device_auth::{DeviceCodeClaim, OidcStateClaim, get_device_auth_by
 pub use audit::{AuditEvent, AuditEventFilter, AuditEventGroup, AuditEventKind, Retention};
 
 // Re-export config and auth event types and functions
-pub use config::{AuthEventParams, AuthEventType, ClientInfo, spawn_audit_event};
+pub use config::{AuthEventParams, AuthEventType, ClientInfo, Principal, record_auth_event};
 
 // Re-export SCIM types and functions
 pub use scim::{
-    CreateScimTokenParams, CreateScimUserError, ScimFilterError, ScimGroupRecord, ScimScope,
-    ScimScopeSet, ScimToken, ScimUserRecord, add_scim_group_member, create_scim_group,
-    create_scim_token, create_scim_user, delete_expired_scim_tokens, delete_scim_group,
-    delete_scim_token, get_scim_group, get_scim_group_members, get_scim_token_by_hash,
-    get_scim_user, insert_scim_audit, list_scim_groups, list_scim_tokens, list_scim_users,
-    remove_scim_group_member, replace_scim_group_members, update_scim_group,
+    CreateScimTokenParams, CreateScimUserError, ScimFilterError, ScimGroupRecord, ScimGroupState,
+    ScimGroupUpdateError, ScimScope, ScimScopeSet, ScimToken, ScimUpdateError, ScimUserRecord,
+    create_scim_group, create_scim_token, create_scim_user, delete_expired_scim_tokens,
+    delete_scim_group, delete_scim_token, get_scim_group, get_scim_group_members,
+    get_scim_token_by_hash, get_scim_user, list_scim_tokens, record_scim_audit, update_scim_group,
     update_scim_token_last_used, update_scim_user,
+};
+pub(crate) use scim::{
+    GroupListFilter, MAX_SCIM_TOKENS, UserListFilter, list_scim_groups, list_scim_users,
 };
 
 // Re-export audit payload types: the sealed AuditData marker plus the
 // credential envelope + per-kind details
 pub use documents::audit::{
     AuditData, AwsCredentialDetails, CredentialAuditDetails, CredentialAuditEnvelope,
-    GitHubCredentialDetails, SshCredentialDetails, TokenExchangeDetails,
+    GitHubCredentialDetails, Refusal, ScimAuditData, SshCredentialDetails, TokenExchangeDetails,
 };
 pub use documents::oauth::{
     AccessScope, FapiProfile, OAuthClientType, RegistrationSource, ResponseMode,
@@ -138,16 +155,18 @@ pub use documents::oauth::{
 // Re-export OAuth domain types and functions
 pub(crate) use oauth::JwtAssertionJtiClaim;
 pub use oauth::{
-    ClientKeys, ClientKeysError, CreateOAuthClientParams, JwkEntry, JwkSet, KeyType,
-    MAX_ACTIVE_SECRETS, MAX_POST_LOGOUT_REDIRECT_URIS, OAuthClient, OAuthClientSecret,
-    OAuthEventType, OAuthUsageStats, RecordOAuthEventParams, RedirectUriError,
-    UpdateClientRegistrationParams, UpdateOAuthClientParams, client_keys_to_stored,
-    create_oauth_client, create_oauth_client_secret, delete_expired_jwt_assertion_jtis,
-    delete_oauth_client, get_oauth_client_by_client_id, get_oauth_client_by_id,
+    ClientKeys, ClientKeysError, ClientType, ConsumedRegistrationToken, CreateOAuthClientParams,
+    JwkEntry, JwkSet, KeyType, MAX_ACTIVE_SECRETS, MAX_POST_LOGOUT_REDIRECT_URIS, OAuthClient,
+    OAuthClientSecret, OAuthEventType, OAuthUsageStats, RecordOAuthEventParams, RecordedOrgDomain,
+    RedirectUriError, UnusableJwk, UpdateClientRegistrationParams, UpdateOAuthClientParams,
+    client_keys_to_stored, consume_registration_access_token, create_oauth_client,
+    create_oauth_client_secret, delete_expired_jwt_assertion_jtis, delete_oauth_client,
+    delete_oauth_client_and_revoke_sessions, get_oauth_client_by_client_id, get_oauth_client_by_id,
     get_oauth_client_secret_by_id, get_oauth_client_secrets, get_oauth_clients_for_user,
     get_oauth_secret_by_hash, get_oauth_usage_stats, is_loopback_redirect_host,
     is_valid_post_logout_redirect_uri_str, parse_jwks_set, record_oauth_event,
-    revoke_all_oauth_client_secrets, revoke_oauth_client_secret, store_jwt_assertion_jti,
+    resolve_event_org_domain, restore_registration_access_token, revoke_all_oauth_client_secrets,
+    revoke_oauth_client_secret, revoke_registration_access_token, store_jwt_assertion_jti,
     update_oauth_client, update_oauth_client_last_used, update_oauth_client_registration,
     validate_oauth_client_credentials, validate_redirect_uri,
 };
@@ -162,9 +181,12 @@ pub use jwks_cache::{
 };
 
 // Re-export DPoP types and functions (RFC 9449)
+#[cfg(test)]
+pub use dpop::delete_dpop_nonce;
 pub use dpop::{
-    DpopJtiClaim, check_and_store_dpop_jti, delete_expired_dpop_jtis, delete_expired_dpop_nonces,
-    generate_dpop_nonce, validate_and_consume_dpop_nonce,
+    DpopJtiClaim, check_and_store_dpop_jti_at_second, delete_expired_dpop_jtis,
+    delete_expired_dpop_nonces, delete_expired_signature_nonces, generate_dpop_nonce,
+    generate_signature_nonce, validate_and_consume_signature_nonce, validate_dpop_nonce,
 };
 
 // Re-export credentials types and functions
@@ -179,11 +201,12 @@ pub use credentials::{
 
 // Re-export GitHub types and functions
 pub use github::{
-    CreateGitHubInstallationParams, GitHubInstallation, create_github_installation,
-    delete_github_installation_by_installation_id, get_all_linked_installation_ids,
-    get_github_installation_by_installation_id, get_github_installation_by_org_and_account,
-    get_github_installations_by_org, suspend_github_installation, unsuspend_github_installation,
-    update_github_installation_repos, update_github_installation_repos_delta,
+    CreateGitHubInstallationError, CreateGitHubInstallationParams, GitHubInstallation,
+    create_github_installation, delete_github_installation_by_installation_id,
+    get_all_linked_installation_ids, get_github_installation_by_installation_id,
+    get_github_installation_by_org_and_account, get_github_installations_by_org,
+    suspend_github_installation, unsuspend_github_installation, update_github_installation_repos,
+    update_github_installation_repos_delta,
 };
 
 // Re-export PAR types and functions (RFC 9126)
@@ -215,8 +238,8 @@ pub(crate) use claim::ClaimError;
 // Re-export authorization code functions (RFC 6749 Section 10.5)
 pub(crate) use authorization_codes::AuthCodeClaim;
 pub use authorization_codes::{
-    delete_expired_authorization_codes, get_authorization_code_details, get_consumed_code_owner,
-    store_authorization_code, try_consume_authorization_code,
+    delete_expired_authorization_codes, get_authorization_code_details, store_authorization_code,
+    try_consume_authorization_code,
 };
 
 // Re-export enrollment types and functions
@@ -225,9 +248,11 @@ pub use enrollment::{EnrollUserError, EnrolledUser, enroll_user_with_org};
 
 // Re-export posture policy types and functions
 pub use posture_policies::{
-    CreateCustomPolicyParams, CustomPosturePolicy, FieldUpdate, UpdateCustomPolicyParams,
-    create_custom_policy, delete_custom_policy, get_active_custom_policies,
-    get_active_preconfigured_slugs, get_custom_policy, list_custom_policies,
+    ActivePreconfiguredConfig, CreateCustomPolicyError, CreateCustomPolicyParams,
+    CustomPosturePolicy, FieldUpdate, MAX_CUSTOM_POLICIES, UpdateCustomPolicyParams,
+    compare_and_set_preconfigured_active, create_custom_policy, create_preconfigured_active,
+    delete_custom_policy, get_active_custom_policies, get_active_preconfigured_slugs,
+    get_custom_policy, get_preconfigured_active_with_version, list_custom_policies,
     set_preconfigured_active, update_custom_policy,
 };
 

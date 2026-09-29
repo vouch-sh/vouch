@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
+use vouch_common::http::with_process_doh;
 use vouch_common::{ApiError, protocol};
 
 /// Total timeout for interactive CLI operations.
@@ -27,10 +28,6 @@ pub struct HttpResponse {
     /// WWW-Authenticate header value (if present on 401 responses).
     /// Used for RFC 9470 step-up authentication challenge detection.
     pub www_authenticate: Option<String>,
-    /// DPoP-Nonce header value (if present).
-    /// Returned by the server to bind the next DPoP proof to a server-issued nonce
-    /// (RFC 9449 Section 8).
-    pub dpop_nonce: Option<String>,
     /// Signature-Nonce header value (if present).
     /// Server-issued nonce for RFC 9421 HTTP signature replay protection.
     pub sig_nonce: Option<String>,
@@ -46,7 +43,6 @@ impl HttpResponse {
             status,
             body,
             www_authenticate: None,
-            dpop_nonce: None,
             sig_nonce: None,
             retry_after: None,
         }
@@ -133,13 +129,13 @@ fn check_clock_skew(headers: &reqwest::header::HeaderMap) {
 
 /// Extract common response headers from a `HeaderMap`.
 ///
-/// Returns `(www_authenticate, dpop_nonce, retry_after)` extracted from
+/// Returns `(www_authenticate, sig_nonce, retry_after)` extracted from
 /// the headers based on the HTTP status code. Shared by both the
 /// production `ReqwestClient` and the test `TestHttpClient`.
 fn extract_response_headers(
     status: u16,
     headers: &reqwest::header::HeaderMap,
-) -> (Option<String>, Option<String>, Option<String>, Option<u64>) {
+) -> (Option<String>, Option<String>, Option<u64>) {
     let www_authenticate = if status == 401 {
         headers
             .get("www-authenticate")
@@ -148,11 +144,6 @@ fn extract_response_headers(
     } else {
         None
     };
-
-    let dpop_nonce = headers
-        .get(protocol::HEADER_DPOP_NONCE)
-        .and_then(|v| v.to_str().ok())
-        .map(String::from);
 
     let sig_nonce = headers
         .get("signature-nonce")
@@ -168,7 +159,7 @@ fn extract_response_headers(
         None
     };
 
-    (www_authenticate, dpop_nonce, sig_nonce, retry_after)
+    (www_authenticate, sig_nonce, retry_after)
 }
 
 /// Trait for abstracting HTTP client operations.
@@ -241,7 +232,7 @@ impl ReqwestClient {
             .timeout(INTERACTIVE_TOTAL)
             .connect_timeout(INTERACTIVE_CONNECT);
 
-        let client = vouch_common::http::with_process_doh(builder)
+        let client = with_process_doh(builder)
             .build()
             .context(tr!("err-failed-create-http-client"))?;
 
@@ -308,7 +299,7 @@ impl HttpClient for ReqwestClient {
             .context(tr!("err-http-request-failed"))?;
 
         let status = response.status().as_u16();
-        let (www_authenticate, dpop_nonce, sig_nonce, retry_after) =
+        let (www_authenticate, sig_nonce, retry_after) =
             extract_response_headers(status, response.headers());
         check_clock_skew(response.headers());
 
@@ -331,7 +322,6 @@ impl HttpClient for ReqwestClient {
             status,
             body: body.to_vec(),
             www_authenticate,
-            dpop_nonce,
             sig_nonce,
             retry_after,
         })
@@ -591,7 +581,7 @@ mod test_utils {
                 .context(tr!("err-router-error"))?;
 
             let status = response.status().as_u16();
-            let (www_authenticate, dpop_nonce, sig_nonce, retry_after) =
+            let (www_authenticate, sig_nonce, retry_after) =
                 extract_response_headers(status, response.headers());
 
             let body_bytes = axum::body::to_bytes(response.into_body(), 10 * 1024 * 1024)
@@ -602,7 +592,6 @@ mod test_utils {
                 status,
                 body: body_bytes.to_vec(),
                 www_authenticate,
-                dpop_nonce,
                 sig_nonce,
                 retry_after,
             })
@@ -667,25 +656,6 @@ mod tests {
         let response = HttpResponse::new(200, b"not json".to_vec());
         let result: Result<serde_json::Value> = response.json();
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_http_response_dpop_nonce_default_none() {
-        let response = HttpResponse::new(200, b"{}".to_vec());
-        assert!(response.dpop_nonce.is_none());
-    }
-
-    #[test]
-    fn test_http_response_401_dpop_nonce_none() {
-        let response = HttpResponse {
-            status: 401,
-            body: b"{}".to_vec(),
-            www_authenticate: None,
-            dpop_nonce: None,
-            sig_nonce: None,
-            retry_after: None,
-        };
-        assert!(response.dpop_nonce.is_none());
     }
 
     #[test]
@@ -828,5 +798,52 @@ mod tests {
 
         let parsed: TestResponse = resp.json().unwrap();
         assert_eq!(parsed.message, "hello");
+    }
+
+    /// RFC 7592 §5: "When using TLS, the client MUST perform a TLS/SSL server
+    /// certificate check, per RFC 6125 [RFC6125]."
+    ///
+    /// Vouch's CLI is a client of its own RFC 7592 configuration endpoint, and
+    /// it carries the registration access token there in clear text under TLS.
+    /// reqwest verifies server certificates by default, so the requirement is
+    /// met by *not* opting out — which is exactly the kind of guarantee that
+    /// disappears silently in a one-line change. This scans the CLI's own
+    /// sources for any such opt-out.
+    #[test]
+    fn no_source_file_disables_tls_certificate_verification() {
+        // Split so the needles never appear verbatim in this file — otherwise
+        // the scanner's own source is its first hit.
+        const CERTS: &str = concat!("danger_accept_invalid_", "certs(");
+        const HOSTNAMES: &str = concat!("danger_accept_invalid_", "hostnames(");
+
+        fn scan(dir: &std::path::Path, needles: &[&str], findings: &mut Vec<String>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    scan(&path, needles, findings);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let Ok(text) = std::fs::read_to_string(&path) else {
+                        continue;
+                    };
+                    for (n, line) in text.lines().enumerate() {
+                        if needles.iter().any(|needle| line.contains(needle)) {
+                            findings.push(format!("{}:{}", path.display(), n.saturating_add(1)));
+                        }
+                    }
+                }
+            }
+        }
+
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut findings = Vec::new();
+        scan(&src, &[CERTS, HOSTNAMES], &mut findings);
+
+        assert!(
+            findings.is_empty(),
+            "TLS certificate verification must never be disabled (RFC 7592 §5), found: {findings:?}"
+        );
     }
 }

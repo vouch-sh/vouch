@@ -1,57 +1,88 @@
 # DPoP Token Type Must Match Sender Constraint Binding
 
-The `token_type` in an OAuth token response must be derived from the same value the issued token's `cnf` claim was derived from — never hardcoded and never recomputed in parallel. `create_oauth_access_token` already derives it from `params.binding.token_type()` and returns it as `CreateSessionResult::token_type`, so grant handlers take it from there rather than spelling the derivation themselves. For an access token the value is `DPoP` when `cnf.jkt` is set (RFC 9449 §5) and `Bearer` otherwise, including mTLS-bound tokens (`cnf.x5t#S256`, RFC 8705 defines no distinct token type).
+Token endpoint handlers must compute `token_type` from whether a DPoP proof was validated and threaded into the issued token (`cnf.jkt`), never hardcode it. When `dpop_jkt` is `Some`, the response must advertise `token_type: "DPoP"`; when it is `None`, it must advertise `token_type: "Bearer"` (RFC 9449 Section 5).
 
 ## What to look for
 
 Examine every code path that constructs a token response struct (`TokenResponse`, `TokenExchangeResponse`, `DeviceTokenResponse`, or any custom struct with a `token_type: String` field) in the token handlers and grant services:
 
-1. **Hardcoded `"Bearer"` (or `"DPoP"`) at a grant site.** Any call site that sets `token_type: "Bearer".to_string()` (or `"DPoP"`) instead of `session_result.token_type.to_string()` after calling `create_oauth_access_token` is a violation — the response is no longer tied to the `cnf` claim the issuance pipeline stamped.
+1. **Hardcoded `"Bearer"` when a DPoP proof may have been validated.** Any call site that sets `token_type: "Bearer".to_string()` (or `"Bearer".to_owned()`) while the surrounding code also holds a `dpop_proof`, `dpop_jkt`, or `dpop_jkt: Option<&str>` binding is a violation — the code minted a `cnf.jkt`-bound token but lied to the client about it.
 
-2. **Inconsistency between `CreateOAuthTokenParams::binding` and the returned `token_type`.** If `binding: TokenBinding::Dpop(_)` was passed to `create_oauth_access_token` (so `cnf.jkt` will be embedded in the JWT) but the constructed response carries anything other than `"DPoP"`, the response is wrong. The same goes for `TokenBinding::Bearer` / `TokenBinding::MutualTls(_)` producing anything other than `"Bearer"`.
+2. **Inconsistency between `CreateOAuthTokenParams::dpop_jkt` and the returned `token_type`.** If `dpop_jkt: Some(...)` is passed to `create_oauth_access_token` (meaning `cnf.jkt` will be embedded in the JWT), but the constructed response carries `token_type: "Bearer"`, the response is wrong.
 
-3. **Recomputing `token_type` from the proof/binding instead of using `session_result.token_type`.** Spelling `let token_type = if dpop_proof.is_some() { "DPoP" } else { "Bearer" };` (or `if dpop_jkt.is_some()`) at a grant site is a violation — it duplicates the derivation that lives behind `params.binding.token_type()` / `CnfClaim::token_type`, and the two can drift. Grant handlers that take `CreateSessionResult` and reach the response without referencing `session_result.token_type` are suspect.
+3. **Missing conditional before setting `token_type`.** The correct pattern is always:
+   ```rust
+   let token_type = if dpop_jkt.is_some() { "DPoP" } else { "Bearer" };
+   ```
+   or equivalently testing `dpop_proof.is_some()`. A grant handler that reaches token issuance without this conditional is suspect.
 
 The grants to check in this codebase:
-- `crates/vouch-server/src/handlers/device.rs` — `device_token`
+- `crates/vouch-server/src/handlers/device.rs` — `device_token` (the site of the confirmed bug)
 - `crates/vouch-server/src/services/oidc/token.rs` — `exchange_authorization_code`
 - `crates/vouch-server/src/services/oidc/client_credentials.rs` — `exchange_client_credentials`
 - `crates/vouch-server/src/services/oidc/exchange.rs` — `exchange_token` (access-token path)
 - `crates/vouch-server/src/services/oidc/fido2_grant.rs` — `exchange_fido2_assertion`
 
-Note: the ID-token path in `exchange.rs` (`issue_id_token`) legitimately returns `token_type: "N_A"` (`protocol::TOKEN_TYPE_NOT_APPLICABLE`), not `"Bearer"` — RFC 8693 §2.2.1 mandates `N_A` because the issued token is not usable as an access token. Do not flag it.
+Note: the ID-token path in `exchange.rs` (`issue_id_token`) legitimately returns `"Bearer"` because no DPoP-bound access token is issued there; do not flag it.
 
 ## Violation examples
 
-**Recomputing token_type after issuance already derived it**
+**Device flow hardcodes Bearer after threading dpop_jkt into the token (confirmed bug, `handlers/device.rs`)**
 ```rust
-// create_oauth_access_token already derives `token_type` from `params.binding`;
-// it is returned on session_result.token_type and that is the whole point.
-let token_type = if dpop_proof.is_some() {
-    "DPoP"
-} else {
-    "Bearer"
-};
+// dpop_jkt is derived from the validated DPoP proof above and passed to
+// create_oauth_access_token — the token carries cnf.jkt — but the response says Bearer.
+let session_result = create_oauth_access_token(
+    &state,
+    CreateOAuthTokenParams {
+        dpop_jkt: dpop_jkt.as_deref(), // Some("...") when DPoP proof was present
+        // ...
+    },
+    proof,
+).await?;
+
+Ok(Json(DeviceTokenResponse {
+    access_token: token.expose_secret().to_string(),
+    token_type: "Bearer".to_string(), // BUG: hardcoded; should be "DPoP" when dpop_jkt is Some
+    expires_in,
+    email: user_email,
+}))
+```
+
+**Generic pattern — hardcoded Bearer after DPoP validation**
+```rust
+// dpop_proof is Some(...) — token will be cnf.jkt-bound
+let dpop_jkt = dpop_proof.as_ref().map(|p| p.jkt.clone());
+// ... create_oauth_access_token called with dpop_jkt: dpop_jkt.as_deref() ...
 Ok(TokenResponse {
-    access_token: session_result.token.clone(),
-    token_type: token_type.to_string(), // VIOLATION — use session_result.token_type
-    expires_in: session_result.expires_in,
+    access_token: result.access_token,
+    token_type: "Bearer".to_string(), // VIOLATION
+    expires_in: result.expires_in,
 })
 ```
 
 ## Correct patterns
 
-**Take `token_type` from `CreateSessionResult` (used in `client_credentials.rs`, `exchange.rs`, `fido2_grant.rs`, `token.rs`, `device.rs`)**
+**Compute token_type from dpop_jkt (used in `client_credentials.rs`, `exchange.rs`, `fido2_grant.rs`, `token.rs`)**
 ```rust
+// RFC 9449 Section 5: token_type is "DPoP" when the token is sender-constrained
+let token_type = if bindings.dpop_jkt.is_some() {
+    "DPoP"
+} else {
+    "Bearer"
+};
 Ok(SomeResult {
-    access_token: session_result.token.clone(),
-    token_type: session_result.token_type.to_string(),
-    expires_in: session_result.expires_in,
-    // ...
+    access_token: ...,
+    token_type: token_type.to_string(),
+    expires_in: ...,
 })
 ```
 
-`session_result.token_type` is set inside `create_oauth_access_token` from `params.binding.token_type()` — the same `TokenBinding` whose `cnf()` was stamped into the JWT — so the advertisement cannot disagree with the confirmation the token carries.
+**Equivalent form using the proof object directly**
+```rust
+let token_type = if dpop_proof.is_some() { "DPoP" } else { "Bearer" };
+```
+
+Both forms are correct as long as the variable tested (`dpop_jkt` or `dpop_proof`) is the same binding that was passed to `create_oauth_access_token` as `dpop_jkt`.
 
 ## Scope
 

@@ -23,8 +23,7 @@
 //! │  - verify_webhook_signature()   │
 //! │  - handle_webhook_event()       │
 //! │  - link_user_account()          │
-//! │  - connect_installation()       │
-//! │  - reconnect_installation()     │
+//! │  - link_installation()          │
 //! └─────────────────────────────────┘
 //!     │
 //!     ├─► app.rs (GitHub API calls)
@@ -39,7 +38,7 @@ pub(crate) mod webhooks;
 
 use std::sync::Arc;
 
-use crate::config::ServerConfig;
+use crate::config::{NonEmptySecret, ServerConfig};
 use crate::db::audit::AuditStore;
 use crate::db::store::DocumentStore;
 
@@ -48,7 +47,7 @@ pub(crate) use app::{
     GitHubApp, GitHubInstallationId, exchange_oauth_code, get_github_user,
     list_user_accessible_installations, minimal_git_permissions, refresh_oauth_token,
 };
-pub(crate) use installations::{ConnectInstallationParams, ReconnectInstallationParams};
+pub(crate) use installations::{InstallationLinkFlow, LinkInstallationParams};
 pub(crate) use oauth::LinkAccountParams;
 
 /// Error types for GitHub service operations.
@@ -224,10 +223,12 @@ impl<'a> GitHubService<'a> {
             .ok_or(GitHubError::OAuthNotConfigured)
     }
 
-    /// Get webhook secret.
-    pub(crate) fn webhook_secret(&self) -> GitHubResult<&str> {
+    /// Get webhook secret. The type guarantees it is not empty, so an HMAC
+    /// can never be verified under the publicly-known empty key.
+    pub(crate) fn webhook_secret(&self) -> GitHubResult<&NonEmptySecret> {
         self.config
-            .github_webhook_secret_exposed()
+            .github_webhook_secret
+            .as_ref()
             .ok_or(GitHubError::WebhookSecretNotConfigured)
     }
 }
@@ -239,8 +240,9 @@ impl<'a> GitHubService<'a> {
 )]
 mod tests {
     use super::*;
+    use crate::config::NonEmptySecret;
     use crate::test_utils;
-    use secrecy::SecretString;
+    use secrecy::{ExposeSecret, SecretString};
 
     #[tokio::test]
     async fn is_configured_reflects_app_presence() {
@@ -285,7 +287,7 @@ mod tests {
         let state = test_utils::test_app_state().await;
         let mut config = (**state.config()).clone();
         config.github_app_client_id = Some("client-xyz".to_string());
-        config.github_app_client_secret = Some(SecretString::from("secret-xyz".to_string()));
+        config.github_app_client_secret = NonEmptySecret::new(SecretString::from("secret-xyz"));
 
         let service = GitHubService::new(
             &state.store,
@@ -318,14 +320,17 @@ mod tests {
 
         let mut config_with_secret = (**state.config()).clone();
         config_with_secret.github_webhook_secret =
-            Some(SecretString::from("wh-secret".to_string()));
+            NonEmptySecret::new(SecretString::from("wh-secret".to_string()));
         let service = GitHubService::new(
             &state.store,
             &state.audit,
             &config_with_secret,
             state.github_app.as_ref(),
         );
-        assert_eq!(service.webhook_secret().expect("secret"), "wh-secret");
+        assert_eq!(
+            service.webhook_secret().expect("secret").expose_secret(),
+            "wh-secret"
+        );
     }
 
     #[tokio::test]

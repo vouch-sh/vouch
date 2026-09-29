@@ -19,7 +19,9 @@
 
 use std::path::Path;
 use vouch_cli::FidoDevice;
-use vouch_common::fixtures::Fido2Fixture;
+use vouch_common::fixtures::{
+    AuthenticationFixture, Fido2Fixture, FixtureMetadata, RegistrationFixture,
+};
 
 /// Load a fixture from the fixtures directory.
 ///
@@ -280,14 +282,14 @@ fn test_mock_device_fixture_compatibility() {
 
     // Create a fixture from MockFidoDevice data
     let fixture = Fido2Fixture {
-        metadata: vouch_common::fixtures::FixtureMetadata {
+        metadata: FixtureMetadata {
             description: "MockFidoDevice test fixture".to_string(),
             device_model: Some("Mock Device".to_string()),
             aaguid: None,
             created_at: "2024-01-01T00:00:00Z".to_string(),
             rp_id: "test.local".to_string(),
         },
-        registration: vouch_common::fixtures::RegistrationFixture {
+        registration: RegistrationFixture {
             challenge_hex: hex::encode(challenge),
             client_data_json: String::from_utf8_lossy(&reg.client_data_json).to_string(),
             credential_id_hex: hex::encode(&reg.credential_id),
@@ -297,7 +299,7 @@ fn test_mock_device_fixture_compatibility() {
             x_hex: String::new(), // Would need to extract from COSE key
             y_hex: String::new(),
         },
-        authentication: vouch_common::fixtures::AuthenticationFixture {
+        authentication: AuthenticationFixture {
             challenge_hex: hex::encode(challenge),
             client_data_json: String::from_utf8_lossy(&auth.client_data_json).to_string(),
             auth_data_hex: hex::encode(&auth.authenticator_data),

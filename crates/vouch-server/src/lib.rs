@@ -4,6 +4,21 @@
 //! This crate provides the Vouch identity server with OIDC provider,
 //! WebAuthn authentication, and credential issuance.
 
+// Request-path time comparisons take `arrival::ArrivalTime`, not their own
+// clock reading. `disallowed_methods` is configured in `.clippy.toml` and left
+// at `allow` workspace-wide; this is where it is switched on.
+#![warn(clippy::disallowed_methods)]
+// Test code stamps clocks freely: a test that needs an instant constructs one,
+// and the convention is about code serving a request. The non-test build of
+// this library still lints every production site.
+#![cfg_attr(
+    test,
+    expect(
+        clippy::disallowed_methods,
+        reason = "tests construct their own instants; the lint targets request-serving code"
+    )
+)]
+
 // Prevent test-utils from being enabled in any release build of this
 // library. The feature exposes `test_utils` (helpers that bypass FIDO2
 // and construct `GrantProof::TestingOnly` / `TestCoseVerifier`) — none
@@ -13,7 +28,10 @@
 #[cfg(all(feature = "test-utils", not(debug_assertions)))]
 compile_error!("test-utils feature must not be enabled in release builds");
 
+pub mod arrival;
+pub mod assurance;
 pub(crate) mod attestation;
+pub mod client_info;
 pub mod config;
 pub mod crypto;
 pub mod db;
@@ -24,6 +42,7 @@ pub(crate) mod geo;
 pub(crate) mod handlers;
 pub(crate) mod http;
 pub mod infra;
+pub(crate) mod scim_filter;
 pub mod services;
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -106,6 +125,9 @@ pub struct AppState {
     /// operators listed them in `VOUCH_IDPS` (or the S3 `idps` array). Order
     /// controls login page button order; `id` is the lookup key at callback time.
     pub idps: Vec<services::idp::ConfiguredIdp>,
+    /// Trust anchors for `tls_client_auth` client certificates, from
+    /// `VOUCH_MTLS_CLIENT_CA_CERTS`. `None` disables `tls_client_auth`.
+    pub(crate) client_cert_trust: Option<services::oidc::mtls::ClientCertTrust>,
 }
 
 impl AppState {
@@ -132,9 +154,12 @@ impl AppState {
 /// - Validates Host header against `rp_id` to prevent injection attacks
 /// - Uses 308 Permanent Redirect to preserve HTTP method
 /// - Allows `/health` endpoint for load balancer health checks
+/// - Allows `/health/ready` for readiness probes, which cannot send the PROXY
+///   header port 443 may require
 pub fn build_redirect_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(|| async { "ok" }))
+        .route("/health/ready", get(infra::router::readiness_handler))
         .fallback(redirect_to_https)
         .with_state(state)
 }
@@ -196,11 +221,17 @@ mod redirect_tests {
     )]
 
     use super::*;
+    use crate::config::BaseUrl;
+    use crate::crypto::document_crypto::{DocumentCrypto, PlaintextDocumentCrypto};
     use crate::crypto::keys::OidcSigningKey;
+    use crate::db::pool::PoolConfig;
+    use crate::infra::conn_caps::ConnCapConfig;
+    use crate::test_utils::test_app_state;
     use axum::body::Body;
     use axum::http::Request;
     use secrecy::SecretString;
     use tower::ServiceExt;
+    use vouch_common::AaguidPolicy;
 
     fn test_app_state_with_rp_id(rp_id: &str) -> AppState {
         let config = config::ServerConfig {
@@ -211,7 +242,7 @@ mod redirect_tests {
             jwt_secret: SecretString::from("test_jwt_secret_must_be_at_least_32_characters_long"),
             session_hours: 8,
             idps: Vec::new(),
-            base_url: crate::config::BaseUrl::new(format!("https://{rp_id}")),
+            base_url: BaseUrl::new(format!("https://{rp_id}")),
             device_code_expires_seconds: 600,
             device_poll_interval_seconds: 5,
             allowed_domains: None,
@@ -256,14 +287,16 @@ mod redirect_tests {
             aws_partition: None,
             aws_use_fips_endpoint: None,
             jwt_assertion_max_lifetime_seconds: 300,
-            allowed_aaguids: vouch_common::AaguidPolicy::Any,
-            require_attestation_cert: false,
+            allowed_aaguids: AaguidPolicy::Any,
             log_format: config::LogFormat::Text,
             trusted_proxies: Vec::new(),
+            proxy_protocol: false,
+            connection_caps: ConnCapConfig::DEFAULT,
             metrics_bearer_token: None,
             certification_test_token: None,
             extra_ca_certs: None,
-            pool_config: crate::db::pool::PoolConfig::default(),
+            mtls_client_ca_certs: None,
+            pool_config: PoolConfig::default(),
             session_cache_max_capacity: 10_000,
             session_cache_ttl_secs: 30,
         };
@@ -276,8 +309,8 @@ mod redirect_tests {
         .unwrap();
 
         let pool = Pool::new_test();
-        let crypto: std::sync::Arc<dyn crate::crypto::document_crypto::DocumentCrypto> =
-            std::sync::Arc::new(crate::crypto::document_crypto::PlaintextDocumentCrypto);
+        let crypto: std::sync::Arc<dyn DocumentCrypto> =
+            std::sync::Arc::new(PlaintextDocumentCrypto);
         let store = db::store::DocumentStore::new(pool.clone(), crypto.clone());
         let audit = db::audit::AuditStore::new(pool.clone(), crypto);
 
@@ -299,6 +332,7 @@ mod redirect_tests {
             org_keys_cache: Default::default(),
             policy: Default::default(),
             idps: Vec::new(),
+            client_cert_trust: None,
         }
     }
 
@@ -351,6 +385,23 @@ mod redirect_tests {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
+    /// Port 80 never takes the PROXY protocol, so it must answer the
+    /// readiness probe itself rather than redirect it to 443, which may
+    /// require a PROXY header the kubelet cannot send.
+    #[tokio::test]
+    async fn test_readiness_served_on_http() {
+        let app = build_redirect_router(test_app_state().await);
+
+        let req = Request::builder()
+            .uri("/health/ready")
+            .header("host", "10.0.0.5")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
     #[tokio::test]
     async fn test_redirect_localhost_allowed() {
         let state = Arc::new(test_app_state_with_rp_id("vouch.sh"));
@@ -369,6 +420,43 @@ mod redirect_tests {
             resp.headers().get("location").unwrap(),
             "https://vouch.sh/login"
         );
+    }
+
+    /// RFC 7592 §5: "Since requests to the client configuration endpoint result
+    /// in the transmission of clear-text credentials (in the HTTP request and
+    /// response), the authorization server MUST require the use of a
+    /// transport-layer security mechanism when sending requests to the
+    /// endpoint."
+    ///
+    /// When TLS is configured, port 80 runs this router and nothing else, so a
+    /// cleartext client configuration request is redirected rather than served —
+    /// the registration access token never reaches a handler over plain HTTP.
+    #[tokio::test]
+    async fn test_client_configuration_endpoint_is_never_served_over_cleartext() {
+        let state = Arc::new(test_app_state_with_rp_id("vouch.sh"));
+        let app = build_redirect_router(state);
+
+        for method in ["GET", "PUT", "DELETE"] {
+            let req = Request::builder()
+                .method(method)
+                .uri("/oauth/register/some-client-id")
+                .header("host", "vouch.sh")
+                .header("authorization", "Bearer vouch_reg_secret")
+                .body(Body::empty())
+                .unwrap();
+
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::PERMANENT_REDIRECT,
+                "{method} on the client configuration endpoint must be redirected to HTTPS, \
+                 never answered over cleartext"
+            );
+            assert_eq!(
+                resp.headers().get("location").unwrap(),
+                "https://vouch.sh/oauth/register/some-client-id"
+            );
+        }
     }
 
     #[tokio::test]

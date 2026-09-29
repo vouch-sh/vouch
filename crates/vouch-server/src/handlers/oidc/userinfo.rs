@@ -6,7 +6,7 @@
 //! - RFC 9449 Section 7.1 - DPoP-bound access tokens at resource endpoints
 //! - RFC 8705 Section 3 - mTLS certificate-bound access tokens at resource endpoints
 
-use crate::AppState;
+use crate::arrival::ArrivalTime;
 use crate::crypto::alg::JwsAlgorithm;
 use crate::crypto::keys::OidcSigningKey;
 use crate::db::{self};
@@ -17,6 +17,7 @@ use crate::services::auth::decode_token;
 use crate::services::oidc::dpop;
 use crate::services::oidc::token::validate_session_token;
 use crate::services::oidc::{DpopError, OAuthScope};
+use crate::{AppState, http};
 use axum::{
     Json,
     body::Bytes,
@@ -74,6 +75,7 @@ struct UserInfoForm {
 /// Enforces mTLS certificate binding per RFC 8705 Section 3.
 #[expect(clippy::too_many_lines, reason = "linear OIDC userinfo claim assembly")]
 pub(crate) async fn userinfo(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     method: Method,
     headers: HeaderMap,
@@ -96,10 +98,9 @@ pub(crate) async fn userinfo(
     };
 
     let (token, is_dpop_scheme) = if let Some(ref auth_header) = auth_header_value {
-        if let Some(tok) = crate::http::strip_auth_scheme(auth_header, protocol::AUTH_SCHEME_DPOP) {
+        if let Some(tok) = http::strip_auth_scheme(auth_header, protocol::AUTH_SCHEME_DPOP) {
             (tok.to_string(), true)
-        } else if let Some(tok) =
-            crate::http::strip_auth_scheme(auth_header, protocol::AUTH_SCHEME_BEARER)
+        } else if let Some(tok) = http::strip_auth_scheme(auth_header, protocol::AUTH_SCHEME_BEARER)
         {
             (tok.to_string(), false)
         } else {
@@ -118,7 +119,7 @@ pub(crate) async fn userinfo(
         // an error code or other error information.
         return (
             StatusCode::UNAUTHORIZED,
-            [(header::WWW_AUTHENTICATE, crate::http::bearer_challenge(&[]))],
+            [(header::WWW_AUTHENTICATE, http::bearer_challenge(&[]))],
         )
             .into_response();
     };
@@ -155,6 +156,7 @@ pub(crate) async fn userinfo(
             &full_uri,
             &state.store,
             state.config().dpop_max_age_seconds,
+            arrival,
         )
         .await
         {
@@ -263,7 +265,7 @@ pub(crate) async fn userinfo(
     }
 
     // Validate the session token
-    let result = match validate_session_token(&state, &token).await {
+    let result = match validate_session_token(&state, &token, arrival).await {
         Ok(Some(r)) => r,
         Ok(None) => {
             return oauth_error(
@@ -321,6 +323,10 @@ pub(crate) async fn userinfo(
 ///
 /// Signs the userinfo claims with the algorithm registered by the client.
 /// Returns `application/jwt` with the signed JWT, or a 500 error on signing failure.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "mints the signed userinfo JWT's iat and exp"
+)]
 async fn build_signed_userinfo_response(
     state: &AppState,
     client_id: &Option<String>,
@@ -468,7 +474,7 @@ fn oauth_error(status: StatusCode, error: OAuthErrorCode, description: &str) -> 
     if status == StatusCode::UNAUTHORIZED {
         // RFC 6750 Section 3: Include WWW-Authenticate header on 401 responses
         let www_auth =
-            crate::http::bearer_challenge(&[("error", error), ("error_description", description)]);
+            http::bearer_challenge(&[("error", error), ("error_description", description)]);
         (status, [("WWW-Authenticate", www_auth.as_str())], body).into_response()
     } else {
         (status, body).into_response()

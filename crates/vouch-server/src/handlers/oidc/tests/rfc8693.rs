@@ -2,6 +2,11 @@
 //! RFC 8693 — Token Exchange tests.
 
 use super::helpers::*;
+use crate::crypto;
+use crate::db::documents::oauth::TokenExchangeDoc;
+use crate::db::{self, AuditEventFilter, CreateAuthenticatorParams};
+use crate::services::policy::events;
+use crate::test_utils::{self, TestSessionSpec};
 
 #[tokio::test]
 async fn test_token_exchange_requires_grant_type() {
@@ -28,7 +33,16 @@ async fn test_token_exchange_valid_token_types() {
 
     let user = create_test_user(&state.store, "exchange-types@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
@@ -68,7 +82,11 @@ async fn test_token_exchange_valid_token_types() {
 
 #[tokio::test]
 async fn test_token_exchange_invalid_subject_token() {
-    // RFC 8693: Invalid subject token returns invalid_grant
+    // RFC 8693 §2.2.2: "If the request itself is not valid or if either the
+    // 'subject_token' or 'actor_token' are invalid for any reason, or are
+    // unacceptable based on policy, the authorization server MUST construct
+    // an error response, as specified in Section 5.2 of [RFC6749]. The value
+    // of the 'error' parameter MUST be the 'invalid_request' error code."
     let (app, state) = test_app().await;
 
     let user = create_test_user(&state.store, "exchange-invalid@example.com").await;
@@ -85,7 +103,7 @@ async fn test_token_exchange_invalid_subject_token() {
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
-    assert_eq!(error["error"], "invalid_grant");
+    assert_eq!(error["error"], "invalid_request");
 }
 
 #[tokio::test]
@@ -96,7 +114,16 @@ async fn test_token_exchange_successful() {
     // Create a valid subject token and client for authentication
     let user = create_test_user(&state.store, "exchange@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
@@ -133,7 +160,7 @@ async fn test_token_exchange_successful() {
     // The exchange writes a token_exchange audit event for the subject user.
     let events = state
         .audit
-        .query_events(&crate::db::AuditEventFilter {
+        .query_events(&AuditEventFilter {
             event_types: Some(vec!["token_exchange".to_string()]),
             ..Default::default()
         })
@@ -150,6 +177,67 @@ async fn test_token_exchange_successful() {
     );
 }
 
+/// The exchange's audit row records the request's client address, and the
+/// policy history built from that row carries it as `input.ip`, so a
+/// temporal policy over exchange events can compare addresses. The row used
+/// to carry none, which projected every exchange as `ip: ""`.
+#[tokio::test]
+async fn test_token_exchange_policy_history_carries_client_ip() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "exchange-ip@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    // `http_post_form` connects from 127.0.0.1 (injected `ConnectInfo`).
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange&subject_token={token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token"
+        ),
+        &[
+            ("Authorization", &client.basic_auth_header()),
+            ("User-Agent", "exchange-test-agent"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let events = state
+        .audit
+        .query_events(&AuditEventFilter {
+            event_types: Some(vec!["token_exchange".to_string()]),
+            ..Default::default()
+        })
+        .await
+        .expect("query audit events");
+    assert_eq!(events.len(), 1, "one exchange -> one audit event");
+    let row = events.first().expect("one audit event");
+    let data: serde_json::Value = serde_json::from_str(&row.data).expect("event data JSON");
+    assert_eq!(data["client_ip"], "127.0.0.1", "{data}");
+    assert_eq!(data["user_agent"], "exchange-test-agent", "{data}");
+
+    let event =
+        events::history_event(row, "org-1", 0).expect("an exchange row maps to a history event");
+    assert_eq!(
+        event.field("input", "ip"),
+        Some(&dogwood_language::Value::String("127.0.0.1".to_string())),
+        "the exchange's policy input must carry the request's client IP"
+    );
+}
+
 #[tokio::test]
 async fn test_token_exchange_scope_downgrade() {
     // RFC 8693 Section 2.2: Can reduce scope, not expand
@@ -157,7 +245,16 @@ async fn test_token_exchange_scope_downgrade() {
 
     let user = create_test_user(&state.store, "exchange-scope@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
@@ -238,7 +335,7 @@ async fn test_rfc8693_missing_subject_token() {
     // RFC 6749 §5.2: invalid_request covers a request "missing a required
     // parameter". Pairing subject_token with subject_token_type is what makes
     // this reachable — an absent token used to reach the decoder as an empty
-    // string and come back as invalid_grant.
+    // string and be reported as an invalid token instead.
     assert_eq!(
         error["error"], "invalid_request",
         "Missing subject_token should be rejected as invalid_request, got: {}",
@@ -253,7 +350,16 @@ async fn test_rfc8693_missing_subject_token_type() {
 
     let user = create_test_user(&state.store, "exchange-missing-type@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
@@ -283,7 +389,16 @@ async fn test_rfc8693_issued_token_type_in_response() {
 
     let user = create_test_user(&state.store, "exchange-issued-type@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
@@ -318,7 +433,16 @@ async fn test_rfc8693_unsupported_requested_token_type() {
 
     let user = create_test_user(&state.store, "exchange-bad-type@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
@@ -370,8 +494,16 @@ async fn test_rfc8693_delegation_depth_limit() {
         let actor_email = format!("actor-{}@example.com", i);
         let iter_actor = create_test_user(&state.store, &actor_email).await;
         let iter_actor_auth = create_test_authenticator(&state.store, &iter_actor.id).await;
-        let actor_token =
-            create_test_session(&state, &iter_actor.id, &iter_actor.email, &iter_actor_auth).await;
+        let actor_token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &iter_actor.id,
+                email: &iter_actor.email,
+                auth_id: Some(&iter_actor_auth),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let (status, body) = http_post_form(
             &app,
@@ -416,7 +548,16 @@ async fn test_rfc8693_client_auth_required_for_exchange() {
 
     let user = create_test_user(&state.store, "exchange-noauth@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Try token exchange without any client authentication
     let (status, body) = http_post_form(
@@ -514,6 +655,127 @@ async fn test_rfc8693_unsupported_requested_token_type_rejected() {
 }
 
 #[tokio::test]
+async fn test_rfc8693_requested_token_type_jwt_rejected() {
+    // RFC 8693 Section 2.1: `jwt` is accepted as a subject_token_type but is
+    // not a type this server issues, so requesting it is rejected rather than
+    // silently substituted with an access token (Section 2.2.1 requires
+    // `issued_token_type` to name what was actually issued).
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "exchange-jwt-requested@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let (access_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
+
+    let auth_header = client.basic_auth_header();
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={access_token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &requested_token_type=urn:ietf:params:oauth:token-type:jwt"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "requested_token_type=jwt should be rejected: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["error"], "invalid_request");
+    assert!(
+        error["error_description"]
+            .as_str()
+            .is_some_and(|d| d.contains("Unsupported requested_token_type")),
+        "description should name the parameter: {body}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc8693_resource_must_be_absolute_uri_without_fragment() {
+    // RFC 8693 §2.1: "The value of the 'resource' parameter MUST be an
+    // absolute URI, as specified by Section 4.3 of [RFC3986], that MAY
+    // include a query component and MUST NOT include a fragment component."
+    // RFC 8693 §2.2.2: "If the authorization server is unwilling or unable to
+    // issue a token for any target service indicated by the 'resource' or
+    // 'audience' parameters, the 'invalid_target' error code SHOULD be used
+    // in the error response."
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "exchange-resource-uri@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let (access_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
+    let auth_header = client.basic_auth_header();
+
+    for invalid_resource in [
+        // Relative reference: not an absolute URI.
+        "not-a-valid-uri",
+        // Fragment component.
+        "https://api.example.com/v1#frag",
+    ] {
+        let (status, body) = http_post_form(
+            &app,
+            "/oauth/token",
+            &format!(
+                "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+                 &subject_token={access_token}\
+                 &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+                 &resource={}",
+                urlencoding::encode(invalid_resource)
+            ),
+            &[("Authorization", &auth_header)],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "resource={invalid_resource} must be rejected: {body}"
+        );
+        let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(
+            error["error"], "invalid_target",
+            "resource={invalid_resource} must report invalid_target: {body}"
+        );
+    }
+
+    // A query component is explicitly allowed ("MAY include a query
+    // component"), so this exchange must succeed.
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={access_token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &resource={}",
+            urlencoding::encode("https://api.example.com/v1?tenant=acme")
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "resource with a query component must be accepted: {body}"
+    );
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert!(
+        response.get("access_token").is_some(),
+        "exchange must issue a token: {body}"
+    );
+}
+
+#[tokio::test]
 async fn test_rfc8693_actor_token_delegation_chain() {
     // RFC 8693 Section 2.1: Token exchange with actor token produces nested `act` claims.
     let (app, state) = test_app().await;
@@ -578,6 +840,61 @@ async fn test_rfc8693_actor_token_delegation_chain() {
 }
 
 #[tokio::test]
+async fn test_rfc8693_delegated_exchange_records_actor_user_id() {
+    // A delegated exchange (actor_token present) must record the actor's
+    // user id on the token_exchange audit row, so delegation is attributable
+    // to the acting party, not just visible in the issued JWT's `act` claim.
+    // The insert is best-effort in production (failures only log a warning);
+    // against the test store it always lands.
+    let (app, state) = test_app().await;
+
+    let grantor = create_test_user(&state.store, "audit-actor-grantor@example.com").await;
+    let grantor_auth = create_test_authenticator(&state.store, &grantor.id).await;
+    let client = create_test_oauth_client(&state.store, &grantor.id).await;
+
+    let grantee = create_test_user(&state.store, "audit-actor-grantee@example.com").await;
+    let grantee_auth = create_test_authenticator(&state.store, &grantee.id).await;
+
+    let (grantor_token, _) =
+        issue_oauth_access_token(&app, &state, &grantor, &grantor_auth, &client).await;
+    let (grantee_token, _) =
+        issue_oauth_access_token(&app, &state, &grantee, &grantee_auth, &client).await;
+
+    let auth_header = client.basic_auth_header();
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={grantor_token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &actor_token={grantee_token}\
+             &actor_token_type=urn:ietf:params:oauth:token-type:access_token"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "delegated exchange should succeed: {body}"
+    );
+
+    let row = state
+        .store
+        .find_one::<TokenExchangeDoc>("actor_user_id", &grantee.id)
+        .await
+        .expect("query token_exchange by actor_user_id")
+        .expect("delegated exchange row must record actor_user_id");
+    assert_eq!(
+        row.data.subject_user_id, grantor.id,
+        "audit row must pair the actor with the delegating subject"
+    );
+    assert_eq!(row.data.actor_user_id.as_deref(), Some(grantee.id.as_str()));
+}
+
+#[tokio::test]
 async fn test_rfc8693_token_lifetime_capped_by_subject() {
     // RFC 8693 Section 2.2: Exchanged token lifetime should not exceed
     // the remaining lifetime of the subject token.
@@ -617,6 +934,154 @@ async fn test_rfc8693_token_lifetime_capped_by_subject() {
     assert!(
         expires_in <= u64::try_from(subject_remaining).unwrap_or(0) + 5, // +5s tolerance for test timing
         "Exchanged token lifetime ({expires_in}s) should not exceed subject remaining ({subject_remaining}s)"
+    );
+}
+
+/// RFC 8693 §2.2.1: `expires_in` "is the lifetime in seconds of the access
+/// token" — it describes the token it accompanies. The server's own design
+/// (the `expires_in = min(session_hours*3600, subject_remaining)` cap in
+/// `exchange_token`, mirrored by the ID-token branch's `.valid_for_seconds`)
+/// commits to bounding the *issued* token by the subject token's remaining
+/// TTL. The access-token branch must do the same: the issued JWT `exp`, the
+/// `sessions.expires_at` row, and the `token_exchange` audit row's
+/// `expires_at` must all carry the capped lifetime, not the uncapped
+/// `session_hours` one.
+///
+/// Forges a subject token with `exp = now + 60s` and a matching session row,
+/// performs an exchange, and asserts the issued token's decoded `exp`, the
+/// `sessions` row's `expires_at`, and the `token_exchange` audit row's
+/// `expires_at` all agree on the capped lifetime (~60s) rather than the full
+/// `session_hours` (28800s) lifetime.
+#[tokio::test]
+async fn test_rfc8693_access_token_exp_not_capped_by_subject_ttl() {
+    use crate::db::documents::oauth::TokenExchangeDoc;
+
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "exchange-cap-exp@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    // Mint a full-lifetime token, then re-sign it as a short-lived subject
+    // token (exp = now + 60s) with its own matching session row. This is the
+    // shape that makes the subject-TTL cap bind: the subject token's
+    // remaining TTL is far below `session_hours * 3600` (28800s).
+    let base = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let subject_token =
+        forge_short_lived_access_token(&state, &user.id, &user.email, Some(&auth_id), &base, 60)
+            .await;
+
+    let auth_header = client.basic_auth_header();
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={subject_token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "Exchange should succeed: {body}");
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let issued_token = response["access_token"]
+        .as_str()
+        .expect("access_token present");
+    let reported_expires_in = response["expires_in"].as_u64().expect("expires_in present");
+
+    // (1) The reported `expires_in` must reflect the capped lifetime (~60s),
+    //     not the full session_hours (28800s).
+    assert!(
+        reported_expires_in <= 65,
+        "reported expires_in ({reported_expires_in}s) should be capped by the \
+         subject token's remaining TTL (~60s), not the full session_hours"
+    );
+
+    // (2) The issued access token's actual JWT `exp` claim must agree with
+    //     the reported `expires_in` (within test timing slack). Before the
+    //     fix this was 28800s while the response reported ~60s.
+    let issued_claims = decode_jwt_payload(issued_token);
+    let issued_exp = issued_claims["exp"].as_i64().expect("issued exp present");
+    let issued_iat = issued_claims["iat"].as_i64().expect("issued iat present");
+    let issued_lifetime = issued_exp.saturating_sub(issued_iat);
+    assert!(
+        issued_lifetime <= 65,
+        "issued access token exp ({issued_lifetime}s remaining from iat) should \
+         be capped by subject remaining (~60s), not the full session_hours \
+         lifetime (28800s)"
+    );
+    assert_eq!(
+        issued_lifetime,
+        i64::try_from(reported_expires_in).expect("expires_in fits in i64"),
+        "the issued token's actual lifetime ({issued_lifetime}s) must equal the \
+         `expires_in` value reported to the client ({reported_expires_in}s)"
+    );
+
+    // (3) The issued token must not outlive its subject in absolute terms.
+    //     The cap and the mint read one instant — the request's arrival — so
+    //     `exp_issued = arrival + min(session, subject_exp - arrival)` is at
+    //     or before `subject_exp`. Read from two clocks, the mint's later
+    //     stamp pushed `exp_issued` past `subject_exp` by the gap between
+    //     them, which the lifetime checks above cannot see: both the issued
+    //     `iat` and `exp` shift together.
+    let subject_exp = decode_jwt_payload(&subject_token)["exp"]
+        .as_i64()
+        .expect("subject exp present");
+    assert!(
+        issued_exp <= subject_exp,
+        "issued token exp ({issued_exp}) must not be later than the subject \
+         token's exp ({subject_exp}); an exchanged token may never outlive \
+         the token it was derived from"
+    );
+
+    // (4) The `sessions` row's `expires_at` must match the issued token's
+    //     `exp` claim — the two records must not disagree for the same token.
+    let issued_hash = crypto::hash_token(issued_token);
+    let session = state
+        .session_cache
+        .get_session_by_token_hash(&state.store, &issued_hash, test_arrival())
+        .await
+        .expect("session lookup")
+        .expect("issued access token must be persisted as a session");
+    assert_eq!(
+        session.expires_at.as_second(),
+        issued_exp,
+        "sessions.expires_at ({}) must equal the issued token's JWT exp ({issued_exp})",
+        session.expires_at.as_second()
+    );
+
+    // (5) The `token_exchange` audit row's `expires_at` must agree with the
+    //     issued token's actual `exp` — the audit row and the `sessions` row
+    //     must record the same lifetime for one token. `issued_token_hash`
+    //     is not indexed, so look the row up by the indexed subject_user_id
+    //     and filter for the matching issued token hash.
+    let audit_rows = state
+        .store
+        .find_all::<TokenExchangeDoc>("subject_user_id", &user.id)
+        .await
+        .expect("query token_exchange by subject_user_id");
+    let audit_row = audit_rows
+        .into_iter()
+        .find(|d| d.data.issued_token_hash == issued_hash)
+        .expect("a token_exchange audit row for the issued token must exist");
+    assert_eq!(
+        audit_row.data.expires_at.as_second(),
+        issued_exp,
+        "token_exchange audit row expires_at ({}) must equal the issued \
+         token's JWT exp ({issued_exp}) — the audit row and the sessions row \
+         must agree on one token's lifetime",
+        audit_row.data.expires_at.as_second()
     );
 }
 
@@ -768,12 +1233,21 @@ async fn test_rfc8693_deactivated_subject_user_rejected() {
 
     let user = create_test_user(&state.store, "deactivated-exchange@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
     // Deactivate the user after creating the session
-    crate::db::update_user_active_status(&state.store, &user.id, false)
+    db::update_user_active_status(&state.store, &user.id, false)
         .await
         .expect("deactivate user");
 
@@ -791,7 +1265,9 @@ async fn test_rfc8693_deactivated_subject_user_rejected() {
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
-    assert_eq!(error["error"], "invalid_grant");
+    // RFC 8693 §2.2.2: a subject token "unacceptable based on policy"
+    // (deactivated user) MUST yield the invalid_request error code.
+    assert_eq!(error["error"], "invalid_request");
 }
 
 // ========================================================================
@@ -814,7 +1290,16 @@ async fn test_rfc8693_id_token_request_returns_clean_id_token() {
 
     let user = create_test_user(&state.store, "wif-basic@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
@@ -873,7 +1358,7 @@ async fn test_rfc8693_id_token_request_returns_clean_id_token() {
     // The ID-token exchange writes a token_exchange audit event too.
     let events = state
         .audit
-        .query_events(&crate::db::AuditEventFilter {
+        .query_events(&AuditEventFilter {
             event_types: Some(vec!["token_exchange".to_string()]),
             ..Default::default()
         })
@@ -888,6 +1373,171 @@ async fn test_rfc8693_id_token_request_returns_clean_id_token() {
     );
 }
 
+// ========================================================================
+// CLI grant_types contract — end-to-end through `/oauth/register`
+//
+// `vouch credential openai|anthropic` authenticate as the CLI's single FAPI
+// client and send `grant_type=urn:ietf:params:oauth:grant-type:token-exchange`
+// to mint a Vouch-issued ID-token assertion. Since commit 45b8de2d the server
+// enforces RFC 6749 §5.2 `unauthorized_client` in `handle_token_exchange_grant`
+// via `OAuthClient::is_authorized_for_grant`, which reads the stored
+// `grant_types` at request time — so a CLI client whose registration omits
+// `token-exchange` (the pre-fix `[device_code, fido2-assertion]` vector) is
+// rejected. The CLI registration (`vouch-cli/src/fapi/registration.rs`) now
+// declares `token-exchange`; these tests drive the real `/oauth/register` with
+// the CLI's exact `grant_types` vector — pre-fix and post-fix shapes — then
+// run the WIF token-exchange the CLI performs, exercising the full
+// registration → storage → gate → exchange pipeline.
+// ========================================================================
+
+/// Register a CLI-shape FAPI client via the real `/oauth/register` endpoint
+/// (open registration), mirroring `vouch-cli/src/fapi/registration.rs`.
+///
+/// Returns the server-assigned `client_id` paired with the ES256 signing key
+/// (pkcs8 bytes) whose public JWK was registered inline, so the caller can
+/// build `private_key_jwt` client assertions for `/oauth/token`.
+///
+/// `dpop_bound_access_tokens` is set `false` (the CLI sets it `true`) to
+/// isolate the `grant_types` gate — the contract the CLI depends on — from
+/// FAPI sender-constraint enforcement (DPoP), which is independently pinned
+/// in `rfc9449.rs`. The `grant_types` vector is the CLI's exact vector.
+async fn register_cli_shape_client(app: &axum::Router, grant_types: &[&str]) -> (String, Vec<u8>) {
+    let (pkcs8_bytes, jwk) = generate_es256_signing_key();
+    let body = serde_json::json!({
+        "token_endpoint_auth_method": "private_key_jwt",
+        "grant_types": grant_types,
+        "response_types": [],
+        "dpop_bound_access_tokens": false,
+        "jwks": { "keys": [jwk] },
+        "client_name": "vouch-cli/test",
+        "software_id": "vouch-cli",
+    });
+    let (status, resp) = http_post_json(app, "/oauth/register", &body.to_string(), &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "CLI-shape registration must succeed for grant_types {grant_types:?}: {resp}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+    let client_id = json["client_id"].as_str().expect("client_id").to_string();
+    (client_id, pkcs8_bytes)
+}
+
+/// The CLI's pre-fix registration (`grant_types` without `token-exchange`) MUST
+/// be rejected by the gate with `unauthorized_client` — pinning the
+/// exact regression that broke WIF credential commands. This is the CLI's real
+/// grant vector (`device_code` + `fido2-assertion`), driven through
+/// `/oauth/register`, not the harness-minted default.
+#[tokio::test]
+async fn test_wif_token_exchange_rejected_when_cli_grant_vector_omits_token_exchange() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "wif-cli-grants-buggy@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let subject_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let token_endpoint = format!("{}/oauth/token", state.config().base_url);
+
+    // Pre-fix CLI shape: device_code + fido2-assertion, token-exchange OMITTED.
+    let (client_id, pkcs8_bytes) = register_cli_shape_client(
+        &app,
+        &[
+            "urn:ietf:params:oauth:grant-type:device_code",
+            "urn:ietf:params:oauth:grant-type:fido2-assertion",
+        ],
+    )
+    .await;
+
+    let assertion = build_client_assertion(&client_id, &token_endpoint, &pkcs8_bytes, None);
+    let body = format!(
+        "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+         &subject_token={subject_token}\
+         &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+         &requested_token_type={ID_TOKEN_TYPE}\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}"
+    );
+    let (status, resp) = http_post_form(&app, "/oauth/token", &body, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "omitting token-exchange from the CLI grant vector must be rejected: {resp}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+    assert_eq!(
+        json["error"], "unauthorized_client",
+        "the pre-fix CLI grant vector must yield unauthorized_client: {resp}"
+    );
+}
+
+/// The CLI's post-fix registration (`grant_types` WITH `token-exchange`) MUST
+/// allow the WIF token-exchange to succeed and mint a clean OIDC ID token —
+/// proving the fix. The grant vector is the CLI's exact post-fix shape, driven
+/// through `/oauth/register`, not the harness-minted default.
+#[tokio::test]
+async fn test_wif_token_exchange_succeeds_when_cli_grant_vector_includes_token_exchange() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "wif-cli-grants-fixed@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let subject_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let token_endpoint = format!("{}/oauth/token", state.config().base_url);
+
+    // Post-fix CLI shape: device_code + fido2-assertion + token-exchange.
+    let (client_id, pkcs8_bytes) = register_cli_shape_client(
+        &app,
+        &[
+            "urn:ietf:params:oauth:grant-type:device_code",
+            "urn:ietf:params:oauth:grant-type:fido2-assertion",
+            "urn:ietf:params:oauth:grant-type:token-exchange",
+        ],
+    )
+    .await;
+
+    let assertion = build_client_assertion(&client_id, &token_endpoint, &pkcs8_bytes, None);
+    let body = format!(
+        "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+         &subject_token={subject_token}\
+         &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+         &requested_token_type={ID_TOKEN_TYPE}\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}"
+    );
+    let (status, resp) = http_post_form(&app, "/oauth/token", &body, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the post-fix CLI grant vector (with token-exchange) WIF exchange must succeed: {resp}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+    assert_eq!(
+        json["issued_token_type"], ID_TOKEN_TYPE,
+        "the issued token must be an OIDC ID token (WIF assertion): {resp}"
+    );
+    let id_token = json["access_token"].as_str().expect("access_token present");
+    let claims = decode_jwt_payload(id_token);
+    assert_eq!(claims["sub"], "wif-cli-grants-fixed@example.com");
+}
+
 #[tokio::test]
 async fn test_rfc8693_id_token_audience_routing() {
     // RFC 8707: the requested audience becomes the ID token's `aud` claim.
@@ -895,7 +1545,16 @@ async fn test_rfc8693_id_token_audience_routing() {
 
     let user = create_test_user(&state.store, "wif-aud@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
@@ -936,7 +1595,16 @@ async fn test_rfc8693_id_token_default_audience_is_issuer() {
 
     let user = create_test_user(&state.store, "wif-default-aud@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
@@ -977,7 +1645,16 @@ async fn test_rfc8693_id_token_lifetime_capped_at_default() {
 
     let user = create_test_user(&state.store, "wif-ttl@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
@@ -1028,7 +1705,16 @@ async fn test_rfc8693_id_token_not_persisted_as_session() {
 
     let user = create_test_user(&state.store, "wif-nosession@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
@@ -1055,15 +1741,93 @@ async fn test_rfc8693_id_token_not_persisted_as_session() {
         .as_str()
         .expect("access_token present");
 
-    let hash = crate::crypto::hash_token(id_token);
+    let hash = crypto::hash_token(id_token);
     let session = state
         .session_cache
-        .get_session_by_token_hash(&state.store, &hash)
+        .get_session_by_token_hash(&state.store, &hash, test_arrival())
         .await
         .expect("session lookup");
     assert!(
         session.is_none(),
         "ID token must not be persisted as a session"
+    );
+}
+
+/// The exchanged ID token's signed `exp` claim must agree with the
+/// `token_exchange` audit row's `expires_at`. Commit addbaecd anchored the
+/// audit row's `expires_at` on the request's `arrival` but left
+/// `OidcIdTokenClaimsBuilder::build` on `Timestamp::now()`, so the signed
+/// JWT and the audit row were stamped from two different clocks and could
+/// disagree about the lifetime of one token. The fix threads `arrival` into
+/// the builder so both records share one instant; the (incorrect) comment
+/// that claimed this was already true is removed.
+#[tokio::test]
+async fn test_rfc8693_id_token_exp_matches_audit_expires_at() {
+    use crate::db::documents::oauth::TokenExchangeDoc;
+
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "id-vs-audit@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let auth_header = client.basic_auth_header();
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &requested_token_type={ID_TOKEN_TYPE}"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "ID token exchange should succeed: {body}"
+    );
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let id_token = response["access_token"]
+        .as_str()
+        .expect("access_token present");
+
+    // The signed JWT's `exp` claim.
+    let claims = decode_jwt_payload(id_token);
+    let exp = claims["exp"].as_i64().expect("ID token exp present");
+
+    // The audit row's `expires_at` (a `jiff::Timestamp`) must equal the
+    // signed JWT's `exp` — both stamped from the same arrival instant.
+    let issued_hash = crypto::hash_token(id_token);
+    let audit_rows = state
+        .store
+        .find_all::<TokenExchangeDoc>("subject_user_id", &user.id)
+        .await
+        .expect("query token_exchange by subject_user_id");
+    let audit_row = audit_rows
+        .into_iter()
+        .find(|d| d.data.issued_token_hash == issued_hash)
+        .expect("a token_exchange audit row for the issued ID token must exist");
+    assert_eq!(
+        audit_row.data.expires_at.as_second(),
+        exp,
+        "token_exchange audit row expires_at ({}) must equal the issued ID \
+         token's JWT exp ({exp}) — the audit row records the same lifetime as \
+         the signed token, both anchored on the request's arrival",
+        audit_row.data.expires_at.as_second(),
     );
 }
 
@@ -1075,22 +1839,31 @@ async fn test_rfc8693_id_token_carries_hardware_aaguid() {
 
     let user = create_test_user(&state.store, "wif-aaguid@example.com").await;
     let aaguid = "ee882879-721c-4913-9775-3dfcce97072a";
-    let auth_id = crate::db::create_authenticator(
+    let auth_id = db::create_authenticator(
         &state.store,
-        &crate::db::CreateAuthenticatorParams {
+        &CreateAuthenticatorParams {
             user_id: &user.id,
-            user_email: &user.email,
             name: "YubiKey 5",
             credential_id: format!("cred-{}", uuid::Uuid::now_v7()).as_bytes(),
             public_key: &[0u8; 32],
             aaguid: Some(aaguid),
             user_handle: Some(user.id.as_bytes()),
             attestation_verified: true,
+            counter: 0,
         },
     )
     .await
     .expect("create authenticator with aaguid");
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
@@ -1133,24 +1906,33 @@ async fn test_rfc8693_id_token_uses_session_aaguid_after_rotation() {
 
     let user = create_test_user(&state.store, "wif-rotation@example.com").await;
     let original_aaguid = "ee882879-721c-4913-9775-3dfcce97072a";
-    let auth_id = crate::db::create_authenticator(
+    let auth_id = db::create_authenticator(
         &state.store,
-        &crate::db::CreateAuthenticatorParams {
+        &CreateAuthenticatorParams {
             user_id: &user.id,
-            user_email: &user.email,
             name: "YubiKey 5 (original)",
             credential_id: format!("cred-{}", uuid::Uuid::now_v7()).as_bytes(),
             public_key: &[0u8; 32],
             aaguid: Some(original_aaguid),
             user_handle: Some(user.id.as_bytes()),
             attestation_verified: true,
+            counter: 0,
         },
     )
     .await
     .expect("create original authenticator");
 
     // Session captures the original AAGUID.
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
@@ -1200,7 +1982,16 @@ async fn test_rfc8693_id_token_carries_hd_for_org_user() {
     let org = create_test_org(&state.store, "example.com").await;
     let user = create_test_user_in_org(&state.store, "hduser@example.com", &org.id, false).await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
@@ -1241,7 +2032,16 @@ async fn test_rfc8693_access_token_request_unaffected_by_id_token_branch() {
 
     let user = create_test_user(&state.store, "wif-regression@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
@@ -1272,10 +2072,10 @@ async fn test_rfc8693_access_token_request_unaffected_by_id_token_branch() {
     let access_token = response["access_token"]
         .as_str()
         .expect("access_token present");
-    let hash = crate::crypto::hash_token(access_token);
+    let hash = crypto::hash_token(access_token);
     let session = state
         .session_cache
-        .get_session_by_token_hash(&state.store, &hash)
+        .get_session_by_token_hash(&state.store, &hash, test_arrival())
         .await
         .expect("session lookup");
     assert!(
@@ -1292,11 +2092,20 @@ async fn test_rfc8693_id_token_deactivated_user_rejected() {
 
     let user = create_test_user(&state.store, "wif-deactivated@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
-    crate::db::update_user_active_status(&state.store, &user.id, false)
+    db::update_user_active_status(&state.store, &user.id, false)
         .await
         .expect("deactivate user");
 
@@ -1315,7 +2124,9 @@ async fn test_rfc8693_id_token_deactivated_user_rejected() {
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
-    assert_eq!(error["error"], "invalid_grant");
+    // RFC 8693 §2.2.2: a subject token "unacceptable based on policy"
+    // (deactivated user) MUST yield the invalid_request error code.
+    assert_eq!(error["error"], "invalid_request");
 }
 
 #[tokio::test]
@@ -1329,8 +2140,16 @@ async fn test_rfc8693_id_token_rejects_non_hardware_verified_subject() {
     let (app, state) = test_app().await;
 
     let user = create_test_user(&state.store, "wif-bootstrap@example.com").await;
-    let token =
-        crate::test_utils::create_test_bootstrap_session(&state, &user.id, &user.email).await;
+    let token = test_utils::create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            verification: TestVerification::NotVerified,
+            ..Default::default()
+        },
+    )
+    .await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
@@ -1349,7 +2168,9 @@ async fn test_rfc8693_id_token_rejects_non_hardware_verified_subject() {
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
-    assert_eq!(error["error"], "access_denied");
+    // RFC 8693 §2.2.2: a subject token "unacceptable based on policy" MUST
+    // yield the invalid_request error code.
+    assert_eq!(error["error"], "invalid_request");
 
     // Regression guard: the same subject token must still work for an
     // access-token exchange. The hardware gate is specific to ID-token
@@ -1422,7 +2243,7 @@ async fn test_rfc8693_id_token_rejects_actor_token() {
 //
 // When a token exchange carries an actor_token, the actor user's active
 // flag must be checked symmetrically with the subject user check. A
-// deactivated actor must produce invalid_grant, not a 200 with an act claim.
+// deactivated actor must produce an error, not a 200 with an act claim.
 // ========================================================================
 
 #[tokio::test]
@@ -1444,7 +2265,7 @@ async fn test_rfc8693_deactivated_actor_user_rejected() {
         issue_oauth_access_token(&app, &state, &actor, &actor_auth, &client).await;
 
     // Deactivate the actor user.
-    crate::db::update_user_active_status(&state.store, &actor.id, false)
+    db::update_user_active_status(&state.store, &actor.id, false)
         .await
         .expect("deactivate actor user");
 
@@ -1470,14 +2291,1135 @@ async fn test_rfc8693_deactivated_actor_user_rejected() {
         "Deactivated actor must be rejected: {body}"
     );
     let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    // RFC 8693 §2.2.2: an actor token "unacceptable based on policy"
+    // (deactivated user) MUST yield the invalid_request error code.
     assert_eq!(
-        error["error"], "invalid_grant",
-        "Must return invalid_grant for deactivated actor: {body}"
+        error["error"], "invalid_request",
+        "Must return invalid_request for deactivated actor: {body}"
     );
     assert!(
         error["error_description"]
             .as_str()
             .is_some_and(|d| d.contains("deactivated")),
         "Error description must mention deactivated: {body}"
+    );
+}
+
+/// RFC 6749 Section 10.5: "the authorization server SHOULD attempt to revoke
+/// all access tokens already granted based on the compromised authorization
+/// code." An exchanged token derives its authority from the subject token, so
+/// a token exchanged from an authorization-code token was granted based on
+/// that code and must be revoked when the code is replayed — otherwise an
+/// exchange launders a compromised code into a token that outlives it.
+#[tokio::test]
+async fn test_token_exchange_inherits_the_subject_s_authorization_code() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "exchange-replay@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let auth_header = client.basic_auth_header();
+
+    // Redeem an authorization code, then exchange the resulting token.
+    let code = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec::default(),
+    )
+    .await;
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=authorization_code&code={code}\
+             &redirect_uri=https://example.com/callback"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "code exchange failed: {body}");
+    let subject_token =
+        serde_json::from_str::<serde_json::Value>(&body).expect("Valid JSON")["access_token"]
+            .as_str()
+            .expect("access_token")
+            .to_string();
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={subject_token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "token exchange failed: {body}");
+    let exchanged =
+        serde_json::from_str::<serde_json::Value>(&body).expect("Valid JSON")["access_token"]
+            .as_str()
+            .expect("access_token")
+            .to_string();
+
+    // A session from a grant with no single-use code must survive the replay.
+    let unrelated = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let (status, _) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=authorization_code&code={code}\
+             &redirect_uri=https://example.com/callback"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "the replayed code must be denied"
+    );
+
+    for (token, label) in [
+        (&subject_token, "the subject token"),
+        (&exchanged, "the exchanged token"),
+    ] {
+        let (status, _) = http_get(
+            &app,
+            "/oauth/userinfo",
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "{label} must be revoked with the replayed code"
+        );
+    }
+    assert_token_alive(&app, &unrelated, "a session from a grant with no code").await;
+}
+
+// ========================================================================
+// Actor token session lookup — error propagation parity with the subject
+// token lookup (issue #540 pattern).
+//
+// The actor session lookup must distinguish:
+//   * Ok(None) — session missing/revoked → `invalid_request` (RFC 8693 §2.2.2)
+//   * Err(_)   — store failure          → `ServiceError::Internal` (500)
+//
+// The `Ok(None)` arm is exercised here by issuing a real actor token and
+// deleting its backing session before the exchange. The `Err` arm is not
+// reachable end-to-end via `state.db.close()`: with the pool closed the
+// handler's client-auth lookup, the subject session lookup, and the
+// subject's (uncached) `db::get_user_by_id` all run before the actor
+// session lookup and would surface a 500 first. The isolated `Err`-arm
+// regression test uses the test-only `SessionCache::inject_fault` seam so
+// only the actor token hash faults while the subject path keeps the open
+// pool (see `test_rfc8693_actor_session_store_error_returns_internal`).
+// ========================================================================
+
+/// A validly-decoded actor token whose backing session has been removed
+/// must produce `invalid_request` ("Actor token session not found or
+/// revoked") per RFC 8693 §2.2.2, not a 500. Exercises the `Ok(None)` arm
+/// of the actor session lookup — the same call site whose `Err` handling
+/// the fix tightens.
+#[tokio::test]
+async fn test_rfc8693_actor_session_not_found_returns_invalid_request() {
+    let (app, state) = test_app().await;
+
+    // Subject (grantor) with a stored, valid access token.
+    let grantor = create_test_user(&state.store, "actor-notfound-grantor@example.com").await;
+    let grantor_auth = create_test_authenticator(&state.store, &grantor.id).await;
+    let client = create_test_oauth_client(&state.store, &grantor.id).await;
+    let (grantor_token, _) =
+        issue_oauth_access_token(&app, &state, &grantor, &grantor_auth, &client).await;
+
+    // Grantee (actor): issue a real token, then delete its backing session so
+    // the actor session lookup returns `Ok(None)`.
+    let grantee = create_test_user(&state.store, "actor-notfound-grantee@example.com").await;
+    let grantee_auth = create_test_authenticator(&state.store, &grantee.id).await;
+    let (grantee_token, _) =
+        issue_oauth_access_token(&app, &state, &grantee, &grantee_auth, &client).await;
+
+    let grantee_hash = crypto::hash_token(&grantee_token);
+    state.session_cache.invalidate(&grantee_hash);
+    db::delete_session_by_token_hash(&state.store, &grantee_hash)
+        .await
+        .expect("delete actor session");
+
+    let auth_header = client.basic_auth_header();
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={grantor_token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &actor_token={grantee_token}\
+             &actor_token_type=urn:ietf:params:oauth:token-type:access_token"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "missing actor session must return invalid_request, got: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        error["error"], "invalid_request",
+        "missing actor session must report invalid_request: {body}"
+    );
+    assert!(
+        error["error_description"]
+            .as_str()
+            .is_some_and(|d| d.contains("Actor token session not found or revoked")),
+        "error_description must name the actor session: {body}"
+    );
+}
+
+/// Regression: a *store failure* during the actor token session lookup must
+/// surface as `500 Internal Server Error`, not `invalid_grant`.
+///
+/// `state.db.close()` cannot isolate this branch: with the pool closed the
+/// handler's client-auth lookup, the subject session lookup, and the subject
+/// user lookup all run first and would return 500 via the subject path. Instead
+/// we use the test-only `SessionCache::inject_fault` seam to make the actor
+/// token hash fail with a store error while every other lookup uses the live,
+/// open pool.
+///
+/// Against the pre-fix `!matches!(.., Ok(Some(_)))` code this returns the
+/// OAuth error for a missing session (the bug); against the fixed
+/// `.map_err(Internal)?.ok_or_else(..)?` code it returns 500. This is the
+/// only test that discriminates the fix from the bug.
+#[tokio::test]
+async fn test_rfc8693_actor_session_store_error_returns_internal() {
+    let (app, state) = test_app().await;
+
+    // Distinct subject (grantor) and actor (grantee) users.
+    let grantor = create_test_user(&state.store, "actor-fault-grantor@example.com").await;
+    let grantor_auth = create_test_authenticator(&state.store, &grantor.id).await;
+    let client = create_test_oauth_client(&state.store, &grantor.id).await;
+    let (grantor_token, _) =
+        issue_oauth_access_token(&app, &state, &grantor, &grantor_auth, &client).await;
+
+    let grantee = create_test_user(&state.store, "actor-fault-grantee@example.com").await;
+    let grantee_auth = create_test_authenticator(&state.store, &grantee.id).await;
+    let (grantee_token, _) =
+        issue_oauth_access_token(&app, &state, &grantee, &grantee_auth, &client).await;
+
+    // Fault only the actor session lookup; the subject path keeps using the
+    // open pool and succeeds.
+    let grantee_hash = crypto::hash_token(&grantee_token);
+    state.session_cache.inject_fault(grantee_hash);
+
+    let auth_header = client.basic_auth_header();
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={grantor_token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &actor_token={grantee_token}\
+             &actor_token_type=urn:ietf:params:oauth:token-type:access_token"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "store failure during actor session lookup must return 500, not an \
+         OAuth token error; got: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_ne!(
+        error["error"], "invalid_request",
+        "DB error must not be reported as invalid_request: {body}"
+    );
+    assert_ne!(
+        error["error"], "invalid_grant",
+        "DB error must not be reported as invalid_grant: {body}"
+    );
+}
+
+// ========================================================================
+// RFC 8707 resource_uris allowlist enforcement on token exchange.
+//
+// Token exchange is reachable directly at /oauth/token with no prior
+// /authorize or PAR "front door", so the authenticated client's registered
+// `resource_uris` allowlist must be enforced inside the handler, matching
+// the check that the front doors perform. These tests pin that behavior for
+// both the RFC 9068 access-token fork and the OIDC ID-token (WIF) fork.
+// ========================================================================
+
+/// Helper: build a confidential client restricted to a single registered
+/// audience.
+async fn make_restricted_client(
+    state: &std::sync::Arc<crate::AppState>,
+    user_id: &str,
+) -> TestOAuthClient {
+    create_test_client(
+        &state.store,
+        user_id,
+        TestClientSpec {
+            resource_uris: vec!["https://api.example.com".to_string()],
+            ..Default::default()
+        },
+    )
+    .await
+}
+
+#[tokio::test]
+async fn test_rfc8693_resource_uris_rejects_unregistered_audience_access_token() {
+    // A client narrowed to `resource_uris: ["https://api.example.com"]` must
+    // NOT mint an RFC 9068 access token for an unregistered audience.
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "rur-at-reject@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let client = make_restricted_client(&state, &user.id).await;
+    let auth_header = client.basic_auth_header();
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &audience=https://victim.example.com"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "restricted client must not mint a token for an unregistered audience: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        error["error"], "invalid_target",
+        "unregistered audience must report invalid_target: {body}"
+    );
+    assert!(
+        error["error_description"]
+            .as_str()
+            .is_some_and(|d| d.contains("not registered for this client")),
+        "description must name the allowlist violation: {body}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc8693_resource_uris_rejects_unregistered_audience_id_token() {
+    // The OIDC ID-token (Workload Identity Federation) fork must also reject
+    // an unregistered audience. These ID tokens are presented to external
+    // relying parties (Kubernetes API server, Vault, cloud WIF) that trust the
+    // issuer to enforce the per-client audience boundary.
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "rur-id-reject@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let client = make_restricted_client(&state, &user.id).await;
+    let auth_header = client.basic_auth_header();
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &requested_token_type={ID_TOKEN_TYPE}\
+             &audience=https://victim.example.com"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "restricted client must not mint an ID token for an unregistered audience: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        error["error"], "invalid_target",
+        "unregistered audience must report invalid_target: {body}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc8693_resource_uris_rejects_unregistered_resource() {
+    // The `resource` parameter (RFC 8707) is an alternate spelling of the
+    // audience; it must be gated by the same allowlist.
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "rur-res-reject@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let client = make_restricted_client(&state, &user.id).await;
+    let auth_header = client.basic_auth_header();
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &resource=https://victim.example.com"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "restricted client must not mint a token for an unregistered resource: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        error["error"], "invalid_target",
+        "unregistered resource must report invalid_target: {body}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc8693_resource_uris_rejects_matched_unregistered_audience_and_resource() {
+    // When `audience` and `resource` are both supplied and equal (so the
+    // self-consistency check passes) but the shared value is not on the
+    // allowlist, the allowlist check — not the consistency check — must
+    // still reject the request.
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "rur-match-reject@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let client = make_restricted_client(&state, &user.id).await;
+    let auth_header = client.basic_auth_header();
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &audience=https://victim.example.com\
+             &resource=https://victim.example.com"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "matched-but-unregistered audience/resource must be rejected: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        error["error"], "invalid_target",
+        "matched-but-unregistered values must report invalid_target: {body}"
+    );
+    // The allowlist message (not the "must match" consistency message) must win.
+    assert!(
+        error["error_description"]
+            .as_str()
+            .is_some_and(|d| d.contains("not registered for this client")),
+        "description must name the allowlist violation, not the consistency check: {body}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc8693_resource_uris_allows_registered_audience_access_token() {
+    // Happy path: a restricted client requesting a *registered* audience on
+    // the access-token fork must succeed and the issued `aud` must equal the
+    // registered value. Gates against the fix over-rejecting valid requests.
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "rur-at-allow@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let client = make_restricted_client(&state, &user.id).await;
+    let auth_header = client.basic_auth_header();
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &audience=https://api.example.com"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "registered audience must be accepted on the access-token fork: {body}"
+    );
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let access_token = response["access_token"]
+        .as_str()
+        .expect("access_token present");
+    let claims = decode_jwt_payload(access_token);
+    assert_eq!(
+        claims["aud"], "https://api.example.com",
+        "issued access token's aud must be the registered audience"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc8693_resource_uris_allows_registered_audience_id_token() {
+    // Happy path: a restricted client requesting a *registered* audience on
+    // the ID-token (WIF) fork must succeed and the issued `aud` must equal
+    // the registered value.
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "rur-id-allow@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let client = make_restricted_client(&state, &user.id).await;
+    let auth_header = client.basic_auth_header();
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &requested_token_type={ID_TOKEN_TYPE}\
+             &audience=https://api.example.com"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "registered audience must be accepted on the ID-token fork: {body}"
+    );
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let id_token = response["access_token"]
+        .as_str()
+        .expect("access_token present");
+    let claims = decode_jwt_payload(id_token);
+    assert_eq!(
+        claims["aud"], "https://api.example.com",
+        "issued ID token's aud must be the registered audience"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc8693_resource_uris_permissive_client_allows_arbitrary_audience() {
+    // A client with an empty `resource_uris` (the permissive default) must
+    // still be able to mint a token for any audience — `is_valid_resource_uri`
+    // short-circuits to `true` when the allowlist is empty. Guards against
+    // the fix accidentally rejecting the permissive default.
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "rur-permissive@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let auth_header = client.basic_auth_header();
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &audience=https://arbitrary.example.com"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "permissive (empty resource_uris) client must accept arbitrary audience: {body}"
+    );
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let access_token = response["access_token"]
+        .as_str()
+        .expect("access_token present");
+    let claims = decode_jwt_payload(access_token);
+    assert_eq!(
+        claims["aud"], "https://arbitrary.example.com",
+        "permissive client's token aud must be the requested arbitrary audience"
+    );
+}
+
+// ========================================================================
+// `logout_invalidates_exchange` applied to the actor token (the temporal
+// half of the #550 "mirroring" gap).
+//
+// The subject path already evaluates `logout_invalidates_exchange` against
+// the subject's `user_id`. Before this fix, the actor path ran only the
+// structural checks (decode, session row, `user.active`, self-delegation,
+// depth) and never consulted the policy engine, so a still-signed,
+// still-row-backed access token belonging to a browser-logged-out user
+// could be presented as the `actor_token` and mint a derivative RFC 9068
+// token whose `act.sub` names the logged-out victim.
+//
+// Browser logout (`POST /logout` / RP-initiated logout) deletes only the
+// cookie session row and records a `Logout` audit event; the access-token
+// session rows survive, so `get_session_by_token_hash` still returns
+// `Ok(Some(..))`. The `Logout` event is exactly what
+// `logout_invalidates_exchange` consumes, and exactly what the actor path
+// ignored. These tests seed the `Logout` (and an anchoring `Login`) for the
+// actor user the same way `POST /logout` would, leaving the actor token's
+// session row present, so they exercise the temporal policy half that the
+// structural-only checks never covered.
+//
+// Only `logout_invalidates_exchange` maps onto the actor — the other
+// ExchangeToken policies (`exchange_ip_consistency`,
+// `token_exchange_step_up`, `exchange_rate_limit`) reason about the
+// *request* or the *subject's* history, so applying them to the actor would
+// ban cross-IP delegations and require the actor to have logged in within
+// 15m. The fix must reject a logged-out actor without over-blocking a
+// logged-in one.
+// ========================================================================
+
+/// Seed a `Login` (success) audit event at `mins_ago` for `user_id`.
+///
+/// `logout_invalidates_exchange` anchors on a successful `Login`; without
+/// one the `since` idiom cannot hold from either side and the forbid fires,
+/// which would mask whether a denial came from the subject or the actor.
+/// The authorization-code flow the test fixtures use records
+/// `oauth_token_issued` (an `IssueToken` action) but never `Login`, so the
+/// `Login` row must be seeded explicitly for any user the policy evaluates.
+async fn seed_login_success(state: &std::sync::Arc<crate::AppState>, user_id: &str, mins_ago: i64) {
+    let ts = jiff::Timestamp::now()
+        .checked_sub(jiff::Span::new().minutes(mins_ago))
+        .expect("backdate login audit event");
+    state
+        .audit
+        .insert_user_event_for_test(db::AuditEventKind::LoginSuccess, user_id, ts, "{}")
+        .await
+        .expect("seed login_success audit event");
+}
+
+/// Seed a `Logout` audit event at `mins_ago` for `user_id`, mirroring the
+/// `Logout` row `POST /logout` records. Unlike CLI logout / admin revocation,
+/// browser logout does NOT cascade to access-token session rows, so the
+/// actor token's session row is left intact by design.
+async fn seed_logout(state: &std::sync::Arc<crate::AppState>, user_id: &str, mins_ago: i64) {
+    let ts = jiff::Timestamp::now()
+        .checked_sub(jiff::Span::new().minutes(mins_ago))
+        .expect("backdate logout audit event");
+    state
+        .audit
+        .insert_user_event_for_test(db::AuditEventKind::Logout, user_id, ts, "{}")
+        .await
+        .expect("seed logout audit event");
+}
+
+/// A delegated exchange presenting a *logged-out* user's still-valid access
+/// token as the `actor_token` must be rejected with `invalid_request` when
+/// the org has `logout_invalidates_exchange` enabled. Before the fix the
+/// actor path ran no temporal policy, so the `Logout` the victim just
+/// produced was consumed for the subject half and ignored for the actor
+/// half.
+#[tokio::test]
+async fn test_rfc8693_logged_out_actor_rejected_under_logout_invalidates_exchange() {
+    let (app, state) = test_app().await;
+
+    let org = create_test_org(&state.store, "actor-logout.invalidates.example").await;
+    db::set_preconfigured_active(
+        &state.store,
+        &org.id,
+        vec!["logout_invalidates_exchange".to_string()],
+    )
+    .await
+    .expect("enable logout_invalidates_exchange");
+
+    // Attacker is the subject: a legitimate, still-logged-in user whose
+    // token the exchange is performed *for* (`sub` of the issued token).
+    let attacker = create_test_user_in_org(
+        &state.store,
+        "attacker-actor-logout@example.com",
+        &org.id,
+        false,
+    )
+    .await;
+    let attacker_auth = create_test_authenticator(&state.store, &attacker.id).await;
+    let client = create_test_oauth_client(&state.store, &attacker.id).await;
+    let (attacker_token, _) =
+        issue_oauth_access_token(&app, &state, &attacker, &attacker_auth, &client).await;
+    // The subject policy gate evaluates `logout_invalidates_exchange` against
+    // the attacker: needs a `Login` with no subsequent `Logout` to allow.
+    seed_login_success(&state, &attacker.id, 30).await;
+
+    // Victim is the actor: their access-token session row is still present
+    // (browser-only logout deletes only the cookie row), the token still
+    // verifies, and `user.active` is true — but a `Logout` has occurred
+    // since their last `Login`, which is the signal the policy consumes.
+    let victim = create_test_user_in_org(
+        &state.store,
+        "victim-actor-logout@example.com",
+        &org.id,
+        false,
+    )
+    .await;
+    let victim_auth = create_test_authenticator(&state.store, &victim.id).await;
+    let (victim_token, _) =
+        issue_oauth_access_token(&app, &state, &victim, &victim_auth, &client).await;
+    seed_login_success(&state, &victim.id, 30).await;
+    seed_logout(&state, &victim.id, 10).await;
+
+    let auth_header = client.basic_auth_header();
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={attacker_token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &actor_token={victim_token}\
+             &actor_token_type=urn:ietf:params:oauth:token-type:access_token"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "exchange with a logged-out actor must be rejected: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    // RFC 8693 §2.2.2: an actor token "unacceptable based on policy" MUST
+    // yield the invalid_request error code.
+    assert_eq!(
+        error["error"], "invalid_request",
+        "logged-out actor must report invalid_request: {body}"
+    );
+}
+
+/// A delegated exchange presenting a *logged-in* user's access token as the
+/// `actor_token` must still succeed when `logout_invalidates_exchange` is
+/// enabled — the fix must not over-block valid delegations. The actor has a
+/// `Login` and no subsequent `Logout`, so the policy's `since` idiom holds
+/// and the forbid does not fire.
+#[tokio::test]
+async fn test_rfc8693_logged_in_actor_accepted_under_logout_invalidates_exchange() {
+    let (app, state) = test_app().await;
+
+    let org = create_test_org(&state.store, "actor-logged-in.invalidates.example").await;
+    db::set_preconfigured_active(
+        &state.store,
+        &org.id,
+        vec!["logout_invalidates_exchange".to_string()],
+    )
+    .await
+    .expect("enable logout_invalidates_exchange");
+
+    let attacker = create_test_user_in_org(
+        &state.store,
+        "attacker-actor-in@example.com",
+        &org.id,
+        false,
+    )
+    .await;
+    let attacker_auth = create_test_authenticator(&state.store, &attacker.id).await;
+    let client = create_test_oauth_client(&state.store, &attacker.id).await;
+    let (attacker_token, _) =
+        issue_oauth_access_token(&app, &state, &attacker, &attacker_auth, &client).await;
+    seed_login_success(&state, &attacker.id, 30).await;
+
+    let actor =
+        create_test_user_in_org(&state.store, "actor-still-in@example.com", &org.id, false).await;
+    let actor_auth = create_test_authenticator(&state.store, &actor.id).await;
+    let (actor_token, _) =
+        issue_oauth_access_token(&app, &state, &actor, &actor_auth, &client).await;
+    // A Login with NO subsequent Logout — the actor is still logged in.
+    seed_login_success(&state, &actor.id, 30).await;
+
+    let auth_header = client.basic_auth_header();
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={attacker_token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &actor_token={actor_token}\
+             &actor_token_type=urn:ietf:params:oauth:token-type:access_token"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "exchange with a logged-in actor must succeed when \
+         logout_invalidates_exchange is enabled: {body}"
+    );
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let exchanged_token = response["access_token"]
+        .as_str()
+        .expect("access_token present");
+    let claims = decode_jwt_payload(exchanged_token);
+    // The `act` chain still carries the logged-in actor, proving the
+    // delegation path is intact and the policy did not silently drop it.
+    assert_eq!(
+        claims["act"]["sub"], "actor-still-in@example.com",
+        "the logged-in actor must appear in the act claim: {body}"
+    );
+}
+
+/// When `logout_invalidates_exchange` is NOT enabled, a logged-out actor's
+/// token must still be accepted — the policy is opt-in per org, and the
+/// absence of the policy must leave the pre-fix behavior (structural checks
+/// only) intact. Guards against the fix accidentally denying actor tokens
+/// unconditionally.
+#[tokio::test]
+async fn test_rfc8693_logged_out_actor_accepted_without_logout_invalidates_exchange() {
+    let (app, state) = test_app().await;
+
+    let org = create_test_org(&state.store, "actor-no-policy.example").await;
+    // The org has NO active policies — `logout_invalidates_exchange` is not
+    // installed, so the actor path's temporal gate is a no-op.
+
+    let attacker = create_test_user_in_org(
+        &state.store,
+        "attacker-no-policy@example.com",
+        &org.id,
+        false,
+    )
+    .await;
+    let attacker_auth = create_test_authenticator(&state.store, &attacker.id).await;
+    let client = create_test_oauth_client(&state.store, &attacker.id).await;
+    let (attacker_token, _) =
+        issue_oauth_access_token(&app, &state, &attacker, &attacker_auth, &client).await;
+
+    let victim =
+        create_test_user_in_org(&state.store, "victim-no-policy@example.com", &org.id, false).await;
+    let victim_auth = create_test_authenticator(&state.store, &victim.id).await;
+    let (victim_token, _) =
+        issue_oauth_access_token(&app, &state, &victim, &victim_auth, &client).await;
+    // The victim has logged out, but the policy is not enabled, so the
+    // Logout audit event must not block the exchange.
+    seed_login_success(&state, &victim.id, 30).await;
+    seed_logout(&state, &victim.id, 10).await;
+
+    let auth_header = client.basic_auth_header();
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={attacker_token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &actor_token={victim_token}\
+             &actor_token_type=urn:ietf:params:oauth:token-type:access_token"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "without logout_invalidates_exchange enabled the logged-out actor \
+         must still be accepted: {body}"
+    );
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert!(
+        response.get("access_token").is_some(),
+        "exchange must issue a token: {body}"
+    );
+}
+
+// ========================================================================
+// Supplementary coverage for the guarantees the original three tests did
+// not directly assert: the *subject*-side rejection, the org-less actor
+// exemption, and the re-login remediation path.
+// ========================================================================
+
+/// Subject path still blocks a logged-out subject under the policy.
+///
+/// The same pre-logout token presented as the `subject_token` (no
+/// `actor_token`) under an org with `logout_invalidates_exchange` enabled
+/// MUST be rejected. This is the pre-existing behavior of
+/// `evaluate_exchange_policies` (which has always evaluated the subject);
+/// the fix must not weaken it. Confirms the asymmetry described in the bug
+/// report: the subject half was never broken, only the actor half.
+#[tokio::test]
+async fn test_rfc8693_logged_out_subject_rejected_under_logout_invalidates_exchange() {
+    let (app, state) = test_app().await;
+
+    let org = create_test_org(&state.store, "subject-logout.invalidates.example").await;
+    db::set_preconfigured_active(
+        &state.store,
+        &org.id,
+        vec!["logout_invalidates_exchange".to_string()],
+    )
+    .await
+    .expect("enable logout_invalidates_exchange");
+
+    let victim =
+        create_test_user_in_org(&state.store, "victim-subject@example.com", &org.id, false).await;
+    let victim_auth = create_test_authenticator(&state.store, &victim.id).await;
+    let client = create_test_oauth_client(&state.store, &victim.id).await;
+    let (victim_token, _) =
+        issue_oauth_access_token(&app, &state, &victim, &victim_auth, &client).await;
+    // The victim's access-token session row is still present (browser-only
+    // logout deletes the cookie row, not the access-token row), but a
+    // `Logout` has occurred since their last `Login` — the signal the
+    // subject path's `evaluate_exchange_policies` consumes.
+    seed_login_success(&state, &victim.id, 30).await;
+    seed_logout(&state, &victim.id, 10).await;
+
+    let auth_header = client.basic_auth_header();
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={victim_token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "exchange with a logged-out subject must be rejected: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        error["error"], "invalid_request",
+        "logged-out subject must report invalid_request: {body}"
+    );
+}
+
+/// An actor whose `user.org_id` is `None` is exempt from the actor
+/// policy gate, mirroring the subject path, which skips
+/// `evaluate_exchange_policies` when `subject_user.org_id` is `None`.
+///
+/// The policy is per-org, so a user with no org has no active config to
+/// consult. The fix's `if let Some(ref actor_org_id) = actor_user.org_id`
+/// guard skips the evaluation entirely. Even with a seeded `Logout`, an
+/// org-less actor's token MUST be accepted — guards against the fix
+/// accidentally denying actor tokens for users with no org.
+#[tokio::test]
+async fn test_rfc8693_org_less_actor_exempt_from_logout_invalidates_exchange() {
+    let (app, state) = test_app().await;
+
+    // Subject: in an org with the policy enabled, but logged IN (no
+    // Logout), so the subject path allows.
+    let org = create_test_org(&state.store, "subject-org.example").await;
+    db::set_preconfigured_active(
+        &state.store,
+        &org.id,
+        vec!["logout_invalidates_exchange".to_string()],
+    )
+    .await
+    .expect("enable logout_invalidates_exchange");
+    let subject =
+        create_test_user_in_org(&state.store, "subject-with-org@example.com", &org.id, false).await;
+    let subject_auth = create_test_authenticator(&state.store, &subject.id).await;
+    let client = create_test_oauth_client(&state.store, &subject.id).await;
+    let (subject_token, _) =
+        issue_oauth_access_token(&app, &state, &subject, &subject_auth, &client).await;
+    seed_login_success(&state, &subject.id, 30).await;
+
+    // Actor: NO org (create_test_user does not set org_id), with a seeded
+    // Login+Logout. Because `actor_user.org_id` is `None`, the actor policy
+    // gate is skipped — the exchange MUST succeed.
+    let actor = create_test_user(&state.store, "org-less-actor@example.com").await;
+    let actor_auth = create_test_authenticator(&state.store, &actor.id).await;
+    let (actor_token, _) =
+        issue_oauth_access_token(&app, &state, &actor, &actor_auth, &client).await;
+    seed_login_success(&state, &actor.id, 30).await;
+    seed_logout(&state, &actor.id, 10).await;
+
+    let auth_header = client.basic_auth_header();
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={subject_token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &actor_token={actor_token}\
+             &actor_token_type=urn:ietf:params:oauth:token-type:access_token"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an org-less actor must be exempt from logout_invalidates_exchange: {body}"
+    );
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert!(
+        response.get("access_token").is_some(),
+        "exchange must issue a token for the org-less actor: {body}"
+    );
+}
+
+/// Re-login after logout re-enables the actor.
+///
+/// The `logout_invalidates_exchange` policy's `since` idiom
+/// (`!Logout since Login{result:true}`) re-anchors on a new
+/// `Login{result:true}` recorded AFTER the `Logout`, so the forbid stops
+/// firing. A `Login` → `Logout` → `Login{result:true}` sequence for the
+/// actor MUST allow the subsequent exchange — the policy's designed
+/// remediation path.
+#[tokio::test]
+async fn test_rfc8693_relogin_after_logout_re_enables_actor() {
+    let (app, state) = test_app().await;
+
+    let org = create_test_org(&state.store, "relogin.invalidates.example").await;
+    db::set_preconfigured_active(
+        &state.store,
+        &org.id,
+        vec!["logout_invalidates_exchange".to_string()],
+    )
+    .await
+    .expect("enable logout_invalidates_exchange");
+
+    let subject =
+        create_test_user_in_org(&state.store, "subject-relogin@example.com", &org.id, false).await;
+    let subject_auth = create_test_authenticator(&state.store, &subject.id).await;
+    let client = create_test_oauth_client(&state.store, &subject.id).await;
+    let (subject_token, _) =
+        issue_oauth_access_token(&app, &state, &subject, &subject_auth, &client).await;
+    seed_login_success(&state, &subject.id, 30).await;
+
+    let actor =
+        create_test_user_in_org(&state.store, "actor-relogin@example.com", &org.id, false).await;
+    let actor_auth = create_test_authenticator(&state.store, &actor.id).await;
+    let (actor_token, _) =
+        issue_oauth_access_token(&app, &state, &actor, &actor_auth, &client).await;
+    // Login → Logout → Login{result:true}: the re-anchoring login is the
+    // most recent event, so the `!Logout since Login{result:true}` idiom
+    // no longer holds and the forbid does not fire.
+    seed_login_success(&state, &actor.id, 30).await;
+    seed_logout(&state, &actor.id, 20).await;
+    seed_login_success(&state, &actor.id, 1).await;
+
+    let auth_header = client.basic_auth_header();
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={subject_token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &actor_token={actor_token}\
+             &actor_token_type=urn:ietf:params:oauth:token-type:access_token"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a re-login after logout must re-enable the actor: {body}"
+    );
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let exchanged_token = response["access_token"]
+        .as_str()
+        .expect("access_token present");
+    let claims = decode_jwt_payload(exchanged_token);
+    assert_eq!(
+        claims["act"]["sub"], "actor-relogin@example.com",
+        "the re-logged-in actor must appear in the act claim: {body}"
     );
 }

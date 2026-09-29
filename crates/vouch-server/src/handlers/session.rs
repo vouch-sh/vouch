@@ -2,10 +2,16 @@
 //! Session extraction and cookie management for HTTP handlers.
 
 use crate::AppState;
+use crate::arrival::ArrivalTime;
 use crate::crypto::hash_token;
 use crate::db;
-use crate::error::ServiceError;
-use crate::services::auth::ValidatedResourceToken;
+use crate::error::{OAuthErrorCode, ServiceError};
+use crate::http::strip_auth_scheme;
+use crate::services::auth::{self, AccessTokenClaims, DecodedToken, ValidatedResourceToken};
+use crate::services::keys as key_svc;
+use crate::services::oidc::dpop::{self, DpopError};
+use crate::services::oidc::mtls::ClientCertificate;
+use crate::services::oidc::resource;
 use axum::extract::FromRequestParts;
 use axum::http::StatusCode;
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
@@ -84,7 +90,8 @@ async fn extract_resource_token(
     jar: &CookieJar,
     method: &str,
     uri: &str,
-    client_cert: Option<&crate::services::oidc::mtls::ClientCertificate>,
+    client_cert: Option<&ClientCertificate>,
+    arrival: ArrivalTime,
 ) -> Result<ValidatedResourceToken, ServiceError> {
     // Track DPoP source claim (custom claim for MCP attribution)
     let mut dpop_source: Option<String> = None;
@@ -94,8 +101,8 @@ async fn extract_resource_token(
 
     // 2. Decode as ES256 at+jwt using the OIDC signing key
     let config = state.config();
-    let decoded = crate::services::auth::decode_token(&token, &state.oidc_key, &config.base_url)
-        .ok_or_else(|| {
+    let decoded =
+        auth::decode_token(&token, &state.oidc_key, &config.base_url).ok_or_else(|| {
             ServiceError::api(
                 StatusCode::UNAUTHORIZED,
                 "invalid_token",
@@ -103,7 +110,7 @@ async fn extract_resource_token(
             )
         })?;
 
-    let crate::services::auth::DecodedToken::AccessToken(access_claims) = decoded;
+    let DecodedToken::AccessToken(access_claims) = decoded;
 
     // 2b. Audience coverage for resource-narrowed tokens.
     enforce_audience_coverage(&access_claims, &config.base_url, uri)?;
@@ -112,7 +119,7 @@ async fn extract_resource_token(
     let token_hash = hash_token(&token);
     let session = state
         .session_cache
-        .get_session_by_token_hash(&state.store, &token_hash)
+        .get_session_by_token_hash(&state.store, &token_hash, arrival)
         .await?
         .ok_or_else(|| {
             ServiceError::api(
@@ -135,13 +142,14 @@ async fn extract_resource_token(
                     .and_then(|v| v.to_str().ok());
                 if let Some(proof) = dpop_header {
                     let full_uri = format!("{}{}", config.base_url, uri);
-                    match crate::services::oidc::dpop::validate_dpop_at_resource(
+                    match dpop::validate_dpop_at_resource(
                         &token,
                         proof,
                         method,
                         &full_uri,
                         &state.store,
                         config.dpop_max_age_seconds,
+                        arrival,
                     )
                     .await
                     {
@@ -159,7 +167,7 @@ async fn extract_resource_token(
                             }
                             dpop_source = validated.source;
                         }
-                        Err(e @ crate::services::oidc::dpop::DpopError::Database(_)) => {
+                        Err(e @ DpopError::Database(_)) => {
                             tracing::error!("DPoP backend failure: {e}");
                             return Err(ServiceError::api(
                                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -167,7 +175,7 @@ async fn extract_resource_token(
                                 "DPoP validation backend error",
                             ));
                         }
-                        Err(crate::services::oidc::dpop::DpopError::UseNonce(nonce)) => {
+                        Err(DpopError::UseNonce(nonce)) => {
                             // RFC 9449 §7.2: When the server requires (or
                             // reissues) a nonce, the error response MUST carry
                             // a fresh `DPoP-Nonce` header so the client can
@@ -176,7 +184,7 @@ async fn extract_resource_token(
                             // the fresh nonce lets the caller retry once.
                             return Err(ServiceError::api_with_header(
                                 StatusCode::UNAUTHORIZED,
-                                crate::error::OAuthErrorCode::UseDpopNonce.as_str(),
+                                OAuthErrorCode::UseDpopNonce.as_str(),
                                 "Authorization server requires nonce in DPoP proof",
                                 (protocol::HEADER_DPOP_NONCE, nonce.as_str()),
                             ));
@@ -266,13 +274,13 @@ async fn extract_resource_token(
         client_id: access_claims.client_id,
         aud: access_claims.aud,
         scope: access_claims.scope,
-        authenticator_id: session.authenticator_id,
+        authenticator_id: session.authenticator_id.clone(),
         hardware_verified: access_claims.hardware_verified,
         auth_time: access_claims.auth_time,
         token_hash,
         dpop_source,
-        hardware_aaguid: session.hardware_aaguid,
-        org_domain: session.org_domain,
+        hardware_aaguid: session.hardware_aaguid.clone(),
+        org_domain: session.org_domain.clone(),
     })
 }
 
@@ -285,16 +293,12 @@ async fn extract_resource_token(
 /// [`crate::services::oidc::resource::audience_covers_resource`] accepts
 /// the audience for this deployment and request path.
 fn enforce_audience_coverage(
-    access_claims: &crate::services::auth::AccessTokenClaims,
+    access_claims: &AccessTokenClaims,
     base_url: &str,
     uri: &str,
 ) -> Result<(), ServiceError> {
     if access_claims.aud == access_claims.client_id
-        || crate::services::oidc::resource::audience_covers_resource(
-            &access_claims.aud,
-            base_url,
-            uri,
-        )
+        || resource::audience_covers_resource(&access_claims.aud, base_url, uri)
     {
         return Ok(());
     }
@@ -341,6 +345,20 @@ pub(crate) struct AuthenticatedToken(pub(crate) ValidatedResourceToken);
 /// while `hardware_verified` is false.
 pub(crate) struct HardwareVerifiedToken(pub(crate) ValidatedResourceToken);
 
+/// An access token whose session exercised the security key *recently*.
+///
+/// [`HardwareVerifiedToken`] asks whether a ceremony ever backed this session;
+/// this asks whether one happened within
+/// [`key_svc::KEY_DELETE_MAX_AGE_SECS`]. Deleting a key wants both, because a
+/// session lives for hours and a destructive action should rest on a touch
+/// from seconds ago.
+///
+/// Rejects with RFC 9470 `insufficient_user_authentication` (401) rather than
+/// the 403 `HardwareVerifiedToken` uses: the caller's correct response is to
+/// re-authenticate and retry, and the key-management page drives an inline
+/// FIDO2 step-up off exactly that challenge.
+pub(crate) struct SteppedUpToken(pub(crate) ValidatedResourceToken);
+
 /// Run the shared validation for both extractors.
 ///
 /// The path comes from `OriginalUri` so it is the path the client actually
@@ -358,6 +376,7 @@ async fn extract_token_from_parts(
     let client_cert = super::extractors::OptionalClientCert::from_request_parts(parts, state)
         .await
         .unwrap_or_else(|infallible| match infallible {});
+    let arrival = arrival_from_parts(parts, state).await?;
     let jar = CookieJar::from_headers(&parts.headers);
 
     extract_resource_token(
@@ -367,8 +386,21 @@ async fn extract_token_from_parts(
         parts.method.as_str(),
         uri.path(),
         client_cert.0.as_ref(),
+        arrival,
     )
     .await
+}
+
+/// Pull the request's arrival stamp inside an extractor, restating the
+/// missing-middleware failure as a `ServiceError` so it renders like every
+/// other extractor rejection on these routes.
+async fn arrival_from_parts(
+    parts: &mut http::request::Parts,
+    state: &Arc<AppState>,
+) -> Result<ArrivalTime, ServiceError> {
+    ArrivalTime::from_request_parts(parts, state)
+        .await
+        .map_err(|_| ServiceError::Internal("Request arrival time unavailable".to_string()))
 }
 
 impl axum::extract::FromRequestParts<Arc<AppState>> for AuthenticatedToken {
@@ -414,6 +446,7 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for OptionalAuthenticatedTok
         let client_cert = super::extractors::OptionalClientCert::from_request_parts(parts, state)
             .await
             .unwrap_or_else(|infallible| match infallible {});
+        let arrival = arrival_from_parts(parts, state).await?;
         let token = extract_resource_token(
             state,
             &parts.headers,
@@ -421,6 +454,7 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for OptionalAuthenticatedTok
             parts.method.as_str(),
             uri.path(),
             client_cert.0.as_ref(),
+            arrival,
         )
         .await?;
         Ok(Self(Some(token)))
@@ -447,6 +481,20 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for HardwareVerifiedToken {
                 "This credential requires a hardware-verified session - run 'vouch login' to authenticate with your security key",
             ));
         }
+        Ok(Self(token))
+    }
+}
+
+impl axum::extract::FromRequestParts<Arc<AppState>> for SteppedUpToken {
+    type Rejection = ServiceError;
+
+    async fn from_request_parts(
+        parts: &mut http::request::Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        let token = extract_token_from_parts(parts, state).await?;
+        let arrival = arrival_from_parts(parts, state).await?;
+        key_svc::require_recent_hardware_verification(&token, arrival)?;
         Ok(Self(token))
     }
 }
@@ -480,12 +528,14 @@ pub(super) async fn resolve_token_email(
 pub(crate) async fn extract_session_from_cookie(
     state: &AppState,
     jar: &CookieJar,
+    arrival: ArrivalTime,
 ) -> Result<ValidatedResourceToken, ServiceError> {
     // Use an empty header map — cookie path only.
     // DPoP validation is skipped for the Cookie auth scheme, so method and uri
-    // are not used and can be empty strings.
+    // are not used and can be empty strings. `arrival` still applies: the
+    // session's `expires_at` is judged against it.
     let empty_headers = axum::http::HeaderMap::new();
-    extract_resource_token(state, &empty_headers, jar, "", "", None).await
+    extract_resource_token(state, &empty_headers, jar, "", "", None, arrival).await
 }
 
 /// Authorization scheme detected from the request.
@@ -511,13 +561,10 @@ fn extract_token_from_request(
 
     // Check Authorization header
     if let Some(auth_value) = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()) {
-        if let Some(token) = crate::http::strip_auth_scheme(auth_value, protocol::AUTH_SCHEME_DPOP)
-        {
+        if let Some(token) = strip_auth_scheme(auth_value, protocol::AUTH_SCHEME_DPOP) {
             return Ok((token.to_string(), AuthScheme::DPoP));
         }
-        if let Some(token) =
-            crate::http::strip_auth_scheme(auth_value, protocol::AUTH_SCHEME_BEARER)
-        {
+        if let Some(token) = strip_auth_scheme(auth_value, protocol::AUTH_SCHEME_BEARER) {
             return Ok((token.to_string(), AuthScheme::Bearer));
         }
     }
@@ -577,9 +624,11 @@ pub(crate) async fn extract_user_with_org(
     jar: &CookieJar,
     method: &str,
     uri: &str,
-    client_cert: Option<&crate::services::oidc::mtls::ClientCertificate>,
+    client_cert: Option<&ClientCertificate>,
+    arrival: ArrivalTime,
 ) -> Result<(db::User, String), ServiceError> {
-    let token = extract_resource_token(state, headers, jar, method, uri, client_cert).await?;
+    let token =
+        extract_resource_token(state, headers, jar, method, uri, client_cert, arrival).await?;
     let user = load_active_user(state, &token.sub).await?;
 
     let org_id = user.org_id.clone().ok_or_else(|| {
@@ -595,19 +644,22 @@ pub(crate) async fn extract_user_with_org(
 
 /// Extract and validate an org admin from the access token.
 ///
-/// Returns the user and their org_id if they are an org admin.
-/// Reuses `extract_user_with_org` for token validation and the
-/// active-user lookup, then adds the admin-role check.
+/// Returns the user and their org_id if they are an org admin. Reuses
+/// `extract_user_with_org` for token validation and the active-user lookup,
+/// then adds the admin-role check. No key ceremony is demanded: the upstream
+/// IdP is the trust root for the browser and admin surfaces, while hardware
+/// proof gates credential issuance and key deletion.
 pub(crate) async fn extract_org_admin(
     state: &AppState,
     headers: &axum::http::HeaderMap,
     jar: &CookieJar,
     method: &str,
     uri: &str,
-    client_cert: Option<&crate::services::oidc::mtls::ClientCertificate>,
+    client_cert: Option<&ClientCertificate>,
+    arrival: ArrivalTime,
 ) -> Result<(db::User, String), ServiceError> {
     let (user, org_id) =
-        extract_user_with_org(state, headers, jar, method, uri, client_cert).await?;
+        extract_user_with_org(state, headers, jar, method, uri, client_cert, arrival).await?;
 
     if !user.is_org_admin {
         return Err(ServiceError::api(
@@ -627,6 +679,17 @@ pub(crate) async fn extract_org_admin(
 /// flow redirects from an external IdP (e.g. Google) → `/oauth/callback`
 /// → `/enroll/keys`. With `Strict`, the browser treats the entire redirect
 /// chain as cross-site and refuses to send the cookie on the final hop.
+/// Cookie `Max-Age` for a session cookie carrying a freshly minted access
+/// token, derived from the token's own `expires_in` so the cookie and the
+/// token it carries always expire together. Re-deriving the value from
+/// `session_hours` at the call site is the same drift the RFC 8693 exchange
+/// path had between its reported `expires_in` and the issued token; the
+/// minted lifetime is the single source of truth.
+#[must_use]
+pub(crate) fn session_cookie_max_age(expires_in: u64) -> i64 {
+    i64::try_from(expires_in).unwrap_or(i64::MAX)
+}
+
 #[must_use]
 pub(crate) fn create_session_cookie(token: &str, max_age_seconds: i64) -> Cookie<'static> {
     Cookie::build((vouch_common::SESSION_COOKIE_NAME, token.to_owned()))
@@ -653,50 +716,55 @@ pub(crate) fn clear_session_cookie() -> Cookie<'static> {
 }
 
 /// Helper to extract auth context from cookie jar using OAuth tokens.
-pub(crate) async fn get_resource_auth_context(state: &AppState, jar: &CookieJar) -> AuthContext {
-    // Try to extract token from cookie
-    let token = match jar.get(vouch_common::SESSION_COOKIE_NAME) {
-        Some(c) => c.value(),
-        None => return AuthContext::unauthenticated(),
+///
+/// Routes through the strict [`extract_session_from_cookie`] path rather
+/// than re-implementing the decode + session-lookup pipeline, so the `cnf`
+/// sender-constraint is enforced: a DPoP- (`cnf.jkt`) or mTLS-bound
+/// (`cnf.x5t#S256`) access token presented via the session cookie is
+/// rejected the same way it is on the API path (RFC 9449 §9 / RFC 8705
+/// §3.6). Any rejection is masked to an unauthenticated context to
+/// preserve this helper's infallible return type.
+pub(crate) async fn get_resource_auth_context(
+    state: &AppState,
+    jar: &CookieJar,
+    arrival: ArrivalTime,
+) -> AuthContext {
+    let token = match extract_session_from_cookie(state, jar, arrival).await {
+        Ok(t) => t,
+        Err(e) => {
+            // Expected auth rejections (missing/invalid/revoked token, or a
+            // sender-constrained token presented via cookie) are silent
+            // unauthenticated outcomes. A store failure is an outage, not a
+            // logout — log it so it is distinguishable from a revoked session.
+            if !matches!(
+                e,
+                ServiceError::Api { .. } | ServiceError::ApiWithHeaders { .. }
+            ) {
+                tracing::error!(error = %e, "Session validation failed; treating UI request as unauthenticated");
+            }
+            return AuthContext::unauthenticated();
+        }
     };
 
-    // Decode using ES256 access token path only
-    let config = state.config();
-    let decoded =
-        match crate::services::auth::decode_token(token, &state.oidc_key, &config.base_url) {
-            Some(d) => d,
-            None => return AuthContext::unauthenticated(),
-        };
-
-    // Verify session exists in DB
-    let token_hash = hash_token(token);
-    let session_exists = matches!(
-        state
-            .session_cache
-            .get_session_by_token_hash(&state.store, &token_hash)
-            .await,
-        Ok(Some(_))
-    );
-
-    if !session_exists {
-        return AuthContext::unauthenticated();
-    }
-
-    let user_id = decoded.sub().to_string();
-    let user_email = decoded.email().map(String::from);
-
-    // Look up user to check active status, org membership, and admin status
-    let Ok(user) = load_active_user(state, &user_id).await else {
-        return AuthContext::unauthenticated();
+    // Look up user to check active status, org membership, and admin status.
+    // A deactivated or deleted user is an ordinary unauthenticated outcome;
+    // only a store failure (`Internal`) is worth an error line.
+    let user = match load_active_user(state, &token.sub).await {
+        Ok(user) => user,
+        Err(e) => {
+            if matches!(e, ServiceError::Internal(_)) {
+                tracing::error!(error = %e, "User lookup failed; treating UI request as unauthenticated");
+            }
+            return AuthContext::unauthenticated();
+        }
     };
-    let (has_org, is_org_admin) = (user.org_id.is_some(), user.is_org_admin);
 
     AuthContext {
         authenticated: true,
-        user_id: Some(user_id),
-        user_email,
-        has_org,
-        is_org_admin,
+        user_id: Some(token.sub),
+        user_email: token.email,
+        has_org: user.org_id.is_some(),
+        is_org_admin: user.is_org_admin,
     }
 }
 
@@ -704,8 +772,12 @@ pub(crate) async fn get_resource_auth_context(state: &AppState, jar: &CookieJar)
 /// by templates and browser UI handlers.
 ///
 /// Both names refer to the same OAuth-token-based auth context extraction.
-pub(crate) async fn get_auth_context(state: &AppState, jar: &CookieJar) -> AuthContext {
-    get_resource_auth_context(state, jar).await
+pub(crate) async fn get_auth_context(
+    state: &AppState,
+    jar: &CookieJar,
+    arrival: ArrivalTime,
+) -> AuthContext {
+    get_resource_auth_context(state, jar, arrival).await
 }
 
 #[cfg(test)]

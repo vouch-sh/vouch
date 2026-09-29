@@ -9,10 +9,13 @@ use inquire::{
 };
 use vouch_common::{
     DeleteKeyResponse, KeyInfo, ListKeysResponse, RenameKeyRequest, RenameKeyResponse,
+    ResourceLabel, ResourceLabelError,
 };
 
 use crate::client::VouchClient;
+use crate::commands::login;
 use crate::exit_code::CliError;
+use crate::server_url::ServerUrl;
 use vouch_cli::{tr, tr_args, tr_println};
 
 /// Keys subcommands.
@@ -42,7 +45,7 @@ pub(crate) enum KeysCommands {
 }
 
 /// Interactive key management.
-pub(crate) async fn interactive(server: &str) -> Result<()> {
+pub(crate) async fn interactive(server: &ServerUrl) -> Result<()> {
     let client = VouchClient::new(server).await?;
 
     loop {
@@ -111,7 +114,11 @@ pub(crate) async fn interactive(server: &str) -> Result<()> {
 
 /// Handle action on a selected key.
 /// Returns false if we should exit the interactive loop.
-async fn handle_key_action(server: &str, client: &VouchClient, key: &KeyInfo) -> Result<bool> {
+async fn handle_key_action(
+    server: &ServerUrl,
+    client: &VouchClient,
+    key: &KeyInfo,
+) -> Result<bool> {
     let current_marker = if key.is_current_session {
         tr!("keys-marker-current")
     } else {
@@ -154,7 +161,11 @@ async fn handle_key_action(server: &str, client: &VouchClient, key: &KeyInfo) ->
 }
 
 /// Delete a key with confirmation.
-async fn delete_key_interactive(server: &str, client: &VouchClient, key: &KeyInfo) -> Result<()> {
+async fn delete_key_interactive(
+    server: &ServerUrl,
+    client: &VouchClient,
+    key: &KeyInfo,
+) -> Result<()> {
     let warning = if key.is_current_session {
         format!("\n{}", tr!("keys-warn-current-session"))
     } else {
@@ -207,7 +218,7 @@ async fn delete_key_interactive(server: &str, client: &VouchClient, key: &KeyInf
 /// If the server returns a step-up challenge (RFC 9470), prompts the user to
 /// re-authenticate via FIDO2, then retries the delete with a fresh session.
 async fn delete_with_step_up(
-    server: &str,
+    server: &ServerUrl,
     client: &VouchClient,
     key_id: &str,
 ) -> Result<DeleteKeyResponse> {
@@ -222,7 +233,7 @@ async fn delete_with_step_up(
             {
                 println!();
                 tr_println!("keys-step-up-needed");
-                crate::commands::login::run(server, 30)
+                login::run(server, 30)
                     .await
                     .context(tr!("err-step-up-re-authentication-failed"))?;
 
@@ -251,7 +262,7 @@ fn format_key_for_display(key: &KeyInfo) -> String {
 }
 
 /// List all registered keys (non-interactive).
-pub(crate) async fn list(server: &str, json: bool) -> Result<()> {
+pub(crate) async fn list(server: &ServerUrl, json: bool) -> Result<()> {
     let client = VouchClient::new(server).await?;
 
     let response: ListKeysResponse = client.get_authenticated("/v1/keys").await?;
@@ -300,7 +311,7 @@ pub(crate) async fn list(server: &str, json: bool) -> Result<()> {
 }
 
 /// Remove a registered key (non-interactive).
-pub(crate) async fn remove(server: &str, key_id: &str, force: bool) -> Result<()> {
+pub(crate) async fn remove(server: &ServerUrl, key_id: &str, force: bool) -> Result<()> {
     let client = VouchClient::new(server).await?;
 
     // First, get key info to show the name
@@ -353,17 +364,16 @@ pub(crate) async fn remove(server: &str, key_id: &str, force: bool) -> Result<()
 }
 
 /// Rename a registered key (non-interactive).
-pub(crate) async fn rename(server: &str, key_id: &str, new_name: &str) -> Result<()> {
+pub(crate) async fn rename(server: &ServerUrl, key_id: &str, new_name: &str) -> Result<()> {
     let client = VouchClient::new(server).await?;
 
-    // Validate name
-    let new_name = new_name.trim();
-    if new_name.is_empty() {
-        bail!(tr!("keys-err-name-empty"));
-    }
-    if new_name.len() > 100 {
-        bail!(tr!("keys-err-name-long"));
-    }
+    // Validate the name client-side before the round-trip; the server applies
+    // the same `ResourceLabel` contract authoritatively.
+    let new_name = match ResourceLabel::parse(new_name) {
+        Ok(name) => name,
+        Err(ResourceLabelError::Empty) => bail!(tr!("keys-err-name-empty")),
+        Err(ResourceLabelError::TooLong) => bail!(tr!("keys-err-name-long")),
+    };
 
     // First, verify the key exists
     let keys_response: ListKeysResponse = client.get_authenticated("/v1/keys").await?;
@@ -375,7 +385,7 @@ pub(crate) async fn rename(server: &str, key_id: &str, new_name: &str) -> Result
 
     // Rename the key
     let req = RenameKeyRequest {
-        name: new_name.to_string(),
+        name: new_name.into_string(),
     };
     let response: RenameKeyResponse = client
         .patch_authenticated(&format!("/v1/keys/{key_id}"), &req)

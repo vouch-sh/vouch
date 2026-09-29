@@ -41,9 +41,9 @@
         </div>
         {% endif %}
 
-        {% if tokens.len() >= 2 %}
+        {% if active_count >= max_tokens %}
         <div class="mb-4 px-4 py-3 rounded bg-yellow-900/30 border border-yellow-800 text-yellow-300 text-sm">
-            {{ self.tr("admin-scim-max") }}
+            {{ self.tr("admin-scim-max").arg("max", max_tokens) }}
         </div>
         {% else %}
         <div class="mb-6 bg-vouch-surface border border-vouch-border rounded-lg p-4">

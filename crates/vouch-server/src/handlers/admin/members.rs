@@ -7,17 +7,18 @@ use crate::db::documents::audit::AdminMemberActionData;
 use crate::error::ServiceError;
 use crate::impl_template_response;
 use askama::Template;
-use axum::extract::OriginalUri;
 use axum::extract::{Query, State};
-use axum::http::{HeaderMap, Method, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::cookie::CookieJar;
 use std::sync::Arc;
 
 use super::{PaginationParams, extract_admin_and_target};
-use crate::handlers::browser_login::validate_origin;
-use crate::handlers::session::{AuthContext, get_resource_auth_context};
+use crate::db::Refusal;
+use crate::handlers::extractors::{AdminPage, OrgAdmin};
+use crate::handlers::session::AuthContext;
 use crate::handlers::{ValidPath, ValidUuid};
+use crate::services::auth::{self, DeactivationError};
 
 /// Page size for the members list.
 const MEMBERS_PAGE_SIZE: u64 = 50;
@@ -47,31 +48,15 @@ impl_template_response!(AdminMembersTemplate);
 /// GET /admin — Members list page.
 pub(crate) async fn admin_members_page(
     State(state): State<Arc<AppState>>,
-    jar: CookieJar,
+    _jar: CookieJar,
+    admin: AdminPage,
     Query(params): Query<PaginationParams>,
 ) -> Response {
-    let auth = get_resource_auth_context(&state, &jar).await;
-
-    if !auth.authenticated {
-        return Redirect::to("/enroll/start").into_response();
-    }
-    if !auth.is_org_admin {
-        return Redirect::to("/integrations").into_response();
-    }
-
-    let user_id = match auth.user_id {
-        Some(ref id) => id.clone(),
-        None => return Redirect::to("/enroll/start").into_response(),
-    };
-
-    // Get the admin's org_id
-    let org_id = match db::get_user_by_id(&state.store, &user_id).await {
-        Ok(Some(user)) => match user.org_id {
-            Some(id) => id,
-            None => return Redirect::to("/integrations").into_response(),
-        },
-        _ => return Redirect::to("/integrations").into_response(),
-    };
+    let AdminPage {
+        auth,
+        user_id,
+        org_id,
+    } = admin;
 
     let (users, has_more): (Vec<db::User>, bool) = match db::get_users_by_org_paginated(
         &state.store,
@@ -120,24 +105,11 @@ pub(crate) async fn admin_members_page(
 
 /// POST /admin/members/{id}/promote — Promote a member to admin.
 pub(crate) async fn promote_member(
-    method: Method,
-    uri: OriginalUri,
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    jar: CookieJar,
     ValidPath(target_id): ValidPath<ValidUuid>,
+    admin: OrgAdmin,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-
-    let (admin, target, _org_id) = extract_admin_and_target(
-        &state,
-        &headers,
-        &jar,
-        method.as_str(),
-        uri.path(),
-        &target_id,
-    )
-    .await?;
+    let (admin, target, _org_id) = extract_admin_and_target(&state, admin, &target_id).await?;
 
     // Cannot promote yourself (no-op but creates misleading audit events)
     if admin.id == *target_id {
@@ -158,19 +130,17 @@ pub(crate) async fn promote_member(
         target_user_id: &target_id,
         admin_user_id: &admin.id,
         keys_revoked: None,
+        refusal: None,
     };
-    if let Err(e) = state
+    state
         .audit
-        .insert_event(
+        .record_event(
             db::AuditEventKind::AdminPromote,
             Some(&admin.id),
             Some(&target.email),
             &data,
         )
-        .await
-    {
-        tracing::warn!(error = %e, "failed to write admin_promote audit event");
-    }
+        .await;
 
     tracing::info!(
         "Admin {} promoted {} to org admin",
@@ -183,24 +153,11 @@ pub(crate) async fn promote_member(
 
 /// POST /admin/members/{id}/demote — Demote an admin to regular member.
 pub(crate) async fn demote_member(
-    method: Method,
-    uri: OriginalUri,
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    jar: CookieJar,
     ValidPath(target_id): ValidPath<ValidUuid>,
+    admin: OrgAdmin,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-
-    let (admin, target, _org_id) = extract_admin_and_target(
-        &state,
-        &headers,
-        &jar,
-        method.as_str(),
-        uri.path(),
-        &target_id,
-    )
-    .await?;
+    let (admin, target, _org_id) = extract_admin_and_target(&state, admin, &target_id).await?;
 
     // Cannot demote yourself
     if admin.id == *target_id {
@@ -211,7 +168,10 @@ pub(crate) async fn demote_member(
         ));
     }
 
-    let updated = db::update_user_admin_status(&state.store, &target_id, false).await?;
+    let updated =
+        db::demote_or_deactivate_member(&state.store, &target_id, db::MemberDowngrade::Demote)
+            .await
+            .map_err(last_admin_error)?;
     if !updated {
         return Err(member_gone());
     }
@@ -221,19 +181,17 @@ pub(crate) async fn demote_member(
         target_user_id: &target_id,
         admin_user_id: &admin.id,
         keys_revoked: None,
+        refusal: None,
     };
-    if let Err(e) = state
+    state
         .audit
-        .insert_event(
+        .record_event(
             db::AuditEventKind::AdminDemote,
             Some(&admin.id),
             Some(&target.email),
             &data,
         )
-        .await
-    {
-        tracing::warn!(error = %e, "failed to write admin_demote audit event");
-    }
+        .await;
 
     tracing::info!(
         "Admin {} demoted {} from org admin",
@@ -246,24 +204,11 @@ pub(crate) async fn demote_member(
 
 /// POST /admin/members/{id}/deactivate — Deactivate a user.
 pub(crate) async fn deactivate_member(
-    method: Method,
-    uri: OriginalUri,
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    jar: CookieJar,
     ValidPath(target_id): ValidPath<ValidUuid>,
+    admin: OrgAdmin,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-
-    let (admin, target, _org_id) = extract_admin_and_target(
-        &state,
-        &headers,
-        &jar,
-        method.as_str(),
-        uri.path(),
-        &target_id,
-    )
-    .await?;
+    let (admin, target, _org_id) = extract_admin_and_target(&state, admin, &target_id).await?;
 
     // Cannot deactivate yourself
     if admin.id == *target_id {
@@ -274,40 +219,83 @@ pub(crate) async fn deactivate_member(
         ));
     }
 
-    let updated = db::update_user_active_status(&state.store, &target_id, false).await?;
-    if !updated {
-        return Err(member_gone());
-    }
-
-    // Sessions, SSH certificates, and the GitHub refresh token all go, or the
-    // request fails — reporting a deactivation that left credentials live
-    // would tell the admin access is gone when it is not.
-    crate::services::auth::revoke_user_access(
+    // Revoke sessions, SSH certificates, and the GitHub refresh token BEFORE
+    // the active=false write commits. If the write landed first and revocation
+    // then failed, the member would be left inactive with live SSH certificates
+    // (#1116); revoking first leaves them active and retryable on failure.
+    let updated = match auth::revoke_then_persist(
         &state,
         &target_id,
         "User deactivated by admin",
         &admin.id,
+        // The last-admin floor is enforced inside this write, so it can only
+        // fail after revocation has run. That is the same shape as any other
+        // persist failure here: the member keeps `active = true` and their
+        // credentials are revoked but re-obtainable, so the organization
+        // still has its admin and the operation is retryable.
+        || {
+            db::demote_or_deactivate_member(
+                &state.store,
+                &target_id,
+                db::MemberDowngrade::Deactivate,
+            )
+        },
     )
-    .await?;
+    .await
+    {
+        Ok(updated) => updated,
+        Err(DeactivationError::Revoke(err)) => return Err(err),
+        Err(DeactivationError::Persist(err)) => {
+            if matches!(err, db::MemberDowngradeError::LastAdmin) {
+                // `revoke_then_persist` already committed the target's
+                // session deletions, SSH-cert revocations, and GitHub
+                // refresh-token clear. The authoritative in-transaction
+                // last-admin floor then refused the `active = false` write,
+                // so that write never committed — but the committed
+                // revocation still belongs in the canonical admin audit log.
+                // Record an `AdminDeactivate` event carrying
+                // `refusal: "last_admin"` so the committed revocation is
+                // attributable and distinguishable from a successful
+                // deactivation, as the SCIM handlers do.
+                state
+                    .audit
+                    .record_event(
+                        db::AuditEventKind::AdminDeactivate,
+                        Some(&admin.id),
+                        Some(&target.email),
+                        &AdminMemberActionData {
+                            action: "deactivate",
+                            target_user_id: &target_id,
+                            admin_user_id: &admin.id,
+                            keys_revoked: None,
+                            refusal: Some(Refusal::LastAdmin),
+                        },
+                    )
+                    .await;
+            }
+            return Err(last_admin_error(err));
+        }
+    };
+    if !updated {
+        return Err(member_gone());
+    }
 
     let data = AdminMemberActionData {
         action: "deactivate",
         target_user_id: &target_id,
         admin_user_id: &admin.id,
         keys_revoked: None,
+        refusal: None,
     };
-    if let Err(e) = state
+    state
         .audit
-        .insert_event(
+        .record_event(
             db::AuditEventKind::AdminDeactivate,
             Some(&admin.id),
             Some(&target.email),
             &data,
         )
-        .await
-    {
-        tracing::warn!(error = %e, "failed to write admin_deactivate audit event");
-    }
+        .await;
 
     tracing::info!("Admin {} deactivated user {}", admin.email, target.email);
 
@@ -316,24 +304,11 @@ pub(crate) async fn deactivate_member(
 
 /// POST /admin/members/{id}/activate — Reactivate a user.
 pub(crate) async fn activate_member(
-    method: Method,
-    uri: OriginalUri,
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    jar: CookieJar,
     ValidPath(target_id): ValidPath<ValidUuid>,
+    admin: OrgAdmin,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-
-    let (admin, target, _org_id) = extract_admin_and_target(
-        &state,
-        &headers,
-        &jar,
-        method.as_str(),
-        uri.path(),
-        &target_id,
-    )
-    .await?;
+    let (admin, target, _org_id) = extract_admin_and_target(&state, admin, &target_id).await?;
 
     let updated = db::update_user_active_status(&state.store, &target_id, true).await?;
     if !updated {
@@ -345,19 +320,17 @@ pub(crate) async fn activate_member(
         target_user_id: &target_id,
         admin_user_id: &admin.id,
         keys_revoked: None,
+        refusal: None,
     };
-    if let Err(e) = state
+    state
         .audit
-        .insert_event(
+        .record_event(
             db::AuditEventKind::AdminActivate,
             Some(&admin.id),
             Some(&target.email),
             &data,
         )
-        .await
-    {
-        tracing::warn!(error = %e, "failed to write admin_activate audit event");
-    }
+        .await;
 
     tracing::info!("Admin {} reactivated user {}", admin.email, target.email);
 
@@ -366,24 +339,11 @@ pub(crate) async fn activate_member(
 
 /// POST /admin/members/{id}/revoke-credentials — Revoke all credentials for a user.
 pub(crate) async fn revoke_member_credentials(
-    method: Method,
-    uri: OriginalUri,
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    jar: CookieJar,
     ValidPath(target_id): ValidPath<ValidUuid>,
+    admin: OrgAdmin,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-
-    let (admin, target, _org_id) = extract_admin_and_target(
-        &state,
-        &headers,
-        &jar,
-        method.as_str(),
-        uri.path(),
-        &target_id,
-    )
-    .await?;
+    let (admin, target, _org_id) = extract_admin_and_target(&state, admin, &target_id).await?;
 
     // Cannot revoke your own credentials
     if admin.id == *target_id {
@@ -394,42 +354,95 @@ pub(crate) async fn revoke_member_credentials(
         ));
     }
 
-    // Delete all authenticators (cascades to sessions)
-    let authenticators = db::get_authenticators_for_user(&state.store, &target_id).await?;
-
-    let key_count = authenticators.len();
-    for auth in &authenticators {
-        db::delete_authenticator(&state.store, &auth.id).await?;
-    }
-
-    // Sessions, SSH certificates, and the GitHub refresh token all go, or the
-    // request fails.
-    crate::services::auth::revoke_user_access(
+    // Revoke sessions, SSH certificates, and the GitHub refresh token BEFORE
+    // deleting the authenticators. The authenticators are the member's only
+    // path to re-enroll; revoking access first means a partial failure of the
+    // non-atomic `revoke_user_access` leaves the member with their login
+    // path intact (recoverable by an admin retry) rather than locked out
+    // while long-lived credentials stay live. This mirrors the ordering
+    // `deactivate_member` uses via `revoke_then_persist` (#1116).
+    //
+    // `key_count` is computed from the in-transaction authenticator read below
+    // (not a pre-revocation snapshot), so the `AdminRevokeCredentials` audit
+    // `keys_revoked` reflects the set this request actually deleted.
+    let key_count = auth::revoke_then_persist(
         &state,
         &target_id,
         "Credentials revoked by admin",
         &admin.id,
+        || async {
+            // One transaction for the whole set: revoking a member's
+            // credentials must not be able to land half-applied and leave
+            // them some working keys. This closure runs only if revocation
+            // succeeded, so a partial failure of `revoke_user_access`
+            // cannot leave the member locked out with live long-lived
+            // credentials.
+            //
+            // The transaction runs under `with_dsql_retry!`, as every
+            // `delete_authenticator` caller must: the cascade's guarded
+            // device-auth detach fails with a retryable conflict when a
+            // concurrent `try_consume_device_auth` commits first (and Aurora
+            // DSQL aborts the same interleaving at commit), so the whole
+            // cascade is re-run against fresh state instead of surfacing to
+            // the admin as a failed revocation. `delete_key` and
+            // `delete_user` already wrap their cascades this way.
+            //
+            // The authenticator set is re-read on EVERY attempt against the
+            // live transaction (mirroring `delete_user`'s `tx.find_all`
+            // inside its own retry block, `db/users.rs`). Reading it once
+            // outside the loop — as the pre-#1234 code did — froze the
+            // snapshot across retries, so an authenticator whose
+            // `create_authenticator` insert committed during
+            // `revoke_user_access` (e.g. a member whose in-flight
+            // `register_complete` already passed the `AuthenticatedToken`
+            // extractor) never appeared in the loop and survived the
+            // revocation. Re-reading inside the retry picks up any such
+            // concurrent enrollment and deletes it with the rest.
+            use crate::db::documents::authenticator::AuthenticatorDoc;
+            crate::with_dsql_retry!(async {
+                let mut tx = state.store.begin().await.map_err(|e| {
+                    ServiceError::from_db_contention(e, "Failed to start transaction")
+                })?;
+                let authenticators = tx
+                    .find_all::<AuthenticatorDoc>("user_id", &target_id)
+                    .await
+                    .map_err(|e| {
+                        ServiceError::from_db_contention(e, "Failed to load authenticators")
+                    })?;
+                for auth in &authenticators {
+                    db::delete_authenticator(&mut tx, &auth.id)
+                        .await
+                        .map_err(|e| ServiceError::from_db_contention(e, "Failed to revoke key"))?;
+                }
+                tx.commit().await.map_err(|e| {
+                    ServiceError::from_db_contention(e, "Failed to commit key revocation")
+                })?;
+                Ok::<usize, ServiceError>(authenticators.len())
+            })
+        },
     )
-    .await?;
+    .await
+    .map_err(|e| match e {
+        DeactivationError::Revoke(err) => err,
+        DeactivationError::Persist(err) => err,
+    })?;
 
     let data = AdminMemberActionData {
         action: "revoke_credentials",
         target_user_id: &target_id,
         admin_user_id: &admin.id,
         keys_revoked: Some(key_count),
+        refusal: None,
     };
-    if let Err(e) = state
+    state
         .audit
-        .insert_event(
+        .record_event(
             db::AuditEventKind::AdminRevokeCredentials,
             Some(&admin.id),
             Some(&target.email),
             &data,
         )
-        .await
-    {
-        tracing::warn!(error = %e, "failed to write admin_revoke_credentials audit event");
-    }
+        .await;
 
     tracing::info!(
         "Admin {} revoked {} credentials for user {}",
@@ -443,24 +456,11 @@ pub(crate) async fn revoke_member_credentials(
 
 /// POST /admin/members/{id}/remove — Remove a user from the organization.
 pub(crate) async fn remove_member(
-    method: Method,
-    uri: OriginalUri,
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    jar: CookieJar,
     ValidPath(target_id): ValidPath<ValidUuid>,
+    admin: OrgAdmin,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-
-    let (admin, target, _org_id) = extract_admin_and_target(
-        &state,
-        &headers,
-        &jar,
-        method.as_str(),
-        uri.path(),
-        &target_id,
-    )
-    .await?;
+    let (admin, target, _org_id) = extract_admin_and_target(&state, admin, &target_id).await?;
 
     // Cannot remove yourself
     if admin.id == *target_id {
@@ -476,20 +476,46 @@ pub(crate) async fn remove_member(
     // Withdraw access before deleting. Certificate revocation in particular
     // must happen first: delete_user destroys the issued cert records, which
     // would make those certificates permanently unrevocable.
-    crate::services::auth::revoke_user_access(
-        &state,
-        &target_id,
-        "User removed by admin",
-        &admin.id,
-    )
-    .await?;
+    auth::revoke_user_access(&state, &target_id, "User removed by admin", &admin.id).await?;
 
-    let deleted = db::delete_user(&state.store, &target_id)
-        .await
-        .map_err(|e| {
+    let deleted = match db::delete_user(&state.store, &target_id, db::LastAdminGuard::Enforce).await
+    {
+        Ok(deleted) => deleted,
+        Err(db::DeleteUserError::LastAdmin) => {
+            // `revoke_user_access` above already committed the target's
+            // session deletions, SSH-cert revocations, and GitHub
+            // refresh-token clear. The authoritative in-transaction last-admin
+            // floor then refused the delete, so the user row was never
+            // removed — but that committed revocation still belongs in the
+            // canonical admin audit log. Record an `AdminRemoveUser` event
+            // carrying `refusal: "last_admin"` so the committed revocation is
+            // attributable and distinguishable from a successful removal,
+            // as the SCIM handlers do. Same refusal
+            // `demote_member` gives, for the same reason: the organization
+            // must keep one active admin, and removing the member outright
+            // removes them from that count just as demoting does.
+            state
+                .audit
+                .record_event(
+                    db::AuditEventKind::AdminRemoveUser,
+                    Some(&admin.id),
+                    Some(&target_email),
+                    &AdminMemberActionData {
+                        action: "remove_user",
+                        target_user_id: &target_id,
+                        admin_user_id: &admin.id,
+                        keys_revoked: None,
+                        refusal: Some(Refusal::LastAdmin),
+                    },
+                )
+                .await;
+            return Err(last_admin_refusal());
+        }
+        Err(e) => {
             tracing::error!("Failed to delete user: {e}");
-            ServiceError::Internal("Failed to delete user".to_string())
-        })?;
+            return Err(ServiceError::Internal("Failed to delete user".to_string()));
+        }
+    };
     if !deleted {
         return Err(member_gone());
     }
@@ -499,19 +525,17 @@ pub(crate) async fn remove_member(
         target_user_id: &target_id,
         admin_user_id: &admin.id,
         keys_revoked: None,
+        refusal: None,
     };
-    if let Err(e) = state
+    state
         .audit
-        .insert_event(
+        .record_event(
             db::AuditEventKind::AdminRemoveUser,
             Some(&admin.id),
             Some(&target_email),
             &data,
         )
-        .await
-    {
-        tracing::warn!(error = %e, "failed to write admin_remove_user audit event");
-    }
+        .await;
 
     tracing::info!(
         "Admin {} removed user {} from organization",
@@ -526,6 +550,29 @@ pub(crate) async fn remove_member(
 /// mutation. The DB layer reported no document to change, so returning an
 /// error (instead of logging an audit event and redirecting with success)
 /// keeps the audit log truthful.
+/// Map a member-downgrade failure onto its wire response.
+///
+/// `LastAdmin` is the caller's mistake, not a fault: an organization with no
+/// admin cannot be administered back into shape, so the request is refused
+/// with a 400 the admin can act on. Everything else keeps its usual mapping.
+fn last_admin_refusal() -> ServiceError {
+    ServiceError::api(
+        StatusCode::BAD_REQUEST,
+        "last_admin",
+        "Cannot remove the organization's only remaining admin",
+    )
+}
+
+fn last_admin_error(err: db::MemberDowngradeError) -> ServiceError {
+    match err {
+        db::MemberDowngradeError::LastAdmin => last_admin_refusal(),
+        db::MemberDowngradeError::OccConflict => ServiceError::Internal(
+            "Organization changed during member update; please retry".to_string(),
+        ),
+        db::MemberDowngradeError::Other(e) => ServiceError::from(e),
+    }
+}
+
 fn member_gone() -> ServiceError {
     ServiceError::api(StatusCode::NOT_FOUND, "not_found", "User not found")
 }
@@ -540,16 +587,28 @@ fn member_gone() -> ServiceError {
 mod tests {
     use axum::http::StatusCode;
 
-    use crate::test_utils::*;
+    use crate::db::{
+        self, AuditEventFilter, AuthorizeDeviceAuthParams, CreateAuthenticatorParams,
+        DeviceAuthState, User,
+    };
+    use crate::infra::router;
+    use crate::test_utils::{self, *};
 
     /// Helper: create an org, admin user with session, and a target member.
-    async fn setup_admin_and_member(
-        state: &crate::AppState,
-    ) -> (crate::db::User, String, crate::db::User) {
+    async fn setup_admin_and_member(state: &crate::AppState) -> (User, String, User) {
         let org = create_test_org(&state.store, "example.com").await;
         let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
         let auth_id = create_test_authenticator(&state.store, &admin.id).await;
-        let token = create_test_session(state, &admin.id, &admin.email, &auth_id).await;
+        let token = create_test_session_with(
+            state,
+            TestSessionSpec {
+                user_id: &admin.id,
+                email: &admin.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let member =
             create_test_user_in_org(&state.store, "member@example.com", &org.id, false).await;
         (admin, token, member)
@@ -567,10 +626,19 @@ mod tests {
         let org = create_test_org(&state.store, "example.com").await;
         let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
         let auth_id = create_test_authenticator(&state.store, &admin.id).await;
-        let token = create_test_session(&state, &admin.id, &admin.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &admin.id,
+                email: &admin.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         // Deactivate the admin
-        crate::db::update_user_active_status(&state.store, &admin.id, false)
+        db::update_user_active_status(&state.store, &admin.id, false)
             .await
             .unwrap();
 
@@ -591,10 +659,19 @@ mod tests {
         let org = create_test_org(&state.store, "example.com").await;
         let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
         let auth_id = create_test_authenticator(&state.store, &admin.id).await;
-        let token = create_test_session(&state, &admin.id, &admin.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &admin.id,
+                email: &admin.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         // Deactivate the user
-        crate::db::update_user_active_status(&state.store, &admin.id, false)
+        db::update_user_active_status(&state.store, &admin.id, false)
             .await
             .unwrap();
 
@@ -684,7 +761,16 @@ mod tests {
         // Create a non-admin user with a session
         let user = create_test_user_in_org(&state.store, "user@example.com", &org.id, false).await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let cookie = admin_cookie(&token);
 
         let target =
@@ -713,7 +799,16 @@ mod tests {
         let org = create_test_org(&state.store, "example.com").await;
         let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
         let auth_id = create_test_authenticator(&state.store, &admin.id).await;
-        let token = create_test_session(&state, &admin.id, &admin.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &admin.id,
+                email: &admin.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let cookie = admin_cookie(&token);
 
         let (status, body) = http_post_form(
@@ -737,7 +832,16 @@ mod tests {
         let org = create_test_org(&state.store, "example.com").await;
         let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
         let auth_id = create_test_authenticator(&state.store, &admin.id).await;
-        let token = create_test_session(&state, &admin.id, &admin.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &admin.id,
+                email: &admin.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let cookie = admin_cookie(&token);
 
         let (status, body) = http_post_form(
@@ -756,12 +860,97 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_bootstrap_admin_session_sees_the_page() {
+        // The upstream IdP is the trust root for the browser: an org-admin
+        // session minted by IdP sign-in alone (no FIDO2 ceremony) reads the
+        // members page like any other signed-in admin.
+        let (app, state) = test_app().await;
+        let org = create_test_org(&state.store, "example.com").await;
+        let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
+        let auth_id = create_test_authenticator(&state.store, &admin.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &admin.id,
+                email: &admin.email,
+                auth_id: Some(&auth_id),
+                verification: TestVerification::NotVerified,
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let resp =
+            test_utils::http_get_full(&app, "/admin", &[("Cookie", &admin_cookie(&token))]).await;
+
+        assert_eq!(
+            resp.status,
+            StatusCode::OK,
+            "a signed-in admin reads the page without a key ceremony"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_bootstrap_admin_session_can_promote() {
+        // Org-admin writes take IdP-backed sign-in, not a key ceremony: the
+        // browser trust root is the upstream IdP, and hardware proof gates
+        // credential issuance and key deletion instead.
+        let (app, state) = test_app().await;
+        let org = create_test_org(&state.store, "example.com").await;
+        let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
+        let target =
+            create_test_user_in_org(&state.store, "member@example.com", &org.id, false).await;
+        let auth_id = create_test_authenticator(&state.store, &admin.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &admin.id,
+                email: &admin.email,
+                auth_id: Some(&auth_id),
+                verification: TestVerification::NotVerified,
+                ..Default::default()
+            },
+        )
+        .await;
+        let cookie = admin_cookie(&token);
+
+        let (status, body) = http_post_form(
+            &app,
+            &format!("/admin/members/{}/promote", target.id),
+            "",
+            &[("Cookie", &cookie), ("Origin", "https://test.example.com")],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::SEE_OTHER,
+            "a signed-in admin promotes without a key ceremony: {body}"
+        );
+
+        let promoted = db::get_user_by_id(&state.store, &target.id)
+            .await
+            .expect("target lookup")
+            .expect("target exists");
+        assert!(promoted.is_org_admin, "target must now be an admin");
+    }
+
+    #[tokio::test]
     async fn test_admin_cannot_deactivate_self() {
         let (app, state) = test_app().await;
         let org = create_test_org(&state.store, "example.com").await;
         let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
         let auth_id = create_test_authenticator(&state.store, &admin.id).await;
-        let token = create_test_session(&state, &admin.id, &admin.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &admin.id,
+                email: &admin.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let cookie = admin_cookie(&token);
 
         let (status, body) = http_post_form(
@@ -785,7 +974,16 @@ mod tests {
         let org = create_test_org(&state.store, "example.com").await;
         let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
         let auth_id = create_test_authenticator(&state.store, &admin.id).await;
-        let token = create_test_session(&state, &admin.id, &admin.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &admin.id,
+                email: &admin.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let cookie = admin_cookie(&token);
 
         let (status, body) = http_post_form(
@@ -813,7 +1011,16 @@ mod tests {
 
         let admin = create_test_user_in_org(&state.store, "admin@org1.com", &org1.id, true).await;
         let auth_id = create_test_authenticator(&state.store, &admin.id).await;
-        let token = create_test_session(&state, &admin.id, &admin.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &admin.id,
+                email: &admin.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let cookie = admin_cookie(&token);
 
         let other_user =
@@ -853,7 +1060,7 @@ mod tests {
         assert_eq!(status, StatusCode::SEE_OTHER, "Deactivate should succeed");
 
         // Verify user is now inactive
-        let updated = crate::db::get_user_by_id(&state.store, &member.id)
+        let updated = db::get_user_by_id(&state.store, &member.id)
             .await
             .unwrap()
             .unwrap();
@@ -867,7 +1074,7 @@ mod tests {
         let cookie = admin_cookie(&token);
 
         // Deactivate first
-        crate::db::update_user_active_status(&state.store, &member.id, false)
+        db::update_user_active_status(&state.store, &member.id, false)
             .await
             .unwrap();
 
@@ -881,7 +1088,7 @@ mod tests {
 
         assert_eq!(status, StatusCode::SEE_OTHER, "Activate should succeed");
 
-        let updated = crate::db::get_user_by_id(&state.store, &member.id)
+        let updated = db::get_user_by_id(&state.store, &member.id)
             .await
             .unwrap()
             .unwrap();
@@ -895,7 +1102,16 @@ mod tests {
         let admin =
             create_test_user_in_org(&state.store, "admin1@example.com", &org.id, true).await;
         let auth_id = create_test_authenticator(&state.store, &admin.id).await;
-        let token = create_test_session(&state, &admin.id, &admin.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &admin.id,
+                email: &admin.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let cookie = admin_cookie(&token);
 
         // Create another admin to demote
@@ -912,7 +1128,7 @@ mod tests {
 
         assert_eq!(status, StatusCode::SEE_OTHER, "Demote should succeed");
 
-        let updated = crate::db::get_user_by_id(&state.store, &admin2.id)
+        let updated = db::get_user_by_id(&state.store, &admin2.id)
             .await
             .unwrap()
             .unwrap();
@@ -936,9 +1152,7 @@ mod tests {
 
         assert_eq!(status, StatusCode::SEE_OTHER, "Remove should succeed");
 
-        let deleted = crate::db::get_user_by_id(&state.store, &member_id)
-            .await
-            .unwrap();
+        let deleted = db::get_user_by_id(&state.store, &member_id).await.unwrap();
         assert!(deleted.is_none(), "User should be deleted");
     }
 
@@ -956,7 +1170,16 @@ mod tests {
         let org = create_test_org(&state.store, "example.com").await;
         let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
         let auth_id = create_test_authenticator(&state.store, &admin.id).await;
-        let token = create_test_session(&state, &admin.id, &admin.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &admin.id,
+                email: &admin.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let cookie = admin_cookie(&token);
         let target_email = "target@example.com";
         let target = create_test_user_in_org(&state.store, target_email, &org.id, false).await;
@@ -987,9 +1210,9 @@ mod tests {
 
         let events = state
             .audit
-            .query_events(&crate::db::AuditEventFilter {
+            .query_events(&AuditEventFilter {
                 user_id: Some(admin.id.clone()),
-                ..crate::db::AuditEventFilter::default()
+                ..AuditEventFilter::default()
             })
             .await
             .expect("query audit events");
@@ -1025,7 +1248,7 @@ mod tests {
         let expires_at = jiff::Timestamp::now()
             .checked_add(jiff::Span::new().hours(8))
             .expect("future timestamp");
-        crate::db::record_ssh_certificate_issuance(
+        db::record_ssh_certificate_issuance(
             &state.store,
             42_000_001,
             user_id,
@@ -1046,12 +1269,11 @@ mod tests {
         record_test_ssh_cert(&state, &member.id).await;
 
         // Pre-condition: one issued cert, zero revoked.
-        let issued_before =
-            crate::db::get_issued_ssh_certificates_for_user(&state.store, &member.id)
-                .await
-                .unwrap();
+        let issued_before = db::get_issued_ssh_certificates_for_user(&state.store, &member.id)
+            .await
+            .unwrap();
         assert_eq!(issued_before.len(), 1, "setup: one cert should be issued");
-        let revoked_before = crate::db::get_revoked_ssh_certificates(&state.store)
+        let revoked_before = db::get_revoked_ssh_certificates(&state.store)
             .await
             .unwrap();
         assert!(revoked_before.is_empty(), "setup: no revocations yet");
@@ -1067,7 +1289,7 @@ mod tests {
         assert_eq!(status, StatusCode::SEE_OTHER, "deactivate should succeed");
 
         // The cert should now appear in the revocation list.
-        let revoked = crate::db::get_revoked_ssh_certificates(&state.store)
+        let revoked = db::get_revoked_ssh_certificates(&state.store)
             .await
             .unwrap();
         assert_eq!(
@@ -1089,10 +1311,9 @@ mod tests {
 
         record_test_ssh_cert(&state, &member.id).await;
 
-        let issued_before =
-            crate::db::get_issued_ssh_certificates_for_user(&state.store, &member.id)
-                .await
-                .unwrap();
+        let issued_before = db::get_issued_ssh_certificates_for_user(&state.store, &member.id)
+            .await
+            .unwrap();
         assert_eq!(issued_before.len(), 1, "setup: one cert should be issued");
 
         let (status, _body) = http_post_form(
@@ -1109,7 +1330,7 @@ mod tests {
             "revoke-credentials should succeed"
         );
 
-        let revoked = crate::db::get_revoked_ssh_certificates(&state.store)
+        let revoked = db::get_revoked_ssh_certificates(&state.store)
             .await
             .unwrap();
         assert_eq!(
@@ -1120,6 +1341,501 @@ mod tests {
         assert_eq!(
             revoked[0].serial, issued_before[0].serial,
             "revoked serial must match the issued cert"
+        );
+    }
+
+    /// Ordering guarantee: `revoke_member_credentials` must run
+    /// `revoke_user_access` (sessions, SSH certs, GitHub refresh token) to
+    /// completion BEFORE the authenticator-deletion transaction runs. The
+    /// authenticators are the member's only path back to re-enroll; if the
+    /// irreversible auth-delete committed first and `revoke_user_access` then
+    /// failed partway, the member would be locked out while long-lived
+    /// credentials (e.g. SSH certs) stayed live for their full configured
+    /// lifetime. Routing the handler through `services::auth::revoke_then_persist`
+    /// — the same helper `deactivate_member` uses for the analogous invariant
+    /// (#1116) — guarantees the auth-deletion only runs as the persist closure,
+    /// after revocation already succeeded.
+    ///
+    /// This test witnesses ordering via the existing `modify_test_hook`
+    /// rather than injecting a failure path (no insert/commit fault seam
+    /// reaches `revoke_all_ssh_certificates_for_user`). The hook fires inside
+    /// `clear_user_github_refresh_token` — the LAST sub-step of
+    /// `revoke_user_access` — and records the member's authenticator count
+    /// and revoked SSH-cert count at that instant. With the fix this instant
+    /// precedes the auth-deletion transaction, so the authenticators must
+    /// still be present; on the pre-fix persist-before-revoke ordering the
+    /// auth-deletion had already committed by then and the count would be 0.
+    #[tokio::test]
+    async fn test_revoke_member_credentials_revokes_access_before_deleting_authenticators() {
+        use std::sync::{Arc, Mutex};
+
+        // (authenticator_count, revoked_ssh_cert_count) snapshot taken at
+        // the moment `clear_user_github_refresh_token` runs.
+        let snapshot: Arc<Mutex<Option<(usize, usize)>>> = Arc::new(Mutex::new(None));
+        let snapshot_clone = Arc::clone(&snapshot);
+
+        let target_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let slot = Arc::clone(&target_slot);
+
+        let (app, state) = test_app_with_modify_hook(move |store| {
+            let writer = store.clone();
+            store.set_modify_test_hook(Arc::new(move |doc_id: &str, _attempt: u32| {
+                let writer = writer.clone();
+                let doc_id = doc_id.to_string();
+                let slot = Arc::clone(&slot);
+                let snap = Arc::clone(&snapshot_clone);
+                Box::pin(async move {
+                    let is_target =
+                        slot.lock().expect("slot lock").as_deref() == Some(doc_id.as_str());
+                    if !is_target {
+                        return;
+                    }
+                    // Sample the member's state at the moment the GitHub
+                    // refresh-token clear runs — the last sub-step of
+                    // `revoke_user_access`. With the fix this point
+                    // precedes the auth-deletion transaction.
+                    let auths = db::get_authenticators_for_user(&writer, &doc_id)
+                        .await
+                        .expect("list auths");
+                    let revoked = db::get_revoked_ssh_certificates(&writer)
+                        .await
+                        .expect("list revoked");
+                    *snap.lock().expect("snap lock") = Some((auths.len(), revoked.len()));
+                })
+            }));
+        })
+        .await;
+
+        let (_admin, token, member) = setup_admin_and_member(&state).await;
+        // The member starts with one authenticator (so the auth-deletion
+        // has something to commit) and one issued SSH cert (so step 3a of
+        // `revoke_user_access` is non-trivial).
+        let _ = create_test_authenticator(&state.store, &member.id).await;
+        record_test_ssh_cert(&state, &member.id).await;
+        *target_slot.lock().expect("slot lock") = Some(member.id.clone());
+
+        let cookie = admin_cookie(&token);
+        let (status, body) = http_post_form(
+            &app,
+            &format!("/admin/members/{}/revoke-credentials", member.id),
+            "",
+            &[("Cookie", &cookie), ("Origin", "https://test.example.com")],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::SEE_OTHER,
+            "revoke-credentials should succeed; got {status}: {body}"
+        );
+
+        let snap = snapshot
+            .lock()
+            .expect("snap lock")
+            .take()
+            .expect("modify hook fired for clear_user_github_refresh_token");
+        assert_eq!(
+            snap.0, 1,
+            "the member's authenticator must still be present at the moment \
+             `clear_user_github_refresh_token` (the last sub-step of \
+             `revoke_user_access`) runs — the auth-deletion transaction must \
+             only commit AFTER revocation succeeds"
+        );
+        assert_eq!(
+            snap.1, 1,
+            "the SSH cert must already be revoked when the GitHub refresh-token \
+             clear runs — `revoke_all_ssh_certificates_for_user` runs before \
+             `clear_user_github_refresh_token` within `revoke_user_access`"
+        );
+
+        // Post-condition: the auth-deletion (the persist closure) did land
+        // after revocation succeeded.
+        let remaining = db::get_authenticators_for_user(&state.store, &member.id)
+            .await
+            .unwrap();
+        assert!(
+            remaining.is_empty(),
+            "all member authenticators must be deleted after a successful revoke"
+        );
+
+        let revoked = db::get_revoked_ssh_certificates(&state.store)
+            .await
+            .unwrap();
+        assert_eq!(
+            revoked.len(),
+            1,
+            "SSH certificate must remain revoked after the request"
+        );
+    }
+
+    /// Regression: a concurrent FIDO2 enrollment that commits DURING
+    /// `revoke_user_access` (after the handler's authenticator snapshot was
+    /// taken) must NOT survive the revocation. Pre-fix, the persist closure
+    /// iterated a `Vec` captured before `revoke_user_access` even started, so
+    /// a key inserted into the window was never seen by the delete loop and
+    /// the member retained a working authenticator. Because
+    /// `revoke_member_credentials` deliberately leaves `active = true`, that
+    /// survivor let the member re-authenticate and mint a fresh session —
+    /// exactly what "revoke all credentials" is meant to prevent.
+    ///
+    /// This test deterministically reproduces the race with the existing
+    /// `modify_test_hook` seam: `clear_user_github_refresh_token` is the LAST
+    /// sub-step of `revoke_user_access` and calls `store.modify` on the user
+    /// doc, so the hook fires at an instant strictly after the handler
+    /// snapshot (taken before `revoke_user_access`) and strictly before the
+    /// persist closure's delete transaction — the same window the production
+    /// race exploits. The hook enrolls a second authenticator for the member
+    /// through a hookless store clone, committing it immediately. Post-fix,
+    /// the persist closure re-reads the authenticator set on the live
+    /// transaction and deletes the new key along with the rest; pre-fix, the
+    /// stale snapshot missed it.
+    #[tokio::test]
+    async fn test_revoke_member_credentials_deletes_authenticator_enrolled_during_revocation() {
+        use std::sync::{Arc, Mutex};
+
+        let target_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let slot = Arc::clone(&target_slot);
+
+        // A controlled credential_id for the hook-enrolled authenticator so the
+        // post-request check can resolve it via the same credential-id path
+        // `browser_login_complete` uses (`get_authenticator_by_credential_id`).
+        let survivor_credential_id: Arc<Vec<u8>> = Arc::new(b"survivor-cred-via-hook".to_vec());
+        let cred_for_hook = Arc::clone(&survivor_credential_id);
+
+        let (app, state) = test_app_with_modify_hook(move |store| {
+            let writer = store.clone();
+            store.set_modify_test_hook(Arc::new(move |doc_id: &str, attempt: u32| {
+                let writer = writer.clone();
+                let doc_id = doc_id.to_string();
+                let slot = Arc::clone(&slot);
+                let cred = Arc::clone(&cred_for_hook);
+                Box::pin(async move {
+                    // `clear_user_github_refresh_token` runs `store.modify` on
+                    // the user doc, so doc_id == user_id. Guard on the target
+                    // member and the first attempt only — `modify` retries its
+                    // own CAS loss, so without the attempt guard the injection
+                    // would fire on every retry and over-insert.
+                    let is_target =
+                        slot.lock().expect("slot lock").as_deref() == Some(doc_id.as_str());
+                    if !is_target || attempt != 0 {
+                        return;
+                    }
+                    // Simulate the member's in-flight `register_complete`
+                    // committing its `create_authenticator` insert during the
+                    // revocation window — AFTER the handler's snapshot and
+                    // BEFORE the persist closure's delete transaction. The
+                    // credential_id is the controlled one above so the
+                    // post-request check resolves it via the login path.
+                    let _ = db::create_authenticator(
+                        &writer,
+                        &CreateAuthenticatorParams {
+                            user_id: &doc_id,
+                            name: "Hook-Enrolled Key",
+                            credential_id: cred.as_slice(),
+                            public_key: &[0u8; 32],
+                            aaguid: None,
+                            user_handle: Some(doc_id.as_bytes()),
+                            attestation_verified: false,
+                            counter: 0,
+                        },
+                    )
+                    .await
+                    .expect("hook create authenticator");
+                })
+            }));
+        })
+        .await;
+
+        let (_admin, token, member) = setup_admin_and_member(&state).await;
+        // One authenticator present before the request — the one the
+        // pre-fix snapshot would have captured. The hook adds a second
+        // during `revoke_user_access`.
+        let _initial = create_test_authenticator(&state.store, &member.id).await;
+        *target_slot.lock().expect("slot lock") = Some(member.id.clone());
+
+        let cookie = admin_cookie(&token);
+        let (status, body) = http_post_form(
+            &app,
+            &format!("/admin/members/{}/revoke-credentials", member.id),
+            "",
+            &[("Cookie", &cookie), ("Origin", "https://test.example.com")],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::SEE_OTHER,
+            "revoke-credentials should succeed; got {status}: {body}"
+        );
+
+        // The fix: the concurrently-enrolled authenticator must be deleted,
+        // not left live. Pre-fix this assertion fails — one survivor remains.
+        let remaining = db::get_authenticators_for_user(&state.store, &member.id)
+            .await
+            .unwrap();
+        assert!(
+            remaining.is_empty(),
+            "an authenticator enrolled during the revocation window must be \
+             revoked, not left live (survivors = {})",
+            remaining.len()
+        );
+
+        // The survivor's credential_id must NOT resolve via the login path
+        // (`get_authenticator_by_credential_id`, the resolver
+        // `browser_login_complete` uses at `db/authenticators.rs:120`). The fix
+        // deletes the survivor, so a fresh login attempt with this credential
+        // would find no authenticator — closing the re-authentication bypass.
+        let gone =
+            db::get_authenticator_by_credential_id(&state.store, survivor_credential_id.as_slice())
+                .await
+                .unwrap();
+        assert!(
+            gone.is_none(),
+            "the survivor's credential_id must not resolve after revocation — \
+             browser_login_complete would otherwise find a usable authenticator"
+        );
+
+        // The audit `keys_revoked` must reflect the set actually deleted
+        // (both keys), not the pre-revocation snapshot size (one). This is
+        // the completeness signal the pre-fix event lacked.
+        let event = state
+            .audit
+            .query_events(&AuditEventFilter {
+                event_types: Some(vec!["admin_revoke_credentials".to_string()]),
+                ..AuditEventFilter::default()
+            })
+            .await
+            .expect("query audit events");
+        assert_eq!(
+            event.len(),
+            1,
+            "exactly one AdminRevokeCredentials event must be recorded"
+        );
+        let data: serde_json::Value =
+            serde_json::from_str(&event[0].data).expect("audit data is JSON");
+        assert_eq!(
+            data["keys_revoked"].as_u64(),
+            Some(2),
+            "keys_revoked must count the authenticator enrolled during the \
+             revocation window (got {})",
+            data["keys_revoked"]
+        );
+
+        // The handler never flips `active` — that is by design (#1116), and it
+        // is exactly why a surviving authenticator is a security bypass rather
+        // than a no-op. Assert it here to pin the impact the fix closes.
+        let updated = db::get_user_by_id(&state.store, &member.id)
+            .await
+            .unwrap()
+            .expect("member still exists");
+        assert!(
+            updated.active,
+            "revoke_member_credentials must not deactivate the member; the \
+             survivor-bypass relies on `active` staying true"
+        );
+    }
+
+    /// Forced-retry variant: with a guarded `update_by_index` conflict
+    /// injected into the authenticator-deletion cascade, the persist
+    /// closure's `with_dsql_retry!` re-runs the whole block — and the fix's
+    /// in-transaction `find_all::<AuthenticatorDoc>` re-reads on every retry,
+    /// so a key the modify hook enrolled during `revoke_user_access` is still
+    /// deleted on the retried attempt. Pre-fix, the stale outer snapshot was
+    /// iterated on every retry, so under the same forced conflict the survivor
+    /// stayed (negative control verified separately — see the test plan).
+    ///
+    /// Why a single device-auth doc is enough: the buggy persist closure
+    /// iterates ONLY the pre-revocation snapshot (which contains just the
+    /// member's pre-existing authenticator — the hook enrolls the second one
+    /// later, during `revoke_user_access`). So in the buggy code the loop's
+    /// first (and only) `delete_authenticator` run hits the attached
+    /// device-auth doc → the stale-once seam bumps its version → the guarded
+    /// `update_by_index` fails with `VersionConflict` → `with_dsql_retry!`
+    /// retries → the snapshot is re-iterated → the snapshot authenticator is
+    /// deleted on retry, but the hook-enrolled authenticator was never in the
+    /// snapshot and survives. The fix re-reads on the live transaction inside
+    /// the retry block, so it sees and deletes both.
+    #[tokio::test]
+    async fn test_revoke_member_credentials_re_reads_authenticators_on_persist_retry() {
+        use crate::crypto::webauthn_verify::AuthTime;
+        use crate::db::DeviceApproval;
+        use jiff::Timestamp;
+        use std::sync::{Arc, Mutex};
+
+        let target_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let slot = Arc::clone(&target_slot);
+        let survivor_credential_id: Arc<Vec<u8>> = Arc::new(b"retry-survivor-cred".to_vec());
+        let cred_for_hook = Arc::clone(&survivor_credential_id);
+
+        // Build state WITHOUT the router so the returned `Arc<AppState>` is
+        // uniquely held — `Arc::get_mut` below gives `&mut state.store` to set
+        // the in-transaction stale-once seam (the only test seam that forces
+        // the persist closure's `with_dsql_retry!` to retry). The modify hook
+        // for the concurrent enrollment is installed here.
+        let mut state = test_utils::build_test_app_state(Vec::new(), move |store| {
+            let writer = store.clone();
+            store.set_modify_test_hook(Arc::new(move |doc_id: &str, attempt: u32| {
+                let writer = writer.clone();
+                let doc_id = doc_id.to_string();
+                let slot = Arc::clone(&slot);
+                let cred = Arc::clone(&cred_for_hook);
+                Box::pin(async move {
+                    let is_target =
+                        slot.lock().expect("slot lock").as_deref() == Some(doc_id.as_str());
+                    if !is_target || attempt != 0 {
+                        return;
+                    }
+                    let _ = db::create_authenticator(
+                        &writer,
+                        &CreateAuthenticatorParams {
+                            user_id: &doc_id,
+                            name: "Retry Hook Key",
+                            credential_id: cred.as_slice(),
+                            public_key: &[0u8; 32],
+                            aaguid: None,
+                            user_handle: Some(doc_id.as_bytes()),
+                            attestation_verified: false,
+                            counter: 0,
+                        },
+                    )
+                    .await
+                    .expect("hook create authenticator");
+                })
+            }));
+        })
+        .await;
+
+        let (_admin, token, member) = setup_admin_and_member(&state).await;
+        // The pre-existing authenticator — the only one in the buggy
+        // pre-revocation snapshot.
+        let initial_auth = create_test_authenticator(&state.store, &member.id).await;
+        *target_slot.lock().expect("slot lock") = Some(member.id.clone());
+
+        // A device-authorization request in `Authorized` state whose
+        // `authenticator_id` is the member's pre-existing authenticator.
+        // `delete_authenticator`'s guarded `update_by_index` detach will
+        // conflict when the stale-once seam bumps this doc's version
+        // mid-transaction, forcing `with_dsql_retry!` to retry the cascade.
+        let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().unwrap();
+        let da_id = db::create_device_auth_request(
+            &state.store,
+            "retry-seam-hash",
+            "RETRY-UCODE",
+            "test-client",
+            expires_at,
+            5,
+        )
+        .await
+        .unwrap();
+        db::authorize_device_auth(
+            &state.store,
+            AuthorizeDeviceAuthParams {
+                id: &da_id,
+                user_id: &member.id,
+                user_email: &member.email,
+                authenticator_id: &initial_auth,
+                verification: DeviceApproval::Observed(AuthTime::for_test(
+                    Timestamp::now().as_second(),
+                )),
+            },
+        )
+        .await
+        .unwrap();
+
+        // Set the stale-once seam with the attached device-auth doc's id, on
+        // the same store the handler will use. Requires `&mut state.store`,
+        // so the Arc must be uniquely held (no router clone yet).
+        {
+            let s = Arc::get_mut(&mut state).expect("Arc<AppState> uniquely held pre-router");
+            s.store.set_update_by_index_stale_once(vec![da_id.clone()]);
+        }
+
+        // Now build the router (clones the Arc; the seam persists on the
+        // shared `store` field, and `store.begin()` propagates it into each
+        // transaction the handler opens).
+        let config = state.config();
+        let app =
+            router::build_app(state.clone(), &config).expect("Failed to build test app router");
+
+        let cookie = admin_cookie(&token);
+        let (status, body) = http_post_form(
+            &app,
+            &format!("/admin/members/{}/revoke-credentials", member.id),
+            "",
+            &[("Cookie", &cookie), ("Origin", "https://test.example.com")],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::SEE_OTHER,
+            "revoke-credentials should succeed even under a forced persist retry; \
+             got {status}: {body}"
+        );
+
+        // The fix re-reads authenticators on the live transaction inside
+        // `with_dsql_retry!`, so the hook-enrolled authenticator is deleted
+        // on the retried attempt — 0 survivors. Pre-fix this leaves 1.
+        let remaining = db::get_authenticators_for_user(&state.store, &member.id)
+            .await
+            .unwrap();
+        assert!(
+            remaining.is_empty(),
+            "under a forced OCC retry, the concurrently-enrolled authenticator \
+             must still be revoked, not left live (survivors = {})",
+            remaining.len()
+        );
+
+        // Login path can no longer resolve the survivor's credential — the
+        // re-read on retry deleted it.
+        let gone =
+            db::get_authenticator_by_credential_id(&state.store, survivor_credential_id.as_slice())
+                .await
+                .unwrap();
+        assert!(
+            gone.is_none(),
+            "under a forced retry, the survivor's credential_id must not resolve"
+        );
+
+        // Audit reflects the set actually deleted on the retried transaction
+        // (both keys), not the pre-revocation snapshot size (one).
+        let event = state
+            .audit
+            .query_events(&AuditEventFilter {
+                event_types: Some(vec!["admin_revoke_credentials".to_string()]),
+                ..AuditEventFilter::default()
+            })
+            .await
+            .expect("query audit events");
+        assert_eq!(event.len(), 1, "exactly one AdminRevokeCredentials event");
+        let data: serde_json::Value =
+            serde_json::from_str(&event[0].data).expect("audit data is JSON");
+        assert_eq!(
+            data["keys_revoked"].as_u64(),
+            Some(2),
+            "keys_revoked must reflect 2 deleted under retry (got {})",
+            data["keys_revoked"]
+        );
+
+        // The attached device-auth doc was detached by the retried cascade
+        // — the guarded `update_by_index` landed via `with_dsql_retry!`,
+        // transitioning the `Authorized` row to `Denied` (the detach sets
+        // `authenticator_id = None` and `Authorized → Denied`).
+        let da = db::get_device_auth_by_id(&state.store, &da_id)
+            .await
+            .unwrap()
+            .expect("device-auth doc still exists (cascade detaches, never deletes)");
+        assert!(
+            matches!(da.state, DeviceAuthState::Denied),
+            "the retried cascade must detach the device-auth approval (Authorized → Denied)"
+        );
+
+        let updated = db::get_user_by_id(&state.store, &member.id)
+            .await
+            .unwrap()
+            .expect("member still exists");
+        assert!(
+            updated.active,
+            "revoke_member_credentials must not deactivate the member; the \
+             survivor-bypass relies on `active` staying true"
         );
     }
 
@@ -1150,14 +1866,18 @@ mod tests {
         // admin's read and the update produced a success redirect plus a
         // fraudulent audit event. The modify hook deletes the target's doc
         // on the first OCC attempt, deterministically forcing the miss.
+        //
+        // Covers the two actions that still write through `store.modify`.
+        // `demote` and `deactivate` now read the member and write it inside
+        // one transaction (the last-admin floor has to count admins and write
+        // atomically), so there is no window between the read and the write
+        // for a delete to land in — the race this test forces cannot occur on
+        // those paths. Their equivalent contract, that a missing member
+        // yields `Ok(false)` rather than a phantom success, is pinned by
+        // `db::tests::users_and_sessions::test_downgrade_reports_missing_member`.
         use std::sync::{Arc, Mutex};
 
-        for (action, kind) in [
-            ("promote", "admin_promote"),
-            ("demote", "admin_demote"),
-            ("deactivate", "admin_deactivate"),
-            ("activate", "admin_activate"),
-        ] {
+        for (action, kind) in [("promote", "admin_promote"), ("activate", "admin_activate")] {
             let target_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
             let slot = Arc::clone(&target_slot);
             let (app, state) = test_app_with_modify_hook(move |store| {
@@ -1202,9 +1922,9 @@ mod tests {
 
             let events = state
                 .audit
-                .query_events(&crate::db::AuditEventFilter {
+                .query_events(&AuditEventFilter {
                     event_types: Some(vec![kind.to_string()]),
-                    ..crate::db::AuditEventFilter::default()
+                    ..AuditEventFilter::default()
                 })
                 .await
                 .expect("query audit events");
@@ -1272,15 +1992,537 @@ mod tests {
 
         let events = state
             .audit
-            .query_events(&crate::db::AuditEventFilter {
+            .query_events(&AuditEventFilter {
                 event_types: Some(vec!["admin_remove_user".to_string()]),
-                ..crate::db::AuditEventFilter::default()
+                ..AuditEventFilter::default()
             })
             .await
             .expect("query audit events");
         assert!(
             events.is_empty(),
             "remove: no admin_remove_user audit event may be logged when the delete did not occur"
+        );
+    }
+
+    // ---- In-transaction LastAdmin refusal after revocation committed ----
+    //
+    // The admin `remove_member` / `deactivate_member` handlers revoke access
+    // (sessions, SSH certs, GitHub refresh token) *before* the authoritative
+    // in-transaction last-admin floor runs. When that floor refuses, the
+    // committed revocation must still land in the canonical admin audit log,
+    // carrying `refusal: "last_admin"` so it is distinguishable from a
+    // successful action, as the SCIM handlers do.
+    //
+    // The floor only refuses under a concurrent race: the caller (admin1) must
+    // lose their admin status between `OrgAdmin` extraction and the
+    // in-transaction count. These tests produce that by deactivating admin1
+    // from a hook that runs inside the target's transaction before its first
+    // read: `delete_test_hook` for `remove` (inside `delete_user`),
+    // `last_admin_count_test_hook` for `deactivate` (inside
+    // `demote_or_deactivate_member`).
+
+    /// Records an `admin_remove_user` audit row when the in-transaction
+    /// `LastAdmin` guard refuses a remove *after* the handler's
+    /// `revoke_user_access` already committed the target's session deletions
+    /// and SSH-cert revocations. The row carries `refusal: "last_admin"` to
+    /// distinguish a floor refusal from a successful removal.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "end-to-end race regression: stand up two admins, drive the in-tx floor, assert revocation + audit"
+    )]
+    #[tokio::test]
+    async fn test_remove_member_audits_committed_revocation_when_last_admin_refuses() {
+        use crate::db::documents::session::SessionDoc;
+        use crate::db::documents::user::UserDoc;
+        use std::sync::{Arc, Mutex};
+
+        // Slots carry the target (admin2) and sibling (admin1, the caller) ids
+        // from the test thread into the hook closure; both are `None` until set
+        // after the two admins are stood up, so the hook stays dormant during
+        // setup. The hook deactivates admin1 (the only other active admin) from
+        // a separate transaction inside `delete_user(admin2)`, so the
+        // in-transaction count sees zero other active admins and the floor
+        // refuses — after the handler's `revoke_user_access(admin2)` committed.
+        let target_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let sibling_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let t = Arc::clone(&target_slot);
+        let s = Arc::clone(&sibling_slot);
+        let (app, state) = test_app_with_modify_hook(move |store| {
+            // `writer` is a hookless clone taken before the seam is installed,
+            // so the sibling deactivation never re-enters `delete_user`.
+            let writer = store.clone();
+            store.set_delete_test_hook(Arc::new(move |user_id: &str| {
+                let writer = writer.clone();
+                let user_id = user_id.to_string();
+                let t = Arc::clone(&t);
+                let s = Arc::clone(&s);
+                Box::pin(async move {
+                    let is_target =
+                        t.lock().expect("target lock").as_deref() == Some(user_id.as_str());
+                    if !is_target {
+                        return;
+                    }
+                    let sibling = s.lock().expect("sibling lock").clone();
+                    if let Some(sibling_id) = sibling {
+                        writer
+                            .modify::<UserDoc, _>(&sibling_id, |d| d.active = false)
+                            .await
+                            .expect("deactivate sibling admin from hook");
+                    }
+                })
+            }));
+        })
+        .await;
+
+        // Two active admins in one org. admin1 is the caller (carries the
+        // session + cookie); admin2 is the target of the remove. admin2 gets
+        // a session and an SSH cert so revocation is observable; admin1 gets a
+        // cert too so the test can prove only admin2's cert is revoked (the
+        // hook only flips admin1's user doc `active=false`).
+        let org = create_test_org(&state.store, "example.com").await;
+        let admin1 =
+            create_test_user_in_org(&state.store, "admin1@example.com", &org.id, true).await;
+        let admin1_auth_id = create_test_authenticator(&state.store, &admin1.id).await;
+        let admin1_token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &admin1.id,
+                email: &admin1.email,
+                auth_id: Some(&admin1_auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let admin2 =
+            create_test_user_in_org(&state.store, "admin2@example.com", &org.id, true).await;
+        let admin2_auth_id = create_test_authenticator(&state.store, &admin2.id).await;
+        let _admin2_token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &admin2.id,
+                email: &admin2.email,
+                auth_id: Some(&admin2_auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let expires_at = jiff::Timestamp::now()
+            .checked_add(jiff::Span::new().hours(8))
+            .expect("future timestamp");
+        db::record_ssh_certificate_issuance(
+            &state.store,
+            42_010_050,
+            &admin1.id,
+            &admin1.email,
+            &["user".to_string()],
+            expires_at,
+        )
+        .await
+        .expect("record admin1 issuance");
+        db::record_ssh_certificate_issuance(
+            &state.store,
+            42_010_051,
+            &admin2.id,
+            &admin2.email,
+            &["user".to_string()],
+            expires_at,
+        )
+        .await
+        .expect("record admin2 issuance");
+
+        // Sanity: admin2 is not the last active admin (admin1 still counts),
+        // admin2 has a live session, and no cert has been revoked yet.
+        // (There is no advisory pre-check on the admin `remove_member` path
+        // — the authoritative floor is the in-transaction count — so this just
+        // fixes the starting state.)
+        assert!(
+            !db::is_last_active_org_admin(&state.store, &admin2.id)
+                .await
+                .expect("count admins for admin2"),
+            "setup: admin2 has a second active admin",
+        );
+        let session_count_before = state
+            .store
+            .count::<SessionDoc>("user_id", &admin2.id)
+            .await
+            .expect("count admin2 sessions");
+        assert!(session_count_before >= 1, "setup: admin2 has a session");
+        assert!(
+            db::get_revoked_ssh_certificates(&state.store)
+                .await
+                .expect("list revoked")
+                .is_empty(),
+            "setup: no SSH revocations yet",
+        );
+
+        // Arm the hook: when `delete_user(admin2)` runs (after the handler's
+        // `revoke_user_access` has committed), deactivate admin1 so the
+        // in-transaction count sees zero other active admins and the
+        // authoritative floor fires.
+        *target_slot.lock().expect("target lock") = Some(admin2.id.clone());
+        *sibling_slot.lock().expect("sibling lock") = Some(admin1.id.clone());
+
+        // POST admin1 removes admin2. `revoke_user_access(admin2)` commits,
+        // then `delete_user(admin2)` counts 0 other active admins (admin1
+        // deactivated by the hook) and the floor refuses with `LastAdmin`.
+        let cookie = admin_cookie(&admin1_token);
+        let (status, body) = http_post_form(
+            &app,
+            &format!("/admin/members/{}/remove", admin2.id),
+            "",
+            &[("Cookie", &cookie), ("Origin", "https://test.example.com")],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "in-tx LastAdmin refusal must be a 400: got {status}: {body}",
+        );
+        let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(
+            error["code"], "last_admin",
+            "in-tx LastAdmin refusal on remove uses the `last_admin` code: body={body}",
+        );
+
+        // Revocation committed before the floor refused: admin2's sessions
+        // are gone and its SSH cert is in the revocation list — the durable
+        // side effect the audit row must tie to this operation.
+        let session_count_after = state
+            .store
+            .count::<SessionDoc>("user_id", &admin2.id)
+            .await
+            .expect("count admin2 sessions after");
+        assert_eq!(
+            session_count_after, 0,
+            "admin remove revocation must delete the target's sessions before the floor refuses",
+        );
+        let revoked = db::get_revoked_ssh_certificates(&state.store)
+            .await
+            .expect("list revoked after");
+        assert_eq!(
+            revoked.len(),
+            1,
+            "exactly one cert revoked — the target's; got {}",
+            revoked
+                .iter()
+                .map(|r| r.serial.clone())
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        assert_eq!(
+            revoked[0].user_id, admin2.id,
+            "the revoked cert was admin2's"
+        );
+
+        // admin2's record survives: the delete never committed (the floor
+        // returned before the user-row delete and the org-row OCC), so admin2
+        // stays active/admin and is now the floor's only live admin (admin1
+        // was deactivated by the hook).
+        let admin2_after = db::get_user_by_id(&state.store, &admin2.id)
+            .await
+            .expect("fetch admin2 after")
+            .expect("admin2 record still exists");
+        assert!(
+            admin2_after.active,
+            "admin2 still active — the delete was refused"
+        );
+        assert!(admin2_after.is_org_admin, "admin2 still admin");
+        assert!(
+            db::is_last_active_org_admin(&state.store, &admin2.id)
+                .await
+                .expect("rerun floor"),
+            "admin2 is the last active admin after admin1 was deactivated by the hook",
+        );
+
+        // The fix: an `admin_remove_user` audit event records the committed
+        // revocation, tying it to the calling admin. The payload carries
+        // `refusal: "last_admin"` to distinguish a floor refusal from a
+        // successful removal.
+        let events = state
+            .audit
+            .query_events(&AuditEventFilter {
+                event_types: Some(vec!["admin_remove_user".to_string()]),
+                ..AuditEventFilter::default()
+            })
+            .await
+            .expect("query audit events");
+        assert!(
+            !events.is_empty(),
+            "remove_member: a committed revocation that the last-admin floor \
+             refused must record an `admin_remove_user` audit event; got {}",
+            events
+                .iter()
+                .map(|e| e.data.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        let data: serde_json::Value =
+            serde_json::from_str(&events[0].data).expect("audit data is JSON");
+        assert_eq!(data["action"], "remove_user");
+        assert_eq!(data["target_user_id"], admin2.id);
+        assert_eq!(data["admin_user_id"], admin1.id);
+        assert_eq!(
+            data["refusal"], "last_admin",
+            "the `refusal` distinguisher marks this row as a floor refusal; got: {data}",
+        );
+        // A remove refusal must not carry `keys_revoked` (only the
+        // revoke-credentials action records that).
+        assert!(
+            data.get("keys_revoked").is_none(),
+            "a remove refusal must not carry `keys_revoked`; got {data}",
+        );
+        // The refusal row must not carry a raw target email (regression
+        // guard for the `data.target_email` leak fixed elsewhere).
+        assert!(
+            !events[0].data.contains("admin2@example.com"),
+            "the refusal audit payload must not contain the raw target email; got {}",
+            events[0].data,
+        );
+    }
+
+    /// Records an `admin_deactivate` audit row when the in-transaction
+    /// `LastAdmin` guard refuses a deactivate *after* `revoke_then_persist`
+    /// already committed the target's session deletions and SSH-cert
+    /// revocations. The row carries `refusal: "last_admin"` to distinguish a
+    /// floor refusal from a successful deactivation.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "end-to-end race regression: stand up two admins, drive the in-tx floor, assert revocation + audit"
+    )]
+    #[tokio::test]
+    async fn test_deactivate_member_audits_committed_revocation_when_last_admin_refuses() {
+        use crate::db::documents::session::SessionDoc;
+        use crate::db::documents::user::UserDoc;
+        use std::sync::{Arc, Mutex};
+
+        let target_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let sibling_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let t = Arc::clone(&target_slot);
+        let s = Arc::clone(&sibling_slot);
+        let (app, state) = test_app_with_modify_hook(move |store| {
+            // `writer` is a hookless clone taken before the seam is installed,
+            // so the sibling deactivation never re-enters
+            // `demote_or_deactivate_member`.
+            let writer = store.clone();
+            store.set_last_admin_count_test_hook(Arc::new(move |user_id: &str| {
+                let writer = writer.clone();
+                let user_id = user_id.to_string();
+                let t = Arc::clone(&t);
+                let s = Arc::clone(&s);
+                Box::pin(async move {
+                    let is_target =
+                        t.lock().expect("target lock").as_deref() == Some(user_id.as_str());
+                    if !is_target {
+                        return;
+                    }
+                    let sibling = s.lock().expect("sibling lock").clone();
+                    if let Some(sibling_id) = sibling {
+                        writer
+                            .modify::<UserDoc, _>(&sibling_id, |d| d.active = false)
+                            .await
+                            .expect("deactivate sibling admin from hook");
+                    }
+                })
+            }));
+        })
+        .await;
+
+        // Two active admins in one org. admin1 is the caller; admin2 is the
+        // target of the deactivate. Both get sessions and SSH certs so the
+        // revocation of admin2 (the target) is observable and only admin2's
+        // cert is revoked (the hook only flips admin1's user doc `active`).
+        let org = create_test_org(&state.store, "example.com").await;
+        let admin1 =
+            create_test_user_in_org(&state.store, "admin1@example.com", &org.id, true).await;
+        let admin1_auth_id = create_test_authenticator(&state.store, &admin1.id).await;
+        let admin1_token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &admin1.id,
+                email: &admin1.email,
+                auth_id: Some(&admin1_auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let admin2 =
+            create_test_user_in_org(&state.store, "admin2@example.com", &org.id, true).await;
+        let admin2_auth_id = create_test_authenticator(&state.store, &admin2.id).await;
+        let _admin2_token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &admin2.id,
+                email: &admin2.email,
+                auth_id: Some(&admin2_auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let expires_at = jiff::Timestamp::now()
+            .checked_add(jiff::Span::new().hours(8))
+            .expect("future timestamp");
+        db::record_ssh_certificate_issuance(
+            &state.store,
+            42_010_060,
+            &admin1.id,
+            &admin1.email,
+            &["user".to_string()],
+            expires_at,
+        )
+        .await
+        .expect("record admin1 issuance");
+        db::record_ssh_certificate_issuance(
+            &state.store,
+            42_010_061,
+            &admin2.id,
+            &admin2.email,
+            &["user".to_string()],
+            expires_at,
+        )
+        .await
+        .expect("record admin2 issuance");
+
+        // Sanity: admin2 is not the last active admin, admin2 has a live
+        // session, and no cert has been revoked yet.
+        assert!(
+            !db::is_last_active_org_admin(&state.store, &admin2.id)
+                .await
+                .expect("count admins for admin2"),
+            "setup: admin2 has a second active admin",
+        );
+        let session_count_before = state
+            .store
+            .count::<SessionDoc>("user_id", &admin2.id)
+            .await
+            .expect("count admin2 sessions");
+        assert!(session_count_before >= 1, "setup: admin2 has a session");
+        assert!(
+            db::get_revoked_ssh_certificates(&state.store)
+                .await
+                .expect("list revoked")
+                .is_empty(),
+            "setup: no SSH revocations yet",
+        );
+
+        // Arm the hook: when `demote_or_deactivate_member(admin2)` runs (after
+        // the handler's `revoke_user_access` has committed), deactivate admin1
+        // so the in-transaction count sees zero other active admins.
+        *target_slot.lock().expect("target lock") = Some(admin2.id.clone());
+        *sibling_slot.lock().expect("sibling lock") = Some(admin1.id.clone());
+
+        // POST admin1 deactivates admin2. `revoke_then_persist` commits
+        // admin2's revocation, then `demote_or_deactivate_member` counts 0
+        // other active admins (admin1 deactivated by the hook) and the floor
+        // refuses with `LastAdmin`.
+        let cookie = admin_cookie(&admin1_token);
+        let (status, body) = http_post_form(
+            &app,
+            &format!("/admin/members/{}/deactivate", admin2.id),
+            "",
+            &[("Cookie", &cookie), ("Origin", "https://test.example.com")],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "in-tx LastAdmin refusal must be a 400: got {status}: {body}",
+        );
+        let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(
+            error["code"], "last_admin",
+            "in-tx LastAdmin refusal on deactivate uses the `last_admin` code: body={body}",
+        );
+
+        // Revocation committed before the floor refused: admin2's sessions
+        // are gone and its SSH cert is revoked.
+        let session_count_after = state
+            .store
+            .count::<SessionDoc>("user_id", &admin2.id)
+            .await
+            .expect("count admin2 sessions after");
+        assert_eq!(
+            session_count_after, 0,
+            "admin deactivate revocation must delete the target's sessions before the floor refuses",
+        );
+        let revoked = db::get_revoked_ssh_certificates(&state.store)
+            .await
+            .expect("list revoked after");
+        assert_eq!(
+            revoked.len(),
+            1,
+            "exactly one cert revoked — the target's; got {}",
+            revoked
+                .iter()
+                .map(|r| r.serial.clone())
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        assert_eq!(
+            revoked[0].user_id, admin2.id,
+            "the revoked cert was admin2's"
+        );
+
+        // admin2's record survives: the `active = false` write never
+        // committed (the floor returned before the compare-and-update), so
+        // admin2 stays active/admin and is now the floor's only live admin
+        // (admin1 was deactivated by the hook).
+        let admin2_after = db::get_user_by_id(&state.store, &admin2.id)
+            .await
+            .expect("fetch admin2 after")
+            .expect("admin2 record still exists");
+        assert!(
+            admin2_after.active,
+            "admin2 still active — the deactivation was refused"
+        );
+        assert!(admin2_after.is_org_admin, "admin2 still admin");
+        assert!(
+            db::is_last_active_org_admin(&state.store, &admin2.id)
+                .await
+                .expect("rerun floor"),
+            "admin2 is the last active admin after admin1 was deactivated by the hook",
+        );
+
+        // The fix: an `admin_deactivate` audit event records the committed
+        // revocation, tying it to the calling admin. The payload carries
+        // `refusal: "last_admin"` to distinguish a floor refusal from a
+        // successful deactivation.
+        let events = state
+            .audit
+            .query_events(&AuditEventFilter {
+                event_types: Some(vec!["admin_deactivate".to_string()]),
+                ..AuditEventFilter::default()
+            })
+            .await
+            .expect("query audit events");
+        assert!(
+            !events.is_empty(),
+            "deactivate_member: a committed revocation that the last-admin floor \
+             refused must record an `admin_deactivate` audit event; got {}",
+            events
+                .iter()
+                .map(|e| e.data.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        let data: serde_json::Value =
+            serde_json::from_str(&events[0].data).expect("audit data is JSON");
+        assert_eq!(data["action"], "deactivate");
+        assert_eq!(data["target_user_id"], admin2.id);
+        assert_eq!(data["admin_user_id"], admin1.id);
+        assert_eq!(
+            data["refusal"], "last_admin",
+            "the `refusal` distinguisher marks this row as a floor refusal; got: {data}",
+        );
+        assert!(
+            data.get("keys_revoked").is_none(),
+            "a deactivate refusal must not carry `keys_revoked`; got {data}",
+        );
+        assert!(
+            !events[0].data.contains("admin2@example.com"),
+            "the refusal audit payload must not contain the raw target email; got {}",
+            events[0].data,
         );
     }
 }

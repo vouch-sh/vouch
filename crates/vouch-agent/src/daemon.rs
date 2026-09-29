@@ -11,6 +11,8 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process;
 
+use vouch_common::paths;
+
 use crate::error::{AgentError, Result};
 
 /// Result of the daemonize operation.
@@ -26,14 +28,14 @@ pub enum DaemonizeResult {
 
 /// Get the path to the PID file (`$XDG_CACHE_HOME/vouch/agent.pid`).
 pub fn pid_file_path() -> Result<PathBuf> {
-    let vouch_dir = vouch_common::paths::cache_dir()
+    let vouch_dir = paths::cache_dir()
         .ok_or_else(|| AgentError::Config("Could not determine cache directory".to_string()))?;
     Ok(vouch_dir.join("agent.pid"))
 }
 
 /// Get the path to the log file (`$XDG_CACHE_HOME/vouch/agent.log`).
 pub(crate) fn log_file_path() -> Result<PathBuf> {
-    let vouch_dir = vouch_common::paths::cache_dir()
+    let vouch_dir = paths::cache_dir()
         .ok_or_else(|| AgentError::Config("Could not determine cache directory".to_string()))?;
     Ok(vouch_dir.join("agent.log"))
 }

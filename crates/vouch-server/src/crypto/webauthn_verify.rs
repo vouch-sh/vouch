@@ -32,6 +32,7 @@ use super::attestation_chain::AttestationProof;
 use super::{cose, oid};
 use thiserror::Error;
 use vouch_common::protocol;
+use webauthn_rs::prelude::Passkey;
 
 /// Trait for COSE signature verification.
 ///
@@ -194,13 +195,86 @@ pub enum VerifyError {
     },
 }
 
+/// The instant a WebAuthn ceremony verified — the `auth_time` claim's value
+/// (OIDC Core §2: "Time when the End-User authentication occurred").
+///
+/// The inner value is stamped only here, at the moment a ceremony completes,
+/// and there is no public constructor. Holding one is therefore evidence
+/// that a ceremony happened at that instant, which is what stops a later
+/// request — a device-code poll, say — from passing off its own clock
+/// reading as an authentication time (issue #1166).
+///
+/// The instant is kept at full precision. The `auth_time` claim is whole
+/// seconds ([`Self::as_second`]), but the session row records
+/// [`Self::instant`] so the `max_age=0` / `prompt=login` freshness decision
+/// can order a ceremony against a pending authorization stored in the same
+/// second.
+#[derive(Debug, Clone, Copy)]
+pub struct AuthTime(jiff::Timestamp);
+
+impl AuthTime {
+    /// Stamp the current instant. Private: every public path to an
+    /// `AuthTime` runs through a completed ceremony.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "stamps the instant a ceremony completed, not a comparison"
+    )]
+    fn stamp() -> Self {
+        Self(jiff::Timestamp::now())
+    }
+
+    /// The instant a `webauthn-rs` registration ceremony completed.
+    ///
+    /// Registration runs through `finish_passkey_registration`, which yields
+    /// a [`Passkey`] only for a verified ceremony — so holding one is the
+    /// same evidence [`VerificationResult`] carries for assertions.
+    #[must_use]
+    pub fn from_passkey_registration(_verified: &Passkey) -> Self {
+        Self::stamp()
+    }
+
+    /// Unix seconds, for the `auth_time` claim.
+    #[must_use]
+    pub fn as_second(self) -> i64 {
+        self.0.as_second()
+    }
+
+    /// The ceremony instant at full precision, for storage and for the
+    /// freshness decision.
+    #[must_use]
+    pub fn instant(self) -> jiff::Timestamp {
+        self.0
+    }
+
+    /// Build an `AuthTime` for a specific second in tests, standing in for
+    /// a ceremony that cannot be run without hardware.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[must_use]
+    pub fn for_test(unix_seconds: i64) -> Self {
+        Self(jiff::Timestamp::from_second(unix_seconds).unwrap_or_default())
+    }
+
+    /// Build an `AuthTime` for a specific sub-second instant in tests.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[must_use]
+    pub fn for_test_instant(at: jiff::Timestamp) -> Self {
+        Self(at)
+    }
+}
+
 /// Result of successful assertion verification.
+///
+/// The `verified_at` field has no public constructor, so this struct cannot
+/// be built outside this module — a caller holding one has been through
+/// [`verify_assertion`].
 #[derive(Debug)]
 pub struct VerificationResult {
     /// The new counter value from the authenticator.
     pub counter: u32,
     /// Whether user verification was performed.
     pub user_verified: bool,
+    /// When this assertion verified.
+    pub verified_at: AuthTime,
 }
 
 /// Client data structure from WebAuthn.
@@ -367,7 +441,54 @@ fn verify_assertion_inner<V: CoseVerifier>(
         .map_err(|_| VerifyError::InvalidAuthDataLength)?;
     let counter = u32::from_be_bytes(counter_bytes);
 
-    // 5. Verify counter is increasing.
+    // 5. Parse and verify client data
+    let client_data: ClientData = serde_json::from_slice(client_data_json)
+        .map_err(|e| VerifyError::InvalidClientData(e.to_string()))?;
+
+    // Verify type
+    if client_data.type_ != protocol::CLIENT_DATA_TYPE_GET {
+        return Err(VerifyError::InvalidClientData(format!(
+            "Expected type '{}', got '{}'",
+            protocol::CLIENT_DATA_TYPE_GET,
+            client_data.type_
+        )));
+    }
+
+    // Verify challenge
+    if client_data.challenge != expected_challenge {
+        return Err(VerifyError::ChallengeMismatch);
+    }
+
+    // Verify origin
+    verify_origin(
+        &client_data.origin,
+        expected_origin,
+        origin_policy,
+        "assertion",
+    )?;
+
+    // 6. Build signed data: authenticator_data || SHA-256(client_data_json)
+    let client_data_hash = digest::digest(&SHA256, client_data_json);
+    let mut signed_data = Vec::with_capacity(authenticator_data.len().saturating_add(32));
+    signed_data.extend_from_slice(authenticator_data);
+    signed_data.extend_from_slice(client_data_hash.as_ref());
+
+    // 7. Verify signature using the provided verifier
+    verifier.verify(public_key_cose, &signed_data, signature)?;
+
+    // 8. Verify counter is increasing — only after the signature verified.
+    //
+    // WebAuthn Level 2 §7.2 orders the two: step 20, "Using
+    // credentialPublicKey, verify that sig is a valid signature over the
+    // binary concatenation of authData and hash.", then step 21, "Let
+    // storedSignCount be the stored signature counter value associated with
+    // credential.id." (https://www.w3.org/TR/webauthn-2/, cached as
+    // specs/w3c/webauthn-2.txt). The order matters beyond the step list:
+    // `authData.signCount` is attacker-controlled bytes until the signature
+    // covers it, so a counter regression reported before the signature
+    // verified proves nothing about the key. Only a signed regression is
+    // evidence that a registered key produced it, which is what lets callers
+    // attribute a `CounterNotIncreasing` failure to the key's owner.
     //
     // WebAuthn Level 2 Section 6.1.1: "In subsequent authenticatorGetAssertion
     // operations, the Relying Party compares the stored signature counter
@@ -397,44 +518,10 @@ fn verify_assertion_inner<V: CoseVerifier>(
         return Err(VerifyError::CounterNotIncreasing);
     }
 
-    // 6. Parse and verify client data
-    let client_data: ClientData = serde_json::from_slice(client_data_json)
-        .map_err(|e| VerifyError::InvalidClientData(e.to_string()))?;
-
-    // Verify type
-    if client_data.type_ != protocol::CLIENT_DATA_TYPE_GET {
-        return Err(VerifyError::InvalidClientData(format!(
-            "Expected type '{}', got '{}'",
-            protocol::CLIENT_DATA_TYPE_GET,
-            client_data.type_
-        )));
-    }
-
-    // Verify challenge
-    if client_data.challenge != expected_challenge {
-        return Err(VerifyError::ChallengeMismatch);
-    }
-
-    // Verify origin
-    verify_origin(
-        &client_data.origin,
-        expected_origin,
-        origin_policy,
-        "assertion",
-    )?;
-
-    // 7. Build signed data: authenticator_data || SHA-256(client_data_json)
-    let client_data_hash = digest::digest(&SHA256, client_data_json);
-    let mut signed_data = Vec::with_capacity(authenticator_data.len().saturating_add(32));
-    signed_data.extend_from_slice(authenticator_data);
-    signed_data.extend_from_slice(client_data_hash.as_ref());
-
-    // 8. Verify signature using the provided verifier
-    verifier.verify(public_key_cose, &signed_data, signature)?;
-
     Ok(VerificationResult {
         counter,
         user_verified,
+        verified_at: AuthTime::stamp(),
     })
 }
 
@@ -451,7 +538,11 @@ pub struct RegistrationVerificationResult {
     pub public_key_cose: Vec<u8>,
     /// The AAGUID from the authenticator (16 bytes, hex-encoded).
     pub aaguid: Option<String>,
-    /// The counter value from registration (usually 0).
+    /// The verified `authData.signCount` from registration (WebAuthn L2
+    /// §7.1 step 23). Persisted at registration as the credential's initial
+    /// stored signature counter — see `db::create_authenticator`. `0` for
+    /// per-credential-counter (CTAP 2.1+) and counter-less authenticators;
+    /// the actual global-counter reading for the legacy CTAP 2.0 class.
     pub counter: u32,
     /// The verified attestation chain, when one was validated.
     ///
@@ -489,8 +580,10 @@ pub struct RegistrationParams<'a> {
 /// 1. Parse `attestation_object` CBOR
 /// 2. Verify `authData`: RP ID hash, flags (UP+UV+AT), extract credential
 /// 3. Parse `clientDataJSON`: verify type=webauthn.create, challenge, origin
-/// 4. For `fmt="packed"` self-attestation: verify signature
-/// 5. For `fmt="none"`: accept (no attestation statement)
+/// 4. For `fmt="packed"`: verify the attestation signature (self or x5c)
+/// 5. For `fmt="fido-u2f"`: verify `attStmt.sig` over `0x00 || rpIdHash ||
+///    clientDataHash || credentialId || publicKeyU2F` with the leaf cert
+/// 6. For `fmt="none"`: accept (no attestation statement)
 ///
 /// Returns the server-verified credential ID, public key, and AAGUID.
 pub fn verify_registration(
@@ -502,6 +595,11 @@ pub fn verify_registration(
 /// Verify a WebAuthn registration with a custom COSE verifier.
 ///
 /// This is the testable version of [`verify_registration`].
+#[expect(
+    clippy::too_many_lines,
+    reason = "single-pass WebAuthn L2 §7.1 registration verification; \
+              attestation-format dispatch is the bulk of the body"
+)]
 pub fn verify_registration_with_verifier<V: CoseVerifier>(
     params: &RegistrationParams<'_>,
     verifier: &V,
@@ -570,12 +668,7 @@ pub fn verify_registration_with_verifier<V: CoseVerifier>(
     }
 
     // Extract counter
-    let counter_bytes: [u8; 4] = auth_data_bytes
-        .get(33..37)
-        .ok_or(VerifyError::InvalidAuthDataLength)?
-        .try_into()
-        .map_err(|_| VerifyError::InvalidAuthDataLength)?;
-    let counter = u32::from_be_bytes(counter_bytes);
+    let counter = extract_counter_from_auth_data(&auth_data_bytes)?;
 
     // Extract attested credential data (starts at byte 37)
     // AAGUID (16 bytes) + credential ID length (2 bytes) + credential ID + COSE key
@@ -672,10 +765,56 @@ pub fn verify_registration_with_verifier<V: CoseVerifier>(
             // No attStmt with packed format is invalid, but we're lenient
             // since the COSE key is verified through usage anyway
         }
+        "fido-u2f" => {
+            // FIDO U2F attestation (WebAuthn Level 2 Section 8.3). The signature
+            // is over `0x00 || rpIdHash || clientDataHash || credentialId ||
+            // publicKeyU2F` (not packed's `authData || clientDataHash`), with
+            // `alg` fixed to ES256 — see `verify_fido_u2f_attestation`.
+            //
+            // Verifying `attStmt.sig` is what binds the credential to the
+            // captured certificate; without it the chokepoint's `cert_aaguid`
+            // is unearned (issue #1111 forgery against `fido-u2f`). The browser
+            // path is safe via webauthn-rs's `verify_fidou2f_attestation`; this
+            // arm mirrors it so both paths reject the same inputs. The chain
+            // itself is validated by the chokepoint, which owns chain policy.
+            let stmt_map = att_stmt.ok_or_else(|| {
+                VerifyError::InvalidClientData(
+                    "fido-u2f attestation requires an attStmt".to_string(),
+                )
+            })?;
+            verify_fido_u2f_attestation(
+                stmt_map,
+                &auth_data_bytes,
+                client_data_json,
+                &cose_key_bytes,
+                &credential_id,
+            )?;
+
+            // The authData AAGUID is not signed by a fido-u2f statement (CTAP
+            // 2.0 §7.2: AAGUID "Initialized with all zeros"), so it carries no
+            // model identity; the model comes from the certificate via the
+            // chokepoint.
+            aaguid = None;
+        }
         other => {
-            // Accept other formats (fido-u2f, tpm, etc.) without verification.
-            // The credential will still be verified through assertion on login.
-            tracing::debug!(fmt = %other, "Accepting unverified attestation format");
+            // No verification procedure is implemented for these formats. The
+            // authData AAGUID is signed by nothing here, so it is discarded
+            // (defense-in-depth); the credential is verified later via
+            // assertion. This is not acceptance: the registration chokepoint
+            // (`validate_registration_attestation`) runs `validate_hardware_attestation` afterwards
+            // and is default-deny — these formats are rejected there. The
+            // historical note about CTAP 2.0 §7.2's all-zero AAGUID lives on
+            // the `fido-u2f` arm, which is the only other hardware format and
+            // has its own verifier now.
+            if aaguid.is_some() {
+                tracing::warn!(
+                    fmt = %other,
+                    "Discarding AAGUID from an attestation format that is not verified"
+                );
+                aaguid = None;
+            } else {
+                tracing::debug!(fmt = %other, "Accepting unverified attestation format");
+            }
         }
     }
 
@@ -686,6 +825,72 @@ pub fn verify_registration_with_verifier<V: CoseVerifier>(
         counter,
         attestation,
     })
+}
+
+/// Extract the `authData.signCount` from a CBOR-encoded WebAuthn attestation
+/// object (WebAuthn Level 2 §7.1 step 23: "Associate the `credentialId` with
+/// a new stored signature counter value initialized to the value of
+/// `authData.signCount`").
+///
+/// [`verify_registration_with_verifier`] already returns the verified
+/// counter on its [`RegistrationVerificationResult`]; this helper exists for
+/// the second registration path, which runs through `webauthn-rs`'s
+/// `finish_passkey_registration` (in `handlers/enroll.rs`). The `Passkey`
+/// that API returns wraps the registration counter behind a `pub(crate)`
+/// field with no public accessor, so the call site cannot read the value.
+/// Re-parsing the same `authData` bytes the verifier already consumed — the
+/// counter is a big-endian 4-byte integer at byte offset 33 of `authData`
+/// (`rpIdHash(32) + flags(1) + signCount(4)`) — is the least-invasive way to
+/// thread the §7.1 step 23 value into storage without widening the
+/// dependency's feature surface (the `danger-credential-internals` cargo
+/// feature would, and routing the path through the custom verifier would
+/// change the attestation-acceptance contract; see the bug report's "Out of
+/// scope" appendix).
+///
+/// This function performs no cryptographic verification. It must only be
+/// called on an attestation object that has already been verified — either
+/// by [`verify_registration_with_verifier`] or by
+/// `webauthn_rs::Webauthn::finish_passkey_registration`. A failure here on a
+/// verified attestation indicates a server-side parsing bug, not a
+/// malformed client response.
+///
+/// # Errors
+///
+/// [`VerifyError::InvalidClientData`] if the attestation object is not a
+/// CBOR map containing an `authData` byte string; [`VerifyError::InvalidAuthDataLength`]
+/// if `authData` is shorter than the 37-byte minimum.
+pub fn extract_sign_count(attestation_object: &[u8]) -> Result<u32, VerifyError> {
+    let att_obj: ciborium::Value = ciborium::from_reader(attestation_object)
+        .map_err(|e| VerifyError::InvalidClientData(format!("Invalid attestation CBOR: {e}")))?;
+    let att_map = match att_obj {
+        ciborium::Value::Map(m) => m,
+        _ => {
+            return Err(VerifyError::InvalidClientData(
+                "attestation_object is not a CBOR map".to_string(),
+            ));
+        }
+    };
+    let auth_data_bytes = cbor_map_get_bytes(&att_map, "authData")?;
+    extract_counter_from_auth_data(&auth_data_bytes)
+}
+
+/// Read the big-endian 4-byte signature counter from `authData` bytes.
+///
+/// `authData` layout per WebAuthn Level 2 §6.1: `rpIdHash(32) + flags(1) +
+/// signCount(4) + [attestedCredentialData]`. The counter lives at byte
+/// offset 33..37. Used by [`extract_sign_count`] and by the inline parse in
+/// [`verify_registration_with_verifier`]; factored out so both paths agree
+/// on the offset.
+fn extract_counter_from_auth_data(auth_data_bytes: &[u8]) -> Result<u32, VerifyError> {
+    if auth_data_bytes.len() < 37 {
+        return Err(VerifyError::InvalidAuthDataLength);
+    }
+    let counter_bytes: [u8; 4] = auth_data_bytes
+        .get(33..37)
+        .ok_or(VerifyError::InvalidAuthDataLength)?
+        .try_into()
+        .map_err(|_| VerifyError::InvalidAuthDataLength)?;
+    Ok(u32::from_be_bytes(counter_bytes))
 }
 
 /// Verify a packed attestation statement.
@@ -707,8 +912,12 @@ fn verify_packed_attestation<V: CoseVerifier>(
     auth_data_aaguid: Option<&str>,
     verifier: &V,
 ) -> Result<Option<AttestationProof>, VerifyError> {
-    // Extract x5c certificate chain if present
-    let x5c_certs = extract_x5c_certs(stmt_map);
+    // Extract the x5c certificate chain if present. Extraction is strict: an
+    // x5c member that is not a non-empty array of byte strings is rejected
+    // (WebAuthn Level 2 Section 8.2, verification procedure step 1: "Verify
+    // that attStmt is valid CBOR conforming to the syntax defined above"),
+    // matching webauthn-rs on the browser path.
+    let x5c_certs = extract_x5c_certs(stmt_map)?;
 
     // WebAuthn Level 2 Section 8.2 gives `alg` as a mandatory member of both
     // arms of the packed CDDL, and step 1 of the verification procedure is
@@ -778,6 +987,154 @@ fn verify_packed_attestation<V: CoseVerifier>(
     Ok(None)
 }
 
+/// Verify a FIDO U2F attestation statement (WebAuthn Level 2 Section 8.3).
+///
+/// Verifies `attStmt.sig` over the concatenation of `0x00 || rpIdHash ||
+/// clientDataHash || credentialId || publicKeyU2F` using the leaf attestation
+/// certificate's public key, with the algorithm fixed to ES256 (ECDSA P-256
+/// SHA-256) per the U2F protocol.
+///
+/// This is what binds the credential public key in `authData` to the
+/// attestation certificate — the property the registration chokepoint relies
+/// on when it stamps the certificate's AAGUID onto the authenticator row. The
+/// certificate chain itself is validated by the chokepoint; this function
+/// performs only the signature check the chokepoint does not.
+fn verify_fido_u2f_attestation(
+    stmt_map: &[(ciborium::Value, ciborium::Value)],
+    auth_data_bytes: &[u8],
+    client_data_json: &[u8],
+    cose_key_bytes: &[u8],
+    credential_id: &[u8],
+) -> Result<(), VerifyError> {
+    let x5c_certs = extract_x5c_certs(stmt_map)?.ok_or_else(|| {
+        VerifyError::AttestationChainInvalid(
+            "fido-u2f attestation requires an x5c certificate chain".to_string(),
+        )
+    })?;
+
+    // WebAuthn Level 2 Section 8.3, verification procedure step 2: "Check
+    // that x5c has exactly one element and let attCert be that element." A
+    // conforming U2F statement carries only the leaf; a chain, if present, is
+    // not a U2F statement and is rejected here. Extraction is strict (every
+    // element a byte string), so this counts the raw array — a non-cert
+    // element cannot shrink it to one.
+    if x5c_certs.len() != 1 {
+        return Err(VerifyError::AttestationChainInvalid(format!(
+            "fido-u2f x5c must have exactly one element (the leaf attestation \
+             certificate), got {}",
+            x5c_certs.len()
+        )));
+    }
+    let leaf_der = x5c_certs
+        .first()
+        .ok_or_else(|| VerifyError::AttestationChainInvalid("fido-u2f x5c is empty".to_string()))?;
+
+    // FIDO U2F does not declare `alg` in the statement (CDDL has only `x5c`
+    // and `sig`); the algorithm is fixed by the protocol to ES256, so `sig`
+    // is the only attStmt member read here.
+    let sig = cbor_map_get_bytes_by_text(stmt_map, "sig")?;
+
+    // publicKeyU2F: the credential public key in SEC1 uncompressed form
+    // (0x04 || x || y), per Section 8.3. U2F authenticators register EC2/P-256
+    // keys exclusively, so the credential key is required to be one.
+    let public_key_u2f = cose_key_to_sec1_uncompressed(cose_key_bytes)?;
+
+    // Build the verification data per Section 8.3:
+    // 0x00 || rpIdHash || clientDataHash || credentialId || publicKeyU2F.
+    let rp_id_hash = auth_data_bytes
+        .get(0..32)
+        .ok_or(VerifyError::InvalidAuthDataLength)?;
+    let client_data_hash = digest::digest(&SHA256, client_data_json);
+    let verification_data = build_fido_u2f_verification_data(
+        rp_id_hash,
+        client_data_hash.as_ref(),
+        credential_id,
+        &public_key_u2f,
+    );
+
+    // Verify the signature using the leaf certificate's public key. FIDO U2F
+    // fixes the algorithm to ES256; `verify_attestation_sig_with_leaf_cert`
+    // additionally requires the certificate's public key OID to be
+    // `id-ecPublicKey`, matching the P-256 key a U2F attestation certificate
+    // carries.
+    verify_attestation_sig_with_leaf_cert(leaf_der, &verification_data, &sig, cose::alg::ES256)?;
+
+    tracing::info!(
+        attestation_verified = true,
+        "fido-u2f attestation signature verified"
+    );
+    Ok(())
+}
+
+/// Build the FIDO U2F attestation signature verification data.
+///
+/// WebAuthn Level 2 Section 8.3: "Let verificationData be the concatenation of
+/// (0x00 || rpIdHash || clientDataHash || credentialId || publicKeyU2F)."
+fn build_fido_u2f_verification_data(
+    rp_id_hash: &[u8],
+    client_data_hash: &[u8],
+    credential_id: &[u8],
+    public_key_u2f: &[u8],
+) -> Vec<u8> {
+    let mut data = Vec::with_capacity(
+        1usize
+            .saturating_add(rp_id_hash.len())
+            .saturating_add(client_data_hash.len())
+            .saturating_add(credential_id.len())
+            .saturating_add(public_key_u2f.len()),
+    );
+    data.push(0x00);
+    data.extend_from_slice(rp_id_hash);
+    data.extend_from_slice(client_data_hash);
+    data.extend_from_slice(credential_id);
+    data.extend_from_slice(public_key_u2f);
+    data
+}
+
+/// Convert a COSE-encoded credential public key to the SEC1 uncompressed
+/// point encoding `0x04 || x || y` required by FIDO U2F attestation
+/// verification (WebAuthn Level 2 Section 8.3: `publicKeyU2F`).
+///
+/// FIDO U2F authenticators register EC2/P-256 keys exclusively, so the
+/// credential key is required to be one; any other key type or curve is
+/// rejected as a non-conforming U2F registration rather than fed to a
+/// verifier it does not fit.
+fn cose_key_to_sec1_uncompressed(cose_key: &[u8]) -> Result<Vec<u8>, VerifyError> {
+    let parsed: ciborium::Value =
+        ciborium::from_reader(cose_key).map_err(|e| VerifyError::InvalidCoseKey(e.to_string()))?;
+    let ciborium::Value::Map(map) = parsed else {
+        return Err(VerifyError::InvalidCoseKey("Expected COSE map".to_string()));
+    };
+
+    let kty = get_cose_int(&map, 1)?;
+    if kty != cose::kty::EC2 {
+        return Err(VerifyError::InvalidCoseKey(format!(
+            "fido-u2f requires an EC2 credential key, got kty {kty}"
+        )));
+    }
+
+    let crv = get_cose_int(&map, -1)?;
+    if crv != cose::curve::P256 {
+        return Err(VerifyError::InvalidCoseKey(format!(
+            "fido-u2f requires a P-256 credential key, got crv {crv}"
+        )));
+    }
+
+    let x = get_cose_bytes(&map, -2)?;
+    let y = get_cose_bytes(&map, -3)?;
+    if x.len() != 32 || y.len() != 32 {
+        return Err(VerifyError::InvalidCoseKey(
+            "fido-u2f requires 32-byte P-256 coordinates".to_string(),
+        ));
+    }
+
+    let mut point = Vec::with_capacity(65);
+    point.push(0x04);
+    point.extend_from_slice(&x);
+    point.extend_from_slice(&y);
+    Ok(point)
+}
+
 /// Read the `alg` label (3) of a CBOR-encoded COSE key.
 fn cose_key_alg(cose_key: &[u8]) -> Result<i64, VerifyError> {
     let parsed: ciborium::Value =
@@ -788,30 +1145,46 @@ fn cose_key_alg(cose_key: &[u8]) -> Result<i64, VerifyError> {
     get_cose_int(&map, 3)
 }
 
-/// Extract x5c DER certificate arrays from a CBOR attStmt map.
-fn extract_x5c_certs(stmt_map: &[(ciborium::Value, ciborium::Value)]) -> Option<Vec<Vec<u8>>> {
+/// Extract the x5c DER certificate array from a CBOR attStmt map.
+///
+/// Returns `Ok(None)` when the map has no `x5c` member. A present `x5c` must
+/// be a non-empty CBOR array whose every element is a byte string — the CDDL
+/// of every x5c-bearing format types the elements as `bytes` (WebAuthn Level 2
+/// Section 8.2: `x5c: [ attestnCert: bytes, * (caCert: bytes) ]`; Section 8.3:
+/// `x5c: [ attestnCert: bytes ]`) — so a non-conforming element is an error,
+/// never silently dropped. Filtering here would let downstream conformance
+/// checks (fido-u2f's exactly-one-element rule) count a shorter array than the
+/// statement actually carries.
+fn extract_x5c_certs(
+    stmt_map: &[(ciborium::Value, ciborium::Value)],
+) -> Result<Option<Vec<Vec<u8>>>, VerifyError> {
     for (k, v) in stmt_map {
         if let ciborium::Value::Text(s) = k
             && s == "x5c"
-            && let ciborium::Value::Array(arr) = v
         {
-            let certs: Vec<Vec<u8>> = arr
-                .iter()
-                .filter_map(|item| {
-                    if let ciborium::Value::Bytes(bytes) = item {
-                        Some(bytes.clone())
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            if certs.is_empty() {
-                return None;
+            let ciborium::Value::Array(arr) = v else {
+                return Err(VerifyError::AttestationChainInvalid(
+                    "attStmt x5c is not an array".to_string(),
+                ));
+            };
+            if arr.is_empty() {
+                return Err(VerifyError::AttestationChainInvalid(
+                    "attStmt x5c array is empty".to_string(),
+                ));
             }
-            return Some(certs);
+            let mut certs = Vec::with_capacity(arr.len());
+            for item in arr {
+                let ciborium::Value::Bytes(bytes) = item else {
+                    return Err(VerifyError::AttestationChainInvalid(
+                        "attStmt x5c contains a non-byte-string element".to_string(),
+                    ));
+                };
+                certs.push(bytes.clone());
+            }
+            return Ok(Some(certs));
         }
     }
-    None
+    Ok(None)
 }
 
 /// Verify the attestation signature using the leaf certificate's public key.

@@ -167,7 +167,7 @@ webauthn-err-not-passkey =
 fido2-pin-prompt-new = New PIN (minimum 8 characters):
 fido2-pin-prompt-confirm = Confirm PIN:
 fido2-pin-err-too-short = PIN must be at least 8 characters.
-fido2-pin-err-too-long = PIN must be at most 63 characters.
+fido2-pin-err-too-long = PIN must be at most 63 bytes when encoded as UTF-8.
 fido2-pin-err-mismatch = PINs do not match. Please try again.
 
 fido2-insert-prompt = Please insert your { -yubikey }...
@@ -399,6 +399,8 @@ login-err-invalid-client =
 
 ## register command
 
+register-err-name-empty = Name cannot be empty
+register-err-name-long = Name must be 100 characters or less
 register-starting = Registering additional { -yubikey } '{ $name }'...
 register-contacting-server = Contacting server...
 register-contact-ok = ok
@@ -766,11 +768,11 @@ aws-err-not-configured =
     Run '{ -cmd } setup aws --role <role-arn>' first, or specify --role.
 
 aws-err-no-vouch-profile =
-    No { -product } AWS profile found in ~/.aws/config.
+    No { -product } AWS profile found in { $config_path }.
     Run '{ -cmd } setup aws --role <role-arn>' first.
 
 aws-err-ambiguous-profile =
-    Multiple { -product } AWS profiles found in ~/.aws/config; refusing to guess which account you meant:
+    Multiple { -product } AWS profiles found in { $config_path }; refusing to guess which account you meant:
     { $listing }
     Set AWS_PROFILE, or name the account with { $override_hint }.
 
@@ -783,7 +785,7 @@ aws-override-hint-role = --role
 aws-override-hint-profile-or-role = --profile or --role
 
 aws-err-profile-not-found =
-    AWS profile '{ $profile }' not found in ~/.aws/config.
+    AWS profile '{ $profile }' not found in { $config_path }.
     Run '{ -cmd } setup aws --profile { $profile } --role <role-arn>' to create it.
 
 aws-err-profile-not-managed =
@@ -1042,6 +1044,7 @@ setup-err-load-vouch-config = failed to load { -product } config
 setup-err-not-configured = not configured - run '{ -cmd } enroll' first
 setup-err-anthropic-not-enrolled = not configured — run '{ -cmd } enroll' first
 setup-err-no-home = could not determine home directory
+setup-err-no-appdata = could not determine the APPDATA directory
 
 ## server-url validation
 
@@ -1113,8 +1116,8 @@ setup-aws-wizard-invalid-role-arn = That doesn't look like an IAM role ARN (expe
 setup-aws-wizard-invalid-idc-arn = That doesn't look like an Identity Center application ARN (expected arn:PARTITION:sso::ACCOUNT:application/...). Try again.
 setup-aws-wizard-err-input = Input error: { $reason }
 setup-aws-profile-already-exists =
-    Profile [{ $profile }] already exists in ~/.aws/config.
-    To update it, edit ~/.aws/config directly.
+    Profile [{ $profile }] already exists in { $config_path }.
+    To update it, edit { $config_path } directly.
 
 # Full output block when an existing { -product } profile already targets the
 # requested role. Shell command sits inside the block as literal text so the
@@ -1132,7 +1135,7 @@ setup-aws-already-configured-block =
 # placeable. Keeping the entire block as one message means a translator can
 # re-flow the prose and adjust spacing without coordinating across 5 keys.
 setup-aws-added-profile-block =
-    Added profile [{ $profile }] to ~/.aws/config
+    Added profile [{ $profile }] to { $config_path }
 
     Use AWS CLI with the profile:
 
@@ -1151,8 +1154,12 @@ setup-aws-added-profile-block =
       https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_create_for-idp_oidc.html
 setup-aws-discover-skipped = Skipped [{ $profile }] — already exists
 setup-aws-idc-existing-verified = Profile [{ $profile }] → assumable through AWS IAM Identity Center ({ $account } / { $permission_set })
+# Every candidate name for this assignment (the preferred name, then the
+# account-id and permission-set-hash suffixed fallbacks) is held by a profile
+# vending something else, so discovery did not overwrite it.
+setup-aws-idc-name-taken = Skipped Identity Center assignment ({ $account } / { $permission_set }) — profile name [{ $profile }] and the other names tried for it are already in use by profiles vending something else. Rename or remove a conflicting profile and re-run '{ -cmd } setup aws --discover' to configure this assignment.
 setup-aws-entitlements-invalid-skipped = Skipped entitlement — invalid role or account: { $role_arn }
-setup-aws-entitlements-name-taken = Skipped entitlement for { $role_arn } — profile name [{ $profile }] is already in use by a different profile. The entitlement was NOT configured; rename or remove the existing profile and re-run discovery.
+setup-aws-entitlements-name-taken = Skipped entitlement for { $role_arn } — profile name [{ $profile }] and the other names tried for it are already in use by profiles vending something else. The entitlement was NOT configured; rename or remove a conflicting profile and re-run discovery.
 setup-aws-entitlements-partial = Warning: { $failed } of { $total } entitlement queries failed; entitlement results may be incomplete. Re-run discovery to retry.
 setup-aws-entitlements-added-verified = Added profile [{ $profile }] → { $role_arn } (assumable)
 setup-aws-entitlements-existing-verified = Profile [{ $profile }] → { $role_arn } exists and is assumable
@@ -1172,6 +1179,19 @@ setup-aws-entitlements-trust-remediation =
 setup-aws-entitlements-rerun-hint = Re-run '{ -cmd } setup aws --discover' once access is granted to add the profile.
 setup-aws-sweep-assignment-stale = Profile [{ $profile }] — its Identity Center assignment ({ $account } / { $permission_set }) no longer exists. The profile was kept; remove it manually if unwanted.
 setup-aws-sweep-summary = Checked { $checked } existing profiles; { $issues } not currently usable.
+# The existing-profile sweep found a `--role` (optionally `--via`) profile whose
+# target account no single configured organization covers, or which is
+# ambiguous across organizations. Credential vending itself fails at
+# `resolve_management_role_for` for the same reason, so this is a genuinely
+# broken profile — NOT a trust-policy defect. Distinct from
+# `setup-aws-entitlements-existing-trust-missing`: the remediation here is to
+# cover the account (pin the profile with `--via`, or add an organization),
+# never to widen the target role's trust policy.
+setup-aws-existing-unresolved =
+    Profile [{ $profile }] → { $role_arn } is not reachable under the current organization configuration: no single management role covers its account, or it is ambiguous across organizations.
+    Credential vending for this profile will fail until the configuration covers the account.
+    Re-create the profile with an explicit chain ('{ -cmd } setup aws --role { $role_arn } --via <management-role-arn>'), or add an organization whose management role covers the account.
+    The profile was kept; remove it manually if unwanted.
 setup-aws-discover-added = Added profile [{ $profile }] → { $role_arn }
 # Numeric arms ride as FluentValue::Number so locales can plural-form the
 # noun (e.g. "0 profil/1 profil/2 profile" rules).
@@ -1723,6 +1743,7 @@ err-failed-assume-management-role = failed to assume management role
 err-failed-assume-management-role-idc-exchange = failed to assume management role for IdC exchange
 err-failed-assume-target-role-via-chaining = failed to assume target role via chaining
 err-failed-build-client-assertion = failed to build client assertion
+err-failed-build-client-assertion-challenge-request = failed to build client assertion for challenge request
 err-failed-build-dpop-proof-challenge-request = failed to build DPoP proof for challenge request
 err-failed-build-dpop-proof-token-request = failed to build DPoP proof for token request
 err-failed-build-dpop-proof-with-nonce = failed to build DPoP proof with nonce
@@ -1747,6 +1768,7 @@ err-failed-encode-attestation-object = failed to encode attestation object
 err-failed-encode-role-arn-query-parameter = failed to encode role_arn query parameter
 err-failed-encode-token-exchange-request = failed to encode token-exchange request
 err-failed-encode-token-request = failed to encode token request
+err-failed-encode-challenge-request = failed to encode challenge request
 err-failed-export-public-key-registration = failed to export public key for registration
 err-failed-generate-fapi-client-key = failed to generate FAPI client key
 err-failed-get-codeartifact-authorization-token = failed to get CodeArtifact authorization token

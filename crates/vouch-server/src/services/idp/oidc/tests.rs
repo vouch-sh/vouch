@@ -7,6 +7,9 @@
 )]
 
 use super::*;
+use crate::crypto::jwk::Jwk;
+use crate::crypto::keys::OidcSigningKey;
+use crate::db::Domain;
 use jsonwebtoken::Algorithm;
 
 // ── Issuer host matching (#425) ────────────────────────────────────────
@@ -87,6 +90,22 @@ fn rsa_jwk(kid: &str) -> serde_json::Value {
     })
 }
 
+/// EC P-256 public key from RFC 7517-style test vectors. `DecodingKey::from_jwk`
+/// dispatches solely on `kty`, so this builds as the `Ec` family regardless of
+/// the `kid` it carries — the wrong-family sibling that lets a same-`kid` RSA
+/// entry mask it in the kid-match branch.
+fn ec_jwk(kid: &str) -> serde_json::Value {
+    serde_json::json!({
+        "kty": "EC",
+        "alg": "ES256",
+        "use": "sig",
+        "kid": kid,
+        "crv": "P-256",
+        "x": "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU",
+        "y": "x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0",
+    })
+}
+
 /// A key type `jsonwebtoken` has no decoder for, shaped like the ML-DSA
 /// entry in RFC 9964 Appendix A.1.
 fn unusable_jwk(kid: &str) -> serde_json::Value {
@@ -149,6 +168,148 @@ fn find_decoding_key_rejects_jwks_without_a_usable_key() {
     assert!(find_decoding_key(&jwks_of(vec![]), None, Algorithm::RS256).is_err());
 }
 
+/// RFC 7517 Section 4.5 makes `kid` uniqueness a SHOULD, not a MUST, so an
+/// unusable entry carrying the wanted `kid` must not mask a usable key with
+/// the same `kid` later in the set (e.g. during a post-quantum dual-key
+/// rollout at the upstream IdP).
+// OIDC Core §10.1: kid selects the key that verifies the ID Token.
+#[test]
+fn find_decoding_key_kid_match_skips_unusable_duplicate() {
+    let jwks = jwks_of(vec![unusable_jwk("dup"), rsa_jwk("dup")]);
+    assert!(find_decoding_key(&jwks, Some("dup"), Algorithm::RS256).is_ok());
+}
+
+// OIDC Core §10.1: when every kid-matching key is unusable, the build error
+// is reported (not the generic missing-kid message), preserving single-key
+// diagnostics.
+#[test]
+fn find_decoding_key_kid_match_reports_build_error_when_all_unusable() {
+    let jwks = jwks_of(vec![unusable_jwk("dup")]);
+    let err = find_decoding_key(&jwks, Some("dup"), Algorithm::RS256)
+        .expect_err("an unusable kid-matched key must not resolve");
+    assert!(
+        err.to_string().contains("Failed to build key from JWK"),
+        "expected the preserved build error, got: {err}"
+    );
+}
+
+/// RFC 7517 Section 4.5 makes `kid` uniqueness a SHOULD, not a MUST, so a
+/// buildable same-`kid` entry whose `kty` differs from the ID token's `alg`
+/// family (an RSA key sharing a `kid` with an EC key, when the token is
+/// ES256) must not mask a valid same-`kid`/same-family sibling later in the
+/// set. `DecodingKey::from_jwk` builds both `kty`s as `Ok`, so the only thing
+/// that distinguishes the wrong-family first entry from the right-family
+/// second one is the built key's `AlgorithmFamily` — the family guard.
+//
+// Regression for the buildable-but-wrong-family duplicate-`kid` case that
+// commit 5af9b4e2 left unhandled: that commit's regression test covers only
+// the *unbuildable* duplicate (`unusable_jwk("dup")`); this covers the
+// buildable wrong-family one.
+// OIDC Core §10.1: only a key usable for the token's algorithm is selected.
+#[test]
+fn find_decoding_key_kid_match_skips_wrong_family_duplicate() {
+    let jwks = jwks_of(vec![rsa_jwk("dup"), ec_jwk("dup")]); // RSA first
+    let key = find_decoding_key(&jwks, Some("dup"), Algorithm::ES256)
+        .expect("expected the EC sibling to be selected");
+    assert_eq!(
+        key.family(),
+        jsonwebtoken::AlgorithmFamily::Ec,
+        "EC-signed ID token must use the EC sibling, not the masked RSA first key"
+    );
+}
+
+/// When every same-`kid` entry is buildable but none share the token's
+/// algorithm family, the reported error must name the family mismatch — not
+/// the misleading "No key with kid … found", which would imply the `kid` was
+/// absent from the JWKS. The wrong-family sentinel mirrors the unbuildable
+/// sentinel the commit under review added.
+// OIDC Core §10.1: a kid present but unusable for the token's alg reports why.
+#[test]
+fn find_decoding_key_kid_match_reports_wrong_family_when_all_wrong_family() {
+    let jwks = jwks_of(vec![rsa_jwk("dup")]);
+    let err = find_decoding_key(&jwks, Some("dup"), Algorithm::ES256)
+        .expect_err("a buildable but wrong-family kid-matched key must not resolve");
+    assert!(
+        err.to_string().contains("family does not match"),
+        "expected the wrong-family sentinel, got: {err}"
+    );
+    assert!(
+        !err.to_string().contains("No key with kid"),
+        "must not report the missing-kid message when the kid matched: {err}"
+    );
+}
+
+/// Defense-in-depth for the algorithm-fallback (no-`kid`) branch: a
+/// self-inconsistent JWK (`kty=RSA, alg=ES256`) passes the `alg`-member
+/// filter and builds as RSA — rejected downstream by `jsonwebtoken::decode`
+/// with `InvalidKeyFormat`. The `family()` guard skips it the same way the
+/// kid-match branch skips a wrong-family duplicate, so a later same-family
+/// sibling tagged with the same `alg` member is reached.
+// OIDC Core §10.1: only a key usable for the token's algorithm is selected.
+#[test]
+fn find_decoding_key_skips_wrong_family_when_matching_by_algorithm() {
+    // Self-inconsistent RSA tagged ES256 (kty/alg disagree): passes the
+    // alg-member filter but builds as the Rsa family.
+    let mut rsa = rsa_jwk("rsa-1");
+    rsa["alg"] = serde_json::json!("ES256");
+    // EC tagged ES256: passes the same filter and builds as the Ec family.
+    let jwks = jwks_of(vec![rsa, ec_jwk("ec-1")]);
+    let key = find_decoding_key(&jwks, None, Algorithm::ES256)
+        .expect("the EC sibling must be selected, not the self-inconsistent RSA");
+    assert_eq!(
+        key.family(),
+        jsonwebtoken::AlgorithmFamily::Ec,
+        "ES256 token must skip the RSA-tagged-ES256 entry and use the EC sibling"
+    );
+}
+
+/// The last-resort branch (no `kid` in the header, no JWK carrying a
+/// matching `alg` member) must apply the same family guard as the other two
+/// branches: a wrong-family first key would be rejected downstream with
+/// `InvalidKeyFormat` and would mask a usable same-family key later in the
+/// set, making acceptance depend on JWKS array order.
+// OIDC Core §10.1: only a key usable for the token's algorithm is selected.
+#[test]
+fn find_decoding_key_last_resort_skips_wrong_family_key() {
+    // Strip the `alg` member so neither key matches the algorithm-fallback
+    // branch and the scan reaches the last-resort branch.
+    let strip_alg = |mut jwk: serde_json::Value| {
+        if let Some(obj) = jwk.as_object_mut() {
+            obj.remove("alg");
+        }
+        jwk
+    };
+    let jwks = jwks_of(vec![strip_alg(rsa_jwk("rsa-1")), strip_alg(ec_jwk("ec-1"))]);
+    let key = find_decoding_key(&jwks, None, Algorithm::ES256)
+        .expect("the EC key must be selected in the last-resort scan");
+    assert_eq!(
+        key.family(),
+        jsonwebtoken::AlgorithmFamily::Ec,
+        "ES256 token must skip the wrong-family RSA first key in the last-resort scan"
+    );
+}
+
+/// When the last-resort scan finds only wrong-family keys, the error must
+/// state no usable key exists rather than returning a key `decode` would
+/// reject with `InvalidKeyFormat`.
+// OIDC Core §10.1: a key set with no usable key verifies nothing.
+#[test]
+fn find_decoding_key_last_resort_rejects_all_wrong_family() {
+    let strip_alg = |mut jwk: serde_json::Value| {
+        if let Some(obj) = jwk.as_object_mut() {
+            obj.remove("alg");
+        }
+        jwk
+    };
+    let jwks = jwks_of(vec![strip_alg(rsa_jwk("rsa-1"))]);
+    let err = find_decoding_key(&jwks, None, Algorithm::ES256)
+        .expect_err("a wrong-family last-resort key must not resolve");
+    assert!(
+        err.to_string().contains("no key usable"),
+        "expected the no-usable-key error, got: {err}"
+    );
+}
+
 // ── Test helpers for verify_id_token ────────────────────────────────────
 
 /// Build an `OidcProvider` that points all endpoints at the given mock server.
@@ -167,12 +328,12 @@ fn make_test_provider(base_url: &str) -> OidcProvider {
 /// `jsonwebtoken::jwk::JwkSet` deserializer. The EC key coordinates
 /// (x, y) and kid are taken directly from the signing key so that
 /// the JWKS matches the signature on JWTs the same key produces.
-fn make_ec_jwks_json(signing_key: &crate::crypto::keys::OidcSigningKey) -> String {
+fn make_ec_jwks_json(signing_key: &OidcSigningKey) -> String {
     let jwk = signing_key
         .public_key_jwk()
         .expect("public_key_jwk should succeed");
 
-    serde_json::json!({ "keys": [crate::crypto::jwk::Jwk::Ec(jwk)] }).to_string()
+    serde_json::json!({ "keys": [Jwk::Ec(jwk)] }).to_string()
 }
 
 /// Sign a JWT with the given custom claims using ES256.
@@ -180,17 +341,14 @@ fn make_ec_jwks_json(signing_key: &crate::crypto::keys::OidcSigningKey) -> Strin
 /// Claims must include the standard registered claims `iss`, `aud`, `exp`,
 /// and `iat`; the caller also sets `email`, `email_verified`, `nonce`, and
 /// `hd` as required by `verify_id_token`.
-async fn sign_test_jwt(
-    key: &crate::crypto::keys::OidcSigningKey,
-    claims: serde_json::Value,
-) -> String {
+async fn sign_test_jwt(key: &OidcSigningKey, claims: serde_json::Value) -> String {
     key.sign_jwt(&claims)
         .await
         .expect("sign_jwt should succeed")
 }
 
 /// Mount a JWKS endpoint on the mock server and return the signing key.
-async fn mount_jwks(server: &wiremock::MockServer, key: &crate::crypto::keys::OidcSigningKey) {
+async fn mount_jwks(server: &wiremock::MockServer, key: &OidcSigningKey) {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, ResponseTemplate};
 
@@ -664,8 +822,9 @@ async fn fetch_discovery_invalid_json() {
     let err = fetch_discovery(&client, &server.uri()).await.unwrap_err();
 
     assert!(
-        err.to_string().contains("parse discovery"),
-        "expected parse error, got: {err}",
+        err.to_string().contains("parse response as JSON"),
+        "a non-JSON body must be reported as a parse failure, not a size or \
+         transport one, got: {err}",
     );
 }
 
@@ -697,7 +856,7 @@ async fn verify_id_token_happy_path() {
     let client_id = "test-client";
     let nonce = "test-nonce-abc";
 
-    let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
+    let key = OidcSigningKey::generate().unwrap();
     mount_jwks(&server, &key).await;
 
     let mut claims = base_claims(&issuer, client_id);
@@ -713,10 +872,63 @@ async fn verify_id_token_happy_path() {
         .unwrap();
 
     assert_eq!(result.email, "alice@example.com");
-    assert_eq!(result.domain, Some("example.com".to_string()));
+    assert_eq!(
+        result.domain.map(|d| d.into_string()),
+        Some("example.com".to_string())
+    );
     let upstream = result.upstream.expect("upstream identity must be set");
     assert_eq!(upstream.issuer, issuer);
     assert_eq!(upstream.durable_subject.as_deref(), Some("user-123"));
+}
+
+/// Regression for the buildable-but-wrong-family duplicate-`kid` case
+/// (introduced in commit 5af9b4e2): a validly-signed ES256 ID token whose
+/// verifying EC key shares its `kid` with an RSA entry earlier in the JWKS
+/// must verify regardless of JWKS array order. The unfixed branch returned
+/// the first same-`kid` key that built (the RSA sibling) and
+/// `jsonwebtoken::decode` rejected it with `InvalidKeyFormat`; the family
+/// guard skips the RSA sibling and reaches the EC one, so both orderings
+/// accept. RFC 7517 does not normatively define JWKS array order, so
+/// verification must not flip on it.
+// OIDC Core §10.1: a JWK usable for the token's algorithm must verify it.
+#[tokio::test]
+async fn verify_id_token_wrong_family_kid_duplicate_accepts_regardless_of_order() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let ec_key = OidcSigningKey::generate().unwrap();
+    let ec_kid = ec_key.public_key_jwk().unwrap().kid().unwrap().to_string();
+    let ec_jwk_json = serde_json::to_value(Jwk::Ec(ec_key.public_key_jwk().unwrap())).unwrap();
+
+    for jwks_keys in [
+        // Arm A: RSA (wrong family, same kid) FIRST — the ordering the
+        // unfixed branch rejected with `InvalidKeyFormat`.
+        serde_json::json!({ "keys": [rsa_jwk(&ec_kid), ec_jwk_json.clone()] }),
+        // Arm B: EC (matching family, same kid) FIRST — the ordering that
+        // worked even before the fix.
+        serde_json::json!({ "keys": [ec_jwk_json.clone(), rsa_jwk(&ec_kid)] }),
+    ] {
+        let server = MockServer::start().await;
+        let issuer = server.uri();
+        let client_id = "test-client";
+        let nonce = "test-nonce-abc";
+        Mock::given(method("GET"))
+            .and(path("/jwks"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(jwks_keys.to_string()))
+            .mount(&server)
+            .await;
+        let mut claims = base_claims(&issuer, client_id);
+        claims["nonce"] = serde_json::json!(nonce);
+        claims["hd"] = serde_json::json!("example.com");
+        let token = sign_test_jwt(&ec_key, claims).await;
+        let provider = make_test_provider(&issuer);
+        let client = reqwest::Client::new();
+        let result = verify_id_token(&client, &provider, &token, client_id, nonce).await;
+        assert!(
+            result.is_ok(),
+            "wrong-family sibling first must not mask the EC key: {result:?}"
+        );
+    }
 }
 
 /// A token missing the required `sub` claim must fail verification
@@ -732,7 +944,7 @@ async fn verify_id_token_missing_sub_rejected() {
     let client_id = "test-client";
     let nonce = "test-nonce-abc";
 
-    let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
+    let key = OidcSigningKey::generate().unwrap();
     mount_jwks(&server, &key).await;
 
     let mut claims = base_claims(&issuer, client_id);
@@ -763,7 +975,7 @@ async fn verify_id_token_nonce_mismatch() {
     let issuer = server.uri();
     let client_id = "test-client";
 
-    let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
+    let key = OidcSigningKey::generate().unwrap();
     mount_jwks(&server, &key).await;
 
     let mut claims = base_claims(&issuer, client_id);
@@ -794,7 +1006,7 @@ async fn verify_id_token_missing_nonce() {
     let issuer = server.uri();
     let client_id = "test-client";
 
-    let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
+    let key = OidcSigningKey::generate().unwrap();
     mount_jwks(&server, &key).await;
 
     // No nonce claim in the token
@@ -824,7 +1036,7 @@ async fn verify_id_token_empty_nonce_bypass() {
     let issuer = server.uri();
     let client_id = "test-client";
 
-    let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
+    let key = OidcSigningKey::generate().unwrap();
     mount_jwks(&server, &key).await;
 
     // No nonce in token; empty expected_nonce signals device-code flow
@@ -852,7 +1064,7 @@ async fn verify_id_token_email_not_verified() {
     let client_id = "test-client";
     let nonce = "test-nonce";
 
-    let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
+    let key = OidcSigningKey::generate().unwrap();
     mount_jwks(&server, &key).await;
 
     let mut claims = base_claims(&issuer, client_id);
@@ -886,7 +1098,7 @@ async fn verify_id_token_domain_from_hd_claim() {
     let client_id = "test-client";
     let nonce = "test-nonce";
 
-    let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
+    let key = OidcSigningKey::generate().unwrap();
     mount_jwks(&server, &key).await;
 
     let mut claims = base_claims(google_issuer, client_id);
@@ -903,9 +1115,81 @@ async fn verify_id_token_domain_from_hd_claim() {
         .unwrap();
 
     assert_eq!(
-        result.domain,
+        result.domain.map(|d| d.into_string()),
         Some("acme.com".to_string()),
         "Google Workspace domain should come from hd claim"
+    );
+}
+
+/// Regression (#1270): a Google Workspace `hd` claim that is not a DNS
+/// domain fails the login here. `hd` is the value enrollment persists as
+/// `Organization.domain`, and it diverges from the email's domain — so a
+/// gate further downstream that re-derived the domain from the email would
+/// never see this value at all.
+// OIDC Core §5.1: `hd` is an arbitrary string claim; the RP decides what it
+// will accept.
+#[tokio::test]
+async fn verify_id_token_rejects_malformed_hd_claim() {
+    use wiremock::MockServer;
+
+    let server = MockServer::start().await;
+    let google_issuer = "https://accounts.google.com";
+    let client_id = "test-client";
+    let nonce = "test-nonce";
+
+    let key = OidcSigningKey::generate().unwrap();
+    mount_jwks(&server, &key).await;
+
+    let mut claims = base_claims(google_issuer, client_id);
+    claims["nonce"] = serde_json::json!(nonce);
+    // A clean email paired with a whitespace-bearing hosted domain: the
+    // email alone would pass every shape rule Vouch applies to it.
+    claims["hd"] = serde_json::json!("bar .com");
+
+    let token = sign_test_jwt(&key, claims).await;
+    let mut provider = make_test_provider(google_issuer);
+    provider.jwks_uri = url::Url::parse(&format!("{}/jwks", server.uri())).unwrap();
+    let client = reqwest::Client::new();
+
+    let err = verify_id_token(&client, &provider, &token, client_id, nonce)
+        .await
+        .expect_err("a malformed hd claim must fail verification");
+    assert!(
+        format!("{err:#}").contains("not a valid DNS domain"),
+        "error must name the domain as the cause, got: {err:#}"
+    );
+}
+
+/// A non-Google IdP derives the organization domain from the email, so an
+/// email whose domain is not a DNS domain fails the login for the same
+/// reason a malformed `hd` does.
+// OIDC Core §5.1: the domain falls back to the email claim.
+#[tokio::test]
+async fn verify_id_token_rejects_malformed_email_domain() {
+    use wiremock::MockServer;
+
+    let server = MockServer::start().await;
+    let issuer = server.uri(); // non-Google issuer
+    let client_id = "test-client";
+    let nonce = "test-nonce";
+
+    let key = OidcSigningKey::generate().unwrap();
+    mount_jwks(&server, &key).await;
+
+    let mut claims = base_claims(&issuer, client_id);
+    claims["nonce"] = serde_json::json!(nonce);
+    claims["email"] = serde_json::json!("foo@bar .com");
+
+    let token = sign_test_jwt(&key, claims).await;
+    let provider = make_test_provider(&issuer);
+    let client = reqwest::Client::new();
+
+    let err = verify_id_token(&client, &provider, &token, client_id, nonce)
+        .await
+        .expect_err("a malformed email domain must fail verification");
+    assert!(
+        format!("{err:#}").contains("not a valid DNS domain"),
+        "error must name the domain as the cause, got: {err:#}"
     );
 }
 
@@ -920,7 +1204,7 @@ async fn verify_id_token_no_hd_claim_non_google_falls_back_to_email() {
     let client_id = "test-client";
     let nonce = "test-nonce";
 
-    let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
+    let key = OidcSigningKey::generate().unwrap();
     mount_jwks(&server, &key).await;
 
     let mut claims = base_claims(&issuer, client_id);
@@ -937,7 +1221,7 @@ async fn verify_id_token_no_hd_claim_non_google_falls_back_to_email() {
 
     // Non-Google issuers fall back to email domain when hd is absent
     assert_eq!(
-        result.domain.as_deref(),
+        result.domain.as_ref().map(Domain::as_str),
         Some("example.com"),
         "non-Google issuer should fall back to email domain"
     );
@@ -957,7 +1241,7 @@ async fn verify_id_token_lowercases_mixed_case_hd_claim() {
     let client_id = "test-client";
     let nonce = "test-nonce";
 
-    let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
+    let key = OidcSigningKey::generate().unwrap();
     mount_jwks(&server, &key).await;
 
     let mut claims = base_claims(google_issuer, client_id);
@@ -974,7 +1258,7 @@ async fn verify_id_token_lowercases_mixed_case_hd_claim() {
         .unwrap();
 
     assert_eq!(
-        result.domain.as_deref(),
+        result.domain.as_ref().map(Domain::as_str),
         Some("acme.com"),
         "uppercase hd claim must be normalized to lowercase",
     );
@@ -992,7 +1276,7 @@ async fn verify_id_token_lowercases_email_domain_fallback() {
     let client_id = "test-client";
     let nonce = "test-nonce";
 
-    let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
+    let key = OidcSigningKey::generate().unwrap();
     mount_jwks(&server, &key).await;
 
     let mut claims = base_claims(&issuer, client_id);
@@ -1008,7 +1292,7 @@ async fn verify_id_token_lowercases_email_domain_fallback() {
         .unwrap();
 
     assert_eq!(
-        result.domain.as_deref(),
+        result.domain.as_ref().map(Domain::as_str),
         Some("corp.example.com"),
         "email-fallback domain must be normalized to lowercase",
     );
@@ -1025,7 +1309,7 @@ async fn verify_id_token_google_consumer_no_hd_returns_none() {
     let client_id = "test-client";
     let nonce = "test-nonce";
 
-    let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
+    let key = OidcSigningKey::generate().unwrap();
     mount_jwks(&server, &key).await;
 
     let mut claims = base_claims(google_issuer, client_id);
@@ -1065,7 +1349,7 @@ async fn verify_id_token_entra_tid_mismatch_rejected() {
     let client_id = "test-client";
     let nonce = "test-nonce";
 
-    let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
+    let key = OidcSigningKey::generate().unwrap();
     mount_jwks(&server, &key).await;
 
     let mut claims = base_claims(&entra_issuer, client_id);
@@ -1101,7 +1385,7 @@ async fn verify_id_token_entra_tid_matches_issuer_succeeds() {
     let client_id = "test-client";
     let nonce = "test-nonce";
 
-    let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
+    let key = OidcSigningKey::generate().unwrap();
     mount_jwks(&server, &key).await;
 
     let mut claims = base_claims(&entra_issuer, client_id);
@@ -1149,7 +1433,7 @@ async fn verify_id_token_entra_tenant_template_with_per_tenant_token_succeeds() 
     let client_id = "test-client";
     let nonce = "test-nonce";
 
-    let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
+    let key = OidcSigningKey::generate().unwrap();
     mount_jwks(&server, &key).await;
 
     // Token claims use the per-tenant issuer (as Entra actually issues them)
@@ -1193,7 +1477,7 @@ async fn verify_id_token_entra_tenant_template_tid_mismatch_rejected() {
     let client_id = "test-client";
     let nonce = "test-nonce";
 
-    let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
+    let key = OidcSigningKey::generate().unwrap();
     mount_jwks(&server, &key).await;
 
     let mut claims = base_claims(&token_iss, client_id);
@@ -1233,7 +1517,7 @@ async fn verify_id_token_entra_tenant_template_rejects_non_entra_issuer() {
     let client_id = "test-client";
     let nonce = "test-nonce";
 
-    let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
+    let key = OidcSigningKey::generate().unwrap();
     mount_jwks(&server, &key).await;
 
     let mut claims = base_claims(&token_iss, client_id);
@@ -1293,7 +1577,7 @@ async fn verify_id_token_entra_xms_edov_true_accepted_without_email_verified() {
     let client_id = "test-client";
     let nonce = "test-nonce";
 
-    let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
+    let key = OidcSigningKey::generate().unwrap();
     mount_jwks(&server, &key).await;
 
     let mut claims = base_claims(&token_iss, client_id);
@@ -1332,7 +1616,7 @@ async fn verify_id_token_entra_xms_edov_false_rejected_with_guidance() {
     let client_id = "test-client";
     let nonce = "test-nonce";
 
-    let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
+    let key = OidcSigningKey::generate().unwrap();
     mount_jwks(&server, &key).await;
 
     let mut claims = base_claims(&token_iss, client_id);
@@ -1376,7 +1660,7 @@ async fn verify_id_token_entra_missing_xms_edov_rejected_with_guidance() {
     let client_id = "test-client";
     let nonce = "test-nonce";
 
-    let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
+    let key = OidcSigningKey::generate().unwrap();
     mount_jwks(&server, &key).await;
 
     let mut claims = base_claims(&token_iss, client_id);
@@ -1418,7 +1702,7 @@ async fn verify_id_token_non_entra_xms_edov_does_not_override_email_verified() {
     let client_id = "test-client";
     let nonce = "test-nonce";
 
-    let key = crate::crypto::keys::OidcSigningKey::generate().unwrap();
+    let key = OidcSigningKey::generate().unwrap();
     mount_jwks(&server, &key).await;
 
     let mut claims = base_claims(&issuer, client_id);

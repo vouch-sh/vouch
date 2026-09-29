@@ -21,15 +21,20 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use secrecy::ExposeSecret;
 use serde::Serialize;
-use vouch_cli::fapi::{ClientAssertionBuilder, ClientKey, DpopProofBuilder, FapiInteraction};
+use vouch_cli::fapi::{
+    ClientAssertion, ClientAssertionBuilder, ClientKey, DpopProofBuilder, FapiInteraction,
+};
 use vouch_common::{Fido2ChallengeResponse, protocol};
 
 use super::enroll::expiry_offset_seconds;
 use crate::client::VouchClient;
 use crate::config::Config;
+use crate::exit_code::CliError;
 use crate::fido2::{self, FidoDevice, YubiKey};
-use crate::session;
-use vouch_cli::{tr, tr_args, tr_println};
+use crate::server_url::ServerUrl;
+use crate::{config, session};
+use vouch_cli::fapi::{key_store, registration};
+use vouch_cli::{posture, tr, tr_args, tr_println};
 
 /// Run the login command.
 ///
@@ -40,14 +45,14 @@ use vouch_cli::{tr, tr_args, tr_println};
 /// 1. Contact the server first (async) — fail fast if unreachable.
 /// 2. All FIDO2 device work on a plain OS thread (wait, PIN, authenticate).
 /// 3. Complete authentication with the server (async).
-pub(crate) async fn run(server: &str, timeout_secs: u64) -> Result<()> {
+pub(crate) async fn run(server: &ServerUrl, timeout_secs: u64) -> Result<()> {
     tr_println!("login-starting");
     println!();
 
     let client = VouchClient::unauthenticated(server)?;
 
     // Load or generate the FAPI client key (required for FAPI 2.0 flow)
-    let fapi_key = vouch_cli::fapi::key_store::load_or_create_client_key()?;
+    let fapi_key = key_store::load_or_create_client_key()?;
 
     run_fapi_login(&client, server, timeout_secs, &fapi_key).await
 }
@@ -71,6 +76,17 @@ struct Fido2AssertionTokenRequest {
     /// RFC 9396: Device posture as authorization_details JSON array.
     #[serde(skip_serializing_if = "Option::is_none")]
     authorization_details: Option<String>,
+}
+
+/// Form fields for `POST /oauth/fido2/challenge`.
+///
+/// The challenge endpoint requires `private_key_jwt` client authentication,
+/// so the request carries only the client assertion and its type.
+#[derive(Serialize)]
+struct Fido2ChallengeForm {
+    client_assertion_type: &'static str,
+    #[serde(serialize_with = "vouch_common::serialize_secret_string")]
+    client_assertion: secrecy::SecretString,
 }
 
 // RFC 7521/7523: both the client assertion and the FIDO2 assertion are
@@ -119,11 +135,14 @@ struct Fapi2TokenResponse {
 )]
 async fn run_fapi_login(
     client: &VouchClient,
-    server: &str,
+    server: &ServerUrl,
     timeout_secs: u64,
     fapi_key: &ClientKey,
 ) -> Result<()> {
-    print!("{} ", tr_args!("login-contacting-server", server = server));
+    print!(
+        "{} ",
+        tr_args!("login-contacting-server", server = server.as_str())
+    );
 
     // Step 1: Ensure the client is registered.
     let client_id = ensure_client_registered(client, fapi_key).await?;
@@ -132,20 +151,36 @@ async fn run_fapi_login(
     let token_endpoint_url = format!("{server}/oauth/token");
     let challenge_url = format!("{server}/oauth/fido2/challenge");
 
-    let dpop_proof = DpopProofBuilder::new("POST", &challenge_url)
+    // The challenge endpoint requires `private_key_jwt` client
+    // authentication so the server can bind the issued state JWT to this
+    // client (and reject a state+assertion replayed under a different
+    // client at the token endpoint). FAPI 2.0 §5.3.2.1-8: the assertion
+    // audience is the issuer URL, the same value the token request uses.
+    let challenge_client_assertion = ClientAssertionBuilder::new(&client_id, server.as_str())
+        .build(fapi_key)
+        .context(tr!("err-failed-build-client-assertion-challenge-request"))?;
+
+    let challenge_dpop_proof = DpopProofBuilder::new("POST", &challenge_url)
         .build(fapi_key)
         .context(tr!("err-failed-build-dpop-proof-challenge-request"))?;
 
     let interaction = FapiInteraction::new();
     let fapi_headers = interaction.headers();
 
+    let challenge_form = serde_urlencoded::to_string(&Fido2ChallengeForm {
+        client_assertion_type: ClientAssertion::TYPE,
+        client_assertion: challenge_client_assertion.assertion,
+    })
+    .context(tr!("err-failed-encode-challenge-request"))?;
+
     let response = client
         .raw_client()
         .post(&challenge_url)
-        .header(protocol::HEADER_DPOP, dpop_proof)
+        .header("Content-Type", protocol::CONTENT_TYPE_FORM_URLENCODED)
+        .header(protocol::HEADER_DPOP, challenge_dpop_proof)
         .header(fapi_headers[0].0, fapi_headers[0].1)
         .header(fapi_headers[1].0, fapi_headers[1].1)
-        .json(&serde_json::json!({}))
+        .body(challenge_form)
         .send()
         .await
         .context(tr!("err-failed-request-fido2-challenge"))?;
@@ -153,7 +188,7 @@ async fn run_fapi_login(
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
-        return Err(crate::exit_code::CliError::NetworkError(format!(
+        return Err(CliError::NetworkError(format!(
             "challenge request failed (HTTP {status}): {body}"
         ))
         .into());
@@ -176,7 +211,7 @@ async fn run_fapi_login(
 
     // Step 3: Start posture collection early — it runs during the FIDO2 wait
     // (human touch takes 5-30s, posture takes 100ms-2s).
-    let posture_handle = tokio::task::spawn_blocking(vouch_cli::posture::collect);
+    let posture_handle = tokio::task::spawn_blocking(posture::collect);
 
     // Step 4: FIDO2 assertion on a plain OS thread.
     let rp_id = challenge_resp.rp_id.clone();
@@ -244,7 +279,8 @@ async fn run_fapi_login(
 
     // Step 7: Build client_assertion (private_key_jwt) and DPoP proof.
     // FAPI 2.0 Section 5.3.2.1-8: audience must be the issuer URL (base URL).
-    let client_assertion = ClientAssertionBuilder::new(&client_id, server).build(fapi_key)?;
+    let client_assertion =
+        ClientAssertionBuilder::new(&client_id, server.as_str()).build(fapi_key)?;
 
     let mut dpop_builder = DpopProofBuilder::new("POST", &token_endpoint_url);
     if let Some(ref nonce) = challenge_dpop_nonce {
@@ -349,7 +385,7 @@ async fn run_fapi_login(
 /// Retry the token request with a server-provided DPoP nonce (RFC 9449).
 async fn run_fapi_login_with_nonce(
     client: &VouchClient,
-    server: &str,
+    server: &ServerUrl,
     fapi_key: &ClientKey,
     client_id: &str,
     request: &Fido2AssertionTokenRequest,
@@ -359,7 +395,8 @@ async fn run_fapi_login_with_nonce(
 
     // Rebuild client_assertion and DPoP proof with the nonce.
     // FAPI 2.0 Section 5.3.2.1-8: audience must be the issuer URL (base URL).
-    let client_assertion = ClientAssertionBuilder::new(client_id, server).build(fapi_key)?;
+    let client_assertion =
+        ClientAssertionBuilder::new(client_id, server.as_str()).build(fapi_key)?;
 
     let dpop_proof = DpopProofBuilder::new("POST", &token_endpoint_url)
         .nonce(nonce)
@@ -444,7 +481,8 @@ async fn run_fapi_login_with_nonce(
 ///
 /// Returns the `client_id` on success.
 async fn ensure_client_registered(client: &VouchClient, fapi_key: &ClientKey) -> Result<String> {
-    let base_url = client.base_url().to_string();
+    let server = client.server_url().clone();
+    let base_url = server.as_str().to_string();
 
     if let Ok(mut config) = Config::load() {
         config.set_server_url(&base_url);
@@ -466,8 +504,8 @@ async fn ensure_client_registered(client: &VouchClient, fapi_key: &ClientKey) ->
                 // Check 2: does the registration URI match the
                 // current server? A mismatch means stale config
                 // from a different server (e.g. localhost vs prod).
-                let uri_matches_server = crate::config::hostname_from_url(uri).ok()
-                    == crate::config::hostname_from_url(&base_url).ok();
+                let uri_matches_server = config::hostname_from_url(uri).ok()
+                    == config::hostname_from_url(&base_url).ok();
 
                 if !uri_matches_server {
                     tracing::debug!(
@@ -486,8 +524,9 @@ async fn ensure_client_registered(client: &VouchClient, fapi_key: &ClientKey) ->
                     }
 
                     // Check 3: is the registration still active?
-                    match vouch_cli::fapi::registration::is_client_registered(
+                    match registration::is_client_registered(
                         client.raw_client(),
+                        &server,
                         uri,
                         token.expose_secret(),
                     )
@@ -529,14 +568,9 @@ async fn ensure_client_registered(client: &VouchClient, fapi_key: &ClientKey) ->
     // Register (or re-register) now.
     tracing::debug!("Registering FAPI client");
 
-    let result = vouch_cli::fapi::registration::register_fapi_client(
-        client.raw_client(),
-        &base_url,
-        None,
-        fapi_key,
-    )
-    .await
-    .context(tr!("err-failed-register-fapi-client"))?;
+    let result = registration::register_fapi_client(client.raw_client(), &server, None, fapi_key)
+        .await
+        .context(tr!("err-failed-register-fapi-client"))?;
 
     // Persist the registration to config.
     Config::modify(|config| {

@@ -229,11 +229,21 @@
             return fapiRadio && fapiRadio.value === 'fapi2_security';
         }
 
+        // Whether the application authenticates with a key under the Standard
+        // profile (private_key_jwt), so its JWKS stays editable either way.
+        function isEditKeyAuth() {
+            return editFapiJwksSection && editFapiJwksSection.dataset.keyAuth === 'true';
+        }
+
+        function editNeedsKeys() {
+            return isEditFapiSelected() || isEditKeyAuth();
+        }
+
         function updateEditFapiVisibility() {
             if (!editFapiJwksSection) {
                 return;
             }
-            if (isEditFapiSelected()) {
+            if (editNeedsKeys()) {
                 editFapiJwksSection.classList.remove('hidden');
             } else {
                 editFapiJwksSection.classList.add('hidden');
@@ -344,8 +354,8 @@
                     }
                 }
 
-                // FAPI JWKS validation in edit mode
-                if (isEditFapiSelected()) {
+                // JWKS validation in edit mode (FAPI or private_key_jwt)
+                if (editNeedsKeys()) {
                     var jwksErr = validateEditJwks();
                     if (jwksErr) {
                         e.preventDefault();
@@ -370,7 +380,9 @@
                     if (editJwksTextarea && editJwksUriInput
                         && !editJwksTextarea.value.trim() && !editJwksUriInput.value.trim()) {
                         e.preventDefault();
-                        var msg = t('appcreate-js-fapi-required');
+                        var msg = isEditFapiSelected()
+                            ? t('appcreate-js-fapi-required')
+                            : t('appcreate-js-keyauth-required');
                         showFieldError(editJwksError, editJwksTextarea, msg);
                         if (!hasError) {
                             scrollToField(editJwksTextarea);

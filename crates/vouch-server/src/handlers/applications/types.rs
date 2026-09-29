@@ -5,17 +5,14 @@
 //! both the web UI and API handlers.
 
 use crate::db::{AccessScope, OAuthClient};
-use crate::{impl_template_helpers, impl_template_response};
+use crate::impl_template_response;
 use askama::Template;
-use axum::{
-    http::StatusCode,
-    response::{Html, IntoResponse, Response},
-};
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
-use super::super::session::AuthContext;
+use crate::db::ClientKeys;
 use crate::filters;
+use crate::handlers::session::AuthContext;
 use crate::infra::i18n::Tr;
 
 // ============================================================================
@@ -51,6 +48,10 @@ pub(crate) struct ApplicationInfo {
     pub token_endpoint_auth_method: String,
     /// FAPI 2.0 Security Profile designation ("none" or "fapi2_security").
     pub fapi_profile: String,
+    /// Whether a client secret authenticates this client. Decides both
+    /// whether the owner may add one and whether the last active one is
+    /// protected from revocation, as the secret handlers do.
+    pub secret_is_credential: bool,
     /// Inline JWKS JSON (RFC 7523).
     pub jwks: Option<String>,
     /// Remote JWKS URI (RFC 7523).
@@ -63,15 +64,18 @@ impl From<OAuthClient> for ApplicationInfo {
     fn from(client: OAuthClient) -> Self {
         let token_endpoint_auth_method = client.token_endpoint_auth_method.as_str().to_string();
         let fapi_profile = client.fapi_profile.as_str().to_string();
+        let secret_is_credential = client
+            .token_endpoint_auth_method
+            .secret_is_credential(client.fapi_profile);
         let jwks = client
             .keys
             .as_ref()
-            .and_then(crate::db::ClientKeys::inline)
+            .and_then(ClientKeys::inline)
             .and_then(|set| serde_json::to_string(set).ok());
         let jwks_uri = client
             .keys
             .as_ref()
-            .and_then(crate::db::ClientKeys::uri)
+            .and_then(ClientKeys::uri)
             .map(String::from);
         Self {
             id: client.id,
@@ -88,6 +92,7 @@ impl From<OAuthClient> for ApplicationInfo {
             resource_uris: client.resource_uris,
             token_endpoint_auth_method,
             fapi_profile,
+            secret_is_credential,
             jwks,
             jwks_uri,
             post_logout_redirect_uris: client.post_logout_redirect_uris,
@@ -162,11 +167,6 @@ pub(crate) struct ApplicationErrorTemplate {
     pub back_url: String,
 }
 
-/// Unauthorized template.
-#[derive(Template)]
-#[template(path = "applications/unauthorized.html")]
-pub(crate) struct ApplicationUnauthorizedTemplate;
-
 impl_template_response!(
     ApplicationsListTemplate,
     ApplicationCreateTemplate,
@@ -175,23 +175,6 @@ impl_template_response!(
     SecretAddedTemplate,
     ApplicationErrorTemplate,
 );
-
-// `ApplicationUnauthorizedTemplate` keeps a custom `IntoResponse` that returns
-// 401 instead of 200. Wire up the shared i18n shims (`tr`, `lang`, …) via
-// `impl_template_helpers!` while keeping the bespoke `IntoResponse` below.
-impl_template_helpers!(ApplicationUnauthorizedTemplate);
-
-impl IntoResponse for ApplicationUnauthorizedTemplate {
-    fn into_response(self) -> Response {
-        match self.render() {
-            Ok(html) => (StatusCode::UNAUTHORIZED, Html(html)).into_response(),
-            Err(e) => {
-                tracing::error!("Template render error: {}", e);
-                StatusCode::INTERNAL_SERVER_ERROR.into_response()
-            }
-        }
-    }
-}
 
 // ============================================================================
 // Request/Response Types
@@ -211,6 +194,12 @@ pub(crate) struct CreateApplicationForm {
     /// FAPI 2.0: Security profile ("fapi2_security" or absent/empty for standard).
     #[serde(default)]
     pub fapi_profile: Option<String>,
+    /// RFC 7591 §2 `token_endpoint_auth_method`: `client_secret_basic` or
+    /// `private_key_jwt`; absent or empty takes the default for the
+    /// application type. Chosen independently of `fapi_profile`, which fixes
+    /// it to `private_key_jwt`.
+    #[serde(default)]
+    pub token_endpoint_auth_method: Option<String>,
     /// RFC 7523: Inline JWKS JSON for private_key_jwt authentication.
     #[serde(default)]
     pub jwks: Option<String>,
@@ -260,6 +249,12 @@ pub(crate) struct CreateApplicationRequest {
     /// FAPI 2.0: Security profile ("fapi2_security" or absent/empty for standard).
     #[serde(default)]
     pub fapi_profile: Option<String>,
+    /// RFC 7591 §2 `token_endpoint_auth_method`: `client_secret_basic` or
+    /// `private_key_jwt`; absent or empty takes the default for the
+    /// application type. Chosen independently of `fapi_profile`, which fixes
+    /// it to `private_key_jwt`.
+    #[serde(default)]
+    pub token_endpoint_auth_method: Option<String>,
     /// RFC 7523: Inline JWKS JSON for private_key_jwt authentication.
     #[serde(default)]
     pub jwks: Option<String>,
@@ -381,7 +376,7 @@ impl From<OAuthClient> for ApplicationResponse {
         let jwks_uri = client
             .keys
             .as_ref()
-            .and_then(crate::db::ClientKeys::uri)
+            .and_then(ClientKeys::uri)
             .map(String::from);
         Self {
             id: client.id,

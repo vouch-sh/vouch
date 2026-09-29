@@ -5,6 +5,7 @@
 //! Each covered component contributes one line: `"component-id": value\n`.
 //! The final line is `"@signature-params": (inner-list)` with NO trailing newline.
 
+use crate::component::{ComponentIdentifier, ComponentParam};
 use crate::error::HttpSigError;
 use crate::signature_params::SignatureParams;
 
@@ -12,50 +13,122 @@ use crate::signature_params::SignatureParams;
 ///
 /// This avoids double-serialization when the caller needs the params string
 /// for both the signature base and the `Signature-Input` header.
+///
+/// # Errors
+///
+/// Returns [`HttpSigError`] when a component cannot be resolved or when the
+/// resulting base would violate RFC 9421 §2.5 — see [`BaseBuilder`].
 pub fn build_request_base_with_params_str<T>(
     req: &http::Request<T>,
     params: &SignatureParams,
     params_str: &str,
 ) -> Result<Vec<u8>, HttpSigError> {
-    let mut base = Vec::new();
+    let mut base = BaseBuilder::new();
 
     for component in &params.components {
         let value = component.resolve_from_request(req)?;
-        let id = component.serialize_id();
-        base.extend_from_slice(id.as_bytes());
-        base.extend_from_slice(b": ");
-        base.extend_from_slice(value.as_bytes());
-        base.push(b'\n');
+        base.push(component, &value)?;
     }
 
-    base.extend_from_slice(b"\"@signature-params\": ");
-    base.extend_from_slice(params_str.as_bytes());
-
-    Ok(base)
+    base.finish(params_str)
 }
 
 /// Build the response signature base using a pre-serialized params string.
+///
+/// # Errors
+///
+/// Returns [`HttpSigError`] when a component cannot be resolved or when the
+/// resulting base would violate RFC 9421 §2.5 — see [`BaseBuilder`].
 pub fn build_response_base_with_params_str<T, U>(
     resp: &http::Response<T>,
     req: Option<&http::Request<U>>,
     params: &SignatureParams,
     params_str: &str,
 ) -> Result<Vec<u8>, HttpSigError> {
-    let mut base = Vec::new();
+    let mut base = BaseBuilder::new();
 
     for component in &params.components {
         let value = component.resolve_from_response(resp, req)?;
-        let id = component.serialize_id();
-        base.extend_from_slice(id.as_bytes());
-        base.extend_from_slice(b": ");
-        base.extend_from_slice(value.as_bytes());
-        base.push(b'\n');
+        base.push(component, &value)?;
     }
 
-    base.extend_from_slice(b"\"@signature-params\": ");
-    base.extend_from_slice(params_str.as_bytes());
+    base.finish(params_str)
+}
 
-    Ok(base)
+/// Accumulates signature base lines, enforcing the RFC 9421 §2.5 rules that
+/// constrain the base as a whole rather than a single component value.
+///
+/// Requests and responses share it so those rules cannot end up applied on one
+/// side only. §2.5 is emphatic about the consequence of a violation: "All
+/// errors produced as described MUST fail the algorithm immediately, without
+/// outputting a signature base."
+struct BaseBuilder {
+    base: Vec<u8>,
+    seen: Vec<(String, Vec<ComponentParam>)>,
+}
+
+impl BaseBuilder {
+    fn new() -> Self {
+        Self {
+            base: Vec::new(),
+            seen: Vec::new(),
+        }
+    }
+
+    /// Append one `"component-id": value` line (§2.5 steps 2.2 through 2.7).
+    fn push(&mut self, component: &ComponentIdentifier, value: &str) -> Result<(), HttpSigError> {
+        let id = component.serialize_id();
+
+        // Step 2.1: "If the component identifier (including its parameters) has
+        // already been added to the signature base, produce an error." RFC 9421
+        // §2 defines identifier equality order-insensitively —
+        // `"foo";bar;baz` "cannot be in the same message as `"foo";baz;bar`,
+        // since these two component identifiers are equivalent" — so the key is
+        // the name plus the sorted parameter set, not `serialize_id`, which
+        // preserves the parameter order the signer wrote and would let an
+        // order-permuted duplicate slip through.
+        let dedup_key = component.dedup_key();
+        if self.seen.contains(&dedup_key) {
+            return Err(HttpSigError::BaseConstruction(format!(
+                "component identifier {id} appears more than once in the covered components"
+            )));
+        }
+
+        // The signature-base-line ABNF admits only `*( VCHAR / SP )` in a
+        // component value, annotated "no obs-fold nor obs-text". A value
+        // carrying a newline would forge an additional line in the base.
+        if let Some(byte) = value.bytes().find(|byte| !(0x20..=0x7e).contains(byte)) {
+            return Err(HttpSigError::BaseConstruction(format!(
+                "component {id} resolved to a value containing byte 0x{byte:02x}, \
+                 which the signature base does not admit"
+            )));
+        }
+
+        self.base.extend_from_slice(id.as_bytes());
+        self.base.extend_from_slice(b": ");
+        self.base.extend_from_slice(value.as_bytes());
+        self.base.push(b'\n');
+        self.seen.push(dedup_key);
+
+        Ok(())
+    }
+
+    /// Append the `@signature-params` line and return the base (§2.5 steps 3
+    /// and 4).
+    fn finish(mut self, params_str: &str) -> Result<Vec<u8>, HttpSigError> {
+        self.base.extend_from_slice(b"\"@signature-params\": ");
+        self.base.extend_from_slice(params_str.as_bytes());
+
+        // Step 4: "Produce an error if the output string contains any non-ASCII
+        // characters."
+        if !self.base.is_ascii() {
+            return Err(HttpSigError::BaseConstruction(
+                "signature base contains non-ASCII characters".into(),
+            ));
+        }
+
+        Ok(self.base)
+    }
 }
 
 #[cfg(test)]
@@ -65,7 +138,7 @@ pub fn build_response_base_with_params_str<T, U>(
 )]
 mod tests {
     use super::*;
-    use crate::component::ComponentIdentifier;
+    use crate::component::{ComponentIdentifier, ComponentParam, ComponentParams};
 
     fn make_request(method: &str, uri: &str, headers: &[(&str, &str)]) -> http::Request<()> {
         let mut builder = http::Request::builder().method(method).uri(uri);
@@ -235,5 +308,115 @@ mod tests {
 
         let result = build_request_base_with_params_str(&req, &params, &params.serialize());
         assert!(result.is_err());
+    }
+
+    fn base_for(
+        req: &http::Request<()>,
+        components: Vec<ComponentIdentifier>,
+    ) -> Result<Vec<u8>, HttpSigError> {
+        let params = SignatureParams {
+            components,
+            alg: None,
+            keyid: None,
+            created: Some(100),
+            expires: None,
+            nonce: None,
+            tag: None,
+        };
+        build_request_base_with_params_str(req, &params, &params.serialize())
+    }
+
+    // RFC 9421 §2.5 step 2.1: "If the component identifier (including its
+    // parameters) has already been added to the signature base, produce an
+    // error."
+    #[test]
+    fn test_repeated_component_identifier_is_an_error() {
+        let req = make_request("GET", "https://example.com/p", &[]);
+        assert!(
+            base_for(
+                &req,
+                vec![ComponentIdentifier::method(), ComponentIdentifier::method()],
+            )
+            .is_err()
+        );
+    }
+
+    // RFC 9421 §2.1.2: "Each parameterized key for a given field MUST NOT
+    // appear more than once in the signature base." Two different keys on the
+    // same field are distinct identifiers and stay legal.
+    #[test]
+    fn test_repeated_dictionary_key_is_an_error_but_distinct_keys_are_not() {
+        let req = make_request("GET", "https://example.com/p", &[("x-dict", "a=1, b=2")]);
+        let keyed = |key: &str| ComponentIdentifier::Field {
+            name: "x-dict".into(),
+            params: ComponentParams::from_iter([ComponentParam::Key(key.into())]),
+        };
+
+        assert!(base_for(&req, vec![keyed("a"), keyed("a")]).is_err());
+        assert!(base_for(&req, vec![keyed("a"), keyed("b")]).is_ok());
+    }
+
+    // RFC 9421 §2: `"foo";bar;baz` "cannot be in the same message as
+    // `"foo";baz;bar`, since these two component identifiers are equivalent" —
+    // the parameter order is not significant for equality. Read with §2.5
+    // step 2.1 (an already-added component identifier produces an error), a
+    // covered-components list carrying an order-equivalent duplicate — same
+    // name, same parameter set, different parameter order — MUST fail base
+    // construction. The dedup key is the name plus the sorted parameter set,
+    // not the order-preserving serialization, which would let such a duplicate
+    // through.
+    #[test]
+    fn order_equivalent_duplicate_component_identifier_is_an_error() {
+        let req = make_request("GET", "https://example.com/p", &[("x-dict", "a=1, b=2")]);
+
+        let key_then_sf = ComponentIdentifier::Field {
+            name: "x-dict".into(),
+            params: ComponentParams::from_iter([
+                ComponentParam::Key("a".into()),
+                ComponentParam::Sf,
+            ]),
+        };
+        let sf_then_key = ComponentIdentifier::Field {
+            name: "x-dict".into(),
+            params: ComponentParams::from_iter([
+                ComponentParam::Sf,
+                ComponentParam::Key("a".into()),
+            ]),
+        };
+
+        let result = base_for(&req, vec![key_then_sf, sf_then_key]);
+        assert!(
+            matches!(result, Err(HttpSigError::BaseConstruction(_))),
+            "RFC 9421 §2 + §2.5 step 2.1 require an order-equivalent duplicate \
+             (same name, same parameter set, different parameter order) to fail \
+             base construction; got {result:?}"
+        );
+    }
+
+    // RFC 9421 §2.5 step 4: "Produce an error if the output string contains any
+    // non-ASCII characters." Field resolution rejects such a value first, per
+    // §2.1, so no base is produced either way — which is the property this
+    // pins. The check in `finish` remains the backstop for the rest of the
+    // base, the `@signature-params` line included.
+    #[test]
+    fn test_non_ascii_component_value_never_reaches_a_base() {
+        let req = make_request("GET", "https://example.com/p", &[("x-val", "caf\u{e9}")]);
+        assert!(base_for(&req, vec![ComponentIdentifier::field("x-val")]).is_err());
+    }
+
+    // RFC 9421 §2.5: the signature-base-line ABNF admits only
+    // `*( VCHAR / SP )` as a component value — "no obs-fold nor obs-text". A
+    // value carrying a newline would forge an extra line in the base, so the
+    // builder refuses it. No resolver can currently produce one — `http`
+    // rejects control characters in header values, and §2.2.8 re-encoding
+    // escapes them — which makes this the backstop rather than the first line
+    // of defence, and the reason it is exercised against the builder directly.
+    #[test]
+    fn test_newline_in_component_value_is_refused() {
+        let mut base = BaseBuilder::new();
+        assert!(
+            base.push(&ComponentIdentifier::field("x-val"), "line\nbreak")
+                .is_err()
+        );
     }
 }

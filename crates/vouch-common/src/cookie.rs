@@ -11,6 +11,8 @@ use anyhow::{Context, Result};
 use std::fs;
 use std::path::PathBuf;
 
+use crate::paths;
+
 /// A session cookie in Netscape format.
 #[derive(Clone)]
 pub struct SessionCookie {
@@ -83,7 +85,7 @@ impl SessionCookie {
 /// Returns `$XDG_STATE_HOME/vouch/cookie.txt` (`~/.local/state/vouch/cookie.txt`
 /// by default).
 pub fn cookie_path() -> Result<PathBuf> {
-    crate::paths::cookie_file().context("could not determine home directory")
+    paths::cookie_file().context("could not determine home directory")
 }
 
 /// Write a session cookie to the cookie file.
@@ -96,7 +98,7 @@ pub fn write_cookie(cookie: &SessionCookie) -> Result<()> {
     // Ensure parent directory exists with owner-only (0700) permissions, matching
     // the rest of vouch's state directory (audit log, migrated layout).
     if let Some(parent) = path.parent() {
-        crate::paths::prepare_private_dir(parent)
+        paths::prepare_private_dir(parent)
             .with_context(|| format!("failed to create directory {}", parent.display()))?;
     }
 

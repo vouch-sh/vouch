@@ -15,8 +15,8 @@ mkdir -p /etc/vouch-server
 chmod 750 /etc/vouch-server
 
 # Grant capability to bind privileged ports (80, 443)
-if command -v setcap &> /dev/null; then
-    setcap 'cap_net_bind_service=+ep' /usr/bin/vouch-server || true
+if command -v setcap &>/dev/null; then
+  setcap 'cap_net_bind_service=+ep' /usr/bin/vouch-server || true
 fi
 
 echo ""

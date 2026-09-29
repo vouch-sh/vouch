@@ -7,13 +7,24 @@
 )]
 
 use super::*;
+use crate::crypto::jwk::Jwk;
+use crate::crypto::keys::OidcSigningKey;
+use crate::db::store::GetUserByIdTestHook;
+use crate::db::{
+    self, AuditEvent, AuditEventFilter, DeviceAuthState, OidcState, OidcStateClaim, User,
+};
+use crate::services::idp::oidc::OidcProvider;
+use crate::services::idp::{ConfiguredIdp, ConfiguredOidcProvider};
 use crate::test_utils::{
-    create_test_authenticator, create_test_session, create_test_user, http_post_json, test_app,
-    test_app_state,
+    self, TestSessionSpec, build_test_app_state, create_test_authenticator,
+    create_test_session_with, create_test_user, http_delete_full, http_get_full, http_post_json,
+    test_app, test_app_state, test_app_with_modify_hook, test_arrival, test_config, test_domain,
 };
 use axum::http::StatusCode;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
 /// Build a valid `BrowserRegistrationState` JWT using the test signer.
@@ -61,6 +72,28 @@ fn valid_client_data_json() -> String {
     URL_SAFE_NO_PAD.encode(json.as_bytes())
 }
 
+/// Build the `Cookie` header value for a session token.
+///
+/// Mirrors how the live `Set-Cookie` header is structured
+/// (`create_session_cookie`) so the receipt path in the test harness is
+/// symmetric with the cookie the server would set after `browser_login_complete`.
+fn session_cookie_header(token: &str) -> String {
+    format!("{}={token}", vouch_common::SESSION_COOKIE_NAME)
+}
+
+/// Decode the payload claims of a JWT without verifying the signature.
+///
+/// Splits the token on `.`, base64url-decodes the second part (payload),
+/// and parses it as a JSON object. Used only in tests to inspect claims.
+fn decode_jwt_payload_claims(token: &str) -> serde_json::Value {
+    let parts: Vec<&str> = token.split('.').collect();
+    assert_eq!(parts.len(), 3, "JWT must have exactly 3 parts");
+    let payload_bytes = URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .expect("Failed to base64url-decode JWT payload");
+    serde_json::from_slice(&payload_bytes).expect("Failed to parse JWT payload as JSON")
+}
+
 // ── test_enrollment_complete_missing_state ───────────────────────────────
 
 #[tokio::test]
@@ -75,7 +108,13 @@ async fn test_enrollment_complete_missing_state() {
     })
     .to_string();
 
-    let (status, resp_body) = http_post_json(&app, "/enroll/webauthn/complete", &body, &[]).await;
+    let (status, resp_body) = http_post_json(
+        &app,
+        "/enroll/webauthn/complete",
+        &body,
+        &[("Origin", "https://test.example.com")],
+    )
+    .await;
 
     // `ValidJson` reports every body rejection in the JSON envelope the
     // browser reads, so a missing field is a 400 like any other bad body.
@@ -100,7 +139,13 @@ async fn test_enrollment_complete_invalid_state_token() {
     })
     .to_string();
 
-    let (status, resp_body) = http_post_json(&app, "/enroll/webauthn/complete", &body, &[]).await;
+    let (status, resp_body) = http_post_json(
+        &app,
+        "/enroll/webauthn/complete",
+        &body,
+        &[("Origin", "https://test.example.com")],
+    )
+    .await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(
@@ -125,7 +170,13 @@ async fn test_enrollment_complete_missing_credential_id() {
     })
     .to_string();
 
-    let (status, resp_body) = http_post_json(&app, "/enroll/webauthn/complete", &body, &[]).await;
+    let (status, resp_body) = http_post_json(
+        &app,
+        "/enroll/webauthn/complete",
+        &body,
+        &[("Origin", "https://test.example.com")],
+    )
+    .await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(
@@ -157,7 +208,13 @@ async fn test_enrollment_complete_oversized_credential_id() {
     })
     .to_string();
 
-    let (status, resp_body) = http_post_json(&app, "/enroll/webauthn/complete", &body, &[]).await;
+    let (status, resp_body) = http_post_json(
+        &app,
+        "/enroll/webauthn/complete",
+        &body,
+        &[("Origin", "https://test.example.com")],
+    )
+    .await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(
@@ -172,11 +229,27 @@ async fn test_enrollment_complete_oversized_credential_id() {
 async fn test_browser_register_complete_rejects_replayed_state() {
     let (app, state) = test_app().await;
 
-    // Build a valid BrowserRegistrationState JWT and record its expiry.
-    let user_id = Uuid::now_v7();
+    // Build a real user + session so the state JWT and the cookie share
+    // the same `user_id`. The fix re-binds the caller to that id; without
+    // a matching cookie the request would now be rejected as missing a
+    // session before reaching the replay check.
+    let user = create_test_user(&state.store, "replay@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let user_id = Uuid::parse_str(&user.id).expect("user id is a uuid");
+
     let (_ccr, webauthn_state) = state
         .webauthn
-        .start_passkey_registration(user_id, "replay@example.com", "replay@example.com", None)
+        .start_passkey_registration(user_id, &user.email, &user.email, None)
         .expect("start_passkey_registration");
 
     let now = jiff::Timestamp::now();
@@ -184,7 +257,7 @@ async fn test_browser_register_complete_rejects_replayed_state() {
     let reg_state = BrowserRegistrationState {
         device_auth_id: String::new(),
         user_id,
-        user_email: "replay@example.com".to_string(),
+        user_email: user.email.clone(),
         webauthn_state,
         iat: now.as_second(),
         exp,
@@ -196,7 +269,7 @@ async fn test_browser_register_complete_rejects_replayed_state() {
 
     // Pre-consume the state token to simulate prior use.
     let expires_at = jiff::Timestamp::from_second(exp).expect("valid exp");
-    let _claim = crate::db::consume_challenge_state_for_test(&state.store, &state_jwt, expires_at)
+    let _claim = db::consume_challenge_state_for_test(&state.store, &state_jwt, expires_at)
         .await
         .expect("pre-consume must succeed");
 
@@ -211,7 +284,17 @@ async fn test_browser_register_complete_rejects_replayed_state() {
     })
     .to_string();
 
-    let (status, resp_body) = http_post_json(&app, "/enroll/webauthn/complete", &body, &[]).await;
+    let cookie = session_cookie_header(&token);
+    let (status, resp_body) = http_post_json(
+        &app,
+        "/enroll/webauthn/complete",
+        &body,
+        &[
+            ("Cookie", cookie.as_str()),
+            ("Origin", "https://test.example.com"),
+        ],
+    )
+    .await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(
@@ -239,7 +322,13 @@ async fn test_enrollment_complete_invalid_base64_credential_id() {
     })
     .to_string();
 
-    let (status, resp_body) = http_post_json(&app, "/enroll/webauthn/complete", &body, &[]).await;
+    let (status, resp_body) = http_post_json(
+        &app,
+        "/enroll/webauthn/complete",
+        &body,
+        &[("Origin", "https://test.example.com")],
+    )
+    .await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(
@@ -270,7 +359,13 @@ async fn test_enrollment_complete_rejects_wrong_json_type() {
     })
     .to_string();
 
-    let (status, resp_body) = http_post_json(&app, "/enroll/webauthn/complete", &body, &[]).await;
+    let (status, resp_body) = http_post_json(
+        &app,
+        "/enroll/webauthn/complete",
+        &body,
+        &[("Origin", "https://test.example.com")],
+    )
+    .await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(
@@ -296,11 +391,11 @@ async fn test_oidc_callback_rejects_replayed_state() {
 
     // Seed a fresh OIDC state row + the device-auth row it FKs to.
     let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().expect("valid timestamp");
-    let device_auth_id = crate::db::create_device_auth_request(
+    let device_auth_id = db::create_device_auth_request(
         &state.store,
         "callback-replay-device-hash",
         "CBRP-CODE",
-        None,
+        "test-client",
         expires_at,
         5,
     )
@@ -308,7 +403,7 @@ async fn test_oidc_callback_rejects_replayed_state() {
     .expect("create_device_auth_request");
 
     let oidc_state_value = "callback-replay-state-12345";
-    crate::db::create_oidc_state(
+    db::create_oidc_state(
         &state.store,
         oidc_state_value,
         Some(&device_auth_id),
@@ -321,7 +416,7 @@ async fn test_oidc_callback_rejects_replayed_state() {
     .expect("create_oidc_state");
 
     // Pre-consume to simulate a successful prior callback.
-    let _claim = crate::db::try_consume_oidc_state(&state.store, oidc_state_value)
+    let _claim = db::try_consume_oidc_state(&state.store, oidc_state_value, jiff::Timestamp::now())
         .await
         .expect("pre-consume must succeed");
 
@@ -348,15 +443,459 @@ async fn test_oidc_callback_rejects_replayed_state() {
 
 // ── complete_enrollment_after_identity audit events ─────────────────
 
-/// Seed an OIDC state row and atomically consume it, yielding the
+// ── HTTP-level OIDC callback E2E (wiremock mock IdP) ──────────────────
+//
+// The shape-gate regression tests above exercise
+// `complete_enrollment_after_identity` directly with a hand-built
+// `IdentityResult`. The OIDC and SAML HTTP callbacks both funnel through
+// that same chokepoint, but the callback also performs the live token
+// exchange + ID-token verification + email-claim passthrough before
+// constructing the `IdentityResult`. These HTTP-level tests drive the real
+// routes against an in-process IdP, so the end-to-end outcome (a
+// misconfigured IdP asserting an email with a whitespace-bearing domain
+// never enrolls anyone, and a well-formed email still proceeds) is
+// verified through the full stack, wherever along it the rejection
+// happens.
+
+/// Build a `ConfiguredOidcProvider` whose endpoints point at `issuer`.
+fn mock_oidc_provider(issuer: &str) -> ConfiguredIdp {
+    use crate::services::idp::ConfiguredIdp;
+    use crate::services::idp::oidc::{ConfiguredOidcProvider, OidcProvider};
+    use secrecy::SecretString;
+    use url::Url;
+
+    ConfiguredIdp::Oidc(ConfiguredOidcProvider {
+        id: "mock-idp".to_string(),
+        client_id: "mock-client".to_string(),
+        client_secret: SecretString::from("mock-secret"),
+        provider: OidcProvider {
+            issuer: issuer.to_string(),
+            authorization_endpoint: Url::parse(&format!("{issuer}/authorize"))
+                .expect("parse authorize url"),
+            token_endpoint: Url::parse(&format!("{issuer}/token")).expect("parse token url"),
+            jwks_uri: Url::parse(&format!("{issuer}/jwks")).expect("parse jwks url"),
+        },
+    })
+}
+
+/// Mount JWKS + token endpoints on the mock server, and return the signing
+/// key (so the JWKS matches the signature on the ID token the token
+/// endpoint returns).
+async fn mount_mock_oidc_idp(
+    server: &wiremock::MockServer,
+    key: &OidcSigningKey,
+    id_token: String,
+) {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, ResponseTemplate};
+
+    // JWKS endpoint (mirrors the helper in services/idp/oidc/tests.rs).
+    let jwk = key.public_key_jwk().expect("public_key_jwk should succeed");
+    let jwks_json = serde_json::json!({ "keys": [Jwk::Ec(jwk)] }).to_string();
+    Mock::given(method("GET"))
+        .and(path("/jwks"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(jwks_json))
+        .mount(server)
+        .await;
+
+    // Token endpoint: return the pre-signed ID token.
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id_token": id_token,
+            "access_token": "fake-access-token",
+            "token_type": "Bearer",
+        })))
+        .mount(server)
+        .await;
+}
+
+/// Build the claims object for a non-Google IdP (no `hd` → domain derived
+/// from the email). The nonce must match the OIDC state row's nonce.
+fn id_token_claims(issuer: &str, client_id: &str, nonce: &str, email: &str) -> serde_json::Value {
+    serde_json::json!({
+        "iss": issuer,
+        "aud": client_id,
+        "sub": "mock-subject-1",
+        "exp": 9_999_999_999_i64,
+        "iat": 1_000_000_000_i64,
+        "email": email,
+        "email_verified": true,
+        "nonce": nonce,
+    })
+}
+
+#[tokio::test]
+async fn test_oidc_callback_rejects_whitespace_domain_email_e2e() {
+    use crate::test_utils::{http_get, test_app_with_idps};
+
+    // In-process mock OIDC IdP that signs its own ID token. HTTP on
+    // localhost is allowed by the discovery/JWKS fetcher.
+    let server = wiremock::MockServer::start().await;
+    let issuer = server.uri();
+    let key = OidcSigningKey::generate().expect("generate signing key");
+    let nonce = "e2e-ws-domain-nonce";
+    let id_token = key
+        .sign_jwt(&id_token_claims(
+            &issuer,
+            "mock-client",
+            nonce,
+            "foo@bar .com",
+        ))
+        .await
+        .expect("sign id token");
+    mount_mock_oidc_idp(&server, &key, id_token).await;
+
+    let (app, state) = test_app_with_idps(vec![mock_oidc_provider(&issuer)]).await;
+    // Open-enrollment mode (the default's positive control): no allowlist.
+    {
+        let mut config = state.config().as_ref().clone();
+        config.allowed_domains = None;
+        state.config.store(std::sync::Arc::new(config));
+    }
+
+    // Seed the OIDC state row the callback will consume. provider_id must
+    // match the mock IdP slug; nonce must match the ID token's.
+    let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().expect("valid timestamp");
+    let state_value = "e2e-ws-domain-state";
+    db::create_oidc_state(
+        &state.store,
+        state_value,
+        None,
+        nonce,
+        "",
+        expires_at,
+        "mock-idp",
+    )
+    .await
+    .expect("create_oidc_state");
+
+    // Drive the real /oauth/callback route end-to-end.
+    let (status, body) = http_get(
+        &app,
+        &format!("/oauth/callback?state={state_value}&code=dummy-auth-code"),
+        &[],
+    )
+    .await;
+
+    // The whitespace-bearing domain is rejected — `verify_id_token` parses
+    // the email-derived domain, so the callback never reaches enrollment.
+    // Either way the error template renders with 200 OK (not 303
+    // SEE_OTHER), and neither the user nor the synthetic org is persisted.
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "E2E: whitespace-domain email rejected on the OIDC callback path; got {status}: {body}"
+    );
+    let user = db::get_user_by_email(&state.store, "foo@bar .com")
+        .await
+        .expect("db query ok");
+    assert!(
+        user.is_none(),
+        "E2E: a whitespace-domain email must not be persisted through the OIDC callback"
+    );
+}
+
+#[tokio::test]
+async fn test_oidc_callback_accepts_well_formed_email_e2e() {
+    use crate::test_utils::{http_get, test_app_with_idps};
+
+    let server = wiremock::MockServer::start().await;
+    let issuer = server.uri();
+    let key = OidcSigningKey::generate().expect("generate signing key");
+    let nonce = "e2e-good-email-nonce";
+    let id_token = key
+        .sign_jwt(&id_token_claims(
+            &issuer,
+            "mock-client",
+            nonce,
+            "alice@example.com",
+        ))
+        .await
+        .expect("sign id token");
+    mount_mock_oidc_idp(&server, &key, id_token).await;
+
+    let (app, state) = test_app_with_idps(vec![mock_oidc_provider(&issuer)]).await;
+    {
+        let mut config = state.config().as_ref().clone();
+        config.allowed_domains = None;
+        state.config.store(std::sync::Arc::new(config));
+    }
+
+    let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().expect("valid timestamp");
+    let state_value = "e2e-good-email-state";
+    db::create_oidc_state(
+        &state.store,
+        state_value,
+        None,
+        nonce,
+        "",
+        expires_at,
+        "mock-idp",
+    )
+    .await
+    .expect("create_oidc_state");
+
+    let (status, body) = http_get(
+        &app,
+        &format!("/oauth/callback?state={state_value}&code=dummy-auth-code"),
+        &[],
+    )
+    .await;
+
+    // Positive control: a well-formed email proceeds through the full
+    // OIDC callback to the 303 redirect (the gate does not over-reject).
+    assert_eq!(
+        status,
+        StatusCode::SEE_OTHER,
+        "E2E: a well-formed email must proceed through the OIDC callback; got {status}: {body}"
+    );
+    let user = db::get_user_by_email(&state.store, "alice@example.com")
+        .await
+        .expect("db query ok")
+        .expect("E2E: well-formed email must be persisted");
+    assert_eq!(user.email, "alice@example.com");
+}
+
+#[tokio::test]
+async fn test_saml_acs_rejects_whitespace_domain_email_e2e() {
+    // SAML path E2E: the SAML ACS handler (`POST /saml/acs`) validates a
+    // signed SAML response and extracts the email from the NameID
+    // (verbatim) and the domain from it. A NameID of `foo@bar .com`
+    // (whitespace inside the domain) must not enroll anyone: response
+    // validation parses the derived domain and fails, so the ACS handler
+    // never reaches `complete_enrollment_after_identity`.
+    use crate::services::idp::saml::response::tests::{
+        build_signed_saml_response, generate_test_key_and_cert, test_provider, valid_time_window,
+    };
+    use crate::test_utils::{http_post_form, test_app_with_idps};
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as B64;
+
+    let (key_pair, cert_der) = generate_test_key_and_cert();
+    let saml_provider = test_provider(cert_der);
+    // test_provider uses sp_entity_id "https://vouch.example.com" and acs_url
+    // ".../saml/acs"; the test app's base_url is "https://test.example.com".
+    // The ACS handler validates Destination=acs_url and Audience=sp_entity_id
+    // against the provider, not the app's base_url, so reuse the provider's
+    // values for the signed response.
+    let acs_url = saml_provider.acs_url.clone();
+    let sp_entity_id = saml_provider.sp_entity_id.clone();
+    let issuer = saml_provider.idp_metadata.entity_id.clone();
+    let (not_before, not_on_or_after) = valid_time_window();
+    let request_id = "saml-ws-domain-request-1";
+
+    let xml = build_signed_saml_response(
+        &key_pair,
+        "foo@bar .com",
+        "_resp-ws-1",
+        "_assert-ws-1",
+        request_id,
+        &acs_url,
+        &issuer,
+        &sp_entity_id,
+        &not_before,
+        &not_on_or_after,
+        Some(request_id),
+        Some(&not_on_or_after),
+    );
+    let saml_response = B64.encode(xml.as_bytes());
+
+    let (app, state) = test_app_with_idps(vec![ConfiguredIdp::Saml(saml_provider)]).await;
+    // Open-enrollment mode (the default): no allowlist.
+    {
+        let mut config = state.config().as_ref().clone();
+        config.allowed_domains = None;
+        state.config.store(std::sync::Arc::new(config));
+    }
+
+    // Seed the state row the ACS handler will consume. The stored nonce
+    // is the AuthnRequest ID the validator checks InResponseTo against.
+    let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().expect("valid timestamp");
+    let relay_state = "saml-ws-domain-relay";
+    db::create_oidc_state(
+        &state.store,
+        relay_state,
+        None,
+        request_id,
+        "",
+        expires_at,
+        "corp-saml",
+    )
+    .await
+    .expect("create_oidc_state");
+
+    let form_body = format!(
+        "SAMLResponse={}&RelayState={relay_state}",
+        urlencode(&saml_response)
+    );
+    let (status, body) = http_post_form(&app, "/saml/acs", &form_body, &[]).await;
+
+    // The whitespace-bearing domain is rejected: the error template
+    // renders with 200 OK (not 303), and no user is persisted.
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "E2E SAML: whitespace-domain email rejected on the ACS path; got {status}: {body}"
+    );
+    let user = db::get_user_by_email(&state.store, "foo@bar .com")
+        .await
+        .expect("db query ok");
+    assert!(
+        user.is_none(),
+        "E2E SAML: a whitespace-domain email must not be persisted through the ACS callback"
+    );
+}
+
+/// Percent-encode a string for `application/x-www-form-urlencoded` bodies.
+fn urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for &b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => {
+                out.push('%');
+                out.push_str(&format!("{b:02X}"));
+            }
+        }
+    }
+    out
+}
+
+#[tokio::test]
+async fn test_enrollment_allowed_domains_distinct_from_invalid_domain_gate() {
+    // the new invalid-domain gate and the `allowed_domains`
+    // allowlist gate remain distinct and correctly ordered. A
+    // well-formed email whose domain IS in the allowlist enrolls (303);
+    // a well-formed email whose domain is NOT in the allowlist renders
+    // the `enroll-error-domain-not-allowed` template (the allowlist
+    // gate), NOT the `enroll-error-invalid-email` template (the new
+    // domain-shape gate). A whitespace-bearing domain is rejected by
+    // the new gate even when the allowlist is set (the shape gate runs
+    // first).
+
+    let state = test_app_state().await;
+    {
+        let mut config = state.config().as_ref().clone();
+        // The default test_config sets allowed_domains = ["example.com"].
+        // Keep it (allowlist mode) for this test.
+        config.allowed_domains = Some(vec!["example.com".to_string()]);
+        state.config.store(std::sync::Arc::new(config));
+    }
+
+    // (1) Well-formed email IN the allowlist → proceeds (303).
+    let (stored_in, claim_in) =
+        seed_and_consume_oidc_state(&state, "allowlist-in-state", None).await;
+    let identity_in = IdentityResult {
+        email: "bob@example.com".to_string(),
+        domain: Some(test_domain("example.com")),
+        upstream: None,
+    };
+    let resp = complete_enrollment_after_identity(
+        &state,
+        &stored_in,
+        identity_in,
+        claim_in,
+        ClientInfo::default(),
+        test_arrival(),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::SEE_OTHER,
+        "an in-allowlist well-formed email must enroll"
+    );
+
+    // (2) Well-formed email NOT in the allowlist → the allowlist gate
+    // renders the domain-not-allowed template (200), distinct from the
+    // invalid-domain template.
+    let (stored_out, claim_out) =
+        seed_and_consume_oidc_state(&state, "allowlist-out-state-2", None).await;
+    let identity_out = IdentityResult {
+        email: "carol@other.com".to_string(),
+        domain: Some(test_domain("other.com")),
+        upstream: None,
+    };
+    let resp = complete_enrollment_after_identity(
+        &state,
+        &stored_out,
+        identity_out,
+        claim_out,
+        ClientInfo::default(),
+        test_arrival(),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "out-of-allowlist email renders the error page (200)"
+    );
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    let body = String::from_utf8(body.to_vec()).expect("utf8 body");
+    assert!(
+        body.contains("Domain Not Allowed") || body.contains("not from an allowed domain"),
+        "out-of-allowlist must render the domain-not-allowed template, got: {body}"
+    );
+    assert!(
+        !body.contains("invalid email address"),
+        "out-of-allowlist must NOT render the invalid-email (shape-gate) template"
+    );
+
+    // (3) Whitespace-bearing email domain with the allowlist set → the
+    // email gate (which runs first) rejects it with the invalid-email
+    // template, NOT the allowlist template (confirming order: email gate
+    // before allowlist gate).
+    let (stored_ws, claim_ws) =
+        seed_and_consume_oidc_state(&state, "allowlist-ws-state", None).await;
+    let identity_ws = IdentityResult {
+        email: "dave@bar .com".to_string(),
+        // No IdP-asserted org domain: `Domain` cannot hold `"bar .com"`, so
+        // the malformed value only ever reaches this handler inside the
+        // email.
+        domain: None,
+        upstream: None,
+    };
+    let resp = complete_enrollment_after_identity(
+        &state,
+        &stored_ws,
+        identity_ws,
+        claim_ws,
+        ClientInfo::default(),
+        test_arrival(),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "whitespace-domain email renders the error page (200) even with allowlist set"
+    );
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    let body = String::from_utf8(body.to_vec()).expect("utf8 body");
+    assert!(
+        body.contains("invalid email address"),
+        "whitespace-domain with allowlist set must render the invalid-email (shape-gate) \
+         template, got: {body}"
+    );
+    assert!(
+        !body.contains("Domain Not Allowed"),
+        "whitespace-domain must NOT render the allowlist template (shape gate runs first)"
+    );
+}
+
 /// (state, claim) pair `complete_enrollment_after_identity` requires.
 async fn seed_and_consume_oidc_state(
     state: &AppState,
     state_value: &str,
     device_auth_id: Option<&str>,
-) -> (crate::db::OidcState, crate::db::OidcStateClaim) {
+) -> (OidcState, OidcStateClaim) {
     let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().expect("valid timestamp");
-    crate::db::create_oidc_state(
+    db::create_oidc_state(
         &state.store,
         state_value,
         device_auth_id,
@@ -367,36 +906,24 @@ async fn seed_and_consume_oidc_state(
     )
     .await
     .expect("create_oidc_state");
-    crate::db::try_consume_oidc_state(&state.store, state_value)
+    db::try_consume_oidc_state(&state.store, state_value, jiff::Timestamp::now())
         .await
         .expect("consume oidc state")
 }
 
-/// Poll the audit store for events of `event_type` for the user. Audit
-/// writes are spawned on a detached task, so the first read can race
-/// the write; retry briefly before returning whatever was found.
-async fn wait_for_audit_events(
-    state: &AppState,
-    event_type: &str,
-    user_id: &str,
-) -> Vec<crate::db::AuditEvent> {
-    let mut events = Vec::new();
-    for _ in 0..40 {
-        events = state
-            .audit
-            .query_events(&crate::db::AuditEventFilter {
-                event_types: Some(vec![event_type.to_string()]),
-                user_id: Some(user_id.to_string()),
-                ..Default::default()
-            })
-            .await
-            .expect("query audit events");
-        if !events.is_empty() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-    events
+/// Query the audit store for events of `event_type` for the user. Audit
+/// writes are awaited before the handler responds, so the rows are
+/// visible immediately.
+async fn audit_events_for(state: &AppState, event_type: &str, user_id: &str) -> Vec<AuditEvent> {
+    state
+        .audit
+        .query_events(&AuditEventFilter {
+            event_types: Some(vec![event_type.to_string()]),
+            user_id: Some(user_id.to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("query audit events")
 }
 
 #[tokio::test]
@@ -411,21 +938,28 @@ async fn test_direct_web_signin_returning_user_logs_login_success_with_ip() {
 
     let (stored, claim) = seed_and_consume_oidc_state(&state, "direct-web-state", None).await;
 
-    let client_info = ClientInfo {
-        client_ip: Some("203.0.113.7".parse().expect("valid IP")),
-        ..Default::default()
-    };
+    let client_info = ClientInfo::for_test(
+        Some("203.0.113.7".parse().expect("valid IP")),
+        &axum::http::HeaderMap::new(),
+    );
     let identity = IdentityResult {
         email: "returning@example.com".to_string(),
-        domain: Some("example.com".to_string()),
+        domain: Some(test_domain("example.com")),
         upstream: None,
     };
 
-    let resp =
-        complete_enrollment_after_identity(&state, &stored, identity, claim, client_info).await;
+    let resp = complete_enrollment_after_identity(
+        &state,
+        &stored,
+        identity,
+        claim,
+        client_info,
+        test_arrival(),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
 
-    let events = wait_for_audit_events(&state, "login_success", &user.id).await;
+    let events = audit_events_for(&state, "login_success", &user.id).await;
     assert_eq!(events.len(), 1, "one direct sign-in -> one login_success");
     let event = events.first().expect("login_success event");
     let data: serde_json::Value = serde_json::from_str(&event.data).expect("event data JSON");
@@ -437,7 +971,7 @@ async fn test_direct_web_signin_returning_user_logs_login_success_with_ip() {
 
     let approvals = state
         .audit
-        .query_events(&crate::db::AuditEventFilter {
+        .query_events(&AuditEventFilter {
             event_types: Some(vec!["device_auth_approved".to_string()]),
             ..Default::default()
         })
@@ -446,6 +980,151 @@ async fn test_direct_web_signin_returning_user_logs_login_success_with_ip() {
     assert!(
         approvals.is_empty(),
         "direct sign-in must not emit device_auth_approved"
+    );
+}
+
+// ── Regression: bootstrap session must NOT delete keys without FIDO2 ────
+//
+// The enrollment bootstrap session minted after upstream IdP sign-in (no
+// FIDO2 assertion) must carry `auth_time: None`. The destructive-key
+// freshness gate in `handlers::enroll_keys::delete_key` anchors on
+// `auth_time.unwrap_or(0)`; with the fix it sees Unix epoch and demands a
+// step-up. Before the fix the bootstrap session carried the IdP login
+// time, so an attacker who hijacked the victim's IdP session could sign
+// in directly via the browser, land on `/enroll/keys`, and delete the
+// victim's keys (n-1) within the 60-second window without ever touching a
+// security key.
+//
+// This drives the real `complete_enrollment_after_identity` handler for a
+// returning user with existing keys on a direct browser sign-in (no CLI),
+// extracts the issued session cookie, decodes the JWT to assert `auth_time`
+// is absent, then issues `DELETE /enroll/keys/{id}` through the router with
+// that cookie and asserts it is rejected with `insufficient_user_authentication`.
+#[tokio::test]
+async fn test_direct_web_signin_bootstrap_session_cannot_delete_keys() {
+    let (app, state) = test_app().await;
+    // Two keys: the "last key" guard refuses to delete the only key, so a
+    // deletion that *would* be allowed by the freshness gate needs a spare
+    // to reach the delete step at all.
+    let user = create_test_user(&state.store, "bootstrap-delete@example.com").await;
+    let kept = create_test_authenticator(&state.store, &user.id).await;
+    let doomed = create_test_authenticator(&state.store, &user.id).await;
+
+    let (stored, claim) = seed_and_consume_oidc_state(&state, "bootstrap-delete-state", None).await;
+    let identity = IdentityResult {
+        email: "bootstrap-delete@example.com".to_string(),
+        domain: Some(test_domain("example.com")),
+        upstream: None,
+    };
+
+    let resp = complete_enrollment_after_identity(
+        &state,
+        &stored,
+        identity,
+        claim,
+        ClientInfo::default(),
+        test_arrival(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+
+    // A direct web sign-in (no CLI waiting) lands on the keys page; the
+    // bootstrap session permits key management, and the exploit drives the
+    // DELETE endpoint with the issued cookie.
+    let location = resp
+        .headers()
+        .get(header::LOCATION)
+        .expect("Location header")
+        .to_str()
+        .expect("ascii location")
+        .to_string();
+    assert_eq!(
+        location, "/enroll/keys",
+        "direct returning-user sign-in lands on the keys page, got {location}"
+    );
+
+    // Extract the session cookie value the handler just issued.
+    let set_cookie = resp
+        .headers()
+        .get(header::SET_COOKIE)
+        .expect("Set-Cookie header must be present")
+        .to_str()
+        .expect("ascii Set-Cookie");
+    let cookie_value = set_cookie
+        .split_once(&format!("{}=", vouch_common::SESSION_COOKIE_NAME))
+        .and_then(|(_, rest)| rest.split(';').next())
+        .expect("extract cookie value");
+
+    // G1: the bootstrap session JWT MUST NOT carry `auth_time` — no FIDO2
+    // authentication occurred on this direct IdP sign-in.
+    let jwt_payload = decode_jwt_payload_claims(cookie_value);
+    assert!(
+        matches!(
+            jwt_payload.get("auth_time"),
+            None | Some(serde_json::Value::Null)
+        ),
+        "bootstrap session must not carry auth_time (no FIDO2 occurred): {jwt_payload}"
+    );
+    // The session is also not hardware-verified (sanity-check the shape).
+    assert_eq!(
+        jwt_payload
+            .get("hardware_verified")
+            .and_then(|v| v.as_bool()),
+        Some(false),
+        "bootstrap session hardware_verified must be false: {jwt_payload}"
+    );
+
+    // Drive DELETE /enroll/keys/{doomed} through the router with the cookie.
+    let cookie_header = format!("{}={}", vouch_common::SESSION_COOKIE_NAME, cookie_value);
+    let resp = http_delete_full(
+        &app,
+        &format!("/enroll/keys/{doomed}"),
+        &[
+            ("Cookie", &cookie_header),
+            ("Origin", "https://test.example.com"),
+        ],
+    )
+    .await;
+
+    // G2: the destructive-key freshness gate must fail closed — the
+    // bootstrap session has no recent FIDO2 auth_time, so step-up is
+    // required rather than letting the IdP login time authorize deletion.
+    assert_eq!(
+        resp.status,
+        StatusCode::UNAUTHORIZED,
+        "bootstrap session must not be able to delete keys, body: {}",
+        resp.body
+    );
+    assert!(
+        resp.body.contains("insufficient_user_authentication"),
+        "expected step-up error code, body: {}",
+        resp.body
+    );
+
+    // G3: the victim's keys survive. List via the same cookie and confirm
+    // both `kept` and `doomed` are still present (no partial deletion).
+    let resp = http_get_full(&app, "/enroll/keys/api", &[("Cookie", &cookie_header)]).await;
+    assert_eq!(
+        resp.status,
+        StatusCode::OK,
+        "list keys failed: {}",
+        resp.body
+    );
+    let body: serde_json::Value = serde_json::from_str(&resp.body).expect("json body");
+    let ids: Vec<&str> = body
+        .get("keys")
+        .and_then(serde_json::Value::as_array)
+        .expect("keys[]")
+        .iter()
+        .map(|k| {
+            k.get("id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+        })
+        .collect();
+    assert!(
+        ids.contains(&kept.as_str()) && ids.contains(&doomed.as_str()),
+        "both keys must survive the rejected deletion, got ids: {ids:?}"
     );
 }
 
@@ -461,11 +1140,11 @@ async fn test_cli_enroll_returning_user_requires_assertion_before_approval() {
 
     let device_code_hash = "cli-returning-device-code-hash";
     let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().expect("valid timestamp");
-    let device_auth_id = crate::db::create_device_auth_request(
+    let device_auth_id = db::create_device_auth_request(
         &state.store,
         device_code_hash,
         "CLI-RTRN",
-        None,
+        "test-client",
         expires_at,
         0,
     )
@@ -477,13 +1156,19 @@ async fn test_cli_enroll_returning_user_requires_assertion_before_approval() {
 
     let identity = IdentityResult {
         email: "cli-returning@example.com".to_string(),
-        domain: Some("example.com".to_string()),
+        domain: Some(test_domain("example.com")),
         upstream: None,
     };
 
-    let resp =
-        complete_enrollment_after_identity(&state, &stored, identity, claim, ClientInfo::default())
-            .await;
+    let resp = complete_enrollment_after_identity(
+        &state,
+        &stored,
+        identity,
+        claim,
+        ClientInfo::default(),
+        test_arrival(),
+    )
+    .await;
 
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
     let location = resp
@@ -496,18 +1181,18 @@ async fn test_cli_enroll_returning_user_requires_assertion_before_approval() {
         "a returning user must be sent to assert with their key"
     );
 
-    let request = crate::db::get_device_auth_by_code_hash(&state.store, device_code_hash)
+    let request = db::get_device_auth_by_code_hash(&state.store, device_code_hash)
         .await
         .expect("device auth lookup")
         .expect("device auth exists");
     assert!(
-        matches!(request.state, crate::db::DeviceAuthState::Pending),
+        matches!(request.state, DeviceAuthState::Pending),
         "IdP sign-in alone must not release the waiting CLI"
     );
 
     let approvals = state
         .audit
-        .query_events(&crate::db::AuditEventFilter {
+        .query_events(&AuditEventFilter {
             event_types: Some(vec!["device_auth_approved".to_string()]),
             ..Default::default()
         })
@@ -520,7 +1205,7 @@ async fn test_cli_enroll_returning_user_requires_assertion_before_approval() {
 
     let logins = state
         .audit
-        .query_events(&crate::db::AuditEventFilter {
+        .query_events(&AuditEventFilter {
             event_types: Some(vec!["login_success".to_string()]),
             ..Default::default()
         })
@@ -529,6 +1214,192 @@ async fn test_cli_enroll_returning_user_requires_assertion_before_approval() {
     assert!(
         logins.is_empty(),
         "an IdP sign-in that still owes an assertion is not a completed login"
+    );
+}
+
+#[tokio::test]
+async fn test_cli_enroll_returning_user_fails_closed_on_authenticator_read_error() {
+    // Regression for the `unwrap_or_default()` swallow site. A transient DB
+    // read error on `get_authenticators_for_user` must NOT be treated as "user
+    // has zero authenticators": a returning CLI user would otherwise be
+    // misrouted to `/enroll/keys` (register a new key) instead of `/login`
+    // (assert with an existing key), and the session would be minted with
+    // `authenticator_id = None` / `hardware_aaguid = None`, silently
+    // degrading its authenticator binding. The fix fails closed, mirroring
+    // the adjacent `org_domain` block: the callback returns the
+    // `enroll-error-session-failed` error page and sets no session cookie.
+    //
+    // `set_find_remaining_successes(0)` faults the very next
+    // `DocumentStore::find_all`. The setup helpers and `enroll_user_with_org`
+    // use only point lookups (`store.get`/`find_one`) and writes, never
+    // `find_all`, so the budget survives setup and is consumed only by the
+    // authenticator read inside `complete_enrollment_after_identity` — the
+    // sole `find_all` in that handler. Under the bug the read would be
+    // swallowed and the request would proceed to a `303 See Other` to
+    // `/enroll/keys` with a session cookie; under the fix the error page
+    // renders (200 OK, no redirect, no cookie).
+    let state = build_test_app_state(Vec::new(), |store| {
+        store.set_find_remaining_successes(0);
+    })
+    .await;
+    let user = create_test_user(&state.store, "cli-returning-dberr@example.com").await;
+    create_test_authenticator(&state.store, &user.id).await;
+
+    let device_code_hash = "cli-returning-dberr-code-hash";
+    let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().expect("valid timestamp");
+    let device_auth_id = db::create_device_auth_request(
+        &state.store,
+        device_code_hash,
+        "CLI-DBERR",
+        "test-client",
+        expires_at,
+        0,
+    )
+    .await
+    .expect("create_device_auth_request");
+
+    let (stored, claim) =
+        seed_and_consume_oidc_state(&state, "cli-returning-dberr-state", Some(&device_auth_id))
+            .await;
+
+    let identity = IdentityResult {
+        email: "cli-returning-dberr@example.com".to_string(),
+        domain: Some(test_domain("example.com")),
+        upstream: None,
+    };
+
+    let resp = complete_enrollment_after_identity(
+        &state,
+        &stored,
+        identity,
+        claim,
+        ClientInfo::default(),
+        test_arrival(),
+    )
+    .await;
+
+    // Error page renders 200 OK (not 303 SEE_OTHER), with no redirect and no
+    // session cookie — under the bug this would be a redirect to
+    // `/enroll/keys` carrying a freshly minted session cookie.
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "authenticator read error must fail closed with the error page, not a redirect"
+    );
+    assert!(
+        resp.headers().get(header::LOCATION).is_none(),
+        "no redirect may be issued when the authenticator read fails"
+    );
+    assert!(
+        resp.headers().get(header::SET_COOKIE).is_none(),
+        "a failed callback must not mint a session cookie with a degraded authenticator binding"
+    );
+
+    // The waiting device authorization is untouched: the IdP sign-in alone
+    // never releases the CLI, and a fail-closed read must not advance the
+    // row either.
+    let request = db::get_device_auth_by_code_hash(&state.store, device_code_hash)
+        .await
+        .expect("device auth lookup")
+        .expect("device auth exists");
+    assert!(
+        matches!(request.state, DeviceAuthState::Pending),
+        "device auth must remain Pending when the callback fails closed"
+    );
+
+    // No spurious login/approval audit events: under the bug a returning
+    // user's direct-browser LoginSuccess would be skipped silently, but in
+    // the CLI flow nothing should be recorded at all from the failed read.
+    let approvals = state
+        .audit
+        .query_events(&AuditEventFilter {
+            event_types: Some(vec!["device_auth_approved".to_string()]),
+            ..Default::default()
+        })
+        .await
+        .expect("query audit events");
+    assert!(
+        approvals.is_empty(),
+        "no approval may be recorded when the callback fails closed"
+    );
+    let logins = state
+        .audit
+        .query_events(&AuditEventFilter {
+            event_types: Some(vec!["login_success".to_string()]),
+            ..Default::default()
+        })
+        .await
+        .expect("query audit events");
+    assert!(
+        logins.is_empty(),
+        "no login_success may be recorded when the callback fails closed"
+    );
+}
+
+#[tokio::test]
+async fn test_direct_browser_returning_user_fails_closed_on_authenticator_read_error() {
+    // Direct-browser sign-in by a returning user (no device_auth_id in the
+    // OIDC state). The authenticator read populates the session's
+    // authenticator binding and gates the `LoginSuccess` audit event (the
+    // `else if authenticator_id.is_some()` branch). A transient DB read
+    // error must fail closed rather than silently minting a session with
+    // `authenticator_id = None` — which would skip the returning user's
+    // `LoginSuccess` event (logging it as a first-time enrollee would be)
+    // and redirect to `/enroll/keys`. `set_find_remaining_successes(0)`
+    // faults the next `find_all`, which is the authenticator read; every
+    // other step in the path uses point lookups or writes.
+    let state = build_test_app_state(Vec::new(), |store| {
+        store.set_find_remaining_successes(0);
+    })
+    .await;
+    let user = create_test_user(&state.store, "direct-returning-dberr@example.com").await;
+    create_test_authenticator(&state.store, &user.id).await;
+
+    // No device_auth_id: this is a direct browser sign-in, not a CLI flow.
+    let (stored, claim) =
+        seed_and_consume_oidc_state(&state, "direct-returning-dberr-state", None).await;
+
+    let identity = IdentityResult {
+        email: "direct-returning-dberr@example.com".to_string(),
+        domain: Some(test_domain("example.com")),
+        upstream: None,
+    };
+
+    let resp = complete_enrollment_after_identity(
+        &state,
+        &stored,
+        identity,
+        claim,
+        ClientInfo::default(),
+        test_arrival(),
+    )
+    .await;
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "authenticator read error must fail closed with the error page, not a redirect"
+    );
+    assert!(
+        resp.headers().get(header::LOCATION).is_none(),
+        "no redirect may be issued when the authenticator read fails"
+    );
+    assert!(
+        resp.headers().get(header::SET_COOKIE).is_none(),
+        "a failed callback must not mint a session cookie with a degraded authenticator binding"
+    );
+
+    // A returning user's direct-browser sign-in records `LoginSuccess`
+    // only when the authenticator read succeeds (the
+    // `else if authenticator_id.is_some()` branch). Under the bug the read
+    // would be swallowed to `None`, skipping the event AND redirecting to
+    // `/enroll/keys`; under the fix the callback fails closed before the
+    // branch, so nothing is recorded either way — but crucially no
+    // session is minted. Assert no spurious login is logged.
+    let logins = audit_events_for(&state, "login_success", &user.id).await;
+    assert!(
+        logins.is_empty(),
+        "no login_success may be recorded when the callback fails closed"
     );
 }
 
@@ -558,16 +1429,22 @@ async fn test_identity_conflict_renders_error_and_audits() {
 
     let identity = IdentityResult {
         email: "shared@example.com".to_string(),
-        domain: Some("example.com".to_string()),
+        domain: Some(test_domain("example.com")),
         upstream: Some(db::UpstreamLogin {
             issuer: issuer.to_string(),
             durable_subject: Some("attacker-subject".to_string()),
         }),
     };
 
-    let resp =
-        complete_enrollment_after_identity(&state, &stored, identity, claim, ClientInfo::default())
-            .await;
+    let resp = complete_enrollment_after_identity(
+        &state,
+        &stored,
+        identity,
+        claim,
+        ClientInfo::default(),
+        test_arrival(),
+    )
+    .await;
 
     // Error page renders 200 OK, and crucially carries no session cookie.
     assert_eq!(resp.status(), StatusCode::OK);
@@ -576,7 +1453,7 @@ async fn test_identity_conflict_renders_error_and_audits() {
         "a refused login must not set a session cookie"
     );
 
-    let events = wait_for_audit_events(&state, "identity_bind_refused", &victim.id).await;
+    let events = audit_events_for(&state, "identity_bind_refused", &victim.id).await;
     assert_eq!(events.len(), 1, "one refusal -> one audit event");
     let event = events.first().expect("identity_bind_refused event");
     let data: serde_json::Value = serde_json::from_str(&event.data).expect("event data JSON");
@@ -616,16 +1493,22 @@ async fn test_non_durable_login_refused_once_issuer_is_bound() {
 
     let identity = IdentityResult {
         email: "shared@example.com".to_string(),
-        domain: Some("example.com".to_string()),
+        domain: Some(test_domain("example.com")),
         upstream: Some(db::UpstreamLogin {
             issuer: issuer.to_string(),
             durable_subject: None,
         }),
     };
 
-    let resp =
-        complete_enrollment_after_identity(&state, &stored, identity, claim, ClientInfo::default())
-            .await;
+    let resp = complete_enrollment_after_identity(
+        &state,
+        &stored,
+        identity,
+        claim,
+        ClientInfo::default(),
+        test_arrival(),
+    )
+    .await;
 
     assert_eq!(resp.status(), StatusCode::OK);
     assert!(
@@ -633,7 +1516,7 @@ async fn test_non_durable_login_refused_once_issuer_is_bound() {
         "a refused login must not set a session cookie"
     );
 
-    let events = wait_for_audit_events(&state, "identity_bind_refused", &victim.id).await;
+    let events = audit_events_for(&state, "identity_bind_refused", &victim.id).await;
     assert_eq!(events.len(), 1, "one refusal -> one audit event");
     let event = events.first().expect("identity_bind_refused event");
     let data: serde_json::Value = serde_json::from_str(&event.data).expect("event data JSON");
@@ -653,19 +1536,25 @@ async fn test_lazy_bind_emits_identity_bound_event() {
     let issuer = "https://idp.lazy.example";
     let identity = IdentityResult {
         email: "legacy@example.com".to_string(),
-        domain: Some("example.com".to_string()),
+        domain: Some(test_domain("example.com")),
         upstream: Some(db::UpstreamLogin {
             issuer: issuer.to_string(),
             durable_subject: Some("legacy-subject".to_string()),
         }),
     };
 
-    let resp =
-        complete_enrollment_after_identity(&state, &stored, identity, claim, ClientInfo::default())
-            .await;
+    let resp = complete_enrollment_after_identity(
+        &state,
+        &stored,
+        identity,
+        claim,
+        ClientInfo::default(),
+        test_arrival(),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
 
-    let events = wait_for_audit_events(&state, "identity_bound", &user.id).await;
+    let events = audit_events_for(&state, "identity_bound", &user.id).await;
     assert_eq!(events.len(), 1, "first IdP login -> one identity_bound");
     let event = events.first().expect("identity_bound event");
     let data: serde_json::Value = serde_json::from_str(&event.data).expect("event data JSON");
@@ -690,13 +1579,19 @@ async fn test_cli_device_auth_failure_renders_error_instead_of_redirect() {
 
     let identity = IdentityResult {
         email: "cli-stale-da@example.com".to_string(),
-        domain: Some("example.com".to_string()),
+        domain: Some(test_domain("example.com")),
         upstream: None,
     };
 
-    let resp =
-        complete_enrollment_after_identity(&state, &stored, identity, claim, ClientInfo::default())
-            .await;
+    let resp = complete_enrollment_after_identity(
+        &state,
+        &stored,
+        identity,
+        claim,
+        ClientInfo::default(),
+        test_arrival(),
+    )
+    .await;
 
     assert_ne!(
         resp.status(),
@@ -711,7 +1606,7 @@ async fn test_cli_device_auth_failure_renders_error_instead_of_redirect() {
     // The device auth stays unapproved rather than being silently skipped.
     let approvals = state
         .audit
-        .query_events(&crate::db::AuditEventFilter {
+        .query_events(&AuditEventFilter {
             event_types: Some(vec!["device_auth_approved".to_string()]),
             ..Default::default()
         })
@@ -733,20 +1628,38 @@ async fn test_direct_web_enrollment_new_user_emits_no_login_event() {
 
     let identity = IdentityResult {
         email: "fresh@example.com".to_string(),
-        domain: Some("example.com".to_string()),
+        domain: Some(test_domain("example.com")),
         upstream: None,
     };
-    let resp =
-        complete_enrollment_after_identity(&state, &stored, identity, claim, ClientInfo::default())
-            .await;
+    let resp = complete_enrollment_after_identity(
+        &state,
+        &stored,
+        identity,
+        claim,
+        ClientInfo::default(),
+        test_arrival(),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
 
-    // Audit writes are spawned; give the runtime a moment before
-    // asserting absence.
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    // A fresh enrollee has no key to assert with: they must reach the keys
+    // page to register one, not the /login assertion form.
+    let location = resp
+        .headers()
+        .get(header::LOCATION)
+        .expect("Location header")
+        .to_str()
+        .expect("ascii location");
+    assert_eq!(
+        location, "/enroll/keys",
+        "fresh enrollee must be sent to register a first key, got {location}"
+    );
+
+    // Audit writes are awaited before the handler responds, so absence
+    // here is conclusive.
     let events = state
         .audit
-        .query_events(&crate::db::AuditEventFilter::default())
+        .query_events(&AuditEventFilter::default())
         .await
         .expect("query audit events");
     assert!(
@@ -760,13 +1673,13 @@ async fn test_direct_web_enrollment_new_user_emits_no_login_event() {
 
 /// Build a [`ConfiguredIdp::Oidc`] for tests against the given issuer
 /// (the issuer drives the chooser button's brand/display name).
-fn make_test_oidc_idp(id: &str, issuer: &str) -> crate::services::idp::ConfiguredIdp {
+fn make_test_oidc_idp(id: &str, issuer: &str) -> ConfiguredIdp {
     use secrecy::SecretString;
-    crate::services::idp::ConfiguredIdp::Oidc(crate::services::idp::ConfiguredOidcProvider {
+    ConfiguredIdp::Oidc(ConfiguredOidcProvider {
         id: id.to_string(),
         client_id: format!("{id}-client-id"),
         client_secret: SecretString::from(format!("{id}-secret")),
-        provider: crate::services::idp::oidc::OidcProvider {
+        provider: OidcProvider {
             issuer: issuer.to_string(),
             authorization_endpoint: url::Url::parse(&format!("{issuer}/authorize"))
                 .expect("auth endpoint url"),
@@ -780,11 +1693,11 @@ fn make_test_oidc_idp(id: &str, issuer: &str) -> crate::services::idp::Configure
 /// Seed a pending device-auth row with a valid user code, return the code.
 async fn seed_pending_device_auth(state: &AppState, user_code: &str) {
     let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().expect("valid timestamp");
-    crate::db::create_device_auth_request(
+    db::create_device_auth_request(
         &state.store,
         &format!("hash-{user_code}"),
         user_code,
-        None,
+        "test-client",
         expires_at,
         5,
     )
@@ -792,7 +1705,7 @@ async fn seed_pending_device_auth(state: &AppState, user_code: &str) {
     .expect("seed device_auth_request");
 }
 
-fn two_idps() -> Vec<crate::services::idp::ConfiguredIdp> {
+fn two_idps() -> Vec<ConfiguredIdp> {
     vec![
         make_test_oidc_idp("google", "https://accounts.google.com"),
         make_test_oidc_idp("entra", "https://login.microsoftonline.com/common/v2.0"),
@@ -801,11 +1714,16 @@ fn two_idps() -> Vec<crate::services::idp::ConfiguredIdp> {
 
 #[tokio::test]
 async fn device_chooser_rendered_when_multiple_idps_and_no_provider() {
-    let (app, state) = crate::test_utils::test_app_with_idps(two_idps()).await;
+    let (app, state) = test_utils::test_app_with_idps(two_idps()).await;
     seed_pending_device_auth(&state, "BCDF-GHJK").await;
 
-    let (status, body) =
-        crate::test_utils::http_post_form(&app, "/device", "user_code=BCDF-GHJK", &[]).await;
+    let (status, body) = test_utils::http_post_form(
+        &app,
+        "/device",
+        "user_code=BCDF-GHJK",
+        &[("Origin", "https://test.example.com")],
+    )
+    .await;
 
     assert_eq!(
         status,
@@ -836,14 +1754,14 @@ async fn device_chooser_rendered_when_multiple_idps_and_no_provider() {
 
 #[tokio::test]
 async fn device_redirects_when_provider_selected() {
-    let (app, state) = crate::test_utils::test_app_with_idps(two_idps()).await;
+    let (app, state) = test_utils::test_app_with_idps(two_idps()).await;
     seed_pending_device_auth(&state, "BCDF-GHJK").await;
 
-    let resp = crate::test_utils::http_post_form_full(
+    let resp = test_utils::http_post_form_full(
         &app,
         "/device",
         "user_code=BCDF-GHJK&provider=entra",
-        &[],
+        &[("Origin", "https://test.example.com")],
     )
     .await;
 
@@ -867,14 +1785,14 @@ async fn device_redirects_when_provider_selected() {
 
 #[tokio::test]
 async fn device_rejects_unknown_provider_slug() {
-    let (app, state) = crate::test_utils::test_app_with_idps(two_idps()).await;
+    let (app, state) = test_utils::test_app_with_idps(two_idps()).await;
     seed_pending_device_auth(&state, "BCDF-GHJK").await;
 
-    let (status, body) = crate::test_utils::http_post_form(
+    let (status, body) = test_utils::http_post_form(
         &app,
         "/device",
         "user_code=BCDF-GHJK&provider=evil",
-        &[],
+        &[("Origin", "https://test.example.com")],
     )
     .await;
 
@@ -899,11 +1817,16 @@ async fn device_rejects_unknown_provider_slug() {
 #[tokio::test]
 async fn device_single_idp_auto_selects_without_chooser() {
     let idps = vec![make_test_oidc_idp("google", "https://accounts.google.com")];
-    let (app, state) = crate::test_utils::test_app_with_idps(idps).await;
+    let (app, state) = test_utils::test_app_with_idps(idps).await;
     seed_pending_device_auth(&state, "BCDF-GHJK").await;
 
-    let resp =
-        crate::test_utils::http_post_form_full(&app, "/device", "user_code=BCDF-GHJK", &[]).await;
+    let resp = test_utils::http_post_form_full(
+        &app,
+        "/device",
+        "user_code=BCDF-GHJK",
+        &[("Origin", "https://test.example.com")],
+    )
+    .await;
 
     assert_eq!(
         resp.status,
@@ -932,8 +1855,13 @@ async fn device_zero_idps_renders_not_configured_error() {
     let (app, state) = test_app().await;
     seed_pending_device_auth(&state, "BCDF-GHJK").await;
 
-    let (status, body) =
-        crate::test_utils::http_post_form(&app, "/device", "user_code=BCDF-GHJK", &[]).await;
+    let (status, body) = test_utils::http_post_form(
+        &app,
+        "/device",
+        "user_code=BCDF-GHJK",
+        &[("Origin", "https://test.example.com")],
+    )
+    .await;
 
     assert_eq!(
         status,
@@ -952,9 +1880,9 @@ async fn device_zero_idps_renders_not_configured_error() {
 
 #[tokio::test]
 async fn enroll_start_chooser_rendered_when_multiple_idps_and_no_provider() {
-    let (app, _state) = crate::test_utils::test_app_with_idps(two_idps()).await;
+    let (app, _state) = test_utils::test_app_with_idps(two_idps()).await;
 
-    let (status, body) = crate::test_utils::http_get(&app, "/enroll/start", &[]).await;
+    let (status, body) = test_utils::http_get(&app, "/enroll/start", &[]).await;
 
     assert_eq!(
         status,
@@ -977,9 +1905,9 @@ async fn enroll_start_chooser_rendered_when_multiple_idps_and_no_provider() {
 
 #[tokio::test]
 async fn enroll_start_redirects_when_provider_selected() {
-    let (app, _state) = crate::test_utils::test_app_with_idps(two_idps()).await;
+    let (app, _state) = test_utils::test_app_with_idps(two_idps()).await;
 
-    let resp = crate::test_utils::http_get_full(&app, "/enroll/start?provider=entra", &[]).await;
+    let resp = test_utils::http_get_full(&app, "/enroll/start?provider=entra", &[]).await;
 
     assert_eq!(
         resp.status,
@@ -1002,9 +1930,9 @@ async fn enroll_start_redirects_when_provider_selected() {
 #[tokio::test]
 async fn enroll_start_single_idp_auto_selects_without_chooser() {
     let idps = vec![make_test_oidc_idp("google", "https://accounts.google.com")];
-    let (app, _state) = crate::test_utils::test_app_with_idps(idps).await;
+    let (app, _state) = test_utils::test_app_with_idps(idps).await;
 
-    let resp = crate::test_utils::http_get_full(&app, "/enroll/start", &[]).await;
+    let resp = test_utils::http_get_full(&app, "/enroll/start", &[]).await;
 
     assert_eq!(
         resp.status,
@@ -1031,8 +1959,7 @@ async fn device_verify_page_prefills_valid_user_code() {
     // GET /device?user_code=<valid> pre-fills the input via
     // verification_uri_complete (RFC 8628 §3.3.1).
     let (app, _state) = test_app().await;
-    let (status, body) =
-        crate::test_utils::http_get(&app, "/device?user_code=QHJT-ZLFH", &[]).await;
+    let (status, body) = test_utils::http_get(&app, "/device?user_code=QHJT-ZLFH", &[]).await;
 
     assert_eq!(status, StatusCode::OK);
     assert!(
@@ -1045,7 +1972,7 @@ async fn device_verify_page_prefills_valid_user_code() {
 async fn device_verify_page_ignores_invalid_user_code() {
     // A malformed user_code must not be reflected into the page.
     let (app, _state) = test_app().await;
-    let (status, body) = crate::test_utils::http_get(&app, "/device?user_code=garbage", &[]).await;
+    let (status, body) = test_utils::http_get(&app, "/device?user_code=garbage", &[]).await;
 
     assert_eq!(status, StatusCode::OK);
     assert!(
@@ -1054,33 +1981,55 @@ async fn device_verify_page_ignores_invalid_user_code() {
     );
 }
 
-// ── Regression: browser_register_complete sets auth_time ────────────────
+// ── browser_register_complete requires a verified attestation chain ─────
 //
-// The `browser_register_complete` handler issues a `HardwareVerification::Verified`
-// session after FIDO2 WebAuthn registration. Before the fix it left `auth_time: None`,
-// which caused the `require_fresh_timestamp(token.auth_time.unwrap_or(0), ...)`
-// freshness gate on key deletion to treat the fresh session as Unix epoch, failing
-// every immediate delete with `StepUpRequired`.
+// Issue #1111: a self-attested registration used to be accepted, and the
+// AAGUID the client put in authData became the `hardware_aaguid` claim that
+// relying parties use to gate access by authenticator model. Registration now
+// requires an x5c chain that validates against a pinned Yubico root, with no
+// setting to relax it, so the forgery has nowhere to enter.
 //
-// This test drives the full handler with a cryptographically valid packed
-// self-attestation (signed by a software ES256 key), then decodes the issued
-// session JWT and asserts that `auth_time` is present, recent, and consistent
-// with the `amr`/`acr`/`hardware_verified` claims.
-#[tokio::test]
+// This drives the real endpoint with a well-formed, correctly signed
+// self-attestation — everything a forger could produce — and asserts it is
+// refused.
+//
+// This test previously asserted the opposite: that the same object enrolled
+// successfully and that the resulting session JWT carried `auth_time`,
+// `hardware_verified`, `amr` and `acr` (the regression guard from #1124). That
+// success path is no longer reachable from a test, because minting a
+// certificate under a pinned Yubico root is exactly what the change makes
+// impossible. The claim mapping those assertions covered now lives in
+// `services::auth::tests::test_verified_hardware_sets_amr_acr_and_flag`.
 #[expect(
     clippy::too_many_lines,
-    reason = "hand-built WebAuthn packed attestation payload is inherently linear"
+    reason = "end-to-end self-attestation forging: ES256 keypair, COSE_Key, \
+              authData, clientData, attStmt, plus the caller-binding session \
+              and cookie setup the fix requires"
 )]
-async fn test_browser_register_complete_sets_auth_time_on_session() {
+#[tokio::test]
+async fn test_browser_register_complete_rejects_self_attestation() {
     use aws_lc_rs::signature::{ECDSA_P256_SHA256_ASN1_SIGNING, EcdsaKeyPair, KeyPair};
 
     let (app, state) = test_app().await;
 
-    // Pre-create the user so `complete_enrollment_after_identity`-style rows
-    // exist; `browser_register_complete` itself enrolls the authenticator
-    // against `reg_state.user_id`.
-    let user_id = Uuid::now_v7();
+    // Pre-create the user + session so `complete_enrollment_after_identity`-style
+    // rows exist and the cookie's `sub` matches the state JWT's `user_id`.
+    // The fix re-binds the caller to that id; without a matching cookie the
+    // request would be rejected before the attestation check runs.
     let user_email = "auth-time-regression@example.com";
+    let user = create_test_user(&state.store, user_email).await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let user_id = Uuid::parse_str(&user.id).expect("user id is a uuid");
 
     // 1. Build a valid BrowserRegistrationState JWT and extract the challenge.
     let (ccr, webauthn_state) = state
@@ -1221,97 +2170,34 @@ async fn test_browser_register_complete_sets_auth_time_on_session() {
     })
     .to_string();
 
-    let resp = crate::test_utils::http_request_full(
+    let resp = test_utils::http_request_full(
         &app,
         "POST",
         "/enroll/webauthn/complete",
         Some(body),
-        &[("Content-Type", "application/json")],
+        &[
+            ("Content-Type", "application/json"),
+            ("Cookie", session_cookie_header(&session_token).as_str()),
+            ("Origin", "https://test.example.com"),
+        ],
     )
     .await;
 
     assert_eq!(
         resp.status,
-        StatusCode::OK,
-        "browser_register_complete should succeed, body: {}",
+        StatusCode::BAD_REQUEST,
+        "a self-attested registration must be refused, body: {}",
         resp.body
     );
-
-    // 10. Extract the Set-Cookie header and decode the JWT payload.
-    let set_cookie = resp
-        .headers
-        .get(axum::http::header::SET_COOKIE)
-        .expect("Set-Cookie header must be present")
-        .to_str()
-        .expect("ascii Set-Cookie");
     assert!(
-        set_cookie.contains(vouch_common::SESSION_COOKIE_NAME),
-        "Set-Cookie must set the session cookie: {set_cookie}"
+        resp.body.contains("attestation_cert_required"),
+        "expected attestation_cert_required, body: {}",
+        resp.body
     );
-    // Cookie value is between `<cookie_name>=` and the first `;`.
-    let cookie_value = set_cookie
-        .split_once(&format!("{}=", vouch_common::SESSION_COOKIE_NAME))
-        .and_then(|(_, rest)| rest.split(';').next())
-        .expect("extract cookie value");
-    let jwt_payload = decode_jwt_payload_claims(cookie_value);
-
-    // G4: auth_time is present, recent, non-null.
-    let auth_time = jwt_payload
-        .get("auth_time")
-        .and_then(|v| v.as_i64())
-        .expect("auth_time must be present on the enrollment session JWT");
-    let skew = 10_i64;
-    let now_secs = jiff::Timestamp::now().as_second();
     assert!(
-        (now_secs - skew..=now_secs + skew).contains(&auth_time),
-        "auth_time ({auth_time}) should be within ±{skew}s of now ({now_secs})"
+        resp.headers.get(axum::http::header::SET_COOKIE).is_none(),
+        "a refused registration must not establish a session"
     );
-
-    // G4: hardware_verified, amr, acr are consistent with Verified FIDO2.
-    assert_eq!(
-        jwt_payload
-            .get("hardware_verified")
-            .and_then(|v| v.as_bool()),
-        Some(true),
-        "hardware_verified must be true: {jwt_payload}"
-    );
-    let amr = jwt_payload
-        .get("amr")
-        .and_then(|v| v.as_array())
-        .expect("amr must be present");
-    let amr_values: Vec<&str> = amr.iter().map(|v| v.as_str().unwrap_or("")).collect();
-    assert!(
-        amr_values.contains(&"hwk") && amr_values.contains(&"pin") && amr_values.contains(&"user"),
-        "amr must include hwk, pin, user: {amr:?}"
-    );
-    assert_eq!(
-        jwt_payload.get("acr").and_then(|v| v.as_str()),
-        Some(crate::services::auth::ACR_AAL3),
-        "acr must be AAL3: {jwt_payload}"
-    );
-
-    // 11. G1: the fresh session must pass the freshness gate on key delete.
-    // The "last key" guard refuses to delete the only key, so we cannot
-    // drive DELETE to 200 here without a second authenticator — but the
-    // freshness check itself runs *before* the last-key guard, so a 401
-    // StepUpRequired response would prove the gate fails. Instead, we
-    // verify via the unit-test coverage of `require_fresh_timestamp` plus
-    // the auth_time claim being recent (above), which together pin the
-    // fix. A stale-auth_time session (the bug) would have produced
-    // auth_time=null and been rejected; here auth_time is present and
-    // recent, so `unwrap_or(0)` is never taken.
-}
-
-/// Decode a JWT's payload (middle segment) as a JSON object without
-/// verifying the signature — test-only helper for asserting claim values.
-fn decode_jwt_payload_claims(jwt: &str) -> serde_json::Value {
-    let parts: Vec<&str> = jwt.split('.').collect();
-    assert!(parts.len() >= 2, "JWT must have at least 2 parts");
-    let payload_bytes = URL_SAFE_NO_PAD
-        .decode(parts[1])
-        .or_else(|_| base64::engine::general_purpose::STANDARD.decode(parts[1]))
-        .expect("decode JWT payload");
-    serde_json::from_slice(&payload_bytes).expect("parse JWT payload JSON")
 }
 
 #[tokio::test]
@@ -1321,19 +2207,72 @@ async fn test_browser_register_start_refuses_deactivated_user() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "deactivated-start@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
-    crate::db::update_user_active_status(&state.store, &user.id, false)
+    db::update_user_active_status(&state.store, &user.id, false)
         .await
         .expect("deactivate user");
 
     let cookie = format!("{}={token}", vouch_common::SESSION_COOKIE_NAME);
-    let (status, body) =
-        http_post_json(&app, "/enroll/webauthn/start", "{}", &[("Cookie", &cookie)]).await;
+    let (status, body) = http_post_json(
+        &app,
+        "/enroll/webauthn/start",
+        "{}",
+        &[("Cookie", &cookie), ("Origin", "https://test.example.com")],
+    )
+    .await;
     assert_eq!(
         status,
-        StatusCode::FORBIDDEN,
+        StatusCode::UNAUTHORIZED,
         "deactivated user must not start key registration: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+    assert_eq!(error["message"], "User account is deactivated");
+}
+
+#[tokio::test]
+async fn test_browser_register_start_refuses_vanished_user() {
+    // A user hard-deleted while their enrollment cookie survives must not
+    // begin key registration: the start guard rejects `Ok(None)` the same way
+    // it rejects `active=false`, matching the completion handler.
+    let target: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let (calls, hook) = install_user_vanish_hook(target.clone());
+    let (app, state) = test_app_with_modify_hook(|store| {
+        store.set_get_user_by_id_test_hook(hook);
+    })
+    .await;
+    let (user, cookie) = browser_user_session(&state, "vanished-start@example.com").await;
+    *target.lock().expect("activate hook") = Some(user.id.clone());
+
+    let (status, body) = http_post_json(
+        &app,
+        "/enroll/webauthn/start",
+        "{}",
+        &[
+            ("Cookie", cookie.as_str()),
+            ("Origin", "https://test.example.com"),
+        ],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "deleted user must not start key registration: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+    assert_eq!(error["message"], "User not found");
+    assert!(
+        calls.load(Ordering::SeqCst) >= 1,
+        "the forced Ok(None) must have reached the handler's user read"
     );
 }
 
@@ -1343,7 +2282,23 @@ async fn test_browser_register_complete_refuses_deactivated_user() {
     // for five minutes) must not complete key registration (issue #846).
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "deactivated-complete@example.com").await;
-    crate::db::update_user_active_status(&state.store, &user.id, false)
+    // The session is minted BEFORE deactivation; sessions survive
+    // `update_user_active_status` (admin tooling revokes sessions in a
+    // separate step). The cookie therefore still extracts a token whose
+    // `sub` matches the state JWT — the caller-binding check passes, and
+    // the deactivated-user guard fires as it did before the fix.
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    db::update_user_active_status(&state.store, &user.id, false)
         .await
         .expect("deactivate user");
     let user_uuid = Uuid::parse_str(&user.id).expect("user id is a uuid");
@@ -1374,11 +2329,353 @@ async fn test_browser_register_complete_refuses_deactivated_user() {
     })
     .to_string();
 
-    let (status, resp) = http_post_json(&app, "/enroll/webauthn/complete", &body, &[]).await;
+    let cookie = session_cookie_header(&token);
+    let (status, resp) = http_post_json(
+        &app,
+        "/enroll/webauthn/complete",
+        &body,
+        &[
+            ("Cookie", cookie.as_str()),
+            ("Origin", "https://test.example.com"),
+        ],
+    )
+    .await;
+    // After the `load_active_user` fix, a deactivated user is rejected with
+    // the same shape every other authed handler returns: 401 "User account
+    // is deactivated", not the legacy 403 "user_deactivated".
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "deactivated user must not complete key registration: {resp}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&resp).expect("valid JSON");
+    assert_eq!(error["code"], "unauthorized");
+    assert_eq!(error["message"], "User account is deactivated");
+}
+
+// ── browser_register_complete — deleted user (in-flight delete_user race) ──
+//
+// A user hard-deleted in the window between `browser_register_start` (which
+// issued the state, valid for five minutes) and this completion must be
+// rejected — not proceed to the single-use consume and WebAuthn
+// verification. The `extract_session_from_cookie` extractor validates the
+// session via `session_cache.get_session_by_token_hash` and does NOT call
+// `get_user_by_id`; the handler's `load_active_user` read is the ONLY
+// `get_user_by_id` on this path (mirrors the org-scoped OAuth app race in
+// `handlers/applications/web.rs`, fixed via the same
+// `get_user_by_id_test_hook` seam, and the CLI sibling regression test
+// `test_register_complete_refuses_vanished_user`). Before the
+// `load_active_user` fix the inline `if let Some(ref account) = account`
+// guard admitted `Ok(None)` and the request reached WebAuthn, returning
+// 400 invalid_attestation — the smoking gun that a deleted user was being
+// treated like an active user.
+
+/// Install a `get_user_by_id_test_hook` that forces `Ok(None)` (the "user
+/// vanished mid-request" outcome) for `target` once it has been set. While
+/// `target` is `None` (during test setup) every read runs for real, so
+/// `create_test_user` / `create_test_session_with` work normally. Returns a
+/// counter that is bumped on each forced read so the test can assert the
+/// forced `Ok(None)` landed on the handler's read (the cookie extractor
+/// makes no `get_user_by_id` call on this path, so the count must be exactly
+/// one).
+fn install_user_vanish_hook(
+    target: Arc<Mutex<Option<String>>>,
+) -> (Arc<AtomicU32>, GetUserByIdTestHook) {
+    let calls = Arc::new(AtomicU32::new(0));
+    let calls_for_hook = calls.clone();
+    let hook: GetUserByIdTestHook = Arc::new(move |uid: &str| {
+        let active = target.lock().expect("hook target lock poisoned").as_deref() == Some(uid);
+        if !active {
+            return false;
+        }
+        calls_for_hook.fetch_add(1, Ordering::SeqCst);
+        // Every handler-path read for the target user is forced to `Ok(None)`.
+        // The browser completion path's `load_active_user` makes exactly one
+        // `get_user_by_id` read, so this forces it on the first (and only)
+        // call.
+        true
+    });
+    (calls, hook)
+}
+
+#[tokio::test]
+async fn test_browser_register_complete_refuses_vanished_user() {
+    let target: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let target_for_hook = target.clone();
+    let (calls, hook) = install_user_vanish_hook(target_for_hook);
+    let (app, state) = test_app_with_modify_hook(|store| {
+        store.set_get_user_by_id_test_hook(hook);
+    })
+    .await;
+
+    let user = create_test_user(&state.store, "vanished-browser-complete@example.com").await;
+    // The session is minted BEFORE the user vanishes; the cookie still
+    // extracts a token whose `sub` matches the state JWT — the caller-binding
+    // check passes, and the active-user guard fires as it does for the
+    // deactivated case.
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let user_uuid = Uuid::parse_str(&user.id).expect("user id is a uuid");
+
+    let (_ccr, webauthn_state) = state
+        .webauthn
+        .start_passkey_registration(user_uuid, &user.email, &user.email, None)
+        .expect("start_passkey_registration");
+    let now = jiff::Timestamp::now();
+    let reg_state = BrowserRegistrationState {
+        device_auth_id: String::new(),
+        user_id: user_uuid,
+        user_email: user.email.clone(),
+        webauthn_state,
+        iat: now.as_second(),
+        exp: now.as_second() + 300,
+    };
+    let state_jwt = reg_state
+        .encode(&state.state_signer)
+        .await
+        .expect("encode state");
+
+    // Activate the hook only now — every `get_user_by_id` during setup ran
+    // with the target unset and so was a no-op.
+    *target.lock().expect("activate hook") = Some(user.id.clone());
+
+    let body = serde_json::json!({
+        "state": state_jwt,
+        "credential_id": valid_credential_id(),
+        "attestation_object": valid_attestation_object(),
+        "client_data_json": valid_client_data_json(),
+    })
+    .to_string();
+
+    let cookie = session_cookie_header(&token);
+    let (status, resp) = http_post_json(
+        &app,
+        "/enroll/webauthn/complete",
+        &body,
+        &[
+            ("Cookie", cookie.as_str()),
+            ("Origin", "https://test.example.com"),
+        ],
+    )
+    .await;
+
+    // The deleted user must be rejected — reaching WebAuthn (400
+    // invalid_attestation) is the bug, not the fix.
+    assert_ne!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "deleted user must NOT reach the WebAuthn-verification / \
+         state-consume stage; the active-user guard must reject `Ok(None)` \
+         the way it rejects `active=false`. Got {status} {resp}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&resp).expect("valid JSON");
+    assert_ne!(
+        json["code"], "invalid_attestation",
+        "deleted user must not reach WebAuthn verification: {json}"
+    );
+    // `load_active_user` rejects `Ok(None)` with 401 "User not found".
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "deleted user rejected: {resp}"
+    );
+    assert_eq!(json["code"], "unauthorized");
+    assert_eq!(json["message"], "User not found");
+
+    // The handler's `load_active_user` read is the ONLY `get_user_by_id` on
+    // this path, so the forced `Ok(None)` must have landed exactly there —
+    // proving the rejection came from the handler's guard, not a too-early
+    // fire that some other layer caught.
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "expected exactly one get_user_by_id call (the handler's load_active_user read)"
+    );
+}
+
+// ── browser_register_complete re-binds the caller to the state JWT ────────
+//
+// Mirrors the fix applied to the CLI `register_complete`: the cookie
+// identified by `extract_session_from_cookie` must hold the same `sub` as
+// the state JWT's `user_id`. A captured state JWT is server-signed but not
+// encrypted; without this check an attacker who holds it could complete
+// the enrollment against the victim's account while presenting only the
+// per-route body checks.
+
+/// Build a user + a session cookie the way `browser_register_start` would
+/// establish one (so the caller is genuinely a logged-in account) and
+/// return both the user row and the raw `Cookie` header value.
+async fn browser_user_session(state: &AppState, email: &str) -> (User, String) {
+    let user = create_test_user(&state.store, email).await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    (user, session_cookie_header(&token))
+}
+
+/// Mint a `BrowserRegistrationState` JWT bound to `user.id`, returning the
+/// token and the expiry timestamp the consume test helper needs.
+async fn browser_register_state(state: &AppState, user: &User) -> (String, i64) {
+    let user_id = Uuid::parse_str(&user.id).expect("user id is a uuid");
+    let (_ccr, webauthn_state) = state
+        .webauthn
+        .start_passkey_registration(user_id, &user.email, &user.email, None)
+        .expect("start_passkey_registration");
+    let now = jiff::Timestamp::now();
+    let exp = now.as_second() + 300;
+    let reg_state = BrowserRegistrationState {
+        device_auth_id: String::new(),
+        user_id,
+        user_email: user.email.clone(),
+        webauthn_state,
+        iat: now.as_second(),
+        exp,
+    };
+    let jwt = reg_state
+        .encode(&state.state_signer)
+        .await
+        .expect("encode state");
+    (jwt, exp)
+}
+
+#[tokio::test]
+async fn test_browser_register_complete_rejects_state_user_mismatch() {
+    // Attacker captures the victim's state JWT and submits the completion
+    // under their own session cookie. The mismatch must be rejected with
+    // 403 forbidden / state_user_mismatch *before* the single-use consume,
+    // so the victim can still spend the state later.
+    let (app, state) = test_app().await;
+    let (victim, victim_cookie) =
+        browser_user_session(&state, "victim-browser-mismatch@example.com").await;
+    let (attacker, attacker_cookie) =
+        browser_user_session(&state, "attacker-browser-mismatch@example.com").await;
+    assert_ne!(victim.id, attacker.id, "test setup must distinct users");
+
+    let (state_jwt, exp) = browser_register_state(&state, &victim).await;
+
+    let body = serde_json::json!({
+        "state": state_jwt,
+        "credential_id": valid_credential_id(),
+        "attestation_object": valid_attestation_object(),
+        "client_data_json": valid_client_data_json(),
+    })
+    .to_string();
+
+    let (status, resp_body) = http_post_json(
+        &app,
+        "/enroll/webauthn/complete",
+        &body,
+        &[
+            ("Cookie", attacker_cookie.as_str()),
+            ("Origin", "https://test.example.com"),
+        ],
+    )
+    .await;
+
     assert_eq!(
         status,
         StatusCode::FORBIDDEN,
-        "deactivated user must not complete key registration: {resp}"
+        "mismatched cookie must 403: {resp_body}"
+    );
+    assert!(
+        resp_body.contains("state_user_mismatch"),
+        "expected 'state_user_mismatch' in body, got: {resp_body}"
+    );
+
+    // The rejected mismatch must NOT have consumed the victim's state
+    // token. `consume_challenge_state_for_test` is the only way to splice
+    // into the single-use store, so this assertion consumes the token as
+    // a side-effect — that's why the legitimate retry below uses a
+    // *fresh* state JWT.
+    let expires_at = jiff::Timestamp::from_second(exp).expect("valid exp");
+    let consume = db::consume_challenge_state_for_test(&state.store, &state_jwt, expires_at).await;
+    assert!(
+        consume.is_ok(),
+        "a rejected mismatch consumed the victim's registration state: {consume:?}"
+    );
+
+    // The legitimate retry: the victim spends a fresh state JWT with a
+    // matching cookie. The caller-binding check passes, the active-user
+    // check passes (victim is active), the consume succeeds, and the
+    // request lands in the AAGUID/x5c check — `valid_attestation_object`
+    // rejects minimal bytes there with `attestation_cert_required`. Must
+    // NOT 403 at the caller-binding guard.
+    let (state_jwt, _exp) = browser_register_state(&state, &victim).await;
+    let body = serde_json::json!({
+        "state": state_jwt,
+        "credential_id": valid_credential_id(),
+        "attestation_object": valid_attestation_object(),
+        "client_data_json": valid_client_data_json(),
+    })
+    .to_string();
+    let (status, resp_body) = http_post_json(
+        &app,
+        "/enroll/webauthn/complete",
+        &body,
+        &[
+            ("Cookie", victim_cookie.as_str()),
+            ("Origin", "https://test.example.com"),
+        ],
+    )
+    .await;
+    assert_ne!(
+        status,
+        StatusCode::FORBIDDEN,
+        "victim with matching cookie must not 403: {resp_body}"
+    );
+}
+
+#[tokio::test]
+async fn test_browser_register_complete_requires_session() {
+    // Without a session cookie the request must be rejected by
+    // `extract_session_from_cookie` before any state work: the WebAuthn
+    // ceremony must not be readable by an anonymous caller of the open
+    // `/enroll/webauthn/complete` route.
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "no-session@example.com").await;
+    let (state_jwt, _exp) = browser_register_state(&state, &user).await;
+
+    let body = serde_json::json!({
+        "state": state_jwt,
+        "credential_id": valid_credential_id(),
+        "attestation_object": valid_attestation_object(),
+        "client_data_json": valid_client_data_json(),
+    })
+    .to_string();
+
+    let (status, resp_body) = http_post_json(
+        &app,
+        "/enroll/webauthn/complete",
+        &body,
+        &[("Origin", "https://test.example.com")],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "missing cookie must 401: {resp_body}"
+    );
+    assert!(
+        resp_body.contains("unauthorized") || resp_body.contains("invalid_session"),
+        "expected unauthorized/invalid_session, got: {resp_body}"
     );
 }
 
@@ -1419,8 +2716,7 @@ async fn make_state_token_with_exp(state: &AppState, email: &str) -> (String, i6
 /// Assert the state token is still unconsumed by spending it directly.
 async fn assert_state_unconsumed(state: &AppState, state_jwt: &str, exp: i64) {
     let expires_at = jiff::Timestamp::from_second(exp).expect("valid exp");
-    let consume =
-        crate::db::consume_challenge_state_for_test(&state.store, state_jwt, expires_at).await;
+    let consume = db::consume_challenge_state_for_test(&state.store, state_jwt, expires_at).await;
     assert!(
         consume.is_ok(),
         "a rejected request consumed the registration state: {consume:?}"
@@ -1443,7 +2739,13 @@ async fn test_enrollment_complete_empty_credential_id_leaves_state_unconsumed() 
     })
     .to_string();
 
-    let (status, resp_body) = http_post_json(&app, "/enroll/webauthn/complete", &body, &[]).await;
+    let (status, resp_body) = http_post_json(
+        &app,
+        "/enroll/webauthn/complete",
+        &body,
+        &[("Origin", "https://test.example.com")],
+    )
+    .await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST, "{resp_body}");
     assert!(
@@ -1467,7 +2769,13 @@ async fn test_enrollment_complete_malformed_client_data_leaves_state_unconsumed(
     })
     .to_string();
 
-    let (status, resp_body) = http_post_json(&app, "/enroll/webauthn/complete", &body, &[]).await;
+    let (status, resp_body) = http_post_json(
+        &app,
+        "/enroll/webauthn/complete",
+        &body,
+        &[("Origin", "https://test.example.com")],
+    )
+    .await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST, "{resp_body}");
     assert!(
@@ -1493,7 +2801,13 @@ async fn test_enrollment_complete_foreign_origin_leaves_state_unconsumed() {
     })
     .to_string();
 
-    let (status, resp_body) = http_post_json(&app, "/enroll/webauthn/complete", &body, &[]).await;
+    let (status, resp_body) = http_post_json(
+        &app,
+        "/enroll/webauthn/complete",
+        &body,
+        &[("Origin", "https://test.example.com")],
+    )
+    .await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST, "{resp_body}");
     assert!(
@@ -1501,4 +2815,638 @@ async fn test_enrollment_complete_foreign_origin_leaves_state_unconsumed() {
         "expected 'invalid_client_data' in body, got: {resp_body}"
     );
     assert_state_unconsumed(&state, &state_jwt, exp).await;
+}
+
+// ── finalize_enrollment_audit_and_device_auth ─────────────────────────────
+//
+// `Enrollment` is the handler's only production emit site for
+// `AuthEventType::Enrollment`. It is recorded *before* the fallible
+// `authorize_device_auth` release so a committed authenticator always has a
+// matching enrollment event even when the CLI release fails. The full
+// `browser_register_complete` path needs a Yubico-pinned attestation chain,
+// so these tests exercise the extracted tail directly — the same tail the
+// handler runs after `create_authenticator` commits.
+
+#[tokio::test]
+async fn finalize_enrollment_audit_records_enrollment_when_device_auth_release_fails() {
+    // Regression: `authorize_device_auth` returns Err after `create_authenticator`
+    // already committed the row. The `Enrollment` audit event must still be
+    // recorded — the pre-fix code placed it after the fallible `?`, skipping it.
+    // `device_auth_id` references no row, so `authorize_device_auth` bails at
+    // the "no device auth request found" arm — the cleanup-swept-row and the
+    // concurrent-tab-loses-CAS triggers hit the same path in production.
+    let state = test_app_state().await;
+    let user = create_test_user(&state.store, "da-fail@example.com").await;
+    // Stand-in for the authenticator `create_authenticator` already committed.
+    let authenticator_id = create_test_authenticator(&state.store, &user.id).await;
+
+    let user_uuid = Uuid::parse_str(&user.id).expect("user id is a uuid");
+    let (_ccr, webauthn_state) = state
+        .webauthn
+        .start_passkey_registration(user_uuid, &user.email, &user.email, None)
+        .expect("start_passkey_registration");
+    let now = jiff::Timestamp::now();
+    let reg_state = BrowserRegistrationState {
+        device_auth_id: "reclaimed-device-auth".to_string(),
+        user_id: user_uuid,
+        user_email: user.email.clone(),
+        webauthn_state,
+        iat: now.as_second(),
+        exp: now.as_second() + 300,
+    };
+    let now = jiff::Timestamp::now();
+    let result = finalize_enrollment_audit_and_device_auth(
+        &state,
+        &reg_state,
+        &authenticator_id,
+        AuthTime::for_test(now.as_second()),
+        ClientInfo::default(),
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "authorize_device_auth must fail and propagate when the device-auth row is missing"
+    );
+
+    // THE BUG FIX: the Enrollment audit row was written before the fallible
+    // device-auth release, so it survives the failure.
+    let enroll_events = audit_events_for(&state, "enrollment", &user.id).await;
+    assert_eq!(
+        enroll_events.len(),
+        1,
+        "Enrollment audit event must be recorded even when authorize_device_auth fails"
+    );
+    let event = enroll_events.first().expect("enrollment event");
+    let data: serde_json::Value = serde_json::from_str(&event.data).expect("event data JSON");
+    assert_eq!(
+        data.get("authenticator_id")
+            .and_then(serde_json::Value::as_str),
+        Some(authenticator_id.as_str()),
+        "Enrollment audit event must reference the committed authenticator"
+    );
+    assert_eq!(
+        data.get("success").and_then(serde_json::Value::as_bool),
+        Some(true),
+        "Enrollment audit event must report success: the authenticator IS committed"
+    );
+
+    // The DeviceAuthApproved event must NOT be recorded — the release failed.
+    let approval_events = state
+        .audit
+        .query_events(&AuditEventFilter {
+            event_types: Some(vec!["device_auth_approved".to_string()]),
+            user_id: Some(user.id.clone()),
+            ..Default::default()
+        })
+        .await
+        .expect("query device_auth_approved events");
+    assert!(
+        approval_events.is_empty(),
+        "no DeviceAuthApproved event may be recorded when authorize_device_auth fails"
+    );
+}
+
+#[tokio::test]
+async fn finalize_enrollment_audit_records_both_events_when_cli_release_succeeds() {
+    // Happy-path CLI flow: a Pending device-auth row exists and
+    // `authorize_device_auth` wins the OCC CAS. Both `Enrollment` and
+    // `DeviceAuthApproved` events are recorded, and the row transitions to
+    // `Authorized` carrying the enrolling authenticator. No regression on the
+    // non-failing CLI branch.
+    let state = test_app_state().await;
+    let user = create_test_user(&state.store, "da-ok@example.com").await;
+    let authenticator_id = create_test_authenticator(&state.store, &user.id).await;
+
+    let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().expect("valid timestamp");
+    let device_auth_id = db::create_device_auth_request(
+        &state.store,
+        "hash-da-ok",
+        "DA-OK-CODE",
+        "test-client",
+        expires_at,
+        5,
+    )
+    .await
+    .expect("seed pending device auth request");
+
+    let user_uuid = Uuid::parse_str(&user.id).expect("user id is a uuid");
+    let (_ccr, webauthn_state) = state
+        .webauthn
+        .start_passkey_registration(user_uuid, &user.email, &user.email, None)
+        .expect("start_passkey_registration");
+    let now = jiff::Timestamp::now();
+    let reg_state = BrowserRegistrationState {
+        device_auth_id,
+        user_id: user_uuid,
+        user_email: user.email.clone(),
+        webauthn_state,
+        iat: now.as_second(),
+        exp: now.as_second() + 300,
+    };
+    let now = jiff::Timestamp::now();
+    let result = finalize_enrollment_audit_and_device_auth(
+        &state,
+        &reg_state,
+        &authenticator_id,
+        AuthTime::for_test(now.as_second()),
+        ClientInfo::default(),
+    )
+    .await;
+    assert!(result.is_ok(), "happy-path CLI release should succeed");
+
+    let enroll_events = audit_events_for(&state, "enrollment", &user.id).await;
+    assert_eq!(
+        enroll_events.len(),
+        1,
+        "Enrollment audit event must be recorded on the happy path"
+    );
+    let approval_events = state
+        .audit
+        .query_events(&AuditEventFilter {
+            event_types: Some(vec!["device_auth_approved".to_string()]),
+            user_id: Some(user.id.clone()),
+            ..Default::default()
+        })
+        .await
+        .expect("query device_auth_approved events");
+    assert_eq!(
+        approval_events.len(),
+        1,
+        "DeviceAuthApproved must be recorded when authorize_device_auth succeeds"
+    );
+
+    // The row transitioned to Authorized and carries the enrolling authenticator.
+    let approved = db::get_device_auth_by_id(&state.store, &reg_state.device_auth_id)
+        .await
+        .expect("read device auth")
+        .expect("device auth row present");
+    let approval_auth_id = match approved.state {
+        DeviceAuthState::Authorized(ref ap) => Some(ap.authenticator_id.as_str()),
+        _ => None,
+    };
+    assert_eq!(
+        approval_auth_id,
+        Some(authenticator_id.as_str()),
+        "device-auth row must be Authorized and reference the enrolling authenticator"
+    );
+}
+
+#[tokio::test]
+async fn finalize_enrollment_audit_records_only_enrollment_for_direct_browser_flow() {
+    // Direct browser flow (`device_auth_id` empty): no `authorize_device_auth`
+    // call is made, so `Enrollment` is recorded and `DeviceAuthApproved` is
+    // not. No regression on the `is_empty()` branch.
+    let state = test_app_state().await;
+    let user = create_test_user(&state.store, "direct@example.com").await;
+    let authenticator_id = create_test_authenticator(&state.store, &user.id).await;
+
+    let user_uuid = Uuid::parse_str(&user.id).expect("user id is a uuid");
+    let (_ccr, webauthn_state) = state
+        .webauthn
+        .start_passkey_registration(user_uuid, &user.email, &user.email, None)
+        .expect("start_passkey_registration");
+    let now = jiff::Timestamp::now();
+    let reg_state = BrowserRegistrationState {
+        device_auth_id: String::new(),
+        user_id: user_uuid,
+        user_email: user.email.clone(),
+        webauthn_state,
+        iat: now.as_second(),
+        exp: now.as_second() + 300,
+    };
+    let now = jiff::Timestamp::now();
+    let result = finalize_enrollment_audit_and_device_auth(
+        &state,
+        &reg_state,
+        &authenticator_id,
+        AuthTime::for_test(now.as_second()),
+        ClientInfo::default(),
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "direct browser flow has no device-auth release and must succeed"
+    );
+
+    let enroll_events = audit_events_for(&state, "enrollment", &user.id).await;
+    assert_eq!(
+        enroll_events.len(),
+        1,
+        "Enrollment audit event must be recorded for the direct browser flow"
+    );
+    let approval_events = state
+        .audit
+        .query_events(&AuditEventFilter {
+            event_types: Some(vec!["device_auth_approved".to_string()]),
+            user_id: Some(user.id.clone()),
+            ..Default::default()
+        })
+        .await
+        .expect("query device_auth_approved events");
+    assert!(
+        approval_events.is_empty(),
+        "no DeviceAuthApproved event may be recorded for the direct browser flow"
+    );
+}
+
+// ── Upstream email shape validation at the enrollment chokepoint ────────
+//
+// `complete_enrollment_after_identity` is the single funnel both the OIDC
+// and SAML callbacks feed. RFC 5322 §3.4.1 addr-spec requires a non-empty
+// local part with no unquoted whitespace or angle brackets; a misconfigured
+// IdP emitting a display-name-wrapped or local-part-less email claim must
+// be rejected before `enroll_user_with_org` persists it as the primary
+// identifier (the same `Email::is_valid_address` rule SCIM create enforces).
+
+// RFC 5322 §3.4.1: a display-name-wrapped mailbox is not an addr-spec.
+#[tokio::test]
+async fn test_enrollment_rejects_display_name_wrapped_email() {
+    let state = test_app_state().await;
+    let (stored, claim) = seed_and_consume_oidc_state(&state, "bad-email-state-1", None).await;
+    let identity = IdentityResult {
+        email: "Alice Example <alice@example.com>".to_string(),
+        // The IdP asserted a usable domain; the *email* is what is
+        // malformed.
+        domain: Some(test_domain("example.com")),
+        upstream: None,
+    };
+
+    let resp = complete_enrollment_after_identity(
+        &state,
+        &stored,
+        identity,
+        claim,
+        ClientInfo::default(),
+        test_arrival(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK, "error page renders as 200");
+
+    let user = db::get_user_by_email(&state.store, "alice example <alice@example.com>")
+        .await
+        .expect("db query ok");
+    assert!(
+        user.is_none(),
+        "a malformed upstream email must not be persisted"
+    );
+}
+
+// RFC 5322 §3.4.1: addr-spec requires a non-empty local part.
+#[tokio::test]
+async fn test_enrollment_rejects_empty_local_part_email() {
+    let state = test_app_state().await;
+    let (stored, claim) = seed_and_consume_oidc_state(&state, "bad-email-state-2", None).await;
+    let identity = IdentityResult {
+        email: "@example.com".to_string(),
+        domain: Some(test_domain("example.com")),
+        upstream: None,
+    };
+
+    let resp = complete_enrollment_after_identity(
+        &state,
+        &stored,
+        identity,
+        claim,
+        ClientInfo::default(),
+        test_arrival(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK, "error page renders as 200");
+
+    let user = db::get_user_by_email(&state.store, "@example.com")
+        .await
+        .expect("db query ok");
+    assert!(
+        user.is_none(),
+        "an email with no local part must not be persisted"
+    );
+}
+
+// RFC 5322 §3.4.1: addr-spec requires a non-empty domain. The shape check
+// lets `foo@` through by design (SCIM's downstream ownership gate rejects
+// it), so enrollment needs its own gate: with `allowed_domains` unset (the
+// default, open-enrollment mode), nothing else rejects an empty domain
+// before `enroll_user_with_org` persists it.
+#[tokio::test]
+async fn test_enrollment_open_mode_rejects_empty_domain_email() {
+    let state = test_app_state().await;
+    let mut config = test_config();
+    config.allowed_domains = None;
+    state.config.store(std::sync::Arc::new(config));
+    let (stored, claim) = seed_and_consume_oidc_state(&state, "bad-email-state-3", None).await;
+    let identity = IdentityResult {
+        email: "foo@".to_string(),
+        domain: None,
+        upstream: None,
+    };
+
+    let resp = complete_enrollment_after_identity(
+        &state,
+        &stored,
+        identity,
+        claim,
+        ClientInfo::default(),
+        test_arrival(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK, "error page renders as 200");
+
+    let user = db::get_user_by_email(&state.store, "foo@")
+        .await
+        .expect("db query ok");
+    assert!(
+        user.is_none(),
+        "an empty-domain email must not be persisted in open-enrollment mode"
+    );
+}
+
+// RFC 5322 §3.4.1 / RFC 1035: a domain with internal whitespace (e.g.
+// `bar .com`) is not a valid DNS domain. `Email::is_valid_address` checks
+// whitespace only in the local part, so `foo@bar .com` passes the shape
+// gate; and the domain is non-empty, so the empty-domain gate would
+// likewise pass it. With `allowed_domains` unset (the default,
+// open-enrollment mode), nothing else rejects it before
+// `enroll_user_with_org` persists `User.email = "foo@bar .com"` —
+// `Email::new` only trims + ASCII-lowercases, preserving the internal
+// space.
+#[tokio::test]
+async fn test_enrollment_open_mode_rejects_whitespace_domain_email() {
+    let state = test_app_state().await;
+    let mut config = test_config();
+    config.allowed_domains = None; // open-enrollment mode (the default)
+    state.config.store(std::sync::Arc::new(config));
+    let (stored, claim) = seed_and_consume_oidc_state(&state, "ws-domain-state", None).await;
+    // A non-Google IdP derives `identity.domain` from the email domain,
+    // and `Domain::parse` refuses the internal space — so this identity
+    // reaches the chokepoint only with `domain: None` (an IdP that asserts
+    // a domain of its own, e.g. via a SAML `domain_attribute`). The email
+    // still carries the malformed domain, which is what this gate checks.
+    let identity = IdentityResult {
+        email: "foo@bar .com".to_string(),
+        domain: None,
+        upstream: None,
+    };
+
+    let resp = complete_enrollment_after_identity(
+        &state,
+        &stored,
+        identity,
+        claim,
+        ClientInfo::default(),
+        test_arrival(),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "a whitespace-bearing domain email is rejected at the enrollment chokepoint"
+    );
+
+    // The rejection happens before `enroll_user_with_org`, so neither the
+    // user nor the synthetic organization is persisted.
+    let user = db::get_user_by_email(&state.store, "foo@bar .com")
+        .await
+        .expect("db query ok");
+    assert!(
+        user.is_none(),
+        "a whitespace-domain email must not be persisted as a user in open-enrollment mode"
+    );
+}
+
+// A tab inside the domain (`foo@bar\t.com`) is whitespace too: the gate's
+// `is_whitespace()` predicate must reject it, not just the ASCII space.
+#[tokio::test]
+async fn test_enrollment_open_mode_rejects_tab_in_domain_email() {
+    let state = test_app_state().await;
+    let mut config = test_config();
+    config.allowed_domains = None; // open-enrollment mode (the default)
+    state.config.store(std::sync::Arc::new(config));
+    let (stored, claim) = seed_and_consume_oidc_state(&state, "ws-tab-domain-state", None).await;
+    let identity = IdentityResult {
+        email: "foo@bar\t.com".to_string(),
+        domain: None,
+        upstream: None,
+    };
+
+    let resp = complete_enrollment_after_identity(
+        &state,
+        &stored,
+        identity,
+        claim,
+        ClientInfo::default(),
+        test_arrival(),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "a tab-bearing domain email is rejected at the enrollment chokepoint"
+    );
+
+    let user = db::get_user_by_email(&state.store, "foo@bar\t.com")
+        .await
+        .expect("db query ok");
+    assert!(
+        user.is_none(),
+        "a tab-domain email must not be persisted as a user in open-enrollment mode"
+    );
+}
+
+// RFC 5322 §3.4.1: a well-formed addr-spec passes in open-enrollment mode
+// too (the positive control pinning that the empty-domain gate does not
+// over-reject when `allowed_domains` is unset).
+#[tokio::test]
+async fn test_enrollment_open_mode_accepts_well_formed_email() {
+    let state = test_app_state().await;
+    let mut config = test_config();
+    config.allowed_domains = None;
+    state.config.store(std::sync::Arc::new(config));
+    let user = create_test_user(&state.store, "open-ok@example.com").await;
+    create_test_authenticator(&state.store, &user.id).await;
+    let (stored, claim) = seed_and_consume_oidc_state(&state, "good-email-state-2", None).await;
+    let identity = IdentityResult {
+        email: "open-ok@example.com".to_string(),
+        domain: Some(test_domain("example.com")),
+        upstream: None,
+    };
+
+    let resp = complete_enrollment_after_identity(
+        &state,
+        &stored,
+        identity,
+        claim,
+        ClientInfo::default(),
+        test_arrival(),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::SEE_OTHER,
+        "a valid email must proceed through enrollment in open-enrollment mode"
+    );
+}
+
+// RFC 5322 §3.4.1: a well-formed addr-spec passes the shape gate (the
+// positive control pinning that the guard does not over-reject).
+#[tokio::test]
+async fn test_enrollment_accepts_well_formed_email() {
+    let state = test_app_state().await;
+    let user = create_test_user(&state.store, "shape-ok@example.com").await;
+    create_test_authenticator(&state.store, &user.id).await;
+    let (stored, claim) = seed_and_consume_oidc_state(&state, "good-email-state", None).await;
+    let identity = IdentityResult {
+        email: "shape-ok@example.com".to_string(),
+        domain: Some(test_domain("example.com")),
+        upstream: None,
+    };
+
+    let resp = complete_enrollment_after_identity(
+        &state,
+        &stored,
+        identity,
+        claim,
+        ClientInfo::default(),
+        test_arrival(),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::SEE_OTHER,
+        "a valid email must proceed through enrollment"
+    );
+}
+
+// =========================================================================
+// Divergent `identity.domain`: when a SAML IdP is configured with
+// `domain_attribute` (or an OIDC IdP asserts `hd`), the organization domain
+// is not the email's domain. That value — not the email's — is what
+// enrollment persists as `Organization.domain` / `UserDoc.org_domain`.
+//
+// A malformed divergent domain has no test here because it has no
+// representation here: `IdentityResult.domain` is an
+// `Option<Domain>`, so the value cannot exist unparsed by the
+// time it reaches this handler. The rejection is pinned where the parse
+// happens — `domain_from_configured_attribute_rejects_whitespace` in
+// services::idp::saml::response::tests, and the `hd`-claim tests in
+// services::idp::oidc::tests.
+// =========================================================================
+
+// A divergent `identity.domain` enrolls in open-enrollment mode, and the
+// synthetic `Organization.domain` is that value — not the email's domain.
+// This pins that the email gate above does not reach across to the org
+// domain and reject the legitimate SAML `domain_attribute` feature.
+#[tokio::test]
+async fn test_enrollment_open_mode_accepts_divergent_identity_domain() {
+    let state = test_app_state().await;
+    let mut config = test_config();
+    config.allowed_domains = None;
+    state.config.store(std::sync::Arc::new(config));
+    // Do NOT pre-create the user: a fresh enrollment (the normal IdP-login
+    // path) creates the user linked to the synthesized org. Pre-creating
+    // would leave `resolve_user` returning the existing user with its
+    // pre-existing `org_id`, hiding the synthesized-org linkage this test
+    // exists to pin.
+    let (stored, claim) =
+        seed_and_consume_oidc_state(&state, "divergent-good-domain-state", None).await;
+    let identity = IdentityResult {
+        email: "saml-div@example.com".to_string(),
+        // A bare domain (never an email), as SAML's `extract_domain`
+        // supplies it.
+        domain: Some(test_domain("corp.example.com")),
+        upstream: None,
+    };
+
+    let resp = complete_enrollment_after_identity(
+        &state,
+        &stored,
+        identity,
+        claim,
+        ClientInfo::default(),
+        test_arrival(),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::SEE_OTHER,
+        "a clean divergent identity.domain must enroll in open-enrollment mode"
+    );
+
+    let enrolled = db::get_user_by_email(&state.store, "saml-div@example.com")
+        .await
+        .expect("db query ok")
+        .expect("a clean divergent identity.domain must persist a user");
+    let org_id = enrolled
+        .org_id
+        .as_deref()
+        .expect("a clean divergent identity.domain must synthesize an org");
+    let org_domain = db::get_organization_domain(&state.store, org_id)
+        .await
+        .expect("db query ok");
+    assert_eq!(
+        org_domain.as_deref(),
+        Some("corp.example.com"),
+        "the synthetic Organization.domain must equal the identity.domain value"
+    );
+}
+
+// Google consumer logins carry no `hd` claim, so `identity.domain` is
+// `None` and no organization is synthesized. The email gate still applies:
+// a clean email enrolls, a malformed email domain does not.
+#[tokio::test]
+async fn test_enrollment_open_mode_gates_email_domain_without_asserted_domain() {
+    let state = test_app_state().await;
+    let mut config = test_config();
+    config.allowed_domains = None;
+    state.config.store(std::sync::Arc::new(config));
+
+    // (1) Clean email, no asserted domain → proceeds.
+    let user = create_test_user(&state.store, "google-consumer@example.com").await;
+    create_test_authenticator(&state.store, &user.id).await;
+    let (stored, claim) = seed_and_consume_oidc_state(&state, "none-domain-good-state", None).await;
+    let identity = IdentityResult {
+        email: "google-consumer@example.com".to_string(),
+        domain: None,
+        upstream: None,
+    };
+    let resp = complete_enrollment_after_identity(
+        &state,
+        &stored,
+        identity,
+        claim,
+        ClientInfo::default(),
+        test_arrival(),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::SEE_OTHER,
+        "a clean email with no asserted org domain must enroll"
+    );
+
+    // (2) Whitespace-bearing email domain → rejected by the email gate.
+    let (stored_ws, claim_ws) =
+        seed_and_consume_oidc_state(&state, "none-domain-ws-state", None).await;
+    let identity_ws = IdentityResult {
+        email: "foo@bar .com".to_string(),
+        domain: None,
+        upstream: None,
+    };
+    let resp = complete_enrollment_after_identity(
+        &state,
+        &stored_ws,
+        identity_ws,
+        claim_ws,
+        ClientInfo::default(),
+        test_arrival(),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "a whitespace-domain email is rejected whether or not a domain is asserted"
+    );
+    let user = db::get_user_by_email(&state.store, "foo@bar .com")
+        .await
+        .expect("db query ok");
+    assert!(user.is_none(), "a whitespace-domain email must not enroll");
 }

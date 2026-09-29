@@ -8,14 +8,16 @@
 //! synchronous FIDO2 device operations run on separate threads. See the
 //! module-level docs in [`crate::fido2`] for why this separation is required.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use vouch_common::{
     RegisterCompleteRequest, RegisterCompleteResponse, RegisterStartRequest, RegisterStartResponse,
+    ResourceLabel, ResourceLabelError,
 };
 
 use crate::client::VouchClient;
 use crate::exit_code::CliError;
 use crate::fido2::{self, FidoDevice, YubiKey};
+use crate::server_url::ServerUrl;
 use vouch_cli::{tr, tr_println};
 
 /// On macOS, Google Chrome claims YubiKeys at the USB device level the moment
@@ -58,15 +60,22 @@ fn browser_register_fallback(server: &str) -> Result<()> {
 ///    unreachable or unauthenticated
 /// 2. All FIDO2 device work on a plain OS thread (wait, PIN, register)
 /// 3. Complete registration with the server (async)
-pub(crate) async fn run(server: &str, name: Option<&str>, timeout_secs: u64) -> Result<()> {
-    let name = name.unwrap_or("YubiKey");
-    tr_println!("register-starting", name = name);
+pub(crate) async fn run(server: &ServerUrl, name: Option<&str>, timeout_secs: u64) -> Result<()> {
+    // Validate the name before any hardware interaction or network round-trip,
+    // so input the server would reject does not cost a YubiKey PIN prompt. The
+    // default "YubiKey" always parses, so an omitted --name never bails.
+    let name = match ResourceLabel::parse(name.unwrap_or("YubiKey")) {
+        Ok(name) => name,
+        Err(ResourceLabelError::Empty) => bail!(tr!("register-err-name-empty")),
+        Err(ResourceLabelError::TooLong) => bail!(tr!("register-err-name-long")),
+    };
+    tr_println!("register-starting", name = name.as_str());
     println!();
 
     // Pre-flight: if Chrome is running on macOS, the CTAP-HID flow will fail
     // due to Chrome's USB device claim. Route through the browser instead.
     if is_chrome_running() {
-        return browser_register_fallback(server);
+        return browser_register_fallback(server.as_str());
     }
 
     // Step 1: Start registration with server (async, authenticated).

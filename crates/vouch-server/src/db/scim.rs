@@ -6,11 +6,15 @@ use super::document_type::{Document, DocumentType};
 use super::documents::audit::ScimAuditData;
 use super::documents::organization::OrganizationDoc;
 use super::documents::scim::{ScimGroupDoc, ScimGroupMemberDoc, ScimTokenDoc};
-use super::documents::user::UserDoc;
+use super::documents::user::{UserDoc, UserOrg};
 use super::store::DocumentStore;
+use crate::db::pool::{self, RetryableError};
+use crate::email::Email;
 use crate::error::ServiceError;
+use crate::scim_filter::{AttrExp, CompareOp, FilterError};
 use anyhow::Result;
 use jiff::Timestamp;
+use std::collections::BTreeSet;
 
 // ============================================================================
 // SCIM Scopes
@@ -167,6 +171,7 @@ impl From<Document<ScimTokenDoc>> for ScimToken {
 pub async fn get_scim_token_by_hash(
     store: &DocumentStore,
     token_hash: &str,
+    now: Timestamp,
 ) -> Result<Option<ScimToken>> {
     let doc = store
         .find_one::<ScimTokenDoc>("token_hash", token_hash)
@@ -177,7 +182,6 @@ pub async fn get_scim_token_by_hash(
     };
 
     // Check expiration
-    let now = Timestamp::now();
     if let Some(expires_at) = doc.data.expires_at
         && expires_at <= now
     {
@@ -223,6 +227,10 @@ pub struct CreateScimTokenParams<'a> {
 /// - `ServiceError::NotFound` — organization does not exist.
 /// - `ServiceError::Api(409 "token_limit_reached")` — cap reached (terminal).
 /// - `ServiceError::Api(409 "conflict")` — OCC retry budget exhausted; caller may retry.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "stamps the token's created_at, and the cap count re-reads per OCC attempt"
+)]
 pub async fn create_scim_token(
     store: &DocumentStore,
     params: &CreateScimTokenParams<'_>,
@@ -321,25 +329,29 @@ pub async fn create_scim_token(
 
 /// Delete a SCIM token, scoped to the given organization.
 ///
-/// Returns `Ok(true)` if a token was deleted, `Ok(false)` if no
-/// matching token was found for the given org (prevents cross-org
-/// deletion).
+/// Returns `Ok(true)` only when this call removed the token. `Ok(false)` covers
+/// a token that does not exist, belongs to another org, or was removed by a
+/// concurrent delete, so exactly one of several concurrent deletes reports
+/// success and gets audited.
 pub async fn delete_scim_token(
     store: &DocumentStore,
     token_id: &str,
     org_id: &str,
 ) -> Result<bool> {
-    let Some(doc) = store.get::<ScimTokenDoc>(token_id).await? else {
-        return Ok(false);
-    };
+    crate::with_dsql_retry!(async {
+        let mut tx = store.begin().await?;
 
-    // Prevent cross-org deletion
-    if doc.data.org_id.as_deref() != Some(org_id) {
-        return Ok(false);
-    }
+        let Some(doc) = tx.get::<ScimTokenDoc>(token_id).await? else {
+            return Ok(false);
+        };
+        if doc.data.org_id.as_deref() != Some(org_id) {
+            return Ok(false);
+        }
 
-    store.delete(token_id).await?;
-    Ok(true)
+        let removed = tx.delete(token_id).await?;
+        tx.commit().await?;
+        Ok(removed)
+    })
 }
 
 /// List SCIM tokens, optionally filtered by organization.
@@ -364,32 +376,21 @@ pub async fn delete_expired_scim_tokens(store: &DocumentStore) -> Result<u64> {
 // SCIM Audit → AuditStore
 // ============================================================================
 
-/// Insert SCIM audit log entry via AuditStore.
+/// Record a SCIM audit log entry via AuditStore; best-effort.
 ///
 /// `org_domain` is the acting organization's primary email domain
 /// ([`ScimAuth::org_domain`]). SCIM operations have no user/email of their
 /// own, so without it the event is written with a NULL `email_domain` and
 /// is invisible to org-scoped audit reads (`/admin/audit`,
 /// `GET /api/v1/org/audit-events`).
-pub async fn insert_scim_audit(
+pub async fn record_scim_audit(
     audit: &AuditStore,
-    operation: &str,
-    resource_type: &str,
-    resource_id: &str,
-    actor_token_id: Option<&str>,
-    details: Option<&str>,
+    data: &ScimAuditData<'_>,
     org_domain: Option<&str>,
-) -> Result<String> {
-    let data = ScimAuditData {
-        operation: operation.to_string(),
-        resource_type: resource_type.to_string(),
-        resource_id: resource_id.to_string(),
-        actor_token_id: actor_token_id.map(String::from),
-        details: details.map(String::from),
-    };
+) {
     audit
-        .insert_event_with_domain(AuditEventKind::ScimOperation, None, org_domain, &data)
-        .await
+        .record_event_with_domain(AuditEventKind::ScimOperation, None, org_domain, data)
+        .await;
 }
 
 // ============================================================================
@@ -432,10 +433,10 @@ impl From<Document<UserDoc>> for ScimUserRecord {
 /// Returns [`ScimFilterError::FilterTooBroad`] for non-indexed filters on
 /// tables with >10 000 rows. Returns [`ScimFilterError::OffsetTooLarge`]
 /// when the computed offset exceeds 10 000.
-pub async fn list_scim_users(
+pub(crate) async fn list_scim_users(
     store: &DocumentStore,
     org_id: &str,
-    filter: Option<&str>,
+    filter: Option<&UserListFilter>,
     start_index: usize,
     count: usize,
 ) -> Result<(Vec<ScimUserRecord>, usize)> {
@@ -451,19 +452,20 @@ pub async fn list_scim_users(
         return Ok((page, total));
     }
 
-    // Non-indexed filter: must load org-scoped rows and filter in-app.
-    // Bounded by 10k so an org with millions of users does not load every
-    // record into memory for an unrecognized filter expression.
-    if filter.is_some() {
+    // Non-indexed filter (`co`/`sw`): must load org-scoped rows and filter
+    // in-app. Bounded by 10k so an org with millions of users does not load
+    // every record into memory.
+    if let Some(f) = filter {
         let total_in_org = store.count::<UserDoc>("org_id", org_id).await?;
         if total_in_org > 10_000 {
             return Err(ScimFilterError::FilterTooBroad.into());
         }
         let all = store.find_all::<UserDoc>("org_id", org_id).await?;
-        let mut records: Vec<ScimUserRecord> = all.into_iter().map(ScimUserRecord::from).collect();
-        if let Some(f) = filter {
-            records = apply_scim_user_filter(records, f)?;
-        }
+        let mut records: Vec<ScimUserRecord> = all
+            .into_iter()
+            .map(ScimUserRecord::from)
+            .filter(|r| f.matches(r))
+            .collect();
         records.sort_by(|a, b| a.email.cmp(&b.email));
         let total = records.len();
         let page = records.into_iter().skip(offset).take(count).collect();
@@ -484,77 +486,35 @@ pub async fn list_scim_users(
     ))
 }
 
-/// Try indexed eq lookups for SCIM user filters, scoped to org.
+/// Try indexed eq lookups for SCIM user filters, scoped to org. `None` for
+/// an operator the indexes cannot answer (`co`, `sw`).
 async fn try_indexed_user_lookup(
     store: &DocumentStore,
     org_id: &str,
-    filter: &str,
+    filter: &UserListFilter,
 ) -> Result<Option<Vec<ScimUserRecord>>> {
-    // userName/email eq → find_by_indexes combining email + org_id at DB level.
-    //
-    // `userName` and `email` are both `caseExact: false` per RFC 7643, and
-    // emails are stored ASCII-lowercase by `create_scim_user` /
-    // `enroll_user_with_org`. Normalize the filter value to match the stored
-    // index; otherwise a mixed-case filter like `userName eq "Alice@example.com"`
-    // misses the user stored as `alice@example.com`.
-    for attr in &["userName", "email"] {
-        if let Some(f) = parse_scim_filter(filter, attr)?
-            && f.op == ScimFilterOp::Eq
-        {
-            let email = crate::email::Email::new(&f.value);
-            let docs = store
+    let docs = match filter {
+        // `userName` is `caseExact: false` per RFC 7643, and emails are stored
+        // ASCII-lowercase by `create_scim_user` / `enroll_user_with_org`.
+        // Normalize the filter value to match the stored index; otherwise a
+        // mixed-case filter like `userName eq "Alice@example.com"` misses the
+        // user stored as `alice@example.com`.
+        UserListFilter::UserName(f) if f.op == ScimFilterOp::Eq => {
+            let email = Email::new(&f.value);
+            store
                 .find_by_indexes::<UserDoc>(&[("email", email.as_str()), ("org_id", org_id)])
-                .await?;
-            return Ok(Some(docs.into_iter().map(ScimUserRecord::from).collect()));
+                .await?
         }
-    }
-
-    // externalId eq → find_by_indexes combining external_id + org_id
-    // (externalId has caseExact: true per RFC 7643 Section 3.1, so the
-    // case-sensitive indexed lookup below is correct and must not be
-    // lowercased.)
-    if let Some(f) = parse_scim_filter(filter, "externalId")?
-        && f.op == ScimFilterOp::Eq
-    {
-        let docs = store
-            .find_by_indexes::<UserDoc>(&[("external_id", &f.value), ("org_id", org_id)])
-            .await?;
-        return Ok(Some(docs.into_iter().map(ScimUserRecord::from).collect()));
-    }
-
-    Ok(None)
-}
-
-/// Apply SCIM filter to user records in application code.
-fn apply_scim_user_filter(
-    records: Vec<ScimUserRecord>,
-    filter: &str,
-) -> Result<Vec<ScimUserRecord>> {
-    for attr in &["userName", "email"] {
-        if let Some(f) = parse_scim_filter(filter, attr)? {
-            return Ok(records
-                .into_iter()
-                .filter(|r| match_filter_value(&r.email, &f, false))
-                .collect());
+        // externalId has caseExact: true per RFC 7643 Section 3.1, so the
+        // case-sensitive indexed lookup is correct and must not be lowercased.
+        UserListFilter::ExternalId(f) if f.op == ScimFilterOp::Eq => {
+            store
+                .find_by_indexes::<UserDoc>(&[("external_id", &f.value), ("org_id", org_id)])
+                .await?
         }
-    }
-
-    // `externalId` has `caseExact: true` per RFC 7643 Section 3.1, so the
-    // in-memory filter must be case-sensitive for all operators — matching
-    // the case-sensitive indexed `eq` lookup in `try_indexed_user_lookup`.
-    if let Some(f) = parse_scim_filter(filter, "externalId")? {
-        return Ok(records
-            .into_iter()
-            .filter(|r| {
-                r.external_id
-                    .as_deref()
-                    .is_some_and(|eid| match_filter_value(eid, &f, true))
-            })
-            .collect());
-    }
-
-    // No recognized filter — return all
-    Ok(records)
+        UserListFilter::UserName(_) | UserListFilter::ExternalId(_) => return Ok(None),
+    };
+    Ok(Some(docs.into_iter().map(ScimUserRecord::from).collect()))
 }
 
 /// Check if a value matches a SCIM filter.
@@ -586,11 +546,17 @@ fn match_filter_value(value: &str, filter: &ScimFilter, case_exact: bool) -> boo
 ///
 /// Returns `None` if the user doesn't exist OR belongs to a different
 /// org. Treating cross-org as not-found avoids leaking existence.
+///
+/// Every id Vouch issues is a UUID, so an id that does not parse as one
+/// names no resource and returns `None` without a store read.
 pub async fn get_scim_user(
     store: &DocumentStore,
     user_id: &str,
     org_id: &str,
 ) -> Result<Option<ScimUserRecord>> {
+    if uuid::Uuid::try_parse(user_id).is_err() {
+        return Ok(None);
+    }
     let Some(doc) = store.get::<UserDoc>(user_id).await? else {
         return Ok(None);
     };
@@ -628,11 +594,11 @@ pub enum CreateScimUserError {
     Other(#[from] anyhow::Error),
 }
 
-impl crate::db::pool::RetryableError for CreateScimUserError {
+impl RetryableError for CreateScimUserError {
     fn is_retryable(&self) -> bool {
         match self {
             Self::OccConflict => true,
-            Self::Other(e) => crate::db::pool::is_retryable_db_error(e),
+            Self::Other(e) => pool::is_retryable_db_error(e),
             Self::DomainNotOwned | Self::DuplicateEmail => false,
         }
     }
@@ -715,7 +681,7 @@ pub async fn create_scim_user(
     // of `Alice@example.com` would not collide with a subsequent OIDC
     // enrollment as `alice@example.com`, producing two user records for the
     // same person.
-    let email = crate::email::Email::new(email);
+    let email = Email::new(email);
 
     // Derived once outside the retried block: stable across retries and
     // identical for concurrent callers passing the same email in any casing
@@ -743,7 +709,7 @@ pub async fn create_scim_user(
                 // `Email::domain` is already canonical (lowercase), matching
                 // the convention used by `OrganizationDoc::verified_domains`
                 // (additional domains are stored verbatim from
-                // `normalize_domain`, which lowercases; the primary domain is
+                // `Domain::parse`, which lowercases; the primary domain is
                 // lowercased by `get_or_create_org`).
                 let candidate_domain = email.domain().ok_or_else(|| {
                     CreateScimUserError::Other(anyhow::anyhow!(
@@ -777,10 +743,19 @@ pub async fn create_scim_user(
             return Err(CreateScimUserError::DuplicateEmail);
         }
 
+        // `id` and `domain` come from the one `org_snapshot` read above
+        // (the domain-ownership check already required it), so one can't be
+        // stamped without the other.
+        let user_org = org_snapshot.as_ref().map(|(id, _, data)| UserOrg {
+            id,
+            domain: data.domain.as_str(),
+        });
+
         let doc = UserDoc {
             email: email.clone(),
             name: name.map(String::from),
-            org_id: org_id_owned.clone(),
+            org_id: user_org.map(|o| o.id.to_string()),
+            org_domain: user_org.map(|o| o.domain.to_string()),
             is_org_admin: false,
             active,
             external_id: external_id.map(String::from),
@@ -828,14 +803,24 @@ pub async fn create_scim_user(
 
 /// Update a user via SCIM, scoped to the caller's org.
 ///
-/// Returns `Ok(false)` if the user doesn't exist, belongs to a
-/// different org, or if a concurrent org-ownership change races with
-/// the modify loop and causes the mutation to be skipped (rather than
-/// reporting silent success). `Ok(true)` on a successful update.
+/// Returns `Ok(false)` if the user doesn't exist, belongs to a different org,
+/// or if a concurrent org-ownership change races with this transaction and
+/// causes the mutation to be skipped (rather than reporting silent success).
+/// `Ok(true)` on a successful update.
 ///
-/// Uses optimistic concurrency (`store.modify`) so concurrent field
-/// mutations (e.g. a GitHub identity update) landing between the org
-/// check and the write do not silently overwrite each other.
+/// # Errors
+///
+/// [`ScimUpdateError::LastAdmin`] when the write would clear `active` on the
+/// organization's only active admin. `active=false` reaching an admin removes
+/// them from the admin count exactly as
+/// [`crate::db::demote_or_deactivate_member`] does, so it takes the same floor
+/// — otherwise a `UsersWrite` token could `PATCH active=false` across every
+/// admin in turn.
+///
+/// The count, the write, and the organization row's version bump share one
+/// transaction. That is what makes the floor atomic on every backend: DSQL is
+/// OCC-only with no `SELECT … FOR UPDATE`, so concurrent deactivations have to
+/// be forced to collide on the org row (CLAUDE.md rule 10).
 pub async fn update_scim_user(
     store: &DocumentStore,
     user_id: &str,
@@ -843,40 +828,101 @@ pub async fn update_scim_user(
     name: Option<&str>,
     external_id: Option<&str>,
     active: bool,
-) -> Result<bool> {
-    // Org ownership check: read before entering the modify loop.
-    let Some(doc) = store.get::<UserDoc>(user_id).await? else {
-        return Ok(false);
-    };
-    if doc.data.org_id.as_deref() != Some(org_id) {
-        return Ok(false);
-    }
+) -> std::result::Result<bool, ScimUpdateError> {
+    crate::with_dsql_retry!(async {
+        let mut tx = store.begin().await?;
 
-    // Use modify for optimistic concurrency — re-check org ownership
-    // inside the closure so a concurrent org migration cannot smuggle
-    // a cross-org write through a version win.
-    //
-    // `AtomicBool` is used to signal from the `Fn` closure back to the caller
-    // whether the mutation was applied (org still matched) or skipped.
-    let applied = std::sync::atomic::AtomicBool::new(false);
-    let found = store
-        .modify::<UserDoc, _>(user_id, |data| {
-            // Reset at the top of every attempt: if an earlier OCC retry set
-            // this flag but then lost the version race, the closure runs again
-            // and org ownership must be re-evaluated from scratch.
-            applied.store(false, std::sync::atomic::Ordering::Relaxed);
-            if data.org_id.as_deref() == Some(org_id) {
-                data.name = name.map(String::from);
-                data.external_id = external_id.map(String::from);
-                data.active = active;
-                applied.store(true, std::sync::atomic::Ordering::Relaxed);
+        // Test-only seam, before the first read so a write it commits is
+        // visible to the last-admin count below.
+        #[cfg(test)]
+        store.run_last_admin_count_test_hook(user_id).await;
+
+        let Some(user_doc) = tx.get::<UserDoc>(user_id).await? else {
+            return Ok(false);
+        };
+        // Re-checked inside the transaction so a concurrent org migration
+        // cannot smuggle a cross-org write through a version win.
+        if user_doc.data.org_id.as_deref() != Some(org_id) {
+            return Ok(false);
+        }
+
+        // Version first, then the predicate read it must guard — read
+        // afterwards it would already carry a sibling's bump and the
+        // compare-and-update below would wrongly succeed. Same ordering and
+        // same reason as `demote_or_deactivate_member` and `delete_user`.
+        let org_doc = tx
+            .get::<super::documents::organization::OrganizationDoc>(org_id)
+            .await?;
+
+        // Only clearing `active` on a currently-active admin can breach the
+        // floor. Renames, external_id changes, and `active=true` cannot.
+        if !active
+            && user_doc.data.is_org_admin
+            && user_doc.data.active
+            && super::users::other_active_admins(&mut tx, org_id, user_id).await? == 0
+        {
+            return Err(ScimUpdateError::LastAdmin);
+        }
+
+        // A deactivated user can no longer manage their applications: their
+        // RFC 7592 registration access tokens are revoked on every client they
+        // own, and org-scoped applications move to an active admin, as on
+        // delete and on admin deactivation.
+        if !active && user_doc.data.active {
+            if !super::users::revoke_owner_registration_tokens(&mut tx, user_id).await? {
+                return Err(ScimUpdateError::OccConflict);
             }
-        })
-        .await?;
-    // found=true but applied=false means a concurrent org-ownership change
-    // raced between our pre-check and the modify loop. Report it as
-    // not-found rather than silent success so the caller sees the right signal.
-    Ok(found && applied.load(std::sync::atomic::Ordering::Relaxed))
+            if !super::users::transfer_org_clients(&mut tx, Some(org_id), user_id).await? {
+                return Err(ScimUpdateError::OccConflict);
+            }
+        }
+
+        let mut updated = user_doc.data.clone();
+        updated.name = name.map(String::from);
+        updated.external_id = external_id.map(String::from);
+        updated.active = active;
+        if !tx
+            .compare_and_update(user_id, user_doc.version, &updated)
+            .await?
+        {
+            return Err(ScimUpdateError::OccConflict);
+        }
+
+        if let Some(org_doc) = org_doc
+            && !tx
+                .compare_and_update(org_id, org_doc.version, &org_doc.data)
+                .await?
+        {
+            return Err(ScimUpdateError::OccConflict);
+        }
+
+        tx.commit().await?;
+        Ok(true)
+    })
+}
+
+/// Failure modes of [`update_scim_user`].
+#[derive(Debug, thiserror::Error)]
+pub enum ScimUpdateError {
+    /// The write would leave the organization with no active admin.
+    #[error("organization would be left with no active admin")]
+    LastAdmin,
+    /// Another transaction changed the organization or the user row while this
+    /// update was counting admins.
+    #[error("organization changed during SCIM user update")]
+    OccConflict,
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+impl super::pool::RetryableError for ScimUpdateError {
+    fn is_retryable(&self) -> bool {
+        match self {
+            Self::OccConflict => true,
+            Self::LastAdmin => false,
+            Self::Other(e) => super::pool::is_retryable_db_error(e),
+        }
+    }
 }
 
 // ============================================================================
@@ -894,20 +940,118 @@ pub(crate) enum ScimFilterOp {
     Sw,
 }
 
-/// Parsed SCIM filter result.
+/// One supported comparison: an operator and its decoded string value.
 #[derive(Debug)]
 pub(crate) struct ScimFilter {
     /// The filter operator.
     pub op: ScimFilterOp,
-    /// The quoted value from the filter expression.
+    /// The comparison value, with its JSON escapes resolved.
     pub value: String,
+}
+
+impl TryFrom<&AttrExp<'_>> for ScimFilter {
+    type Error = FilterError;
+
+    /// `eq`, `co`, and `sw` with a string value; every other operator is
+    /// "the specified attribute and filter comparison combination is not
+    /// supported" (RFC 7644 §3.12 Table 9).
+    fn try_from(exp: &AttrExp<'_>) -> Result<Self, FilterError> {
+        let op = match exp.op {
+            CompareOp::Eq => ScimFilterOp::Eq,
+            CompareOp::Co => ScimFilterOp::Co,
+            CompareOp::Sw => ScimFilterOp::Sw,
+            CompareOp::Ne
+            | CompareOp::Ew
+            | CompareOp::Gt
+            | CompareOp::Lt
+            | CompareOp::Ge
+            | CompareOp::Le => return Err(exp.unsupported()),
+        };
+        Ok(Self {
+            op,
+            value: exp.string_value()?.to_owned(),
+        })
+    }
+}
+
+/// A Users list filter Vouch evaluates, built from a parsed [`AttrExp`].
+/// Any other attribute is declined, never widened to every user.
+#[derive(Debug)]
+pub(crate) enum UserListFilter {
+    /// `userName`, or its alias `email`: the stored email, `caseExact: false`.
+    UserName(ScimFilter),
+    /// `externalId`, `caseExact: true` (RFC 7643 Section 3.1).
+    ExternalId(ScimFilter),
+}
+
+impl TryFrom<AttrExp<'_>> for UserListFilter {
+    type Error = FilterError;
+
+    fn try_from(exp: AttrExp<'_>) -> Result<Self, FilterError> {
+        if exp.is("userName") || exp.is("email") {
+            Ok(Self::UserName(ScimFilter::try_from(&exp)?))
+        } else if exp.is("externalId") {
+            Ok(Self::ExternalId(ScimFilter::try_from(&exp)?))
+        } else {
+            Err(exp.unsupported())
+        }
+    }
+}
+
+impl UserListFilter {
+    /// Whether `record` matches, for the in-memory path. Case sensitivity
+    /// follows each attribute's `caseExact` (RFC 7644 §3.4.2.2).
+    fn matches(&self, record: &ScimUserRecord) -> bool {
+        match self {
+            Self::UserName(f) => match_filter_value(&record.email, f, false),
+            Self::ExternalId(f) => record
+                .external_id
+                .as_deref()
+                .is_some_and(|eid| match_filter_value(eid, f, true)),
+        }
+    }
+}
+
+/// A Groups list filter Vouch evaluates, built from a parsed [`AttrExp`].
+/// Any other attribute is declined, never widened to every group.
+#[derive(Debug)]
+pub(crate) enum GroupListFilter {
+    /// `displayName`, `caseExact: false` (RFC 7643 Section 8.7.2).
+    DisplayName(ScimFilter),
+    /// `externalId`, `caseExact: true` (RFC 7643 Section 3.1).
+    ExternalId(ScimFilter),
+}
+
+impl TryFrom<AttrExp<'_>> for GroupListFilter {
+    type Error = FilterError;
+
+    fn try_from(exp: AttrExp<'_>) -> Result<Self, FilterError> {
+        if exp.is("displayName") {
+            Ok(Self::DisplayName(ScimFilter::try_from(&exp)?))
+        } else if exp.is("externalId") {
+            Ok(Self::ExternalId(ScimFilter::try_from(&exp)?))
+        } else {
+            Err(exp.unsupported())
+        }
+    }
+}
+
+impl GroupListFilter {
+    /// Whether `record` matches, for the in-memory path.
+    fn matches(&self, record: &ScimGroupRecord) -> bool {
+        match self {
+            Self::DisplayName(f) => match_filter_value(&record.display_name, f, false),
+            Self::ExternalId(f) => record
+                .external_id
+                .as_deref()
+                .is_some_and(|eid| match_filter_value(eid, f, true)),
+        }
+    }
 }
 
 /// Error from SCIM filter or pagination operations.
 #[derive(Debug)]
 pub enum ScimFilterError {
-    /// The filter uses an operator we don't support.
-    UnsupportedOperator(String),
     /// Non-indexed filter against a table with >10 000 rows.
     FilterTooBroad,
     /// Requested offset exceeds the 10 000-row cap.
@@ -917,9 +1061,6 @@ pub enum ScimFilterError {
 impl std::fmt::Display for ScimFilterError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::UnsupportedOperator(op) => {
-                write!(f, "unsupported filter operator '{op}'")
-            }
             Self::FilterTooBroad => {
                 write!(f, "filter is too broad for the current dataset size")
             }
@@ -931,75 +1072,6 @@ impl std::fmt::Display for ScimFilterError {
 }
 
 impl std::error::Error for ScimFilterError {}
-
-/// Parse a SCIM filter expression for the given attribute.
-///
-/// Supports `eq`, `co`, and `sw` operators (RFC 7644 Section
-/// 3.4.2). Returns `Ok(Some(filter))` on match, `Ok(None)` if
-/// the attribute doesn't match, and `Err` for unsupported
-/// operators.
-pub(crate) fn parse_scim_filter(
-    filter: &str,
-    attr: &str,
-) -> Result<Option<ScimFilter>, ScimFilterError> {
-    let filter_lower = filter.to_lowercase();
-    let attr_lower = attr.to_lowercase();
-
-    let Some(attr_pos) = filter_lower.find(&attr_lower) else {
-        return Ok(None);
-    };
-
-    let after_attr = filter_lower
-        .get(attr_pos.saturating_add(attr_lower.len())..)
-        .unwrap_or("");
-    let after_attr_trimmed = after_attr.trim_start();
-
-    let Some(space_end) = after_attr_trimmed.find(' ') else {
-        return Ok(None);
-    };
-    let Some(op_word) = after_attr_trimmed.get(..space_end) else {
-        return Ok(None);
-    };
-
-    let op = match op_word {
-        "eq" => ScimFilterOp::Eq,
-        "co" => ScimFilterOp::Co,
-        "sw" => ScimFilterOp::Sw,
-        other => return Err(ScimFilterError::UnsupportedOperator(other.to_string())),
-    };
-
-    // Extract quoted value from the original filter (preserving case).
-    //
-    // We search in `filter_lower` for consistent byte offsets, then map
-    // back to the original `filter` using `char_indices` so that any
-    // multibyte characters that change byte length under `to_lowercase()`
-    // don't cause offset misalignment.
-    let pattern_lower = format!("{attr_lower} {op_word} ");
-
-    if let Some(lower_pos) = filter_lower.find(&pattern_lower) {
-        let lower_end = lower_pos.saturating_add(pattern_lower.len());
-
-        // Map byte offset in filter_lower back to the original filter
-        // by counting characters up to that offset, then converting
-        // back to a byte offset in the original string.
-        let char_offset = filter_lower.get(..lower_end).map(|s| s.chars().count());
-
-        if let Some(orig_byte_pos) =
-            char_offset.and_then(|n| filter.char_indices().nth(n).map(|(i, _)| i))
-            && let Some(rest_str) = filter.get(orig_byte_pos..)
-            && let Some(unquoted) = rest_str.strip_prefix('"')
-            && let Some(end) = unquoted.find('"')
-            && let Some(val) = unquoted.get(..end)
-        {
-            return Ok(Some(ScimFilter {
-                op,
-                value: val.to_string(),
-            }));
-        }
-    }
-
-    Ok(None)
-}
 
 // ============================================================================
 // SCIM Groups
@@ -1027,28 +1099,57 @@ impl From<Document<ScimGroupDoc>> for ScimGroupRecord {
     }
 }
 
-/// Create a new SCIM group bound to the caller's org.
+/// Create a SCIM group bound to the caller's org, with its members.
+///
+/// The group and every membership row commit in one transaction, so a failed
+/// member insert (a NUL byte in a user id, say) leaves no group behind for a
+/// retried POST to duplicate. Repeated user ids collapse to one row.
+/// Cross-org user ids become inert references, filtered out when members are
+/// read.
 pub async fn create_scim_group(
     store: &DocumentStore,
     org_id: &str,
     display_name: &str,
     external_id: Option<&str>,
+    members: &[String],
 ) -> Result<ScimGroupRecord> {
-    let doc = ScimGroupDoc {
-        org_id: org_id.to_string(),
-        display_name: display_name.to_string(),
-        external_id: external_id.map(String::from),
-    };
-    let result = store.insert(&doc).await?;
-    Ok(ScimGroupRecord::from(result))
+    let members: BTreeSet<&str> = members.iter().map(String::as_str).collect();
+    crate::with_dsql_retry!(async {
+        let mut tx = store.begin().await?;
+        let group = tx
+            .insert(&ScimGroupDoc {
+                org_id: org_id.to_string(),
+                display_name: display_name.to_string(),
+                external_id: external_id.map(String::from),
+            })
+            .await?;
+        for user_id in &members {
+            tx.insert_with_id(
+                &deterministic_group_member_id(&group.id, user_id),
+                &ScimGroupMemberDoc {
+                    group_id: group.id.clone(),
+                    user_id: (*user_id).to_string(),
+                },
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(ScimGroupRecord::from(group))
+    })
 }
 
 /// Get a SCIM group by ID, scoped to the caller's org.
+///
+/// Every id Vouch issues is a UUID, so an id that does not parse as one
+/// names no resource and returns `None` without a store read.
 pub async fn get_scim_group(
     store: &DocumentStore,
     id: &str,
     org_id: &str,
 ) -> Result<Option<ScimGroupRecord>> {
+    if uuid::Uuid::try_parse(id).is_err() {
+        return Ok(None);
+    }
     let Some(doc) = store.get::<ScimGroupDoc>(id).await? else {
         return Ok(None);
     };
@@ -1068,10 +1169,10 @@ pub async fn get_scim_group(
 /// Returns [`ScimFilterError::FilterTooBroad`] for non-indexed filters on
 /// tables with >10 000 rows. Returns [`ScimFilterError::OffsetTooLarge`]
 /// when the computed offset exceeds 10 000.
-pub async fn list_scim_groups(
+pub(crate) async fn list_scim_groups(
     store: &DocumentStore,
     org_id: &str,
-    filter: Option<&str>,
+    filter: Option<&GroupListFilter>,
     start_index: usize,
     count: usize,
 ) -> Result<(Vec<ScimGroupRecord>, usize)> {
@@ -1085,19 +1186,19 @@ pub async fn list_scim_groups(
         return Ok((page, total));
     }
 
-    // Non-indexed filter: bounded by 10k so a large org does not load
-    // every group into memory for an unrecognized filter expression.
-    if filter.is_some() {
+    // Non-indexed filter (`co`/`sw`): bounded by 10k so a large org does not
+    // load every group into memory.
+    if let Some(f) = filter {
         let total_in_org = store.count::<ScimGroupDoc>("org_id", org_id).await?;
         if total_in_org > 10_000 {
             return Err(ScimFilterError::FilterTooBroad.into());
         }
         let all = store.find_all::<ScimGroupDoc>("org_id", org_id).await?;
-        let mut records: Vec<ScimGroupRecord> =
-            all.into_iter().map(ScimGroupRecord::from).collect();
-        if let Some(f) = filter {
-            records = apply_scim_group_filter(records, f)?;
-        }
+        let mut records: Vec<ScimGroupRecord> = all
+            .into_iter()
+            .map(ScimGroupRecord::from)
+            .filter(|r| f.matches(r))
+            .collect();
         records.sort_by_key(|b| std::cmp::Reverse(b.created_at));
         let total = records.len();
         let page = records.into_iter().skip(offset).take(count).collect();
@@ -1117,136 +1218,176 @@ pub async fn list_scim_groups(
     ))
 }
 
-/// Try indexed eq lookups for SCIM group filters, scoped to org.
+/// Try indexed eq lookups for SCIM group filters, scoped to org. `None` for
+/// an operator the indexes cannot answer (`co`, `sw`).
 async fn try_indexed_group_lookup(
     store: &DocumentStore,
     org_id: &str,
-    filter: &str,
+    filter: &GroupListFilter,
 ) -> Result<Option<Vec<ScimGroupRecord>>> {
-    // displayName eq → find_by_indexes combining display_name + org_id at DB
-    // level.
-    //
-    // `displayName` is `caseExact: false` per RFC 7643 Section 8.7.2, and
-    // `ScimGroupDoc::index_entries` stores the value ASCII-lowercased. Normalize
-    // the filter value to match the lowercased index; otherwise a mixed-case
-    // filter like `displayName eq "engineering"` misses a group stored as
-    // "Engineering". The `co`/`sw` operators are already case-insensitive via
-    // the in-memory fallback in `list_scim_groups`.
-    //
-    // An empty result is returned as `Some(vec![])`, matching the `externalId`
-    // branch below and the user lookup: the indexed path is authoritative, so
-    // "no such group" is an answer rather than a reason to rescan. Falling
-    // through to the unindexed scan instead would hand every miss to the
-    // 10k `FilterTooBroad` guard in `list_scim_groups`, and a miss is the
-    // normal case — Okta and Entra both query `displayName eq` to check
-    // whether a group exists before creating it, so above 10k groups the
-    // common provisioning path would start returning 400.
-    if let Some(f) = parse_scim_filter(filter, "displayName")?
-        && f.op == ScimFilterOp::Eq
-    {
-        let display_name_lower = f.value.to_ascii_lowercase();
-        let docs = store
-            .find_by_indexes::<ScimGroupDoc>(&[
-                ("display_name", &display_name_lower),
-                ("org_id", org_id),
-            ])
-            .await?;
-        return Ok(Some(docs.into_iter().map(ScimGroupRecord::from).collect()));
-    }
-
-    if let Some(f) = parse_scim_filter(filter, "externalId")?
-        && f.op == ScimFilterOp::Eq
-    {
-        let docs = store
-            .find_by_indexes::<ScimGroupDoc>(&[("external_id", &f.value), ("org_id", org_id)])
-            .await?;
-        return Ok(Some(docs.into_iter().map(ScimGroupRecord::from).collect()));
-    }
-
-    Ok(None)
+    let docs = match filter {
+        // `displayName` is `caseExact: false` per RFC 7643 Section 8.7.2, and
+        // `ScimGroupDoc::index_entries` stores the value ASCII-lowercased. Normalize
+        // the filter value to match the lowercased index; otherwise a mixed-case
+        // filter like `displayName eq "engineering"` misses a group stored as
+        // "Engineering". The `co`/`sw` operators are already case-insensitive via
+        // the in-memory fallback in `list_scim_groups`.
+        //
+        // An empty result is returned as `Some(vec![])`, matching the `externalId`
+        // branch below and the user lookup: the indexed path is authoritative, so
+        // "no such group" is an answer rather than a reason to rescan. Falling
+        // through to the unindexed scan instead would hand every miss to the
+        // 10k `FilterTooBroad` guard in `list_scim_groups`, and a miss is the
+        // normal case — Okta and Entra both query `displayName eq` to check
+        // whether a group exists before creating it, so above 10k groups the
+        // common provisioning path would start returning 400.
+        GroupListFilter::DisplayName(f) if f.op == ScimFilterOp::Eq => {
+            let display_name_lower = f.value.to_ascii_lowercase();
+            store
+                .find_by_indexes::<ScimGroupDoc>(&[
+                    ("display_name", &display_name_lower),
+                    ("org_id", org_id),
+                ])
+                .await?
+        }
+        GroupListFilter::ExternalId(f) if f.op == ScimFilterOp::Eq => {
+            store
+                .find_by_indexes::<ScimGroupDoc>(&[("external_id", &f.value), ("org_id", org_id)])
+                .await?
+        }
+        GroupListFilter::DisplayName(_) | GroupListFilter::ExternalId(_) => return Ok(None),
+    };
+    Ok(Some(docs.into_iter().map(ScimGroupRecord::from).collect()))
 }
 
-/// Apply SCIM filter to group records in application code.
-fn apply_scim_group_filter(
-    records: Vec<ScimGroupRecord>,
-    filter: &str,
-) -> Result<Vec<ScimGroupRecord>> {
-    if let Some(f) = parse_scim_filter(filter, "displayName")? {
-        return Ok(records
-            .into_iter()
-            .filter(|r| match_filter_value(&r.display_name, &f, false))
-            .collect());
-    }
-
-    // `externalId` has `caseExact: true` per RFC 7643 Section 3.1, so the
-    // in-memory filter must be case-sensitive for all operators — matching
-    // the case-sensitive indexed `eq` lookup in `try_indexed_group_lookup`.
-    if let Some(f) = parse_scim_filter(filter, "externalId")? {
-        return Ok(records
-            .into_iter()
-            .filter(|r| {
-                r.external_id
-                    .as_deref()
-                    .is_some_and(|eid| match_filter_value(eid, &f, true))
-            })
-            .collect());
-    }
-
-    Ok(records)
+/// A SCIM group's attributes and member user ids, as [`update_scim_group`]
+/// hands them to an edit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScimGroupState {
+    pub display_name: String,
+    pub external_id: Option<String>,
+    /// User ids of the group's membership rows, including cross-org ids that
+    /// reads filter out.
+    pub members: BTreeSet<String>,
 }
 
-/// Update a SCIM group, scoped to the caller's org.
+/// Failure modes of [`update_scim_group`].
+#[derive(Debug)]
+pub enum ScimGroupUpdateError<E> {
+    /// The edit rejected the update; nothing was written.
+    Rejected(E),
+    /// Another transaction changed the group while this one was editing it.
+    OccConflict,
+    Other(anyhow::Error),
+}
+
+impl<E> From<anyhow::Error> for ScimGroupUpdateError<E> {
+    fn from(err: anyhow::Error) -> Self {
+        Self::Other(err)
+    }
+}
+
+impl<E> std::fmt::Display for ScimGroupUpdateError<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rejected(_) => f.write_str("SCIM group update rejected"),
+            Self::OccConflict => f.write_str("SCIM group changed during update"),
+            Self::Other(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+impl<E> super::pool::RetryableError for ScimGroupUpdateError<E> {
+    fn is_retryable(&self) -> bool {
+        match self {
+            Self::OccConflict => true,
+            Self::Rejected(_) => false,
+            Self::Other(e) => super::pool::is_retryable_db_error(e),
+        }
+    }
+}
+
+/// Apply `edit` to a SCIM group's attributes and members in one transaction,
+/// scoped to the caller's org.
 ///
-/// Both fields are written through, so `external_id: None` clears the stored
-/// value — the caller passes the group's full desired state, as it does for
-/// [`update_scim_user`].
+/// RFC 7644 §3.5.2: "A PATCH request, regardless of the number of operations,
+/// SHALL be treated as atomic." `edit` runs against the stored state and the
+/// result is written whole or not at all: a rejection writes nothing, and the
+/// attribute change and every membership insert and delete commit together.
 ///
-/// Returns `Ok(false)` if the group doesn't exist, belongs to a different org,
-/// or if a concurrent org-ownership change races with the modify loop and causes
-/// the mutation to be skipped. `Ok(true)` on a successful update.
+/// Only the difference is written, so an edit that changes nothing writes
+/// nothing and leaves `meta.lastModified` alone (RFC 7644 §3.5.2.1). Any
+/// change version-bumps the group document first; concurrent updates of the
+/// same group collide on it and retry against the winner's state, so neither
+/// loses the other's members. `edit` is `Fn` because a retry runs it again.
 ///
-/// Uses optimistic concurrency (`store.modify`) so concurrent field mutations
-/// do not silently overwrite each other. The org-scope check is re-evaluated
-/// inside the closure on each OCC retry.
-pub async fn update_scim_group(
+/// Returns `Ok(false)` if the group doesn't exist or belongs to a different
+/// org.
+pub async fn update_scim_group<E, F>(
     store: &DocumentStore,
     id: &str,
     org_id: &str,
-    display_name: &str,
-    external_id: Option<&str>,
-) -> Result<bool> {
-    // Pre-check: return not-found quickly without entering the modify loop
-    // if the group is absent or belongs to a different org.
-    let Some(doc) = store.get::<ScimGroupDoc>(id).await? else {
-        return Ok(false);
-    };
-    if doc.data.org_id != org_id {
+    edit: F,
+) -> std::result::Result<bool, ScimGroupUpdateError<E>>
+where
+    F: Fn(&mut ScimGroupState) -> std::result::Result<(), E>,
+{
+    if uuid::Uuid::try_parse(id).is_err() {
         return Ok(false);
     }
+    crate::with_dsql_retry!(async {
+        let mut tx = store.begin().await?;
+        let Some(doc) = tx.get::<ScimGroupDoc>(id).await? else {
+            return Ok(false);
+        };
+        if doc.data.org_id != org_id {
+            return Ok(false);
+        }
+        let member_docs = tx.find_all::<ScimGroupMemberDoc>("group_id", id).await?;
 
-    // Owned copies for the Fn closure.
-    let display_name_owned = String::from(display_name);
-    let external_id_owned = external_id.map(String::from);
+        let stored = ScimGroupState {
+            display_name: doc.data.display_name.clone(),
+            external_id: doc.data.external_id.clone(),
+            members: member_docs
+                .iter()
+                .map(|member| member.data.user_id.clone())
+                .collect(),
+        };
+        let mut edited = stored.clone();
+        edit(&mut edited).map_err(ScimGroupUpdateError::Rejected)?;
+        if edited == stored {
+            return Ok(true);
+        }
 
-    let applied = std::sync::atomic::AtomicBool::new(false);
-    let found = store
-        .modify::<ScimGroupDoc, _>(id, |data| {
-            // Reset at the top of every attempt: if an earlier OCC retry set
-            // this flag but then lost the version race, the closure runs again
-            // and org ownership must be re-evaluated from scratch.
-            applied.store(false, std::sync::atomic::Ordering::Relaxed);
-            // Re-check org ownership inside the closure so a concurrent
-            // org migration cannot smuggle a cross-org write through a version win.
-            if data.org_id != org_id {
-                return;
+        let updated = ScimGroupDoc {
+            org_id: doc.data.org_id.clone(),
+            display_name: edited.display_name.clone(),
+            external_id: edited.external_id.clone(),
+        };
+        if !tx.compare_and_update(id, doc.version, &updated).await? {
+            return Err(ScimGroupUpdateError::OccConflict);
+        }
+        // Every row for a removed user goes, including legacy rows written
+        // before membership ids were deterministic.
+        for member in &member_docs {
+            if !edited.members.contains(&member.data.user_id) {
+                tx.delete(&member.id).await?;
             }
-            data.display_name = display_name_owned.clone();
-            data.external_id = external_id_owned.clone();
-            applied.store(true, std::sync::atomic::Ordering::Relaxed);
-        })
-        .await?;
+        }
+        for user_id in edited.members.difference(&stored.members) {
+            tx.insert_with_id(
+                &deterministic_group_member_id(id, user_id),
+                &ScimGroupMemberDoc {
+                    group_id: id.to_string(),
+                    user_id: user_id.clone(),
+                },
+            )
+            .await?;
+        }
 
-    Ok(found && applied.load(std::sync::atomic::Ordering::Relaxed))
+        tx.commit().await?;
+        Ok(true)
+    })
 }
 
 /// Delete a SCIM group atomically, scoped to the caller's org.
@@ -1258,6 +1399,10 @@ pub async fn delete_scim_group(store: &DocumentStore, id: &str, org_id: &str) ->
     crate::with_dsql_retry!(async {
         let mut tx = store.begin().await?;
 
+        // Test-only seam: a concurrent delete landing before the existence check.
+        #[cfg(test)]
+        store.run_delete_test_hook(id).await;
+
         let Some(doc) = tx.get::<ScimGroupDoc>(id).await? else {
             return Ok(false);
         };
@@ -1267,20 +1412,18 @@ pub async fn delete_scim_group(store: &DocumentStore, id: &str, org_id: &str) ->
 
         tx.delete_by_index::<ScimGroupMemberDoc>("group_id", id)
             .await?;
-        tx.delete(id).await?;
+        let removed = tx.delete(id).await?;
 
         tx.commit().await?;
-        Ok(true)
+        Ok(removed)
     })
 }
 
 /// Derive a deterministic document ID from `(group_id, user_id)`.
 ///
-/// Two concurrent `add_scim_group_member` calls for the same group and user
-/// produce the same document ID, so the losing `insert_with_id` fails on the
-/// `documents` PRIMARY KEY constraint. This eliminates the check-then-insert
-/// TOCTOU race without requiring elevated transaction isolation or advisory
-/// locks.
+/// A membership row for a given group and user always has the same document
+/// ID, so no interleaving of writers can store the pair twice: a second
+/// insert fails on the `documents` PRIMARY KEY constraint instead.
 ///
 /// Same SHA-256-with-domain-separator construction as
 /// `deterministic_org_id` (`db/enrollment.rs`), [`deterministic_user_id`]
@@ -1298,111 +1441,6 @@ fn deterministic_group_member_id(group_id: &str, user_id: &str) -> String {
     ctx.update(b"\0");
     ctx.update(user_id.as_bytes());
     hex::encode(ctx.finish().as_ref())
-}
-
-/// Add a member to a SCIM group, scoped to the caller's org.
-///
-/// Verifies the group is in the caller's org (single indexed lookup,
-/// not per-user) and then inserts the membership row. Cross-org
-/// `user_id` values become inert references — they are filtered out
-/// when reading the group's members.
-///
-/// Returns `Ok(false)` if the group doesn't exist OR belongs to a
-/// different org.
-///
-/// # Race safety
-///
-/// The membership document ID is derived deterministically from
-/// `(group_id, user_id)` via [`deterministic_group_member_id`] and inserted
-/// with [`DocumentStore::insert_with_id`]. Two concurrent
-/// `add_scim_group_member` calls for the same pair therefore compute the
-/// same primary key: the winning insert commits, and the loser's insert
-/// fails with a primary-key violation (`is_unique_violation`), which is
-/// treated as idempotent success (`Ok(true)`).
-///
-/// This closes the check-then-act TOCTOU window that existed when the
-/// insert used a fresh random UUID v7: two transactions could both observe
-/// "no membership exists" and then commit distinct rows, because neither
-/// `SERIALIZABLE` isolation nor a `SELECT FOR UPDATE` catches two concurrent
-/// inserts of *distinct* primary keys. The deterministic ID makes the keys
-/// collide, forcing serialization at the `documents` PRIMARY KEY constraint.
-///
-/// The `find_by_indexes` pre-check is retained as a fast path for the common
-/// "membership already exists" case — including legacy rows created before
-/// deterministic IDs (which carry random UUID v7 IDs and would not collide
-/// with the deterministic ID). The pre-check alone does not close the race
-/// (it runs outside the insert transaction); the deterministic PRIMARY KEY
-/// collision is the real guard.
-///
-/// `insert_with_id` is wrapped in `with_dsql_retry!` (`db/store.rs`).
-/// `23505` (unique violation) is not retryable, so it surfaces here and is
-/// mapped to idempotent success. Under Aurora DSQL's optimistic concurrency
-/// control, the losing concurrent transaction first receives a serialization
-/// error (`40001`), which `with_dsql_retry!` retries; on retry the insert
-/// collides with the already-committed winner row (`23505`), which is then
-/// caught here. Only one transaction wins.
-pub async fn add_scim_group_member(
-    store: &DocumentStore,
-    group_id: &str,
-    org_id: &str,
-    user_id: &str,
-) -> Result<bool> {
-    if get_scim_group(store, group_id, org_id).await?.is_none() {
-        return Ok(false);
-    }
-
-    // Fast path: if a membership already exists (including legacy rows
-    // created before deterministic IDs, which carry random UUID v7 IDs and
-    // would not collide with the deterministic ID below), return idempotent
-    // success without attempting an insert.
-    let existing = store
-        .find_by_indexes::<ScimGroupMemberDoc>(&[("group_id", group_id), ("user_id", user_id)])
-        .await?;
-    if !existing.is_empty() {
-        return Ok(true);
-    }
-
-    // Deterministic ID: two concurrent adds for the same (group_id, user_id)
-    // compute the same primary key, so the losing insert fails with a
-    // unique/primary-key violation. The index pre-check above does not close
-    // the race (it runs outside the insert transaction), but the deterministic
-    // PRIMARY KEY collision does.
-    let member_id = deterministic_group_member_id(group_id, user_id);
-    let doc = ScimGroupMemberDoc {
-        group_id: group_id.to_string(),
-        user_id: user_id.to_string(),
-    };
-
-    match store.insert_with_id(&member_id, &doc).await {
-        Ok(_) => Ok(true),
-        Err(e) if super::pool::is_unique_violation(&e) => Ok(true),
-        Err(e) => Err(e),
-    }
-}
-
-/// Remove a member from a SCIM group, scoped to the caller's org.
-///
-/// Returns `Ok(false)` if the group doesn't exist, belongs to a
-/// different org, or the user is not a member.
-pub async fn remove_scim_group_member(
-    store: &DocumentStore,
-    group_id: &str,
-    org_id: &str,
-    user_id: &str,
-) -> Result<bool> {
-    if get_scim_group(store, group_id, org_id).await?.is_none() {
-        return Ok(false);
-    }
-
-    let existing = store
-        .find_by_indexes::<ScimGroupMemberDoc>(&[("group_id", group_id), ("user_id", user_id)])
-        .await?;
-
-    if let Some(doc) = existing.into_iter().next() {
-        store.delete(&doc.id).await?;
-        return Ok(true);
-    }
-    Ok(false)
 }
 
 /// Get all members of a SCIM group, scoped to the caller's org.
@@ -1437,44 +1475,6 @@ pub async fn get_scim_group_members(
 
     users.sort_by(|a, b| a.email.cmp(&b.email));
     Ok(Some(users))
-}
-
-/// Replace all members of a SCIM group atomically, scoped to the
-/// caller's org.
-///
-/// Verifies the group is in the caller's org (single indexed lookup,
-/// not per-user). Cross-org `user_id` values in `user_ids` become
-/// inert references that are filtered out at read time.
-///
-/// Returns `Ok(false)` if the group doesn't exist OR belongs to a
-/// different org.
-pub async fn replace_scim_group_members(
-    store: &DocumentStore,
-    group_id: &str,
-    org_id: &str,
-    user_ids: &[String],
-) -> Result<bool> {
-    if get_scim_group(store, group_id, org_id).await?.is_none() {
-        return Ok(false);
-    }
-
-    crate::with_dsql_retry!(async {
-        let mut tx = store.begin().await?;
-
-        tx.delete_by_index::<ScimGroupMemberDoc>("group_id", group_id)
-            .await?;
-
-        for user_id in user_ids {
-            let doc = ScimGroupMemberDoc {
-                group_id: group_id.to_string(),
-                user_id: user_id.clone(),
-            };
-            tx.insert(&doc).await?;
-        }
-
-        tx.commit().await?;
-        Ok(true)
-    })
 }
 
 #[cfg(test)]

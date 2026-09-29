@@ -2,8 +2,11 @@
 //! Enrollment handlers for browser-based device authorization flow.
 
 use crate::AppState;
+use crate::arrival::ArrivalTime;
+use crate::assurance::HardwareVerification;
+use crate::crypto::webauthn_verify::{self, AuthTime};
 use crate::db::ClientInfo;
-use crate::db::{self, AuthEventParams, AuthEventType};
+use crate::db::{self, AuthEventParams, AuthEventType, Domain};
 use crate::impl_template_response;
 use crate::infra::i18n::Tr;
 use askama::Template;
@@ -25,21 +28,31 @@ use vouch_common::fido2_types::{Challenge, CredentialId, UserHandle};
 use vouch_common::{BrowserRegisterCompleteRequest, BrowserRegisterStartResponse, protocol};
 
 use super::extractors::ValidJson;
-use super::session::AuthContext;
+use super::session::{AuthContext, session_cookie_max_age};
 use super::{ClientDataError, ClientDataProof};
 use super::{
     create_session_cookie, extract_session_from_cookie, hash_token,
     validate_registration_attestation,
 };
+use crate::crypto::cose;
+use crate::crypto::jwt::{JwtType, StateTokenError, StateTokenSigner};
+use crate::db::documents::audit::RegistrationReplayData;
+use crate::email::Email;
 use crate::error::ServiceError;
+use crate::infra::{egress, metrics};
 use crate::redact_email;
 use crate::services::auth::{
-    ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenBinding,
-    TokenIssuanceProof, create_oauth_access_token,
+    ClientAuthProof, CreateOAuthTokenParams, GrantProof, NoClientAuth, SenderConstraintProof,
+    TokenBinding, TokenIssuanceProof, create_oauth_access_token,
 };
-use crate::services::idp::IdentityResult;
+use crate::services::idp::{AuthAction, ConfiguredIdp, IdentityResult, oidc};
 use crate::services::keys as key_svc;
 use crate::services::oidc::ScopeSet;
+
+/// Maximum size of an upstream IdP's token endpoint response (256 KB).
+///
+/// The body is a small JSON object whose largest member is an ID token.
+const MAX_TOKEN_RESPONSE_SIZE: usize = 256 * 1024;
 
 // ============================================================================
 // Templates
@@ -190,16 +203,6 @@ impl std::fmt::Debug for OidcTokenResponse {
     }
 }
 
-/// Client data JSON structure from `WebAuthn` response.
-#[derive(Deserialize)]
-#[expect(dead_code, reason = "reserved for serde DTO conformance / future use")]
-struct ClientData {
-    challenge: String,
-    origin: String,
-    #[serde(rename = "type")]
-    typ: String,
-}
-
 /// Browser registration state stored between `WebAuthn` start and complete.
 #[derive(Debug, Serialize, Deserialize)]
 struct BrowserRegistrationState {
@@ -208,28 +211,32 @@ struct BrowserRegistrationState {
     user_email: String,
     /// Serialized webauthn-rs PasskeyRegistration state for verification.
     webauthn_state: webauthn_rs::prelude::PasskeyRegistration,
-    /// RFC 8725 §3.11: Issued at time for expiration enforcement.
+    /// RFC 7519 §4.1.6: Issued at time. Not validated on decode — the token
+    /// is minted and consumed by this server on one clock, so `exp` alone
+    /// bounds its lifetime.
     iat: i64,
-    /// RFC 8725 §3.11: Expiration time (5 minutes).
+    /// RFC 7519 §4.1.4: Expiration time (5 minutes), enforced on decode.
     exp: i64,
 }
 
 impl BrowserRegistrationState {
-    async fn encode(
-        &self,
-        signer: &crate::crypto::jwt::StateTokenSigner,
-    ) -> Result<String, crate::crypto::jwt::StateTokenError> {
+    async fn encode(&self, signer: &StateTokenSigner) -> Result<String, StateTokenError> {
         signer
-            .encode_state_token(self, crate::crypto::jwt::JwtType::BrowserRegistrationState)
+            .encode_state_token(self, JwtType::BrowserRegistrationState)
             .await
     }
 
     async fn decode(
         token: &str,
-        signer: &crate::crypto::jwt::StateTokenSigner,
-    ) -> Result<Self, crate::crypto::jwt::StateTokenError> {
+        signer: &StateTokenSigner,
+        arrival: ArrivalTime,
+    ) -> Result<Self, StateTokenError> {
         signer
-            .decode_state_token(token, crate::crypto::jwt::JwtType::BrowserRegistrationState)
+            .decode_state_token(
+                token,
+                JwtType::BrowserRegistrationState,
+                arrival.as_second(),
+            )
             .await
     }
 }
@@ -285,6 +292,7 @@ impl RegistrationCompletion {
     async fn validate(
         req: BrowserRegisterCompleteRequest,
         state: &AppState,
+        arrival: ArrivalTime,
     ) -> Result<Self, ServiceError> {
         let expected_origin = state.config().base_url.clone();
         let client_data = ClientDataProof::verify(
@@ -309,13 +317,15 @@ impl RegistrationCompletion {
             ServiceError::api(StatusCode::BAD_REQUEST, "invalid_client_data", message)
         })?;
 
-        let reg_state = BrowserRegistrationState::decode(req.state.as_str(), &state.state_signer)
-            .await
-            .map_err(|e| {
-                ServiceError::api(StatusCode::BAD_REQUEST, "invalid_state", e.to_string())
-            })?;
+        let reg_state =
+            BrowserRegistrationState::decode(req.state.as_str(), &state.state_signer, arrival)
+                .await
+                .map_err(|e| {
+                    ServiceError::api(StatusCode::BAD_REQUEST, "invalid_state", e.to_string())
+                })?;
 
-        let expires_at = Timestamp::from_second(reg_state.exp).unwrap_or_else(|_| Timestamp::now());
+        let expires_at =
+            Timestamp::from_second(reg_state.exp).unwrap_or_else(|_| arrival.timestamp());
 
         Ok(Self {
             req,
@@ -356,6 +366,7 @@ pub(crate) async fn device_verify_page(
 /// Handle device code submission.
 /// POST /device
 pub(crate) async fn device_verify_submit(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     Form(form): Form<UserCodeForm>,
 ) -> Response {
@@ -393,7 +404,7 @@ pub(crate) async fn device_verify_submit(
     };
 
     // Check if expired
-    let now = Timestamp::now();
+    let now = arrival.timestamp();
     if now > request.expires_at {
         return DeviceVerifyTemplate {
             error: Some("This code has expired. Please request a new one.".to_string()),
@@ -420,7 +431,7 @@ pub(crate) async fn device_verify_submit(
     //     validated `user_code` is carried as a hidden field, which doubles
     //     as an implicit CSRF token (the attacker must already hold it).
     let base_url = state.config().base_url.clone();
-    let chosen_idp: &crate::services::idp::ConfiguredIdp = match form
+    let chosen_idp: &ConfiguredIdp = match form
         .provider
         .as_deref()
         .map(str::trim)
@@ -504,8 +515,8 @@ pub(crate) async fn device_verify_submit(
     // Use 303 See Other (not 307) to ensure browser converts POST to GET
     // A 307 would preserve the POST method and body, sending user_code to the IdP
     match auth_request.action {
-        crate::services::idp::AuthAction::Redirect { url } => Redirect::to(&url).into_response(),
-        crate::services::idp::AuthAction::PostForm {
+        AuthAction::Redirect { url } => Redirect::to(&url).into_response(),
+        AuthAction::PostForm {
             action_url,
             saml_request,
             relay_state,
@@ -525,6 +536,7 @@ pub(crate) async fn device_verify_submit(
     reason = "axum handler; OIDC callback orchestrates IdP exchange and enrollment"
 )]
 pub(crate) async fn oidc_callback(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     client_info: ClientInfo,
     Query(params): Query<OidcCallbackParams>,
@@ -578,7 +590,7 @@ pub(crate) async fn oidc_callback(
     // get-then-delete pattern, closing the read-vs-consume TOCTOU that
     // let two concurrent callbacks both pass validation and issue tokens.
     let (stored_state, oidc_state_claim) =
-        match db::try_consume_oidc_state(&state.store, &oidc_state).await {
+        match db::try_consume_oidc_state(&state.store, &oidc_state, arrival.timestamp()).await {
             Ok(pair) => pair,
             Err(db::ClaimError::AlreadyConsumed) => {
                 return ErrorTemplate {
@@ -607,13 +619,13 @@ pub(crate) async fn oidc_callback(
     // (rolling deploy compatibility).
     let oidc_provider = if stored_state.provider_id.is_empty() {
         state.idps.iter().find_map(|i| match i {
-            crate::services::idp::ConfiguredIdp::Oidc(p) => Some(p),
-            crate::services::idp::ConfiguredIdp::Saml(_) => None,
+            ConfiguredIdp::Oidc(p) => Some(p),
+            ConfiguredIdp::Saml(_) => None,
         })
     } else {
         state.idp(&stored_state.provider_id).and_then(|i| match i {
-            crate::services::idp::ConfiguredIdp::Oidc(p) => Some(p),
-            crate::services::idp::ConfiguredIdp::Saml(_) => None,
+            ConfiguredIdp::Oidc(p) => Some(p),
+            ConfiguredIdp::Saml(_) => None,
         })
     };
     let Some(oidc_provider) = oidc_provider else {
@@ -664,7 +676,7 @@ pub(crate) async fn oidc_callback(
     };
 
     if !token_response.status().is_success() {
-        let error_text = token_response.text().await.unwrap_or_default();
+        let error_text = egress::read_error_body(token_response).await;
         tracing::error!("Token exchange failed: {}", error_text);
         return ErrorTemplate {
             title: Tr::new("error-heading").to_string(),
@@ -674,22 +686,23 @@ pub(crate) async fn oidc_callback(
         .into_response();
     }
 
-    let tokens: OidcTokenResponse = match token_response.json().await {
-        Ok(t) => t,
-        Err(e) => {
-            tracing::error!("Failed to parse token response: {}", e);
-            return ErrorTemplate {
-                title: Tr::new("error-heading").to_string(),
-                message: Tr::new("enroll-error-auth-complete-failed").to_string(),
-                back_url: None,
+    let tokens: OidcTokenResponse =
+        match egress::read_capped_json(token_response, MAX_TOKEN_RESPONSE_SIZE).await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::error!("Failed to read token response: {}", e);
+                return ErrorTemplate {
+                    title: Tr::new("error-heading").to_string(),
+                    message: Tr::new("enroll-error-auth-complete-failed").to_string(),
+                    back_url: None,
+                }
+                .into_response();
             }
-            .into_response();
-        }
-    };
+        };
 
     // Verify ID token: signature, issuer, audience, nonce, email_verified,
     // and extract domain (OIDC Core Section 3.1.3.7).
-    let identity = match crate::services::idp::oidc::verify_id_token(
+    let identity = match oidc::verify_id_token(
         &state.http_client,
         &oidc_provider.provider,
         tokens.id_token.expose_secret(),
@@ -716,6 +729,7 @@ pub(crate) async fn oidc_callback(
         identity,
         oidc_state_claim,
         client_info,
+        arrival,
     )
     .await
 }
@@ -730,7 +744,56 @@ pub(crate) async fn complete_enrollment_after_identity(
     identity: IdentityResult,
     oidc_state_claim: db::OidcStateClaim,
     client_info: ClientInfo,
+    arrival: ArrivalTime,
 ) -> Response {
+    // Shape-check the upstream-supplied email before it becomes the primary
+    // identifier (same `Email::is_valid_address` rule the SCIM create path
+    // enforces): a misconfigured IdP emitting a display-name-wrapped,
+    // whitespace-bearing, or local-part-less value must not be persisted
+    // verbatim by `enroll_user_with_org`, which only trims and lowercases.
+    // This chokepoint covers both the OIDC and SAML callback paths.
+    if !Email::is_valid_address(&identity.email) {
+        tracing::warn!(
+            email = %redact_email(&identity.email),
+            "rejected IdP enrollment: upstream email is not a valid address"
+        );
+        return ErrorTemplate {
+            title: Tr::new("error-heading").to_string(),
+            message: Tr::new("enroll-error-invalid-email").to_string(),
+            back_url: None,
+        }
+        .into_response();
+    }
+
+    // The shape check above deliberately lets an empty domain (`foo@`)
+    // through because SCIM's create path has a downstream domain-ownership
+    // gate that rejects it with a specific error. Enrollment has no such
+    // always-on gate: its only domain check is the optional
+    // `allowed_domains` allowlist below, which is unset by default. So the
+    // email's own domain is checked here — `foo@` and `foo@bar .com` are
+    // not addresses Vouch stores, and `enroll_user_with_org`'s only
+    // normalization is `Email::new` (trim + ASCII-lowercase), which would
+    // persist either verbatim as `User.email`.
+    //
+    // This gate is about the *email*. The organization domain is a separate
+    // value that the IdP layer has already parsed into an
+    // `identity.domain: Option<Domain>` — an unvalidated string cannot
+    // reach `enroll_user_with_org` below, so there is nothing left for a
+    // handler-side org-domain gate to check. The two diverge whenever a
+    // SAML IdP sets `domain_attribute` or an OIDC IdP asserts `hd`.
+    if Email::domain_of(&identity.email).is_none_or(|d| Domain::parse(&d).is_err()) {
+        tracing::warn!(
+            email = %redact_email(&identity.email),
+            "rejected IdP enrollment: upstream email has an invalid domain"
+        );
+        return ErrorTemplate {
+            title: Tr::new("error-heading").to_string(),
+            message: Tr::new("enroll-error-invalid-email").to_string(),
+            back_url: None,
+        }
+        .into_response();
+    }
+
     // Check domain restriction.
     // For Google consumers (no `hd` claim), `identity.domain` is `None`,
     // so `email_domain` becomes "" and will never match an allowed domain.
@@ -740,7 +803,7 @@ pub(crate) async fn complete_enrollment_after_identity(
         .as_ref()
         .filter(|d| !d.is_empty())
     {
-        let email_domain = identity.domain.as_deref().unwrap_or("");
+        let email_domain = identity.domain.as_ref().map_or("", Domain::as_str);
         if !domains.iter().any(|d| d.eq_ignore_ascii_case(email_domain)) {
             let allowed_list = domains.join(", ");
             return ErrorTemplate {
@@ -764,7 +827,7 @@ pub(crate) async fn complete_enrollment_after_identity(
         &state.store,
         &identity.email,
         None,
-        identity.domain.as_deref(),
+        identity.domain.as_ref(),
         identity.upstream.as_ref(),
     )
     .await
@@ -785,8 +848,12 @@ pub(crate) async fn complete_enrollment_after_identity(
                 "Refusing IdP login: could not reassert the subject bound \
                  to the account with this email for this issuer"
             );
+            // The upstream IdP verified the email this account is keyed on;
+            // only the subject binding failed. The row stays on the targeted
+            // account so its owner and admins see the attempt. It is not a
+            // temporal-history kind, so it cannot feed a per-user policy.
             let event = db::AuthEventParams {
-                user_id,
+                user_id: db::Principal::Verified(user_id),
                 event_type: db::AuthEventType::IdentityBindRefused,
                 success: false,
                 failure_reason: Some(
@@ -794,9 +861,10 @@ pub(crate) async fn complete_enrollment_after_identity(
                 ),
                 idp_issuer: Some(issuer),
                 client: client_info,
-                ..Default::default()
+                authenticator_id: None,
+                client_id: None,
             };
-            db::spawn_audit_event(&state.audit, event, Some(identity.email.clone()));
+            db::record_auth_event(&state.audit, event, Some(identity.email.clone())).await;
             return ErrorTemplate {
                 title: Tr::new("enroll-error-identity-conflict-title").to_string(),
                 message: Tr::new("enroll-error-identity-conflict").to_string(),
@@ -814,15 +882,19 @@ pub(crate) async fn complete_enrollment_after_identity(
                 email = %redact_email(&email),
                 "Refusing IdP login for deactivated account"
             );
+            // The upstream IdP verified this identity, so the refusal is
+            // attributed to the account.
             let event = db::AuthEventParams {
-                user_id,
+                user_id: db::Principal::Verified(user_id),
                 event_type: db::AuthEventType::LoginFailed,
                 success: false,
                 failure_reason: Some("user_deactivated".to_string()),
                 client: client_info,
-                ..Default::default()
+                authenticator_id: None,
+                client_id: None,
+                idp_issuer: None,
             };
-            db::spawn_audit_event(&state.audit, event, Some(email));
+            db::record_auth_event(&state.audit, event, Some(email)).await;
             return ErrorTemplate {
                 title: Tr::new("enroll-error-account-deactivated-title").to_string(),
                 message: Tr::new("enroll-error-account-deactivated").to_string(),
@@ -846,7 +918,7 @@ pub(crate) async fn complete_enrollment_after_identity(
     // logged but never written back: there is no email-change machinery,
     // and downstream artifacts (sessions, certs, audit) must stay
     // consistent with the stored account.
-    if user.email != crate::email::Email::new(&identity.email).as_str() {
+    if user.email != Email::new(&identity.email).as_str() {
         tracing::warn!(
             user_id = %user.id,
             account_email = %redact_email(&user.email),
@@ -859,18 +931,23 @@ pub(crate) async fn complete_enrollment_after_identity(
         && let Some(ref upstream) = identity.upstream
     {
         let event = db::AuthEventParams {
-            user_id: user.id.clone(),
+            user_id: db::Principal::Verified(user.id.clone()),
             event_type: db::AuthEventType::IdentityBound,
             success: true,
             idp_issuer: Some(upstream.issuer.clone()),
             client: client_info.clone(),
-            ..Default::default()
+            authenticator_id: None,
+            failure_reason: None,
+            client_id: None,
         };
-        db::spawn_audit_event(&state.audit, event, Some(user.email.clone()));
+        db::record_auth_event(&state.audit, event, Some(user.email.clone())).await;
     }
 
-    // Create session for this user (using session cookie instead of enrollment cookie)
-    let now = Timestamp::now();
+    // Create session for this user (using session cookie instead of enrollment
+    // cookie). Measured from arrival, the same instant the access token minted
+    // below derives its `exp` from, so the cookie session and the token it
+    // carries cannot expire at different times.
+    let now = arrival.timestamp();
     let session_hours = i64::try_from(state.config().session_hours).unwrap_or(8);
     let duration = Span::new().hours(session_hours);
     let expires = match now.checked_add(duration) {
@@ -886,20 +963,44 @@ pub(crate) async fn complete_enrollment_after_identity(
         }
     };
 
-    // Get authenticator (if any) for session claims
-    let existing_auths = db::get_authenticators_for_user(&state.store, &user.id)
-        .await
-        .unwrap_or_default();
+    // Get authenticator (if any) for session claims. Fail closed: a transient
+    // DB error here is indistinguishable from "user has zero authenticators"
+    // under a `.unwrap_or_default()`, yet it silently degrades the session's
+    // authenticator binding (`authenticator_id`, `hardware_aaguid`) and
+    // misroutes a returning CLI user to `/enroll/keys` instead of `/login` —
+    // the same hazard the `org_domain` block below fails closed for, and every
+    // other production call site of `get_authenticators_for_user` propagates
+    // the error. Read paths are not wrapped in `with_dsql_retry!`, so the `Err`
+    // escapes with no retry; log and return the session-failed error page so
+    // the user restarts rather than receiving a silently degraded session.
+    let existing_auths = match db::get_authenticators_for_user(&state.store, &user.id).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!("Failed to read authenticators for session claims: {e}");
+            return ErrorTemplate {
+                title: Tr::new("error-heading").to_string(),
+                message: Tr::new("enroll-error-session-failed").to_string(),
+                back_url: None,
+            }
+            .into_response();
+        }
+    };
     let existing_authenticator = existing_auths.first();
     let authenticator_id = existing_authenticator.map(|a| a.id.clone());
     let hardware_aaguid = existing_authenticator.and_then(|a| a.aaguid.clone());
 
-    // Snapshot org domain so the enrollment session carries the federation
-    // claims that match the user's state at this moment. Fail closed: the
-    // snapshot is captured exactly once, so silently dropping a transient
-    // DB error would permanently degrade this session's `hd` claim.
+    // Org domain, read once at session creation for the federation claims.
+    // Fail closed: silently dropping a transient DB error here would
+    // permanently degrade the session's `hd` claim.
     let org_domain = match user.org_id.as_deref() {
-        Some(org_id) => match db::get_organization_domain(&state.store, org_id).await {
+        Some(org_id) => match db::get_user_org_domain(
+            &state.store,
+            &user.id,
+            org_id,
+            user.org_domain.as_deref(),
+        )
+        .await
+        {
             Ok(domain) => domain,
             Err(e) => {
                 tracing::error!("Failed to snapshot org domain: {}", e);
@@ -918,6 +1019,15 @@ pub(crate) async fn complete_enrollment_after_identity(
     // This session is created after upstream IdP auth (OIDC/SAML) but BEFORE
     // FIDO2 WebAuthn registration — do NOT claim AAL3 or FIDO2 amr here.
     // The proper FIDO2 claims are set later in browser_register_complete.
+    //
+    // `auth_time` is deliberately `None`: per the codebase-wide semantics it
+    // records when FIDO2 authentication occurred, not when the upstream IdP
+    // authenticated the person. No FIDO2 assertion happened here (the user is
+    // either a first-time enrollee or a returning user on a direct browser
+    // sign-in), so the destructive-key freshness gate in
+    // `handlers/enroll_keys::delete_key` — which anchors on
+    // `auth_time.unwrap_or(0)` — must see Unix epoch and step up, rather
+    // than accept the IdP login time as proof of recent FIDO2.
     let client_id_for_token = state.config().base_url.clone();
     let session_result = match create_oauth_access_token(
         state,
@@ -930,20 +1040,20 @@ pub(crate) async fn complete_enrollment_after_identity(
             binding: TokenBinding::Bearer,
             act: None,
             audience: None,
-            auth_time: Some(now.as_second()),
-            hardware_verification: crate::services::auth::HardwareVerification::NotVerified,
+            max_lifetime_secs: None,
+            hardware_verification: HardwareVerification::NotVerified,
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
             hardware_aaguid: hardware_aaguid.as_deref(),
             org_domain: org_domain.as_deref(),
+            source_code_hash: None,
         },
         TokenIssuanceProof {
             grant: GrantProof::EnrollmentBootstrap(oidc_state_claim),
-            client_auth: ClientAuthProof::NoAuth(
-                crate::services::auth::NoClientAuth::internal_endpoint(),
-            ),
+            client_auth: ClientAuthProof::NoAuth(NoClientAuth::internal_endpoint()),
             sender_constraint: SenderConstraintProof::no_registered_client(),
         },
+        arrival,
     )
     .await
     {
@@ -1019,13 +1129,16 @@ pub(crate) async fn complete_enrollment_after_identity(
         // empty — distinguishing this from passkey logins. Fresh enrollees
         // are covered by the Enrollment event in browser_register_complete.
         let event = db::AuthEventParams {
-            user_id: user.id.clone(),
+            user_id: db::Principal::Verified(user.id.clone()),
             event_type: db::AuthEventType::LoginSuccess,
             success: true,
             client: client_info,
-            ..Default::default()
+            authenticator_id: None,
+            failure_reason: None,
+            client_id: None,
+            idp_issuer: None,
         };
-        db::spawn_audit_event(&state.audit, event, Some(user.email.clone()));
+        db::record_auth_event(&state.audit, event, Some(user.email.clone())).await;
     }
 
     // No explicit state delete here — `try_consume_oidc_state` already
@@ -1044,7 +1157,10 @@ pub(crate) async fn complete_enrollment_after_identity(
     tracing::info!("Session created for user: {}", redact_email(&user.email));
     tracing::debug!("Setting session cookie and redirecting to {destination}");
 
-    let cookie = create_session_cookie(token.expose_secret(), session_hours.saturating_mul(3600));
+    let cookie = create_session_cookie(
+        token.expose_secret(),
+        session_cookie_max_age(session_result.expires_in),
+    );
 
     Response::builder()
         .status(StatusCode::SEE_OTHER)
@@ -1081,13 +1197,14 @@ async fn load_keys_for_display(
 /// GET /enroll/keys
 /// Authentication is via session cookie (set by oidc_callback).
 pub(crate) async fn enroll_keys_page(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
 ) -> Response {
     tracing::debug!("enroll_keys_page: checking for session cookie");
 
     // Get session from cookie
-    match extract_session_from_cookie(&state, &jar).await {
+    match extract_session_from_cookie(&state, &jar, arrival).await {
         Ok(token) => {
             let email = token.email.clone().unwrap_or_default();
             tracing::debug!(
@@ -1152,18 +1269,23 @@ pub(crate) async fn enroll_keys_page(
 /// Start browser-based `WebAuthn` registration.
 /// POST /enroll/webauthn/start
 /// Authentication is via session cookie (set by oidc_callback).
+#[expect(
+    clippy::disallowed_methods,
+    reason = "mints a registration state token's expiry"
+)]
 pub(crate) async fn browser_register_start(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
 ) -> Result<Json<BrowserRegisterStartResponse>, ServiceError> {
     // Get session from cookie
-    let token = extract_session_from_cookie(&state, &jar)
+    let token = extract_session_from_cookie(&state, &jar, arrival)
         .await
         .map_err(|_| {
             ServiceError::api(
                 StatusCode::UNAUTHORIZED,
                 "invalid_session",
-                "Invalid or expired session",
+                Tr::new("enroll-error-session-invalid").to_string(),
             )
         })?;
 
@@ -1177,20 +1299,13 @@ pub(crate) async fn browser_register_start(
 
     let user_email = token.email.clone().unwrap_or_default();
 
-    // A deactivated user's surviving enrollment cookie must not begin new
-    // hardware-key registration. `extract_session_from_cookie` deliberately
-    // skips the `active` check, so this mutating endpoint carries its own
-    // guard (per-handler point-fix pattern).
-    let account = db::get_user_by_id(&state.store, &token.sub)
-        .await
-        .map_err(|e| {
-            ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
-        })?;
-    if let Some(account) = account
-        && !account.active
-    {
-        return Err(ServiceError::Forbidden("user_deactivated"));
-    }
+    // A deactivated or deleted user's surviving enrollment cookie must not
+    // begin new hardware-key registration. `extract_session_from_cookie`
+    // deliberately skips the `active` check, so this mutating endpoint carries
+    // its own guard. It uses `load_active_user`, like `browser_register_complete`
+    // and the CLI `register_start`/`register_complete`, so a missing user
+    // (`Ok(None)`) is refused the same way as `active=false`.
+    super::session::load_active_user(&state, &token.sub).await?;
 
     // Get device_auth_id from enrollment session if available (for CLI polling).
     // Look up by session token hash, since oidc_callback stores the
@@ -1209,7 +1324,7 @@ pub(crate) async fn browser_register_start(
                         ServiceError::api(
                             StatusCode::INTERNAL_SERVER_ERROR,
                             "db_error",
-                            "Failed to look up enrollment session",
+                            Tr::new("enroll-error-session-lookup-failed").to_string(),
                         )
                     })?;
             enrollment_session
@@ -1338,67 +1453,90 @@ pub(crate) async fn browser_register_start(
 /// type, origin, state decode — cannot be reordered after it. The account must
 /// also still be active, which is a database read rather than a body check and so
 /// runs between the two.
+///
+/// The caller is re-bound to the session cookie established at
+/// `browser_register_start` here, mirroring the start handler's
+/// `extract_session_from_cookie`. `browser_register_start` minted the state
+/// from the cookie's `sub`; completion must assert the same principal before
+/// consuming the state or storing a credential. Without this check a holder
+/// of a leaked-but-still-valid state JWT could complete enrollment with an
+/// attacker-controlled YubiKey against the victim's account by passing only
+/// the per-route body checks.
 #[expect(
     clippy::too_many_lines,
     reason = "axum handler; FIDO2 registration completion: attestation, db, session"
 )]
 pub(crate) async fn browser_register_complete(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
+    jar: CookieJar,
     client_info: ClientInfo,
     ValidJson(req): ValidJson<BrowserRegisterCompleteRequest>,
 ) -> Result<impl IntoResponse, ServiceError> {
-    let checked = RegistrationCompletion::validate(req, &state).await?;
+    let checked = RegistrationCompletion::validate(req, &state, arrival).await?;
 
-    // A user deactivated after obtaining the registration state (valid for
-    // five minutes) must not register a new hardware key.
-    let account = db::get_user_by_id(&state.store, &checked.reg_state.user_id.to_string())
-        .await
-        .map_err(|e| {
-            ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
-        })?;
-    if let Some(account) = account
-        && !account.active
-    {
-        return Err(ServiceError::Forbidden("user_deactivated"));
+    // Bind the caller to the state JWT's user_id. `browser_register_start`
+    // minted the state from the session cookie's `sub`; completion must
+    // assert the same principal before consuming the state. A mismatched
+    // caller is rejected here, *before* the single-use consume, so the
+    // legitimate holder can still complete the enrollment with the same
+    // state token.
+    let session = extract_session_from_cookie(&state, &jar, arrival).await?;
+    if session.sub != checked.reg_state.user_id.to_string() {
+        tracing::warn!(
+            caller_sub = %session.sub,
+            state_user_id = %checked.reg_state.user_id,
+            "browser_register_complete caller does not match state JWT user_id"
+        );
+        return Err(ServiceError::Forbidden("state_user_mismatch"));
     }
+
+    // A user deactivated — or hard-deleted — after obtaining the registration
+    // state (valid for five minutes) must not register a new hardware key. Like
+    // the CLI `register_complete`, this routes through `load_active_user`, which
+    // rejects both `Ok(None)` (deleted, the in-flight `delete_user` race) and
+    // `active=false` (deactivated, issue #846) and keeps the two halves of the
+    // enrollment flow consistent. The previous inline `if let Some(ref account)`
+    // guard only caught `Some(active=false)` and silently let `Ok(None)` through
+    // to the single-use consume and WebAuthn verification (and, for the browser
+    // path, on to `create_oauth_access_token`). The returned `User` is reused
+    // below for the org-domain snapshot, preserving the single-read semantics.
+    let account =
+        super::session::load_active_user(&state, &checked.reg_state.user_id.to_string()).await?;
 
     // Consume the state token before any WebAuthn work so that a captured
     // state JWT cannot be replayed within the 5-minute validity window.
     // The witness is threaded into TokenIssuanceProof below — the only
     // path to `GrantProof::EnrollmentComplete`.
-    let registration_claim = match key_svc::consume_registration_state(&state.store, &checked)
-        .await?
-    {
-        key_svc::RegistrationStateConsumed::Won(claim) => claim,
-        key_svc::RegistrationStateConsumed::Replay => {
-            tracing::warn!(
-                user_id = %checked.reg_state.user_id,
-                "browser registration state replay rejected"
-            );
-            let audit_data = crate::db::documents::audit::RegistrationReplayData {
-                flow: "browser_register",
-                success: false,
-                error_code: "state_already_used",
-            };
-            if let Err(e) = state
-                .audit
-                .insert_event(
-                    db::AuditEventKind::KeyRegistrationReplay,
-                    Some(&checked.reg_state.user_id.to_string()),
-                    Some(&checked.reg_state.user_email),
-                    &audit_data,
-                )
-                .await
-            {
-                tracing::warn!(error = %e, "failed to write key_registration_replay audit event");
+    let registration_claim =
+        match key_svc::consume_registration_state(&state.store, &checked).await? {
+            key_svc::RegistrationStateConsumed::Won(claim) => claim,
+            key_svc::RegistrationStateConsumed::Replay => {
+                tracing::warn!(
+                    user_id = %checked.reg_state.user_id,
+                    "browser registration state replay rejected"
+                );
+                let audit_data = RegistrationReplayData {
+                    flow: "browser_register",
+                    success: false,
+                    error_code: "state_already_used",
+                };
+                state
+                    .audit
+                    .record_event(
+                        db::AuditEventKind::KeyRegistrationReplay,
+                        Some(&checked.reg_state.user_id.to_string()),
+                        Some(&checked.reg_state.user_email),
+                        &audit_data,
+                    )
+                    .await;
+                return Err(ServiceError::api(
+                    StatusCode::BAD_REQUEST,
+                    "state_already_used",
+                    Tr::new("enroll-error-registration-link-used").to_string(),
+                ));
             }
-            return Err(ServiceError::api(
-                StatusCode::BAD_REQUEST,
-                "state_already_used",
-                "This registration link has already been used",
-            ));
-        }
-    };
+        };
 
     let RegistrationCompletion {
         req,
@@ -1407,14 +1545,36 @@ pub(crate) async fn browser_register_complete(
         expires_at: _,
     } = checked;
 
-    // Reject software passkeys, platform authenticators, and disallowed AAGUIDs.
+    // Registration policy: hardware-only, x5c chain, AAGUID policy, device
+    // name. Identical call to the CLI path in `keys.rs`, so the two agree by
+    // construction.
     let validated = validate_registration_attestation(
         &req.attestation_object,
         &state.config().allowed_aaguids,
-        state.config().require_attestation_cert,
     )?;
 
-    let x5c_certs = crate::attestation::extract_x5c_from_attestation(&req.attestation_object);
+    // Extract the verified `authData.signCount` (WebAuthn L2 §7.1 step 23)
+    // so the credential's stored signature counter is initialized to it
+    // rather than a hardcoded `0`. `finish_passkey_registration` below
+    // yields a `Passkey` whose `webauthn-rs` 0.5.5 API does not surface the
+    // registration counter (the `cred` field is `pub(crate)`), so the
+    // server re-parses the same authData bytes the verifier consumes
+    // below. This performs no cryptographic work — only a CBOR+authData
+    // read of the 4-byte big-endian signCount at byte offset 33 — so a
+    // malformed attestation that fails here would also fail
+    // `finish_passkey_registration`; the extracted value is used only
+    // after that verification succeeds, in `create_authenticator` below.
+    let sign_count = webauthn_verify::extract_sign_count(req.attestation_object.as_bytes())
+        .map_err(|e| {
+            tracing::warn!("Failed to extract signCount from registration authData: {e}");
+            ServiceError::api(
+                StatusCode::BAD_REQUEST,
+                "invalid_attestation",
+                Tr::new("enroll-error-attestation-failed")
+                    .arg("detail", e.to_string())
+                    .to_string(),
+            )
+        })?;
 
     // WebAuthn cryptographic verification.
     use webauthn_rs::prelude::Base64UrlSafeData;
@@ -1439,7 +1599,9 @@ pub(crate) async fn browser_register_complete(
             ServiceError::api(
                 StatusCode::BAD_REQUEST,
                 "attestation_failed",
-                format!("Attestation verification failed: {e}"),
+                Tr::new("enroll-error-attestation-failed")
+                    .arg("detail", e.to_string())
+                    .to_string(),
             )
         })?;
 
@@ -1455,7 +1617,7 @@ pub(crate) async fn browser_register_complete(
         return Err(ServiceError::api(
             StatusCode::CONFLICT,
             "credential_already_registered",
-            "This security key is already registered",
+            Tr::new("enroll-error-key-already-registered").to_string(),
         ));
     }
 
@@ -1463,57 +1625,18 @@ pub(crate) async fn browser_register_complete(
     // This ensures compatibility with our server-side WebAuthn verification
     let cose_key = passkey.get_public_key();
 
-    let public_key_cbor = crate::crypto::cose::cose_key_to_cbor(cose_key).map_err(|e| {
+    let public_key_cbor = cose::cose_key_to_cbor(cose_key).map_err(|e| {
         tracing::error!("Failed to serialize COSE key to CBOR: {e}");
         ServiceError::api(
             StatusCode::INTERNAL_SERVER_ERROR,
             "cbor_error",
-            "Failed to serialize key",
+            Tr::new("enroll-error-key-serialize-failed").to_string(),
         )
     })?;
 
     // Use the credential_id from the passkey (parsed by webauthn-rs from the attestation)
     // rather than the one from the request, to ensure consistency with what the YubiKey has stored.
     let cred_id_to_store = passkey.cred_id().to_vec();
-
-    // x5c attestation chain validation (browser enrollment).
-    // The browser enrollment path uses webauthn-rs for verification, so we
-    // additionally validate the x5c chain here for attestation_verified status.
-    let mut validated = validated;
-    if let Some(x5c_certs) = x5c_certs {
-        match crate::crypto::attestation_chain::validate_attestation_chain(
-            &x5c_certs,
-            validated.aaguid.as_deref(),
-        ) {
-            Ok(chain_result) => {
-                validated.attestation = Some(chain_result);
-                tracing::info!(
-                    attestation_verified = true,
-                    "Browser enrollment: x5c chain validated"
-                );
-            }
-            Err(e) => {
-                if state.config().require_attestation_cert {
-                    tracing::warn!(
-                        "Browser enrollment: x5c chain validation \
-                         failed (fatal, require_attestation_cert=true): {e}"
-                    );
-                    return Err(ServiceError::api(
-                        StatusCode::BAD_REQUEST,
-                        "attestation_chain_invalid",
-                        "Attestation certificate chain could not be \
-                         verified against trusted roots. Only genuine \
-                         hardware authenticators with valid attestation \
-                         chains are accepted.",
-                    ));
-                }
-                tracing::warn!(
-                    "Browser enrollment: x5c chain validation \
-                     failed (non-fatal): {e}"
-                );
-            }
-        }
-    }
 
     // Store the authenticator with verified credential
     // user_handle is the user_id as bytes (for discoverable credentials)
@@ -1522,16 +1645,185 @@ pub(crate) async fn browser_register_complete(
         &state.store,
         &db::CreateAuthenticatorParams {
             user_id: &reg_state.user_id.to_string(),
-            user_email: &reg_state.user_email,
             name: &validated.device_name,
             credential_id: &cred_id_to_store,
             public_key: &public_key_cbor,
             aaguid: validated.aaguid.as_deref(),
             user_handle: Some(&user_handle),
-            attestation_verified: validated.attestation.is_some(),
+            attestation_verified: true,
+            // Initialize the stored signature counter to the registration
+            // `authData.signCount` (WebAuthn L2 §7.1 step 23), re-parsed
+            // above from the same attestation object
+            // `finish_passkey_registration` verified.
+            counter: sign_count,
         },
     )
     .await?;
+
+    // The registration ceremony just completed above is an authentication
+    // event (the session's amr/acr below claim hardware verification), and
+    // `finish_passkey_registration` yields a `Passkey` only for a verified
+    // one. Its instant backs both the browser session and the device
+    // approval, so the token the device-code grant later mints reports the
+    // ceremony instant rather than the CLI's poll instant, and the
+    // `require_fresh_timestamp` gate on key deletion does not read either as
+    // Unix epoch (`unwrap_or(0)`).
+    let auth_now = AuthTime::from_passkey_registration(&passkey);
+
+    // Audit the enrollment and release the CLI's device-auth row. The
+    // `Enrollment` audit row is recorded before the fallible
+    // `authorize_device_auth` call so a committed authenticator always has a
+    // matching `AuthEventType::Enrollment` event even when the CLI release
+    // fails — `create_authenticator` above is not in a shared transaction
+    // with the device-auth release.
+    finalize_enrollment_audit_and_device_auth(
+        &state,
+        &reg_state,
+        &authenticator_id,
+        auth_now,
+        client_info,
+    )
+    .await?;
+
+    tracing::info!(
+        "Enrollment complete for: {} with {} (AAGUID: {})",
+        redact_email(&reg_state.user_email),
+        validated.device_name,
+        validated.aaguid.as_deref().unwrap_or("unknown")
+    );
+
+    // Issue an OAuth access token (RFC 9068) — the server acts as both issuer and audience
+    let enroll_client_id = state.config().base_url.clone();
+    let user_id_str = reg_state.user_id.to_string();
+
+    // Snapshot org domain for federation claims tied to this session, reusing
+    // the same `account` read that gated activation above rather than a
+    // second `get_user_by_id` — so the snapshot reflects the user's org as of
+    // the start of this ceremony, not as of just before token issuance. Fail
+    // closed: the snapshot is captured exactly once, so silently dropping a
+    // transient DB error would permanently degrade this session's `hd` claim.
+    let snapshot_error = |err: anyhow::Error| {
+        tracing::error!("Failed to snapshot org domain: {}", err);
+        ServiceError::api(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "db_error",
+            Tr::new("enroll-error-browser-session-create-failed").to_string(),
+        )
+    };
+    // `load_active_user` returns an active `User` (not `Option<User>`), so the
+    // deleted-user (`Ok(None)`) arm that used to fall through to `None` here is
+    // no longer reachable — a vanished user is rejected above before this
+    // point.
+    let org_domain = match account.org_id.as_deref() {
+        Some(org_id) => db::get_user_org_domain(
+            &state.store,
+            &account.id,
+            org_id,
+            account.org_domain.as_deref(),
+        )
+        .await
+        .map_err(snapshot_error)?,
+        None => None,
+    };
+
+    let session_result = create_oauth_access_token(
+        &state,
+        CreateOAuthTokenParams {
+            user_id: &user_id_str,
+            email: &reg_state.user_email,
+            authenticator_id: Some(&authenticator_id),
+            client_id: &enroll_client_id,
+            scope: Some(ScopeSet::all()),
+            binding: TokenBinding::Bearer,
+            act: None,
+            audience: None,
+            max_lifetime_secs: None,
+            hardware_verification: HardwareVerification::Verified {
+                auth_time: Some(auth_now.instant()),
+            },
+            session_purpose: db::SessionPurpose::OAuthAccessToken,
+            authorization_details: None,
+            hardware_aaguid: validated.aaguid.as_deref(),
+            org_domain: org_domain.as_deref(),
+            source_code_hash: None,
+        },
+        TokenIssuanceProof {
+            grant: GrantProof::EnrollmentComplete(registration_claim),
+            client_auth: ClientAuthProof::NoAuth(NoClientAuth::internal_endpoint()),
+            sender_constraint: SenderConstraintProof::no_registered_client(),
+        },
+        arrival,
+    )
+    .await
+    .map_err(|e| {
+        ServiceError::api(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "session_error",
+            e.to_string(),
+        )
+    })?;
+    let token = session_result.token;
+
+    // Return success template with session cookie
+    let cookie = create_session_cookie(
+        token.expose_secret(),
+        session_cookie_max_age(session_result.expires_in),
+    );
+    let html = SuccessTemplate.render().map_err(|e| {
+        tracing::error!("Template render error: {}", e);
+        ServiceError::api(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "render_error",
+            Tr::new("enroll-error-render-failed").to_string(),
+        )
+    })?;
+
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(header::SET_COOKIE, cookie.to_string())
+        .body(Body::from(html))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()))
+}
+
+/// Record the `Enrollment` audit event for a committed authenticator and, for
+/// CLI-initiated flows, release the waiting device-authorization row.
+///
+/// `create_authenticator` (the caller) persists the authenticator row
+/// outside any shared transaction with `authorize_device_auth`, so the
+/// `Enrollment` audit row is recorded *before* the fallible device-auth
+/// release below. This guarantees every committed authenticator has a
+/// matching `AuthEventType::Enrollment` event even when the CLI release fails
+/// — this is the only production emit site for `Enrollment`. The
+/// `DeviceAuthApproved` audit row is recorded only when the release succeeds,
+/// since it semantically asserts the row transitioned to `Authorized`.
+async fn finalize_enrollment_audit_and_device_auth(
+    state: &AppState,
+    reg_state: &BrowserRegistrationState,
+    authenticator_id: &str,
+    auth_now: AuthTime,
+    client_info: ClientInfo,
+) -> Result<(), ServiceError> {
+    // Log enrollment event — the authenticator is already committed, so this
+    // row must be written before the fallible device-auth release below.
+    let auth_event_params = AuthEventParams {
+        user_id: db::Principal::Verified(reg_state.user_id.to_string()),
+        event_type: AuthEventType::Enrollment,
+        authenticator_id: Some(authenticator_id.to_string()),
+        success: true,
+        client: client_info.clone(),
+        failure_reason: None,
+        client_id: None,
+        idp_issuer: None,
+    };
+    db::record_auth_event(
+        &state.audit,
+        auth_event_params,
+        Some(reg_state.user_email.clone()),
+    )
+    .await;
+
+    metrics::record_auth_event("enrollment");
 
     // Mark device authorization as complete (only for CLI-initiated flows)
     if reg_state.device_auth_id.is_empty() {
@@ -1546,9 +1838,9 @@ pub(crate) async fn browser_register_complete(
                 id: &reg_state.device_auth_id,
                 user_id: &reg_state.user_id.to_string(),
                 user_email: &reg_state.user_email,
-                authenticator_id: &authenticator_id,
+                authenticator_id,
                 // The WebAuthn registration ceremony just completed above.
-                hardware_verified: true,
+                verification: db::DeviceApproval::Observed(auth_now),
             },
         )
         .await
@@ -1561,138 +1853,18 @@ pub(crate) async fn browser_register_complete(
         })?;
 
         let event = db::AuthEventParams {
-            user_id: reg_state.user_id.to_string(),
+            user_id: db::Principal::Verified(reg_state.user_id.to_string()),
             event_type: db::AuthEventType::DeviceAuthApproved,
-            authenticator_id: Some(authenticator_id.clone()),
+            authenticator_id: Some(authenticator_id.to_string()),
             success: true,
-            client: client_info.clone(),
-            ..Default::default()
+            client: client_info,
+            failure_reason: None,
+            client_id: None,
+            idp_issuer: None,
         };
-        db::spawn_audit_event(&state.audit, event, Some(reg_state.user_email.clone()));
+        db::record_auth_event(&state.audit, event, Some(reg_state.user_email.clone())).await;
     }
-
-    // Log enrollment event (fire-and-forget)
-    let auth_event_params = AuthEventParams {
-        user_id: reg_state.user_id.to_string(),
-        event_type: AuthEventType::Enrollment,
-        authenticator_id: Some(authenticator_id.clone()),
-        success: true,
-        client: client_info,
-        ..AuthEventParams::default()
-    };
-    db::spawn_audit_event(
-        &state.audit,
-        auth_event_params,
-        Some(reg_state.user_email.clone()),
-    );
-
-    crate::infra::metrics::record_auth_event("enrollment");
-
-    tracing::info!(
-        "Enrollment complete for: {} with {} (AAGUID: {})",
-        redact_email(&reg_state.user_email),
-        validated.device_name,
-        validated.aaguid.as_deref().unwrap_or("unknown")
-    );
-
-    // Create a session for the browser so the user stays logged in
-    let session_hours = i64::try_from(state.config().session_hours).map_err(|_| {
-        ServiceError::api(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "time_error",
-            "Invalid session hours",
-        )
-    })?;
-
-    // Issue an OAuth access token (RFC 9068) — the server acts as both issuer and audience
-    let enroll_client_id = state.config().base_url.clone();
-    let user_id_str = reg_state.user_id.to_string();
-
-    // Snapshot org domain for federation claims tied to this session. Fail
-    // closed: the snapshot is captured exactly once, so silently dropping a
-    // transient DB error would permanently degrade this session's `hd` claim.
-    let snapshot_error = |err: anyhow::Error| {
-        tracing::error!("Failed to snapshot org domain: {}", err);
-        ServiceError::api(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "db_error",
-            "Failed to create session",
-        )
-    };
-    let org_domain = match db::get_user_by_id(&state.store, &user_id_str)
-        .await
-        .map_err(snapshot_error)?
-    {
-        Some(u) => match u.org_id {
-            Some(org_id) => db::get_organization_domain(&state.store, &org_id)
-                .await
-                .map_err(snapshot_error)?,
-            None => None,
-        },
-        None => None,
-    };
-
-    // Capture the FIDO2 authentication timestamp — the user just completed
-    // WebAuthn registration, which is an authentication event (amr/acr below
-    // claim hardware verification). This must be `Some(now)` for consistency
-    // with every other `HardwareVerification::Verified` flow and so the
-    // `require_fresh_timestamp` freshness gate on key deletion does not treat
-    // the freshly-minted session as Unix epoch (`unwrap_or(0)`).
-    let auth_now = Timestamp::now();
-
-    let session_result = create_oauth_access_token(
-        &state,
-        CreateOAuthTokenParams {
-            user_id: &user_id_str,
-            email: &reg_state.user_email,
-            authenticator_id: Some(&authenticator_id),
-            client_id: &enroll_client_id,
-            scope: Some(ScopeSet::all()),
-            binding: TokenBinding::Bearer,
-            act: None,
-            audience: None,
-            auth_time: Some(auth_now.as_second()),
-            hardware_verification: crate::services::auth::HardwareVerification::Verified,
-            session_purpose: db::SessionPurpose::OAuthAccessToken,
-            authorization_details: None,
-            hardware_aaguid: validated.aaguid.as_deref(),
-            org_domain: org_domain.as_deref(),
-        },
-        TokenIssuanceProof {
-            grant: GrantProof::EnrollmentComplete(registration_claim),
-            client_auth: ClientAuthProof::NoAuth(
-                crate::services::auth::NoClientAuth::internal_endpoint(),
-            ),
-            sender_constraint: SenderConstraintProof::no_registered_client(),
-        },
-    )
-    .await
-    .map_err(|e| {
-        ServiceError::api(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "session_error",
-            e.to_string(),
-        )
-    })?;
-    let token = session_result.token;
-
-    // Return success template with session cookie
-    let cookie = create_session_cookie(token.expose_secret(), session_hours.saturating_mul(3600));
-    let html = SuccessTemplate.render().map_err(|e| {
-        tracing::error!("Template render error: {}", e);
-        ServiceError::api(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "render_error",
-            "Failed to render template",
-        )
-    })?;
-
-    Ok(Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-        .header(header::SET_COOKIE, cookie.to_string())
-        .body(Body::from(html))
-        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()))
+    Ok(())
 }
 
 // ============================================================================
@@ -1712,6 +1884,10 @@ pub(crate) struct DirectEnrollQuery {
 /// This initiates OIDC authentication directly from the browser,
 /// without requiring the CLI to create a device authorization request.
 /// After successful enrollment, the user can download the CLI and login.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "stamps the enrollment audit record"
+)]
 pub(crate) async fn direct_enroll_start(
     State(state): State<Arc<AppState>>,
     Query(query): Query<DirectEnrollQuery>,
@@ -1743,7 +1919,7 @@ pub(crate) async fn direct_enroll_start(
     // the multi-IdP case, so `state.idps.first()` here is the single
     // configured IdP (config validation ensures at least one IdP is present).
     let base_url = state.config().base_url.clone();
-    let chosen_idp: Option<&crate::services::idp::ConfiguredIdp> = match provider_choice {
+    let chosen_idp: Option<&ConfiguredIdp> = match provider_choice {
         Some(slug) => match state.idp(slug) {
             Some(i) => Some(i),
             None => {
@@ -1814,8 +1990,8 @@ pub(crate) async fn direct_enroll_start(
     }
 
     match auth_request.action {
-        crate::services::idp::AuthAction::Redirect { url } => Redirect::to(&url).into_response(),
-        crate::services::idp::AuthAction::PostForm {
+        AuthAction::Redirect { url } => Redirect::to(&url).into_response(),
+        AuthAction::PostForm {
             action_url,
             saml_request,
             relay_state,

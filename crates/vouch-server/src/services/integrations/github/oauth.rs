@@ -89,26 +89,37 @@ impl GitHubService<'_> {
 
     /// Get a fresh GitHub access token for a user using their stored refresh token.
     ///
-    /// Returns `Ok(None)` if the user doesn't have a stored refresh token.
+    /// Returns `Ok(None)` if the user doesn't have a stored refresh token, the
+    /// user document is gone, or a concurrent re-link to a different GitHub
+    /// account committed during the refresh round-trip (in which case the
+    /// rotated token would belong to the pre-relink account and is
+    /// discarded to avoid overwriting the re-link's refresh token — the
+    /// caller then signals the same recovery the missing-token branch
+    /// already routes to).
     /// Returns an error if the refresh fails.
     pub(crate) async fn get_user_access_token(
         &self,
         user_id: &str,
     ) -> GitHubResult<Option<SecretString>> {
-        // Get the user's refresh token
-        let refresh_token = match db::get_user_github_refresh_token(self.store, user_id)
+        // Read the GitHub identity (id + refresh token) from a single doc
+        // snapshot. The conditional write below compares the stored link
+        // against this snapshot, so both fields must describe one moment.
+        let Some(linked) = db::get_user_github_link(self.store, user_id)
             .await
             .map_err(GitHubError::Database)?
-        {
-            Some(token) => token,
-            None => return Ok(None),
+        else {
+            return Ok(None);
+        };
+        let Some(refresh_token) = linked.github_refresh_token.as_ref() else {
+            return Ok(None);
         };
 
         let app = self.require_app()?;
         let client_id = self.oauth_client_id()?;
         let client_secret = self.oauth_client_secret()?;
 
-        // Refresh the token
+        // Refresh the token. RACE WINDOW: a re-link, a revocation, or
+        // another refresh can commit during this round-trip.
         let token_response = refresh_oauth_token(
             app.http_client(),
             client_id,
@@ -125,24 +136,24 @@ impl GitHubService<'_> {
         // failures so they surface instead of silently discarding the only
         // copy of the new token.
         if let Some(new_refresh_token) = &token_response.refresh_token {
-            let user = db::get_user_by_id(self.store, user_id)
-                .await
-                .map_err(GitHubError::Database)?
-                .ok_or(GitHubError::UserNotFound)?;
-
-            let (Some(github_id), Some(github_login)) = (user.github_id, &user.github_login) else {
-                return Err(GitHubError::GitHubAccountNotLinked);
-            };
-
-            db::update_user_github_identity(
+            // Write only the refresh token, and only when the stored link is
+            // still the one refreshed above — see
+            // `update_user_github_refresh_token`.
+            let outcome = db::update_user_github_refresh_token(
                 self.store,
                 user_id,
-                github_id,
-                github_login,
-                Some(new_refresh_token.expose_secret()),
+                new_refresh_token.expose_secret(),
+                &linked,
             )
             .await
             .map_err(GitHubError::Database)?;
+            if outcome == db::RefreshOutcome::SkippedLinkChanged {
+                // The link changed during the round-trip: re-linked, revoked,
+                // or rotated by another refresh. There is no usable access
+                // token for the doc's current state; route recovery the same
+                // way the missing-refresh-token branch does.
+                return Ok(None);
+            }
         }
 
         Ok(Some(token_response.access_token))
@@ -173,6 +184,7 @@ impl GitHubService<'_> {
 )]
 mod tests {
     use super::*;
+    use crate::config::NonEmptySecret;
     use crate::test_utils;
     use secrecy::SecretString;
 
@@ -181,7 +193,7 @@ mod tests {
         let state = test_utils::test_app_state().await;
         let mut config = (**state.config()).clone();
         config.github_app_client_id = Some("github-client-id".to_string());
-        config.github_app_client_secret = Some(SecretString::from("shh".to_string()));
+        config.github_app_client_secret = NonEmptySecret::new(SecretString::from("shh"));
 
         let service = GitHubService::new(
             &state.store,
@@ -214,7 +226,7 @@ mod tests {
         let state = test_utils::test_app_state().await;
         let mut config = (**state.config()).clone();
         config.github_app_client_id = Some("github-client-id".to_string());
-        config.github_app_client_secret = Some(SecretString::from("shh".to_string()));
+        config.github_app_client_secret = NonEmptySecret::new(SecretString::from("shh"));
 
         let service = GitHubService::new(
             &state.store,

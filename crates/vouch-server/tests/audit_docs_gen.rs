@@ -16,7 +16,6 @@
     clippy::expect_used,
     reason = "test code: panic on assertion failure is acceptable"
 )]
-
 use vouch_server::db::{AuditEventGroup, AuditEventKind};
 use vouch_server::infra::i18n::I18nContext;
 

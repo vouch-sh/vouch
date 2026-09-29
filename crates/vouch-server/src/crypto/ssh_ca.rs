@@ -300,7 +300,7 @@ impl SshCa {
         let rp_id = match self {
             Self::Local { rp_id, .. } | Self::Kms { rp_id, .. } => rp_id,
         };
-        let key_id = format!("{user_email}@{rp_id}");
+        let key_id = vouch_common::ssh_cert_key_id(user_email, rp_id);
 
         // Build the certificate
         let mut builder =

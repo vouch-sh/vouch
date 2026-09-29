@@ -6,6 +6,8 @@
 
 use std::fmt;
 
+use vouch_common::UrlSecurity;
+
 /// A validated, normalized Vouch server URL.
 ///
 /// Guarantees:
@@ -15,7 +17,7 @@ use std::fmt;
 ///
 /// Construct via [`ServerUrl::parse`].
 #[derive(Debug, Clone)]
-pub(crate) struct ServerUrl {
+pub struct ServerUrl {
     url: String,
 }
 
@@ -30,7 +32,7 @@ impl ServerUrl {
     ///
     /// If the URL uses HTTP for a non-loopback host and `allow_insecure` is true,
     /// a warning is printed to stderr but the URL is accepted.
-    pub(crate) fn parse(url: &str, allow_insecure: bool) -> Result<Self, ServerUrlError> {
+    pub fn parse(url: &str, allow_insecure: bool) -> Result<Self, ServerUrlError> {
         if url.is_empty() {
             return Err(ServerUrlError::Empty);
         }
@@ -40,8 +42,8 @@ impl ServerUrl {
 
         // Check scheme security
         match vouch_common::check_url_security(url) {
-            vouch_common::UrlSecurity::Secure => {}
-            vouch_common::UrlSecurity::InsecureHttp { url: insecure_url } => {
+            UrlSecurity::Secure => {}
+            UrlSecurity::InsecureHttp { url: insecure_url } => {
                 if allow_insecure {
                     crate::tr_eprintln!("server-url-warn-insecure", url = insecure_url.as_str());
                     // Trailing blank line to set the warning apart visually.
@@ -59,8 +61,29 @@ impl ServerUrl {
     }
 
     /// Get the URL as a string slice.
-    pub(crate) fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         &self.url
+    }
+
+    /// Whether `url` is on this server: the same scheme, host, and port, and
+    /// a path at or below this URL's path. Used before sending a credential
+    /// to a URL the server returned earlier (RFC 7592 `registration_client_uri`).
+    pub fn contains(&self, url: &str) -> bool {
+        let (Ok(base), Ok(other)) = (url::Url::parse(&self.url), url::Url::parse(url)) else {
+            return false;
+        };
+        if base.scheme() != other.scheme()
+            || base.host() != other.host()
+            || base.port_or_known_default() != other.port_or_known_default()
+        {
+            return false;
+        }
+        let base_path = base.path().trim_end_matches('/');
+        let path = other.path();
+        path == base_path
+            || path
+                .strip_prefix(base_path)
+                .is_some_and(|rest| rest.starts_with('/'))
     }
 }
 
@@ -76,9 +99,42 @@ impl AsRef<str> for ServerUrl {
     }
 }
 
+/// Where this invocation's opt-in to a plain-HTTP server URL comes from.
+///
+/// Every server URL a token is sent to is judged per invocation, never on
+/// the strength of an opt-in given when the URL was stored at login.
+#[derive(Debug, Clone, Copy)]
+pub enum InsecureOptIn {
+    /// A subcommand: clap has already merged `--allow-insecure` and
+    /// `VOUCH_ALLOW_INSECURE` into this value.
+    Cli(bool),
+    /// A helper binary (`docker-credential-vouch`, `git-remote-codecommit`,
+    /// `keyring`, `vouch-pnpm-tokenhelper`). These are dispatched on argv0
+    /// before clap parses and are run by other tools through argument-less
+    /// symlinks, so `VOUCH_ALLOW_INSECURE` in the calling tool's environment
+    /// is the only opt-in. It is read when a URL is judged, so a helper
+    /// operation that never contacts the server does not fail on it.
+    Env,
+}
+
+impl InsecureOptIn {
+    /// Whether a plain-HTTP URL to a non-loopback host is allowed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerUrlError::OptIn`] when `VOUCH_ALLOW_INSECURE` holds a
+    /// value that is neither on nor off; it is never read as either.
+    pub fn allowed(self) -> Result<bool, ServerUrlError> {
+        match self {
+            Self::Cli(allowed) => Ok(allowed),
+            Self::Env => vouch_common::allow_insecure_from_env().map_err(ServerUrlError::OptIn),
+        }
+    }
+}
+
 /// Errors from [`ServerUrl::parse`].
 #[derive(Debug)]
-pub(crate) enum ServerUrlError {
+pub enum ServerUrlError {
     /// The URL string was empty.
     Empty,
 
@@ -87,6 +143,20 @@ pub(crate) enum ServerUrlError {
 
     /// The URL uses HTTP for a non-loopback host.
     InsecureHttp(String),
+
+    /// `VOUCH_ALLOW_INSECURE` could not be read as on or off. The message is
+    /// the environment parser's own, shown verbatim like other environment
+    /// errors.
+    OptIn(String),
+}
+
+impl ServerUrlError {
+    /// Whether `e` is a server URL judged unusable for this invocation, as
+    /// opposed to there being no stored session at all. Credential helpers
+    /// use it to show the URL's own message instead of "not configured".
+    pub fn is_in(e: &anyhow::Error) -> bool {
+        e.downcast_ref::<Self>().is_some()
+    }
 }
 
 impl std::fmt::Display for ServerUrlError {
@@ -107,6 +177,7 @@ impl std::fmt::Display for ServerUrlError {
                     crate::tr_args!("server-url-err-insecure-http", url = url.as_str())
                 )
             }
+            Self::OptIn(detail) => f.write_str(detail),
         }
     }
 }
@@ -120,6 +191,32 @@ impl std::error::Error for ServerUrlError {}
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn contains_accepts_paths_on_the_same_server() {
+        let server = ServerUrl::parse("https://vouch.example.com", false).unwrap();
+        assert!(server.contains("https://vouch.example.com/oauth/register/abc"));
+        assert!(server.contains("https://vouch.example.com:443/oauth/register/abc"));
+    }
+
+    #[test]
+    fn contains_rejects_other_servers() {
+        let server = ServerUrl::parse("https://vouch.example.com", false).unwrap();
+        // Another host, a look-alike host, a downgraded scheme, another port.
+        assert!(!server.contains("https://attacker.example/oauth/register/abc"));
+        assert!(!server.contains("https://vouch.example.com.attacker.example/x"));
+        assert!(!server.contains("http://vouch.example.com/oauth/register/abc"));
+        assert!(!server.contains("https://vouch.example.com:8443/oauth/register/abc"));
+        assert!(!server.contains("not a url"));
+    }
+
+    #[test]
+    fn contains_respects_a_base_path() {
+        let server = ServerUrl::parse("https://example.com/vouch", false).unwrap();
+        assert!(server.contains("https://example.com/vouch/oauth/register/abc"));
+        assert!(!server.contains("https://example.com/vouchers/oauth/register"));
+        assert!(!server.contains("https://example.com/other"));
+    }
 
     #[test]
     fn test_https_url_accepted() {

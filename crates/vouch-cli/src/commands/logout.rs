@@ -1,26 +1,29 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Logout command - end current session.
 
+use crate::server_url::ServerUrl;
 use anyhow::Result;
 use secrecy::ExposeSecret;
 #[cfg(unix)]
 use vouch_agent::{AgentClient, AgentError};
+use vouch_cli::fapi::{ClientAssertionBuilder, key_store};
+use vouch_cli::http::ReqwestClient;
 
 use crate::config::Config;
 use vouch_cli::tr_println;
 use vouch_common::{clear_cookie, protocol};
 
 /// Run the logout command.
-pub(crate) async fn run(server: &str) -> Result<()> {
+pub(crate) async fn run(server: &ServerUrl) -> Result<()> {
     let mut config = Config::load()?;
-    config.set_server_url(server);
+    config.set_server_url(server.as_str());
 
     // Check if we have a token in config
     let had_token = config.token().is_some();
 
     // Best-effort server-side revocation before clearing local state.
     if had_token {
-        revoke_on_server(&config).await;
+        revoke_on_server(&config, server).await;
     }
 
     // Clear session from agent (if running)
@@ -58,15 +61,14 @@ pub(crate) async fn run(server: &str) -> Result<()> {
 /// Uses `private_key_jwt` (RFC 7523) client authentication when a FAPI
 /// key and client_id are available. Best-effort: failures are logged at
 /// debug level and do not block local cleanup.
-async fn revoke_on_server(config: &Config) {
-    let (Some(token), Some(client_id), Some(server_url)) =
-        (config.token(), config.client_id(), config.server_url())
-    else {
-        tracing::debug!("Skipping server revocation: missing token, client_id, or server_url");
+async fn revoke_on_server(config: &Config, server: &ServerUrl) {
+    let (Some(token), Some(client_id)) = (config.token(), config.client_id()) else {
+        tracing::debug!("Skipping server revocation: missing token or client_id");
         return;
     };
+    let server_url = server.as_str();
 
-    let fapi_key = match vouch_cli::fapi::key_store::load_client_key() {
+    let fapi_key = match key_store::load_client_key() {
         Some(key) => key,
         None => {
             tracing::debug!("Skipping server revocation: no FAPI key available");
@@ -77,9 +79,7 @@ async fn revoke_on_server(config: &Config) {
     let revoke_url = format!("{server_url}/oauth/revoke");
 
     // FAPI 2.0 Section 5.3.2.1-8: audience must be the issuer URL (base URL).
-    let assertion = match vouch_cli::fapi::ClientAssertionBuilder::new(client_id, server_url)
-        .build(&fapi_key)
-    {
+    let assertion = match ClientAssertionBuilder::new(client_id, server_url).build(&fapi_key) {
         Ok(a) => a,
         Err(e) => {
             tracing::debug!("Failed to build client assertion for revocation: {e}");
@@ -87,7 +87,7 @@ async fn revoke_on_server(config: &Config) {
         }
     };
 
-    let client = match vouch_cli::http::ReqwestClient::new() {
+    let client = match ReqwestClient::new() {
         Ok(c) => c,
         Err(e) => {
             tracing::debug!("Failed to create HTTP client for revocation: {e}");

@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Session database operations.
 
+use crate::arrival::ArrivalTime;
+
 use super::document_type::{Document, DocumentType};
 use super::documents::session::SessionDoc;
 use super::store::DocumentStore;
 use anyhow::Result;
 use jiff::Timestamp;
 use std::collections::HashMap;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 // Re-export SessionPurpose from documents module
@@ -31,6 +33,18 @@ pub struct Session {
     pub hardware_aaguid: Option<String>,
     /// Organization domain (`hd` claim) at session creation time (snapshot).
     pub org_domain: Option<String>,
+    /// OAuth `client_id` that requested this token. `None` for sessions
+    /// issued before the field was backfilled. Used by `revoke_tokens_api`
+    /// to delete every access token an application minted.
+    pub client_id: Option<String>,
+    /// Hash of the single-use grant code (authorization code or device code)
+    /// that this session was issued from. `None` for grants with no such
+    /// code. Used by replay detection (RFC 6749 §10.5) to revoke only the
+    /// tokens issued from the replayed code.
+    pub source_code_hash: Option<String>,
+    /// Full-precision instant of the FIDO2 ceremony behind this session
+    /// (see [`SessionDoc::authenticated_at`]).
+    pub authenticated_at: Option<Timestamp>,
 }
 
 impl From<Document<SessionDoc>> for Session {
@@ -47,6 +61,9 @@ impl From<Document<SessionDoc>> for Session {
             authorization_details: doc.data.authorization_details,
             hardware_aaguid: doc.data.hardware_aaguid,
             org_domain: doc.data.org_domain,
+            client_id: doc.data.client_id,
+            source_code_hash: doc.data.source_code_hash,
+            authenticated_at: doc.data.authenticated_at,
         }
     }
 }
@@ -66,6 +83,20 @@ pub struct CreateSessionParams<'a> {
     pub authorization_details: Option<&'a serde_json::Value>,
     pub hardware_aaguid: Option<&'a str>,
     pub org_domain: Option<&'a str>,
+    /// OAuth `client_id` that requested this token (the RFC 9068 `client_id`
+    /// claim). Indexed so `revoke_tokens_api` can delete every access token
+    /// an application minted — not only the M2M (`client_credentials`)
+    /// sessions, which are keyed by `user_id == client_id` and handled by
+    /// `delete_sessions_for_user`. `None` only for low-level test fixtures
+    /// that bypass `create_oauth_access_token`.
+    pub client_id: Option<&'a str>,
+    /// Hash of the single-use grant code that sourced this session. `None`
+    /// for grants with no single-use code; `Some` for the authorization-code
+    /// and device-code grants so replay detection can target this session.
+    pub source_code_hash: Option<&'a str>,
+    /// Full-precision instant of the FIDO2 ceremony behind this session.
+    /// `None` when no ceremony was observed.
+    pub authenticated_at: Option<Timestamp>,
 }
 
 /// Create a new session.
@@ -83,6 +114,9 @@ pub async fn create_session(
         authorization_details: params.authorization_details.cloned(),
         hardware_aaguid: params.hardware_aaguid.map(String::from),
         org_domain: params.org_domain.map(String::from),
+        client_id: params.client_id.map(String::from),
+        source_code_hash: params.source_code_hash.map(String::from),
+        authenticated_at: params.authenticated_at,
     };
     let result = store.insert(&doc).await?;
     Ok(result.id)
@@ -107,12 +141,58 @@ pub async fn get_session_by_token_hash(
     }
 }
 
-/// Delete a session by token hash.
-pub async fn delete_session_by_token_hash(store: &DocumentStore, token_hash: &str) -> Result<bool> {
-    let count = store
-        .delete_by_index::<SessionDoc>("token_hash", token_hash)
+/// Look up a session row by token hash WITHOUT the expiry filter.
+///
+/// Unlike [`get_session_by_token_hash`], this returns the row even when its
+/// `expires_at` is already in the past, as long as the row has not yet been
+/// reaped by the expired-session cleanup task. `/oauth/revoke` reads it to
+/// check which client an expired token was issued to before deleting it.
+///
+/// This bypasses the [`SessionCache`] on purpose: the cache's miss path
+/// delegates to the expiry-filtering [`get_session_by_token_hash`] and would
+/// answer `None` for an expired-but-present row.
+pub async fn find_session_by_token_hash(
+    store: &DocumentStore,
+    token_hash: &str,
+) -> Result<Option<Session>> {
+    let doc = store
+        .find_one::<SessionDoc>("token_hash", token_hash)
         .await?;
-    Ok(count > 0)
+    Ok(doc.map(Session::from))
+}
+
+/// Delete the session row(s) for `token_hash`, whatever their expiry, and
+/// return one that this call removed; `None` when this call removed no row.
+///
+/// The row is read and deleted in one transaction. Every path that deletes a
+/// session by hash (`POST /logout`, RP-initiated logout, `/oauth/revoke`)
+/// records a `Logout` audit event for the row's user, and the audit event must
+/// be recorded whenever the row actually existed, including an expired row the
+/// cleanup task has not reaped yet. Returning the row gives each caller the
+/// `user_id` and `user_email` for it.
+///
+/// The return is driven off `StoreTransaction::delete`'s row count, not the
+/// pre-delete read: of two concurrent revokes of the same `token_hash` only
+/// the transaction that physically deletes the row returns `Some`, so exactly
+/// one of them records the `Logout` audit event. A loser that read the row but
+/// deleted nothing returns `None`, matching `delete_scim_token`,
+/// `delete_custom_policy`, `delete_scim_group`, and `delete_user`.
+pub async fn delete_session_by_token_hash(
+    store: &DocumentStore,
+    token_hash: &str,
+) -> Result<Option<Session>> {
+    crate::with_dsql_retry!(async {
+        let mut tx = store.begin().await?;
+        let docs = tx.find_all::<SessionDoc>("token_hash", token_hash).await?;
+        let mut deleted = None;
+        for doc in docs {
+            if tx.delete(&doc.id).await? {
+                deleted = Some(Session::from(doc));
+            }
+        }
+        tx.commit().await?;
+        Ok(deleted)
+    })
 }
 
 /// Delete expired sessions.
@@ -120,27 +200,96 @@ pub async fn delete_expired_sessions(store: &DocumentStore, _now: &str) -> Resul
     store.delete_expired(SessionDoc::DOC_TYPE).await
 }
 
-/// Delete OAuth access token sessions for a user.
+/// Revoke the OAuth access-token sessions issued from a single-use grant
+/// code, returning their token hashes so the caller can drop them from the
+/// session cache.
 ///
-/// Used by authorization code replay detection (RFC 6749 Section 10.5) to
-/// revoke all access tokens that may have been issued from a compromised code.
-pub async fn delete_oauth_sessions_for_user(store: &DocumentStore, user_id: &str) -> Result<u64> {
-    // Find all sessions for this user, filter for OAuth access tokens, delete
-    let sessions = store.find_all::<SessionDoc>("user_id", user_id).await?;
-    let mut count: u64 = 0;
+/// RFC 6749 Section 10.5: "If the authorization server observes multiple
+/// attempts to exchange an authorization code for an access token, the
+/// authorization server SHOULD attempt to revoke all access tokens already
+/// granted based on the compromised authorization code." The same applies by
+/// extension to an RFC 8628 device code, which is likewise single-use.
+///
+/// Revocation is bounded by that sentence's "based on the compromised
+/// authorization code": this targets only sessions whose `source_code_hash`
+/// matches the replayed code, so a replay cannot log the victim out of
+/// unrelated applications. Sessions issued from other codes, and sessions from
+/// grants with no single-use code (FIDO2, browser login), are left intact.
+///
+/// Best-effort on per-session failures: each session is deleted in its own
+/// committed transaction, so a fault partway through the loop leaves the
+/// earlier deletes already committed in the database. To keep the session
+/// cache in sync with those committed deletes, a per-session delete failure is
+/// logged (target `security`) and the loop continues — the token hashes of
+/// every session actually deleted are still returned on the `Ok` arm so the
+/// caller's existing `Ok`-arm invalidation drops them from the cache. Only a
+/// failure of the initial `find_all` returns `Err`; in that case no session was
+/// deleted and there is nothing for the caller to invalidate, so its log-only
+/// `Err` arm is correct. Returning the committed deletes' hashes here — rather
+/// than propagating `Err` and dropping them — is what prevents a DB-deleted
+/// session from staying cached as a stale `Hit` for up to the cache TTL.
+///
+/// Returns the token hashes of the sessions actually deleted, in insertion
+/// order, so the caller can invalidate each cache entry by key.
+pub async fn delete_sessions_for_code_replay(
+    store: &DocumentStore,
+    code_hash: &str,
+) -> Result<Vec<String>> {
+    let sessions = store
+        .find_all::<SessionDoc>("source_code_hash", code_hash)
+        .await?;
+    let mut token_hashes = Vec::with_capacity(sessions.len());
     for session in &sessions {
         if session.data.session_type == SessionPurpose::OAuthAccessToken {
-            store.delete(&session.id).await?;
-            count = count.saturating_add(1);
+            if let Err(e) = store.delete(&session.id).await {
+                tracing::error!(
+                    target: "security",
+                    code_hash,
+                    session_id = %session.id,
+                    error = %e,
+                    "delete_sessions_for_code_replay: per-session delete failed; \
+                     already-committed deletes remain and the caller still \
+                     invalidates their cache entries from the returned hashes",
+                );
+                continue;
+            }
+            token_hashes.push(session.data.token_hash.clone());
         }
     }
-    Ok(count)
+    Ok(token_hashes)
 }
 
 /// Delete all sessions for a user (for immediate session invalidation).
 pub async fn delete_sessions_for_user(store: &DocumentStore, user_id: &str) -> Result<u64> {
     store
         .delete_by_index::<SessionDoc>("user_id", user_id)
+        .await
+}
+
+/// Delete all sessions issued for a given OAuth client (by `client_id`).
+///
+/// Used by `revoke_tokens_api` to invalidate every access token an
+/// application minted — `authorization_code`, `device_code`, RFC 8693
+/// `token_exchange`, FIDO2, and `client_credentials` — keyed by the issuing
+/// client. User-issued grants persist sessions under the *real resource
+/// owner's* `user_id` (not the client's), so
+/// [`delete_sessions_for_user`](&delete_sessions_for_user) with the client's
+/// id only reaches the `client_credentials` (M2M) sessions. This closes that
+/// gap by indexing on `client_id`, the value
+/// [`create_oauth_access_token`](crate::services::auth::create_oauth_access_token)
+/// stamps into every session it writes.
+///
+/// Pre-migration sessions issued before the `client_id` index existed
+/// deserialize `client_id` to `None` and so are not matched; they remain
+/// valid until their `exp`. The caller MUST also call
+/// [`SessionCache::invalidate_for_client`] to drop any cached entries for
+/// the same client, since a DB delete alone does not evict the cache.
+pub async fn delete_sessions_for_oauth_client(
+    store: &DocumentStore,
+    client_id: &str,
+) -> Result<u64> {
+    store
+        .delete_by_index::<SessionDoc>("client_id", client_id)
         .await
 }
 
@@ -157,27 +306,31 @@ pub struct SessionCache {
     /// Bumped on every invalidation; prevents stale DB results from
     /// being inserted after a concurrent revocation.
     generation: AtomicU64,
+    /// Test-only fault-injection seam: token hashes whose next (and every)
+    /// lookup must return `Err`, simulating a store failure. Absent in
+    /// production builds (`#[cfg(test)]`), so it cannot affect runtime.
+    #[cfg(test)]
+    fault_hashes: Mutex<Vec<String>>,
 }
 
 struct CacheEntry {
-    value: Option<Session>,
+    /// Shared with every caller that got a hit; hits must stay a refcount
+    /// bump, never a deep copy. `Session` is plain immutable data — do not
+    /// reach for `Arc::make_mut`, which would either copy-on-write or mutate
+    /// the cached entry in place depending on the live refcount.
+    value: Option<Arc<Session>>,
     inserted_at: Instant,
 }
 
 /// Result of a cache probe, distinguishing a miss from a cached
 /// "no such session" answer (negative caching).
-#[expect(
-    clippy::large_enum_variant,
-    reason = "Hit is the common case on the auth hot path and is destructured \
-              immediately; boxing would add an allocation per lookup"
-)]
 enum CacheLookup {
     /// No fresh entry for this key — consult the database.
     Miss,
     /// Cached knowledge that the database has no session for this key.
     NegativeHit,
     /// Cached session.
-    Hit(Session),
+    Hit(Arc<Session>),
 }
 
 impl SessionCache {
@@ -197,24 +350,46 @@ impl SessionCache {
             ttl: Duration::from_secs(ttl_secs),
             max_capacity,
             generation: AtomicU64::new(0),
+            #[cfg(test)]
+            fault_hashes: Mutex::new(Vec::new()),
         }
     }
 
     /// Get a cached session by token hash, or fetch from DB on miss.
+    ///
+    /// `arrival` is the instant the session's `expires_at` is judged against,
+    /// so a request that authenticates here and then makes a second
+    /// time-sensitive decision downstream measures both from one clock.
     pub async fn get_session_by_token_hash(
         &self,
         store: &DocumentStore,
         token_hash: &str,
-    ) -> Result<Option<Session>> {
+        arrival: ArrivalTime,
+    ) -> Result<Option<Arc<Session>>> {
+        // Test-only fault injection: the hash was registered via
+        // [`Self::inject_fault`]; return a store-style `Err` so callers can
+        // exercise their DB-error propagation path without a real outage.
+        #[cfg(test)]
+        if self.is_faulted(token_hash) {
+            return Err(anyhow::anyhow!(
+                "injected store fault for token hash {token_hash}"
+            ));
+        }
         match self.get(token_hash) {
-            CacheLookup::Hit(session) => return Ok(Some(session)),
+            // An entry ages by its insertion time, not the session's expiry,
+            // so a hit is judged against `arrival` as the DB lookup is.
+            CacheLookup::Hit(session) => {
+                return Ok(Some(session).filter(|s| s.expires_at > arrival.timestamp()));
+            }
             CacheLookup::NegativeHit => return Ok(None),
             CacheLookup::Miss => {}
         }
         // Snapshot generation before the async DB fetch so we can
         // detect invalidations that occurred during the await.
         let gen_before = self.generation.load(Ordering::SeqCst);
-        let result = get_session_by_token_hash(store, token_hash, Timestamp::now()).await?;
+        let result = get_session_by_token_hash(store, token_hash, arrival.timestamp())
+            .await?
+            .map(Arc::new);
         self.insert_if_valid(token_hash.to_string(), result.clone(), gen_before);
         Ok(result)
     }
@@ -242,6 +417,27 @@ impl SessionCache {
         });
     }
 
+    /// Invalidate cached sessions issued for a given OAuth client.
+    ///
+    /// Companion to [`delete_sessions_for_oauth_client`]: a DB delete alone
+    /// does not evict cached `Hit` entries, so a just-revoked token would keep
+    /// validating from the cache until the TTL elapsed. Sessions whose
+    /// `client_id` is `None` (pre-migration rows) are retained — they are not
+    /// reachable by client-scoped revocation and would otherwise be dropped
+    /// indiscriminately.
+    pub fn invalidate_for_client(&self, client_id: &str) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        let Ok(mut map) = self.entries.lock() else {
+            return;
+        };
+        map.retain(|_, entry| {
+            let Some(session) = entry.value.as_ref() else {
+                return true;
+            };
+            session.client_id.as_deref() != Some(client_id)
+        });
+    }
+
     fn get(&self, key: &str) -> CacheLookup {
         let Ok(mut map) = self.entries.lock() else {
             return CacheLookup::Miss;
@@ -265,11 +461,33 @@ impl SessionCache {
         self.generation.load(Ordering::SeqCst)
     }
 
+    /// Test-only: register a token hash whose lookups must fail with a store
+    /// error, so DB-error propagation in callers of
+    /// [`Self::get_session_by_token_hash`] can be exercised deterministically
+    /// without closing the pool (which would fault every earlier lookup too).
+    #[cfg(test)]
+    pub fn inject_fault(&self, token_hash: String) {
+        let Ok(mut faults) = self.fault_hashes.lock() else {
+            return;
+        };
+        if !faults.iter().any(|h| h == &token_hash) {
+            faults.push(token_hash);
+        }
+    }
+
+    #[cfg(test)]
+    fn is_faulted(&self, token_hash: &str) -> bool {
+        let Ok(faults) = self.fault_hashes.lock() else {
+            return false;
+        };
+        faults.iter().any(|h| h == token_hash)
+    }
+
     /// Insert a value only if no invalidation has occurred since
     /// `expected_gen` was captured. The generation is re-checked under
     /// the lock so no invalidation can race between the check and the
     /// actual map write.
-    fn insert_if_valid(&self, key: String, value: Option<Session>, expected_gen: u64) {
+    fn insert_if_valid(&self, key: String, value: Option<Arc<Session>>, expected_gen: u64) {
         let Ok(mut map) = self.entries.lock() else {
             return;
         };
@@ -307,8 +525,8 @@ impl SessionCache {
 mod tests {
     use super::*;
 
-    fn fake_session(token_hash: &str) -> Session {
-        Session {
+    fn fake_session(token_hash: &str) -> Arc<Session> {
+        Arc::new(Session {
             id: "sess-1".to_string(),
             user_id: "user-1".to_string(),
             user_email: "test@example.com".to_string(),
@@ -320,7 +538,10 @@ mod tests {
             authorization_details: None,
             hardware_aaguid: None,
             org_domain: None,
-        }
+            client_id: None,
+            source_code_hash: None,
+            authenticated_at: None,
+        })
     }
 
     #[test]
@@ -333,6 +554,32 @@ mod tests {
             generation,
         );
         assert!(matches!(cache.get("hash-a"), CacheLookup::Hit(_)));
+    }
+
+    /// Two hits for the same key must return the same allocation — the point
+    /// of storing `Arc<Session>` is that a hit is a refcount bump, and a
+    /// reintroduced deep copy would pass every shape-only `matches!` test.
+    #[test]
+    fn cache_hit_shares_the_cached_allocation() {
+        let cache = SessionCache::new(100, 30);
+        let generation = cache.generation();
+        cache.insert_if_valid(
+            "hash-share".to_string(),
+            Some(fake_session("hash-share")),
+            generation,
+        );
+        let first = match cache.get("hash-share") {
+            CacheLookup::Hit(session) => Some(session),
+            CacheLookup::Miss | CacheLookup::NegativeHit => None,
+        };
+        let second = match cache.get("hash-share") {
+            CacheLookup::Hit(session) => Some(session),
+            CacheLookup::Miss | CacheLookup::NegativeHit => None,
+        };
+        assert!(
+            matches!((&first, &second), (Some(a), Some(b)) if Arc::ptr_eq(a, b)),
+            "both lookups must hit and share the cached allocation"
+        );
     }
 
     #[test]
@@ -423,6 +670,105 @@ mod tests {
         assert!(
             matches!(cache.get("hash-user"), CacheLookup::Miss),
             "revoked session must not be cached after invalidate_for_user"
+        );
+    }
+
+    /// `invalidate_for_client` evicts every cached session issued for the
+    /// given OAuth client, leaving other clients' sessions and sessions with
+    /// no `client_id` (pre-migration rows) intact.
+    #[test]
+    fn invalidate_for_client_evicts_only_that_client() {
+        fn session_for(token_hash: &str, client_id: Option<&str>) -> Arc<Session> {
+            Arc::new(Session {
+                id: "sess-1".to_string(),
+                user_id: "user-1".to_string(),
+                user_email: "test@example.com".to_string(),
+                token_hash: token_hash.to_string(),
+                authenticator_id: None,
+                expires_at: Timestamp::now(),
+                created_at: Timestamp::now(),
+                session_type: SessionPurpose::OAuthAccessToken,
+                authorization_details: None,
+                hardware_aaguid: None,
+                org_domain: None,
+                client_id: client_id.map(str::to_string),
+                source_code_hash: None,
+                authenticated_at: None,
+            })
+        }
+        let cache = SessionCache::new(100, 30);
+        let generation = cache.generation();
+        cache.insert_if_valid(
+            "hash-target".to_string(),
+            Some(session_for("hash-target", Some("client-A"))),
+            generation,
+        );
+        let generation = cache.generation();
+        cache.insert_if_valid(
+            "hash-other".to_string(),
+            Some(session_for("hash-other", Some("client-B"))),
+            generation,
+        );
+        let generation = cache.generation();
+        cache.insert_if_valid(
+            "hash-legacy".to_string(),
+            Some(session_for("hash-legacy", None)),
+            generation,
+        );
+
+        cache.invalidate_for_client("client-A");
+
+        assert!(
+            matches!(cache.get("hash-target"), CacheLookup::Miss),
+            "revoked client's session must be evicted"
+        );
+        assert!(
+            matches!(cache.get("hash-other"), CacheLookup::Hit(_)),
+            "other client's session must survive"
+        );
+        assert!(
+            matches!(cache.get("hash-legacy"), CacheLookup::Hit(_)),
+            "pre-migration session (no client_id) must survive"
+        );
+    }
+
+    /// Same TOCTOU regression case for client-scoped invalidation: an
+    /// in-flight DB fetch that started before the revoke must not re-cache
+    /// the now-revoked session.
+    #[test]
+    fn insert_after_invalidate_for_client_is_rejected() {
+        fn session_for_client(token_hash: &str, client_id: &str) -> Arc<Session> {
+            Arc::new(Session {
+                id: "sess-1".to_string(),
+                user_id: "user-1".to_string(),
+                user_email: "test@example.com".to_string(),
+                token_hash: token_hash.to_string(),
+                authenticator_id: None,
+                expires_at: Timestamp::now(),
+                created_at: Timestamp::now(),
+                session_type: SessionPurpose::OAuthAccessToken,
+                authorization_details: None,
+                hardware_aaguid: None,
+                org_domain: None,
+                client_id: Some(client_id.to_string()),
+                source_code_hash: None,
+                authenticated_at: None,
+            })
+        }
+        let cache = SessionCache::new(100, 30);
+        let gen_before = cache.generation();
+
+        cache.invalidate_for_client("client-A");
+
+        cache.insert_if_valid(
+            "hash-client".to_string(),
+            Some(session_for_client("hash-client", "client-A")),
+            gen_before,
+        );
+
+        assert!(
+            matches!(cache.get("hash-client"), CacheLookup::Miss),
+            "revoked session must not be cached after invalidate_for_client"
         );
     }
 

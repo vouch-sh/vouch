@@ -9,14 +9,19 @@
 //! - POST /github/reconnect - Reconnect an existing GitHub installation
 //! - GET /github/success - Success page after connection
 
-use crate::db;
+use crate::arrival::ArrivalTime;
+use crate::config::ServerConfig;
+use crate::crypto::jwt::{JwtType, StateTokenError, StateTokenSigner};
 use crate::error::ServiceError;
-use crate::handlers::session::AuthContext;
-use crate::services::integrations::github::{
-    ConnectInstallationParams, GitHubError, GitHubService, LinkAccountParams,
-    ReconnectInstallationParams, installations::validate_org_admin, webhooks::WebhookEvent,
+use crate::handlers::session::{
+    AuthContext, extract_session_from_cookie, get_auth_context, load_active_user,
 };
-use crate::{AppState, impl_template_response};
+use crate::services::auth::ValidatedResourceToken;
+use crate::services::integrations::github::{
+    GitHubError, GitHubService, InstallationLinkFlow, LinkAccountParams, LinkInstallationParams,
+    installations::validate_org_admin, webhooks::WebhookEvent,
+};
+use crate::{AppState, crypto, impl_template_response};
 use askama::Template;
 use axum::Form;
 use axum::body::Bytes;
@@ -59,8 +64,6 @@ pub(crate) struct GitHubConnectTemplate {
     pub github_login: Option<String>,
     /// Unlinked installations the user can reconnect.
     pub unlinked_installations: Vec<UnlinkedInstallation>,
-    /// Whether GitHub OAuth is configured (client_id + client_secret).
-    pub oauth_configured: bool,
 }
 
 impl_template_response!(GitHubConnectTemplate);
@@ -157,6 +160,10 @@ impl GitHubStateToken {
         Self::new(org_id, user_id, session_binding, GitHubStateFlowType::Link)
     }
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "mints the GitHub state token's iat"
+    )]
     fn new(
         org_id: &str,
         user_id: &str,
@@ -164,7 +171,7 @@ impl GitHubStateToken {
         flow_type: GitHubStateFlowType,
     ) -> Result<Self, aws_lc_rs::error::Unspecified> {
         let now = Timestamp::now().as_second();
-        let nonce = URL_SAFE_NO_PAD.encode(crate::crypto::generate_random_bytes(16)?);
+        let nonce = URL_SAFE_NO_PAD.encode(crypto::generate_random_bytes(16)?);
         Ok(Self {
             org_id: org_id.to_string(),
             user_id: user_id.to_string(),
@@ -177,22 +184,18 @@ impl GitHubStateToken {
     }
 
     /// Encode as JWT (RFC 8725 §3.11: explicit typ).
-    async fn encode(
-        &self,
-        signer: &crate::crypto::jwt::StateTokenSigner,
-    ) -> Result<String, crate::crypto::jwt::StateTokenError> {
-        signer
-            .encode_state_token(self, crate::crypto::jwt::JwtType::GitHubState)
-            .await
+    async fn encode(&self, signer: &StateTokenSigner) -> Result<String, StateTokenError> {
+        signer.encode_state_token(self, JwtType::GitHubState).await
     }
 
     /// Decode from JWT.
     async fn decode(
         token: &str,
-        signer: &crate::crypto::jwt::StateTokenSigner,
-    ) -> Result<Self, crate::crypto::jwt::StateTokenError> {
+        signer: &StateTokenSigner,
+        arrival: ArrivalTime,
+    ) -> Result<Self, StateTokenError> {
         signer
-            .decode_state_token(token, crate::crypto::jwt::JwtType::GitHubState)
+            .decode_state_token(token, JwtType::GitHubState, arrival.as_second())
             .await
     }
 }
@@ -261,10 +264,7 @@ fn error_response(error: GitHubError) -> Response {
 }
 
 /// Create a GitHubService from AppState components.
-fn github_service<'a>(
-    state: &'a AppState,
-    config: &'a crate::config::ServerConfig,
-) -> GitHubService<'a> {
+fn github_service<'a>(state: &'a AppState, config: &'a ServerConfig) -> GitHubService<'a> {
     GitHubService::new(
         &state.store,
         &state.audit,
@@ -330,6 +330,7 @@ pub(crate) async fn github_webhook(
 /// Also handles redirects from GitHub after app installation if the GitHub App's
 /// "Setup URL" points here instead of `/github/callback`.
 pub(crate) async fn github_connect_page(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
     Query(params): Query<GitHubConnectParams>,
@@ -353,17 +354,18 @@ pub(crate) async fn github_connect_page(
     }
 
     // Extract session from cookie (browser UI)
-    let session = match crate::handlers::session::extract_session_from_cookie(&state, &jar).await {
+    let session = match extract_session_from_cookie(&state, &jar, arrival).await {
         Ok(s) => s,
         Err(_) => {
             return Redirect::to("/enroll/start").into_response();
         }
     };
 
-    // Get user
-    let user = match db::get_user_by_id(&state.store, &session.sub).await {
-        Ok(Some(u)) => u,
-        _ => return error_response(GitHubError::UserNotFound),
+    // Refuse a deactivated account: the cookie extraction skips the active
+    // check, so this mutating flow carries its own guard.
+    let user = match load_active_user(&state, &session.sub).await {
+        Ok(u) => u,
+        Err(_) => return error_response(GitHubError::UserNotFound),
     };
 
     // Verify user has an organization and is admin
@@ -371,6 +373,12 @@ pub(crate) async fn github_connect_page(
         Ok(org_id) => org_id,
         Err(e) => return error_response(e),
     };
+
+    // Linking an installation checks the admin's own GitHub access, which
+    // needs the OAuth client to exchange and refresh their token.
+    if !service.is_oauth_configured() {
+        return error_response(GitHubError::OAuthNotConfigured);
+    }
 
     // Get existing connected accounts
     let connected_accounts = service
@@ -434,7 +442,6 @@ pub(crate) async fn github_connect_page(
         github_linked: user.github_login.is_some(),
         github_login: user.github_login.clone(),
         unlinked_installations,
-        oauth_configured: service.is_oauth_configured(),
     }
     .into_response()
 }
@@ -448,17 +455,18 @@ pub(crate) async fn github_connect_page(
 /// Both flows require an authenticated session cookie that matches the session
 /// which originally minted the state token (RFC 6819 §5.3.5 CSRF defense).
 pub(crate) async fn github_callback(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
     Query(params): Query<GitHubCallbackParams>,
 ) -> Response {
     // Detect callback type by presence of `code` parameter
     if let Some(code) = &params.code {
-        return handle_oauth_callback(&state, &jar, code, params.state.as_deref()).await;
+        return handle_oauth_callback(&state, &jar, code, params.state.as_deref(), arrival).await;
     }
 
     // Otherwise, handle as installation callback
-    handle_installation_callback(&state, &jar, &params).await
+    handle_installation_callback(&state, &jar, &params, arrival).await
 }
 
 /// Validate the callback session against the state token.
@@ -470,13 +478,18 @@ pub(crate) async fn github_callback(
 ///      same session that minted the state is completing the callback.
 ///
 /// Returns the validated session on success or an error response on failure.
+#[expect(
+    clippy::result_large_err,
+    reason = "Err is an HTTP Response; size is acceptable in error path"
+)]
 async fn validate_callback_session(
     state: &Arc<AppState>,
     jar: &CookieJar,
     token: &GitHubStateToken,
     flow_label: &'static str,
-) -> Result<crate::services::auth::ValidatedResourceToken, Response> {
-    let session = match crate::handlers::session::extract_session_from_cookie(state, jar).await {
+    arrival: ArrivalTime,
+) -> Result<ValidatedResourceToken, Response> {
+    let session = match extract_session_from_cookie(state, jar, arrival).await {
         Ok(s) => s,
         Err(_) => {
             tracing::warn!(
@@ -519,6 +532,7 @@ async fn handle_oauth_callback(
     jar: &CookieJar,
     code: &str,
     state_param: Option<&str>,
+    arrival: ArrivalTime,
 ) -> Response {
     // Verify state parameter
     let state_token = match state_param {
@@ -527,7 +541,7 @@ async fn handle_oauth_callback(
     };
 
     // Decode and validate state token
-    let token = match GitHubStateToken::decode(state_token, &state.state_signer).await {
+    let token = match GitHubStateToken::decode(state_token, &state.state_signer, arrival).await {
         Ok(t) => t,
         Err(e) => {
             tracing::warn!("Invalid state token: {}", e);
@@ -541,9 +555,20 @@ async fn handle_oauth_callback(
     }
 
     // CSRF defense: bind the callback to the cookie session.
-    let session = match validate_callback_session(state, jar, &token, "oauth_link").await {
+    let session = match validate_callback_session(state, jar, &token, "oauth_link", arrival).await {
         Ok(s) => s,
         Err(resp) => return resp,
+    };
+
+    // Refuse a deactivated account. extract_session_from_cookie serves a
+    // per-process SessionCache HIT without a DB lookup, so on a peer instance
+    // whose cache was not invalidated by another instance's revoke_user_access,
+    // the CSRF gate alone cannot witness deactivation. The cookie extraction
+    // skips the active check, so this mutating flow carries its own guard —
+    // mirroring github_link_start and handle_installation_callback.
+    let _user = match load_active_user(state, &session.sub).await {
+        Ok(u) => u,
+        Err(_) => return error_response(GitHubError::UserNotFound),
     };
 
     let config = state.config();
@@ -571,6 +596,7 @@ async fn handle_installation_callback(
     state: &Arc<AppState>,
     jar: &CookieJar,
     params: &GitHubCallbackParams,
+    arrival: ArrivalTime,
 ) -> Response {
     // Verify required parameters
     let installation_id = match params.installation_id {
@@ -586,7 +612,7 @@ async fn handle_installation_callback(
     };
 
     // Decode and validate state token
-    let token = match GitHubStateToken::decode(state_token, &state.state_signer).await {
+    let token = match GitHubStateToken::decode(state_token, &state.state_signer, arrival).await {
         Ok(t) => t,
         Err(e) => {
             tracing::warn!("Invalid state token: {}", e);
@@ -599,22 +625,24 @@ async fn handle_installation_callback(
     }
 
     // CSRF defense: bind the callback to the cookie session.
-    let session = match validate_callback_session(state, jar, &token, "install").await {
+    let session = match validate_callback_session(state, jar, &token, "install", arrival).await {
         Ok(s) => s,
         Err(resp) => return resp,
     };
 
-    // Re-fetch the user from DB by the *session* identity (not the JWT).
-    let user = match db::get_user_by_id(&state.store, &session.sub).await {
-        Ok(Some(u)) => u,
-        _ => return error_response(GitHubError::UserNotFound),
+    // Re-fetch the user from DB by the *session* identity (not the JWT),
+    // refusing an account deactivated since the flow began.
+    let user = match load_active_user(state, &session.sub).await {
+        Ok(u) => u,
+        Err(_) => return error_response(GitHubError::UserNotFound),
     };
 
-    // Verify the user is still a member of the org bound to the state token.
-    // Guards against the user changing orgs in the 10-minute state window.
-    match user.org_id.as_deref() {
-        Some(org_id) if org_id == token.org_id => {}
-        _ => {
+    // The connect page required an org admin when it minted the state token.
+    // Re-check the same predicate here: the user may have lost the admin role
+    // or changed orgs in the 10-minute state window.
+    match validate_org_admin(&user) {
+        Ok(org_id) if org_id == token.org_id => {}
+        Ok(_) | Err(GitHubError::OrganizationRequired) => {
             tracing::warn!(
                 user_id = %session.sub,
                 token_org_id = %token.org_id,
@@ -624,17 +652,18 @@ async fn handle_installation_callback(
             );
             return error_response(GitHubError::SessionMismatch);
         }
+        Err(e) => return error_response(e),
     }
 
     let config = state.config();
     let service = github_service(state, &config);
 
-    // Connect the installation
     match service
-        .connect_installation(ConnectInstallationParams {
+        .link_installation(LinkInstallationParams {
             installation_id,
             org_id: &token.org_id,
             user: &user,
+            flow: InstallationLinkFlow::Install,
         })
         .await
     {
@@ -656,6 +685,7 @@ async fn handle_installation_callback(
 
 /// GET /github/link - Redirect user to GitHub OAuth to link their GitHub account.
 pub(crate) async fn github_link_start(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
 ) -> Response {
@@ -668,17 +698,18 @@ pub(crate) async fn github_link_start(
     }
 
     // Extract session from cookie
-    let session = match crate::handlers::session::extract_session_from_cookie(&state, &jar).await {
+    let session = match extract_session_from_cookie(&state, &jar, arrival).await {
         Ok(s) => s,
         Err(_) => {
             return Redirect::to("/enroll/start").into_response();
         }
     };
 
-    // Get user
-    let user = match db::get_user_by_id(&state.store, &session.sub).await {
-        Ok(Some(u)) => u,
-        _ => return error_response(GitHubError::UserNotFound),
+    // Refuse a deactivated account: the cookie extraction skips the active
+    // check, so this mutating flow carries its own guard.
+    let user = match load_active_user(&state, &session.sub).await {
+        Ok(u) => u,
+        Err(_) => return error_response(GitHubError::UserNotFound),
     };
 
     // Verify user has an organization
@@ -718,6 +749,7 @@ pub(crate) async fn github_link_start(
 /// This allows an org admin to link an existing GitHub installation (that they
 /// have access to via `/user/installations`) to their Vouch organization.
 pub(crate) async fn github_reconnect(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
     Form(form): Form<GitHubReconnectForm>,
@@ -731,17 +763,18 @@ pub(crate) async fn github_reconnect(
     }
 
     // Extract session from cookie
-    let session = match crate::handlers::session::extract_session_from_cookie(&state, &jar).await {
+    let session = match extract_session_from_cookie(&state, &jar, arrival).await {
         Ok(s) => s,
         Err(_) => {
             return Redirect::to("/enroll/start").into_response();
         }
     };
 
-    // Get user
-    let user = match db::get_user_by_id(&state.store, &session.sub).await {
-        Ok(Some(u)) => u,
-        _ => return error_response(GitHubError::UserNotFound),
+    // Refuse a deactivated account: the cookie extraction skips the active
+    // check, so this mutating flow carries its own guard.
+    let user = match load_active_user(&state, &session.sub).await {
+        Ok(u) => u,
+        Err(_) => return error_response(GitHubError::UserNotFound),
     };
 
     // Verify user has an organization and is admin
@@ -750,12 +783,12 @@ pub(crate) async fn github_reconnect(
         Err(e) => return error_response(e),
     };
 
-    // Reconnect the installation
     match service
-        .reconnect_installation(ReconnectInstallationParams {
+        .link_installation(LinkInstallationParams {
             installation_id: form.installation_id,
             org_id: &org_id,
             user: &user,
+            flow: InstallationLinkFlow::Reconnect,
         })
         .await
     {
@@ -777,11 +810,12 @@ pub(crate) async fn github_reconnect(
 
 /// GET /github/success - Show success page after GitHub connection.
 pub(crate) async fn github_success_page(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
     Query(params): Query<GitHubSuccessParams>,
 ) -> impl IntoResponse {
-    let auth = crate::handlers::session::get_auth_context(&state, &jar).await;
+    let auth = get_auth_context(&state, &jar, arrival).await;
 
     GitHubSuccessTemplate {
         org_name: state.config().get_org_display_name().to_string(),
@@ -797,8 +831,11 @@ pub(crate) async fn github_success_page(
 )]
 mod tests {
     use super::*;
+    use crate::config::NonEmptySecret;
     use crate::crypto::jwt::{JwtType, StateTokenSigner};
+    use crate::infra::router;
     use crate::test_utils::*;
+    use crate::{crypto, db};
     use axum::http::StatusCode;
 
     #[tokio::test]
@@ -808,7 +845,7 @@ mod tests {
             .expect("create token");
 
         let encoded = token.encode(&signer).await.expect("encode");
-        let decoded = GitHubStateToken::decode(&encoded, &signer)
+        let decoded = GitHubStateToken::decode(&encoded, &signer, test_arrival())
             .await
             .expect("decode");
 
@@ -825,7 +862,7 @@ mod tests {
             .expect("create token");
 
         let encoded = token.encode(&signer).await.expect("encode");
-        let decoded = GitHubStateToken::decode(&encoded, &signer)
+        let decoded = GitHubStateToken::decode(&encoded, &signer, test_arrival())
             .await
             .expect("decode");
 
@@ -844,7 +881,7 @@ mod tests {
             .expect("create token");
 
         let encoded = token.encode(&signer_a).await.expect("encode");
-        let result = GitHubStateToken::decode(&encoded, &signer_b).await;
+        let result = GitHubStateToken::decode(&encoded, &signer_b, test_arrival()).await;
         assert!(result.is_err(), "Wrong secret should be rejected");
     }
 
@@ -858,7 +895,11 @@ mod tests {
 
         // Try decoding with wrong JwtType via the raw signer
         let result: Result<GitHubStateToken, _> = signer
-            .decode_state_token(&encoded, JwtType::RegistrationState)
+            .decode_state_token(
+                &encoded,
+                JwtType::RegistrationState,
+                test_arrival().as_second(),
+            )
             .await;
         assert!(result.is_err(), "Wrong JWT type should be rejected");
     }
@@ -908,6 +949,32 @@ mod tests {
                 "X-Hub-Signature-256",
                 "sha256=0000000000000000000000000000000000000000000000000000000000000000",
             )],
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_webhook_empty_secret_refuses_empty_key_signature() {
+        // `VOUCH_GITHUB_WEBHOOK_SECRET=""` must leave webhook verification
+        // unconfigured. Were it loaded as an empty HMAC key, anyone could sign
+        // a payload with HMAC-SHA256("", body) and have it accepted.
+        let (app, state) = test_app().await;
+        let mut config = (**state.config()).clone();
+        config.github_webhook_secret = NonEmptySecret::from_arg(Some(String::new()));
+        assert!(config.github_webhook_secret.is_none());
+        state.config.store(Arc::new(config));
+
+        let body = "{}";
+        let key = aws_lc_rs::hmac::Key::new(aws_lc_rs::hmac::HMAC_SHA256, b"");
+        let forged = hex::encode(aws_lc_rs::hmac::sign(&key, body.as_bytes()).as_ref());
+        let header = format!("sha256={forged}");
+        let (status, _body) = http_request(
+            &app,
+            "POST",
+            "/api/webhooks/github",
+            Some(body.to_string()),
+            &[("X-Hub-Signature-256", &header), ("X-GitHub-Event", "ping")],
         )
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -1039,8 +1106,17 @@ mod tests {
         let org = create_test_org(&state.store, domain).await;
         let user = create_test_user_in_org(&state.store, email, &org.id, true).await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let session_token = create_test_session(state, &user.id, email, &auth_id).await;
-        let token_hash = crate::crypto::hash_token(&session_token);
+        let session_token = create_test_session_with(
+            state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let token_hash = crypto::hash_token(&session_token);
         (user.id, org.id, session_token, token_hash)
     }
 
@@ -1221,6 +1297,255 @@ mod tests {
         assert!(
             !body.contains("Sign In Required"),
             "CSRF gate should pass when session matches, got: {body}"
+        );
+    }
+
+    // ========================================================================
+    // Deactivation guard tests (issue: stale per-process SessionCache)
+    //
+    // On a multi-instance deployment, a user deactivated on one instance can
+    // still hit a peer whose per-process SessionCache holds a stale (not-yet-
+    // TTL-expired) entry for the victim's token_hash. extract_session_from_cookie
+    // returns that cache HIT without a DB lookup, so the CSRF gate alone cannot
+    // witness the deactivation. Every mutating GitHub session flow therefore
+    // re-validates the account via `load_active_user`. These tests pin that guard
+    // on both callbacks.
+    //
+    // The scenario is modelled by seeding the cache via a first lookup, then
+    // applying the production deactivation DB effects directly — deleting the
+    // session rows, revoking credentials, and flipping `active=false` — WITHOUT
+    // calling `session_cache.invalidate_for_user`, exactly what a peer observes
+    // when another instance ran revoke_user_access.
+    // ========================================================================
+
+    /// The OAuth link callback must reject a deactivated user whose session is
+    /// still served from the per-process SessionCache (peer-instance scenario).
+    ///
+    /// Regression for the missing `load_active_user` guard: before the fix the
+    /// callback fell through to `link_user_account`, which on the unconfigured
+    /// test app surfaced `GitHubError::NotConfigured` ("Not Available" /
+    /// "GitHub integration is not configured on this server"); with the guard
+    /// in place it must surface `GitHubError::UserNotFound` instead and never
+    /// reach the link handler.
+    #[tokio::test]
+    async fn test_callback_oauth_rejects_deactivated_user_via_stale_cache() {
+        let (app, state) = test_app().await;
+        let (user_id, user_org, session_token, session_hash) =
+            setup_user_with_session(&state, "victim@example.com", "example.com").await;
+
+        // Seed the per-process SessionCache the way a prior request to this
+        // peer would: a first lookup hits the DB and inserts the session.
+        let seeded = state
+            .session_cache
+            .get_session_by_token_hash(&state.store, &session_hash, test_arrival())
+            .await
+            .expect("seed lookup succeeds");
+        assert!(seeded.is_some(), "session row must exist before seeding");
+
+        // Simulate a deactivation that ran on a DIFFERENT instance: apply the
+        // production DB effects without invalidating this process's cache.
+        db::delete_sessions_for_user(&state.store, &user_id)
+            .await
+            .expect("delete sessions");
+        db::revoke_user_credentials(&state.store, &user_id, Some("deactivation"), None)
+            .await
+            .expect("revoke credentials");
+        db::update_user_active_status(&state.store, &user_id, false)
+            .await
+            .expect("deactivate user");
+
+        // Mint a link state token bound to the now-deleted session's binding.
+        let encoded = mint_state_token(
+            &state,
+            GitHubStateFlowType::Link,
+            &user_org,
+            &user_id,
+            &session_hash,
+        )
+        .await;
+        let uri = format!(
+            "/github/callback?code=victim_code&state={}",
+            urlencoding::encode(&encoded)
+        );
+        let cookie = cookie_header(&session_token);
+
+        let (status, body) = http_get(&app, &uri, &[("Cookie", &cookie)]).await;
+
+        // The CSRF gate passes on the stale cache hit; the active-user guard
+        // must then reject before link_user_account runs.
+        assert_eq!(status, StatusCode::OK, "Error page should return 200");
+        assert!(
+            body.contains("User not found"),
+            "Expected UserNotFound error page, got: {body}"
+        );
+        assert!(
+            !body.contains("Not Available")
+                && !body.contains("GitHub integration is not configured on this server"),
+            "Callback must not reach link_user_account / NotConfigured path, got: {body}"
+        );
+    }
+
+    /// Negative control: the installation callback already guards with
+    /// `load_active_user`, so the same stale-cache scenario is rejected there.
+    /// Pins the symmetric behaviour the OAuth callback was missing and confirms
+    /// the harness really exercises a stale-cache HIT (otherwise this test
+    /// would pass for the wrong reason — a CSRF / SessionRequired rejection).
+    #[tokio::test]
+    async fn test_callback_install_rejects_deactivated_user_via_stale_cache() {
+        let (app, state) = test_app().await;
+        let (user_id, user_org, session_token, session_hash) =
+            setup_user_with_session(&state, "victim@example.com", "example.com").await;
+
+        let seeded = state
+            .session_cache
+            .get_session_by_token_hash(&state.store, &session_hash, test_arrival())
+            .await
+            .expect("seed lookup succeeds");
+        assert!(seeded.is_some(), "session row must exist before seeding");
+
+        db::delete_sessions_for_user(&state.store, &user_id)
+            .await
+            .expect("delete sessions");
+        db::revoke_user_credentials(&state.store, &user_id, Some("deactivation"), None)
+            .await
+            .expect("revoke credentials");
+        db::update_user_active_status(&state.store, &user_id, false)
+            .await
+            .expect("deactivate user");
+
+        let encoded = mint_state_token(
+            &state,
+            GitHubStateFlowType::Install,
+            &user_org,
+            &user_id,
+            &session_hash,
+        )
+        .await;
+        let uri = format!(
+            "/github/callback?installation_id=42&state={}",
+            urlencoding::encode(&encoded)
+        );
+        let cookie = cookie_header(&session_token);
+
+        let (status, body) = http_get(&app, &uri, &[("Cookie", &cookie)]).await;
+        assert_eq!(status, StatusCode::OK, "Error page should return 200");
+        assert!(
+            body.contains("User not found"),
+            "Expected UserNotFound error page, got: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_callback_install_rejects_demoted_admin() {
+        // The connect page mints the state token only for an org admin; the
+        // callback re-checks the role, since it can be revoked in the
+        // 10-minute state window.
+        let (app, state) = test_app().await;
+        let (user_id, user_org, session_token, session_hash) =
+            setup_user_with_session(&state, "admin@example.com", "example.com").await;
+        let cookie = cookie_header(&session_token);
+        let callback = |encoded: String| {
+            format!(
+                "/github/callback?installation_id=42&state={}",
+                urlencoding::encode(&encoded)
+            )
+        };
+
+        // Control: an admin passes every gate and reaches the service, which
+        // renders "Not Available" because `test_app` has no GitHub App.
+        let encoded = mint_state_token(
+            &state,
+            GitHubStateFlowType::Install,
+            &user_org,
+            &user_id,
+            &session_hash,
+        )
+        .await;
+        let (_, body) = http_get(&app, &callback(encoded), &[("Cookie", &cookie)]).await;
+        assert!(body.contains("Not Available"), "control failed: {body}");
+
+        let encoded = mint_state_token(
+            &state,
+            GitHubStateFlowType::Install,
+            &user_org,
+            &user_id,
+            &session_hash,
+        )
+        .await;
+        assert!(
+            db::update_user_admin_status(&state.store, &user_id, false)
+                .await
+                .expect("demote")
+        );
+        let (status, body) = http_get(&app, &callback(encoded), &[("Cookie", &cookie)]).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.contains("Admin Required") && !body.contains("Not Available"),
+            "Expected NotOrgAdmin for a demoted user, got: {body}"
+        );
+    }
+
+    /// The connect page for an org admin, served by an app whose GitHub App
+    /// and OAuth client are configured. `linked` links the admin's GitHub
+    /// account first.
+    async fn connect_page_body(linked: bool, oauth_configured: bool) -> String {
+        let mock = GitHubMock::spawn(|_| async {
+            (
+                200,
+                serde_json::json!({ "total_count": 0, "installations": [] }),
+            )
+        })
+        .await;
+        let state = test_app_state_with_github_app(mock.client()).await;
+        if !oauth_configured {
+            let mut config = (**state.config()).clone();
+            config.github_app_client_id = None;
+            state.config.store(Arc::new(config));
+        }
+        let config = state.config();
+        let app = router::build_app(state.clone(), &config).expect("build app");
+        let (user_id, _, session_token, _) =
+            setup_user_with_session(&state, "admin@example.com", "example.com").await;
+        if linked {
+            db::update_user_github_identity(
+                &state.store,
+                &user_id,
+                77,
+                "octo-admin",
+                Some("ghr_initial"),
+            )
+            .await
+            .expect("link GitHub account");
+        }
+        let cookie = cookie_header(&session_token);
+        let (status, body) = http_get(&app, "/github/connect", &[("Cookie", &cookie)]).await;
+        assert_eq!(status, StatusCode::OK);
+        body
+    }
+
+    #[tokio::test]
+    async fn test_connect_page_offers_install_only_after_github_link() {
+        let unlinked = connect_page_body(false, true).await;
+        assert!(
+            unlinked.contains("/github/link") && !unlinked.contains("installations/new"),
+            "an unlinked admin must be sent to link first: {unlinked}"
+        );
+
+        let linked = connect_page_body(true, true).await;
+        assert!(
+            linked.contains("installations/new") && !linked.contains("href=\"/github/link\""),
+            "a linked admin gets the install link: {linked}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_connect_page_requires_oauth_client() {
+        // Linking checks the admin's GitHub access with their OAuth token, so
+        // without the client there is nothing the page can link.
+        let body = connect_page_body(true, false).await;
+        assert!(
+            body.contains("GitHub OAuth is not configured") && !body.contains("installations/new"),
+            "Expected OAuthNotConfigured, got: {body}"
         );
     }
 

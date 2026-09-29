@@ -7,6 +7,11 @@
 )]
 
 use super::*;
+use crate::arrival::ArrivalTime;
+use crate::crypto::webauthn_verify::AuthTime;
+use crate::db::claim::ClaimError;
+use crate::db::documents::device_auth::DeviceAuthRequestDoc;
+use crate::db::{DeviceApproval, DeviceAuthStatus};
 
 // ========================================================================
 // RFC 8628 - Device Authorization Grant Tests
@@ -26,7 +31,7 @@ async fn test_device_auth_request_lifecycle() {
         &store,
         device_code_hash,
         user_code,
-        None,
+        "test-client",
         expires_at,
         interval,
     )
@@ -79,13 +84,13 @@ async fn test_device_auth_authorization_flow() {
         &store,
         &CreateAuthenticatorParams {
             user_id: &user_id,
-            user_email: "device@example.com",
             name: "Test Key",
             credential_id: b"test-cred-id-device",
             public_key: &[0u8; 32],
             aaguid: None,
             user_handle: Some(user_id.as_bytes()),
             attestation_verified: false,
+            counter: 0,
         },
     )
     .await
@@ -98,7 +103,7 @@ async fn test_device_auth_authorization_flow() {
         &store,
         device_code_hash,
         user_code,
-        None,
+        "test-client",
         "2099-12-31T23:59:59Z".parse().unwrap(),
         5,
     )
@@ -120,7 +125,9 @@ async fn test_device_auth_authorization_flow() {
             user_id: &user_id,
             user_email: &user.email,
             authenticator_id: &auth_id,
-            hardware_verified: true,
+            verification: DeviceApproval::Observed(AuthTime::for_test(
+                jiff::Timestamp::now().as_second(),
+            )),
         },
     )
     .await
@@ -153,11 +160,12 @@ async fn test_authorized_row_with_cleared_authenticator_reads_denied() {
         device_code_hash: "legacy_cleared_hash".to_string(),
         user_code: "LGCY-0001".to_string(),
         status: DeviceAuthStatus::Authorized,
-        client_id: None,
+        client_id: Some("client_a".to_string()),
         user_id: Some("user_a".to_string()),
         user_email: Some("a@example.com".to_string()),
         authenticator_id: None,
         hardware_verified: true,
+        authenticated_at: None,
         expires_at: "2099-12-31T23:59:59Z".parse().unwrap(),
         interval_seconds: 5,
         last_poll_at: None,
@@ -195,24 +203,115 @@ async fn test_device_auth_polling_rate_limit() {
         &store,
         device_code_hash,
         user_code,
-        None,
+        "test-client",
         "2099-12-31T23:59:59Z".parse().unwrap(),
         interval,
     )
     .await
     .expect("Failed to create device auth request");
 
+    let t0 = ArrivalTime::for_test(jiff::Timestamp::now()).timestamp();
+
     // First poll should succeed
-    let allowed = update_device_auth_poll_time(&store, &id, interval)
+    let allowed = update_device_auth_poll_time(&store, &id, interval, t0)
         .await
         .expect("Failed to update poll time");
     assert!(allowed, "First poll should be allowed");
 
     // Immediate second poll should be rate limited
-    let allowed = update_device_auth_poll_time(&store, &id, interval)
+    let allowed = update_device_auth_poll_time(&store, &id, interval, t0)
         .await
         .expect("Failed to update poll time");
     assert!(!allowed, "Immediate second poll should be rate limited");
+}
+
+/// Offset `at` by `nanos` nanoseconds.
+fn plus_nanos(at: jiff::Timestamp, nanos: i64) -> jiff::Timestamp {
+    at.checked_add(jiff::SignedDuration::from_nanos(nanos))
+        .expect("in range")
+}
+
+// RFC 8628 §3.2: `interval` is "The minimum amount of time in seconds that
+// the client SHOULD wait between polling requests to the token endpoint."
+// A poll that waited exactly `interval` is allowed; one nanosecond less is
+// told to slow down (§3.5 `slow_down`).
+#[tokio::test]
+async fn test_device_auth_poll_interval_boundary_at_full_precision() {
+    let (store, _audit) = test_db().await;
+    let interval = 5;
+    let id = create_device_auth_request(
+        &store,
+        "poll_boundary_hash",
+        "POLL-BNDY",
+        "test-client",
+        "2099-12-31T23:59:59Z".parse().unwrap(),
+        interval,
+    )
+    .await
+    .unwrap();
+
+    // Mid-second, so whole-second flooring would move both ends.
+    let t0 = ArrivalTime::for_test(
+        jiff::Timestamp::from_second(1_900_000_000)
+            .unwrap()
+            .checked_add(jiff::SignedDuration::from_millis(700))
+            .unwrap(),
+    )
+    .timestamp();
+    let interval_nanos = i64::from(interval) * 1_000_000_000;
+
+    assert!(
+        update_device_auth_poll_time(&store, &id, interval, t0)
+            .await
+            .unwrap()
+    );
+    let just_under = ArrivalTime::for_test(plus_nanos(t0, interval_nanos - 1));
+    assert!(
+        !update_device_auth_poll_time(&store, &id, interval, just_under.timestamp())
+            .await
+            .unwrap(),
+        "a poll one nanosecond short of the interval must be told to slow down"
+    );
+    let exactly = ArrivalTime::for_test(plus_nanos(t0, interval_nanos));
+    assert!(
+        update_device_auth_poll_time(&store, &id, interval, exactly.timestamp())
+            .await
+            .unwrap(),
+        "a poll that waited exactly the interval must be allowed"
+    );
+}
+
+// Whole-second arithmetic let a poll 0.2s after its predecessor through a
+// 1-second interval whenever the two straddled a second boundary.
+#[tokio::test]
+async fn test_device_auth_poll_straddling_a_second_boundary_is_slowed() {
+    let (store, _audit) = test_db().await;
+    let interval = 1;
+    let id = create_device_auth_request(
+        &store,
+        "poll_straddle_hash",
+        "POLL-STRD",
+        "test-client",
+        "2099-12-31T23:59:59Z".parse().unwrap(),
+        interval,
+    )
+    .await
+    .unwrap();
+
+    let second = jiff::Timestamp::from_second(1_900_000_000).unwrap();
+    let first = ArrivalTime::for_test(plus_nanos(second, 900_000_000));
+    let next = ArrivalTime::for_test(plus_nanos(second, 1_100_000_000));
+    assert!(
+        update_device_auth_poll_time(&store, &id, interval, first.timestamp())
+            .await
+            .unwrap()
+    );
+    assert!(
+        !update_device_auth_poll_time(&store, &id, interval, next.timestamp())
+            .await
+            .unwrap(),
+        "0.2s between polls is under a 1s interval even across a second boundary"
+    );
 }
 
 #[tokio::test]
@@ -243,9 +342,16 @@ async fn test_try_consume_device_auth_authorized_succeeds() {
     let user_code = "CNSM-SUCC";
     let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().unwrap();
 
-    let id = create_device_auth_request(&store, device_code_hash, user_code, None, expires_at, 5)
-        .await
-        .expect("create");
+    let id = create_device_auth_request(
+        &store,
+        device_code_hash,
+        user_code,
+        "test-client",
+        expires_at,
+        5,
+    )
+    .await
+    .expect("create");
 
     // Authorize it first
     let (user_id, _) = upsert_user(&store, "consume@example.com", Some("Test"))
@@ -255,13 +361,13 @@ async fn test_try_consume_device_auth_authorized_succeeds() {
         &store,
         &CreateAuthenticatorParams {
             user_id: &user_id,
-            user_email: "consume@example.com",
             name: "Key",
             credential_id: b"cred-consume",
             public_key: &[0u8; 32],
             aaguid: None,
             user_handle: None,
             attestation_verified: false,
+            counter: 0,
         },
     )
     .await
@@ -274,7 +380,9 @@ async fn test_try_consume_device_auth_authorized_succeeds() {
             user_id: &user_id,
             user_email: "consume@example.com",
             authenticator_id: &auth_id,
-            hardware_verified: true,
+            verification: DeviceApproval::Observed(AuthTime::for_test(
+                jiff::Timestamp::now().as_second(),
+            )),
         },
     )
     .await
@@ -303,7 +411,7 @@ async fn test_try_consume_device_auth_already_consumed_returns_false() {
         &store,
         device_code_hash,
         "DBLC-CODE",
-        None,
+        "test-client",
         "2099-12-31T23:59:59Z".parse().unwrap(),
         5,
     )
@@ -317,13 +425,13 @@ async fn test_try_consume_device_auth_already_consumed_returns_false() {
         &store,
         &CreateAuthenticatorParams {
             user_id: &user_id,
-            user_email: "double@example.com",
             name: "Key",
             credential_id: b"cred-double",
             public_key: &[0u8; 32],
             aaguid: None,
             user_handle: None,
             attestation_verified: false,
+            counter: 0,
         },
     )
     .await
@@ -336,7 +444,9 @@ async fn test_try_consume_device_auth_already_consumed_returns_false() {
             user_id: &user_id,
             user_email: "double@example.com",
             authenticator_id: &auth_id,
-            hardware_verified: true,
+            verification: DeviceApproval::Observed(AuthTime::for_test(
+                jiff::Timestamp::now().as_second(),
+            )),
         },
     )
     .await
@@ -348,7 +458,7 @@ async fn test_try_consume_device_auth_already_consumed_returns_false() {
 
     let second = try_consume_device_auth(&store, device_code_hash).await;
     assert!(
-        matches!(second, Err(crate::db::claim::ClaimError::AlreadyConsumed)),
+        matches!(second, Err(ClaimError::AlreadyConsumed)),
         "Second consumption must fail with AlreadyConsumed, got: {second:?}"
     );
 }
@@ -362,7 +472,7 @@ async fn test_try_consume_device_auth_pending_returns_false() {
         &store,
         device_code_hash,
         "PEND-CODE",
-        None,
+        "test-client",
         "2099-12-31T23:59:59Z".parse().unwrap(),
         5,
     )
@@ -372,7 +482,7 @@ async fn test_try_consume_device_auth_pending_returns_false() {
     // Attempt to consume a Pending request (never authorized)
     let consumed = try_consume_device_auth(&store, device_code_hash).await;
     assert!(
-        matches!(consumed, Err(crate::db::claim::ClaimError::AlreadyConsumed)),
+        matches!(consumed, Err(ClaimError::AlreadyConsumed)),
         "Pending device code must not be consumable, got: {consumed:?}"
     );
 }
@@ -384,9 +494,16 @@ async fn test_try_consume_device_auth_expired_returns_false() {
     let device_code_hash = "expired_consume_hash";
     // Already expired
     let expired_at: jiff::Timestamp = "2020-01-01T00:00:00Z".parse().unwrap();
-    let id = create_device_auth_request(&store, device_code_hash, "EXPD-CNSM", None, expired_at, 5)
-        .await
-        .expect("create");
+    let id = create_device_auth_request(
+        &store,
+        device_code_hash,
+        "EXPD-CNSM",
+        "test-client",
+        expired_at,
+        5,
+    )
+    .await
+    .expect("create");
 
     let (user_id, _) = upsert_user(&store, "expired@example.com", Some("Test"))
         .await
@@ -395,13 +512,13 @@ async fn test_try_consume_device_auth_expired_returns_false() {
         &store,
         &CreateAuthenticatorParams {
             user_id: &user_id,
-            user_email: "expired@example.com",
             name: "Key",
             credential_id: b"cred-expired",
             public_key: &[0u8; 32],
             aaguid: None,
             user_handle: None,
             attestation_verified: false,
+            counter: 0,
         },
     )
     .await
@@ -414,7 +531,9 @@ async fn test_try_consume_device_auth_expired_returns_false() {
             user_id: &user_id,
             user_email: "expired@example.com",
             authenticator_id: &auth_id,
-            hardware_verified: true,
+            verification: DeviceApproval::Observed(AuthTime::for_test(
+                jiff::Timestamp::now().as_second(),
+            )),
         },
     )
     .await
@@ -422,7 +541,7 @@ async fn test_try_consume_device_auth_expired_returns_false() {
 
     let consumed = try_consume_device_auth(&store, device_code_hash).await;
     assert!(
-        matches!(consumed, Err(crate::db::claim::ClaimError::AlreadyConsumed)),
+        matches!(consumed, Err(ClaimError::AlreadyConsumed)),
         "Expired device code must not be consumable, got: {consumed:?}"
     );
 }
@@ -433,7 +552,7 @@ async fn test_try_consume_device_auth_not_found_returns_false() {
 
     let consumed = try_consume_device_auth(&store, "nonexistent_hash").await;
     assert!(
-        matches!(consumed, Err(crate::db::claim::ClaimError::AlreadyConsumed)),
+        matches!(consumed, Err(ClaimError::AlreadyConsumed)),
         "Nonexistent hash must fail with AlreadyConsumed, got: {consumed:?}"
     );
 }
@@ -474,7 +593,7 @@ async fn test_double_authorization_should_fail() {
         &store,
         "dbl_auth_hash",
         "DBLA-0001",
-        None,
+        "test-client",
         "2099-12-31T23:59:59Z".parse().unwrap(),
         5,
     )
@@ -488,7 +607,9 @@ async fn test_double_authorization_should_fail() {
             user_id: "user_a",
             user_email: "a@example.com",
             authenticator_id: "auth_a",
-            hardware_verified: true,
+            verification: DeviceApproval::Observed(AuthTime::for_test(
+                jiff::Timestamp::now().as_second(),
+            )),
         },
     )
     .await
@@ -501,7 +622,9 @@ async fn test_double_authorization_should_fail() {
             user_id: "user_b",
             user_email: "b@example.com",
             authenticator_id: "auth_b",
-            hardware_verified: true,
+            verification: DeviceApproval::Observed(AuthTime::for_test(
+                jiff::Timestamp::now().as_second(),
+            )),
         },
     )
     .await;
@@ -528,7 +651,7 @@ async fn test_authorize_after_deny_should_fail() {
         &store,
         "deny_then_auth",
         "DNYA-0001",
-        None,
+        "test-client",
         "2099-12-31T23:59:59Z".parse().unwrap(),
         5,
     )
@@ -544,7 +667,9 @@ async fn test_authorize_after_deny_should_fail() {
             user_id: "user_a",
             user_email: "a@example.com",
             authenticator_id: "auth_a",
-            hardware_verified: true,
+            verification: DeviceApproval::Observed(AuthTime::for_test(
+                jiff::Timestamp::now().as_second(),
+            )),
         },
     )
     .await;
@@ -565,7 +690,7 @@ async fn test_deny_after_authorize_should_fail() {
         &store,
         "auth_then_deny",
         "ATDN-0001",
-        None,
+        "test-client",
         "2099-12-31T23:59:59Z".parse().unwrap(),
         5,
     )
@@ -579,7 +704,9 @@ async fn test_deny_after_authorize_should_fail() {
             user_id: "user_a",
             user_email: "a@example.com",
             authenticator_id: "auth_a",
-            hardware_verified: true,
+            verification: DeviceApproval::Observed(AuthTime::for_test(
+                jiff::Timestamp::now().as_second(),
+            )),
         },
     )
     .await
@@ -608,7 +735,7 @@ async fn test_double_deny_should_fail() {
         &store,
         "dbl_deny_hash",
         "DBLD-0001",
-        None,
+        "test-client",
         "2099-12-31T23:59:59Z".parse().unwrap(),
         5,
     )
@@ -627,4 +754,50 @@ async fn test_double_deny_should_fail() {
         .expect("get")
         .expect("exists");
     assert!(matches!(req.state, DeviceAuthState::Denied));
+}
+
+/// A row without a `client_id` belongs to no client (RFC 6749 §5.2:
+/// `invalid_grant` when the grant "was issued to another client"), so the
+/// getters refuse it rather than surface a code nobody may redeem.
+#[tokio::test]
+async fn test_row_without_client_id_is_unreadable() {
+    let (store, _audit) = test_db().await;
+    let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().unwrap();
+    let inserted = store
+        .insert(&DeviceAuthRequestDoc {
+            device_code_hash: "legacy-hash".to_string(),
+            user_code: "LGCY-CODE".to_string(),
+            status: DeviceAuthStatus::Authorized,
+            client_id: None,
+            user_id: Some("legacy-user".to_string()),
+            user_email: Some("legacy@example.com".to_string()),
+            authenticator_id: Some("legacy-auth".to_string()),
+            hardware_verified: true,
+            authenticated_at: jiff::Timestamp::from_second(0).ok(),
+            expires_at,
+            interval_seconds: 5,
+            last_poll_at: None,
+            consumed_at: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        get_device_auth_by_code_hash(&store, "legacy-hash")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        get_device_auth_by_user_code(&store, "LGCY-CODE")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        get_device_auth_by_id(&store, &inserted.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }

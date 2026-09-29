@@ -144,8 +144,8 @@ async fn error_jwt_carries_error_claims() {
     let jwt = build_jarm_error_jwt(
         &harness.state,
         &client,
-        OAuthErrorCode::InvalidScope,
-        Some("unknown scope"),
+        OAuthErrorCode::InvalidGrant,
+        Some("unknown grant"),
         Some("abc"),
     )
     .await
@@ -155,11 +155,11 @@ async fn error_jwt_carries_error_claims() {
     assert_eq!(header.get("alg").and_then(Value::as_str), Some("ES256"));
     assert_eq!(
         payload.get("error").and_then(Value::as_str),
-        Some("invalid_scope")
+        Some("invalid_grant")
     );
     assert_eq!(
         payload.get("error_description").and_then(Value::as_str),
-        Some("unknown scope")
+        Some("unknown grant")
     );
     assert_eq!(payload.get("state").and_then(Value::as_str), Some("abc"));
 }

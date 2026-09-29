@@ -11,6 +11,7 @@ use anyhow::{Context, Result};
 use vouch_cli::{tr, tr_println};
 
 use crate::config::{AnthropicFederation, Config};
+use vouch_common::paths;
 
 /// Arguments captured by the clap `Anthropic` setup variant.
 pub(crate) struct SetupArgs<'a> {
@@ -48,7 +49,7 @@ pub(crate) async fn run(args: SetupArgs<'_>) -> Result<()> {
 }
 
 fn print_success() {
-    let config_path = vouch_common::paths::config_file().map_or_else(
+    let config_path = paths::config_file().map_or_else(
         || "~/.config/vouch/config.json".to_string(),
         |p| p.display().to_string(),
     );

@@ -2,6 +2,11 @@
 //! RFC 9449 — DPoP (Demonstration of Proof of Possession) tests.
 
 use super::helpers::*;
+use crate::crypto::alg::JwsAlgorithm;
+use crate::crypto::kms_signer;
+use crate::db::{FapiProfile, TokenEndpointAuthMethod};
+use crate::services::oidc::dpop::SUPPORTED_ALGORITHMS;
+use crate::services::oidc::mtls;
 use std::collections::BTreeSet;
 
 // ========================================================================
@@ -144,7 +149,7 @@ async fn test_rfc9449_client_credentials_cnf_jkt_matches_proof_key() {
         &user.id,
         TestClientSpec {
             jwks: TestJwks::Custom(serde_json::json!({ "keys": [jwk] })),
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
             dpop_bound_access_tokens: true,
             grant_types: Some(vec!["client_credentials".to_string()]),
             ..Default::default()
@@ -377,7 +382,16 @@ async fn test_dpop_scheme_without_proof_rejected() {
 
     let user = create_test_user(&state.store, "dpop-noproof@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let response = http_get_full(
         &app,
@@ -856,8 +870,8 @@ async fn test_rfc9449_dpop_rs256_algorithm_rejected() {
 
     let key_pair = RsaKeyPair::generate(KeySize::Rsa2048).expect("RSA-2048 keygen");
     let spki_der = key_pair.public_key().as_der().expect("SPKI DER");
-    let (n_bytes, e_bytes) = crate::crypto::kms_signer::parse_spki_rsa(spki_der.as_ref())
-        .expect("parse RSA SPKI components");
+    let (n_bytes, e_bytes) =
+        kms_signer::parse_spki_rsa(spki_der.as_ref()).expect("parse RSA SPKI components");
 
     let jwk = serde_json::json!({
         "kty": "RSA",
@@ -1118,32 +1132,17 @@ async fn test_rfc9449_dpop_nonce_required_token_endpoint_returns_nonce_header() 
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
     // Issue authorization code (no PKCE, no DPoP needed here)
-    let scope_set = ScopeSet::parse("openid");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            ..Default::default()
         },
     )
-    .await
-    .expect("Failed to issue authorization code");
+    .await;
 
     // Build DPoP proof WITHOUT a nonce
     let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
@@ -1201,32 +1200,17 @@ async fn test_rfc9449_dpop_nonce_required_retry_with_nonce_succeeds() {
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
     // Issue authorization code
-    let scope_set = ScopeSet::parse("openid");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            ..Default::default()
         },
     )
-    .await
-    .expect("Failed to issue authorization code");
+    .await;
 
     let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
     let auth_header = client.basic_auth_header();
@@ -1503,32 +1487,19 @@ async fn test_rfc9449_token_public_client_dpop_use_dpop_nonce() {
     // PKCE: S256 challenge / verifier.
     let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
     let challenge = sha256_base64url(verifier);
-    let scope = ScopeSet::parse("openid");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope,
-            nonce: None,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
             code_challenge: Some(&challenge),
-            code_challenge_method: Some(CodeChallengeMethod::S256),
-            resource: None,
-            acr_values: None,
             dpop_jkt: Some(&jkt),
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+            ..Default::default()
         },
     )
-    .await
-    .expect("issue code");
+    .await;
 
     let token_uri = format!("{}/oauth/token", state.config().base_url);
     let proof_no_nonce = create_dpop_proof(&dpop_key, &dpop_jwk, "POST", &token_uri, None, None);
@@ -1575,32 +1546,17 @@ async fn test_rfc9449_token_confidential_client_requires_client_auth_with_dpop()
     let nonce = acquire_dpop_nonce(&app, &dpop_key, &dpop_jwk, "POST", &token_uri).await;
     let proof = create_dpop_proof(&dpop_key, &dpop_jwk, "POST", &token_uri, Some(&nonce), None);
 
-    let scope = ScopeSet::parse("openid");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            ..Default::default()
         },
     )
-    .await
-    .expect("issue code");
+    .await;
 
     // Body provides client_id but NO client_assertion and NO Basic header.
     let body = format!(
@@ -1640,8 +1596,7 @@ async fn test_rfc9449_token_mtls_registered_client_without_cert_rejected() {
 
     // Build any cert just to derive a subject DN to register against.
     let registered_cert = make_test_cert_der("mtls-registered-client");
-    let parsed =
-        crate::services::oidc::mtls::parse_client_certificate(&registered_cert).expect("parse");
+    let parsed = mtls::parse_client_certificate(&registered_cert).expect("parse");
     let subject_dn = parsed.subject_dn.expect("subject DN");
 
     // Manually create an mtls-auth client (no cert-binding required).
@@ -1659,32 +1614,17 @@ async fn test_rfc9449_token_mtls_registered_client_without_cert_rejected() {
     .await
     .client_id;
 
-    let scope = ScopeSet::parse("openid");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+        &user,
+        &auth_id,
+        &client_id,
+        TestCodeSpec {
+            scope: "openid",
+            ..Default::default()
         },
     )
-    .await
-    .expect("issue code");
+    .await;
 
     let body = format!(
         "grant_type=authorization_code&code={code}&redirect_uri={}&client_id={client_id}",
@@ -1728,7 +1668,17 @@ async fn test_rfc9449_userinfo_multiple_dpop_headers_rejected() {
 
     let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
     let jkt = dpop_jkt(&dpop_jwk);
-    let token = create_test_session_with_dpop(&state, &user.id, &user.email, &auth_id, &jkt).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Dpop(&jkt),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let userinfo_uri = format!("{}/oauth/userinfo", state.config().base_url);
     let proof_a = create_dpop_proof(
@@ -1788,7 +1738,17 @@ async fn test_rfc9449_userinfo_mtls_and_dpop_combined_succeeds() {
 
     let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
     let jkt = dpop_jkt(&dpop_jwk);
-    let token = create_test_session_with_dpop(&state, &user.id, &user.email, &auth_id, &jkt).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Dpop(&jkt),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // mTLS cert is presented but the token is DPoP-bound (no x5t#S256 in cnf).
     let cert_der = make_test_cert_der("mtls-also-present");
@@ -1838,7 +1798,17 @@ async fn test_rfc9449_userinfo_dpop_bound_token_in_post_body_rejected() {
 
     let (_dpop_key, dpop_jwk) = generate_dpop_key_pair();
     let jkt = dpop_jkt(&dpop_jwk);
-    let token = create_test_session_with_dpop(&state, &user.id, &user.email, &auth_id, &jkt).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Dpop(&jkt),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let body_str = format!("access_token={}", urlencoding::encode(&token));
     let (status, body) = http_post_form(&app, "/oauth/userinfo", &body_str, &[]).await;
@@ -1869,7 +1839,7 @@ async fn test_dpop_signing_algs_match_supported_algorithms() {
         .map(|v| v.as_str().expect("alg should be string").to_string())
         .collect();
 
-    let supported: BTreeSet<String> = crate::services::oidc::dpop::SUPPORTED_ALGORITHMS
+    let supported: BTreeSet<String> = SUPPORTED_ALGORITHMS
         .iter()
         .map(|alg| alg.as_str().to_string())
         .collect();
@@ -1881,7 +1851,7 @@ async fn test_dpop_signing_algs_match_supported_algorithms() {
 
     for alg in &discovered {
         assert!(
-            alg.parse::<crate::crypto::alg::JwsAlgorithm>().is_ok(),
+            alg.parse::<JwsAlgorithm>().is_ok(),
             "discovery advertises a DPoP algorithm JwsAlgorithm cannot parse: {alg}"
         );
     }
@@ -1911,7 +1881,7 @@ async fn test_token_endpoint_auth_signing_algs_match_client_assertion_algorithms
             .map(|v| v.as_str().expect("alg should be string").to_string())
             .collect();
 
-    let source: BTreeSet<String> = crate::db::FapiProfile::client_assertion_algorithms_union()
+    let source: BTreeSet<String> = FapiProfile::client_assertion_algorithms_union()
         .iter()
         .map(|alg| alg.as_str().to_string())
         .collect();
@@ -1924,7 +1894,7 @@ async fn test_token_endpoint_auth_signing_algs_match_client_assertion_algorithms
 
     for alg in &discovered {
         assert!(
-            alg.parse::<crate::crypto::alg::JwsAlgorithm>().is_ok(),
+            alg.parse::<JwsAlgorithm>().is_ok(),
             "discovery advertises a token endpoint auth algorithm JwsAlgorithm cannot parse: {alg}"
         );
     }

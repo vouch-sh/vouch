@@ -12,8 +12,8 @@ use jiff::{Span, Timestamp};
 use super::{KeyMaterial, ensure_key, generate_key_material, state_priority};
 use crate::AppState;
 use crate::crypto::alg::JwsAlgorithm;
-use crate::db::audit::AuditStore;
 use crate::db::documents::organization::{OrgSigningKeyDoc, OrganizationDoc, SigningKeyState};
+use crate::db::pool::{self, RetryableError};
 use crate::db::store::StoreTransaction;
 use crate::db::{self};
 
@@ -57,11 +57,11 @@ pub(crate) enum OrgRotationError {
     Other(#[from] anyhow::Error),
 }
 
-impl crate::db::pool::RetryableError for OrgRotationError {
+impl RetryableError for OrgRotationError {
     fn is_retryable(&self) -> bool {
         match self {
             Self::OccConflict => true,
-            Self::Other(e) => crate::db::pool::is_retryable_db_error(e),
+            Self::Other(e) => pool::is_retryable_db_error(e),
         }
     }
 }
@@ -137,22 +137,6 @@ pub struct Operator<'a> {
     pub email: Option<&'a str>,
 }
 
-/// Insert an audit event, logging (never propagating) failures — audit writes
-/// must not abort a key operation that already committed.
-async fn audit_best_effort<D: db::AuditData>(
-    audit: &AuditStore,
-    kind: db::AuditEventKind,
-    operator: Operator<'_>,
-    data: &D,
-) {
-    if let Err(e) = audit
-        .insert_event(kind, operator.user_id, operator.email, data)
-        .await
-    {
-        tracing::warn!(error = %e, event_type = kind.as_str(), "failed to write audit event");
-    }
-}
-
 /// The instant a key staged at `staged_at` has been published long enough for
 /// relying-party JWKS caches to have seen its kid.
 fn publish_ready_at(staged_at: Timestamp) -> Result<Timestamp> {
@@ -192,6 +176,10 @@ fn revoke_ready_at(demoted_at: Timestamp, session_hours: u64) -> Result<Timestam
 /// a missing Next key (rows created before rotation existed) by staging one,
 /// outside any transaction — safe because the staged insert is idempotent.
 /// The rotate transaction re-checks every gate authoritatively.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "operator-driven key rotation, not a request-path comparison"
+)]
 async fn precheck_rotate_and_heal(state: &AppState, org_id: &str) -> Result<Option<RotateOutcome>> {
     let store = &state.store;
     let now = Timestamp::now();
@@ -370,6 +358,10 @@ async fn rotate_one_alg_in_tx(
 /// # Errors
 /// Returns an error if key generation or the transaction fails after the OCC
 /// retry budget is exhausted.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "operator-driven key rotation, not a request-path comparison"
+)]
 pub async fn rotate_org_keys(
     state: &AppState,
     org_id: &str,
@@ -425,19 +417,21 @@ pub async fn rotate_org_keys(
     if let RotateOutcome::Rotated { es256, rs256 } = &outcome {
         state.org_keys_cache.invalidate(org_id);
         for (alg, kids) in [(JwsAlgorithm::Es256, es256), (JwsAlgorithm::Rs256, rs256)] {
-            audit_best_effort(
-                &state.audit,
-                db::AuditEventKind::OrgIssuerKeyRotated,
-                operator,
-                &db::documents::audit::OrgIssuerKeyRotationData {
-                    action: "rotate_org_issuer_key",
-                    org_id,
-                    alg: alg.as_str(),
-                    old_kid: &kids.old_kid,
-                    new_kid: &kids.new_kid,
-                },
-            )
-            .await;
+            state
+                .audit
+                .record_event(
+                    db::AuditEventKind::OrgIssuerKeyRotated,
+                    operator.user_id,
+                    operator.email,
+                    &db::documents::audit::OrgIssuerKeyRotationData {
+                        action: "rotate_org_issuer_key",
+                        org_id,
+                        alg: alg.as_str(),
+                        old_kid: &kids.old_kid,
+                        new_kid: &kids.new_kid,
+                    },
+                )
+                .await;
         }
         tracing::info!(org_id, "rotated org issuer keys");
     }
@@ -459,6 +453,10 @@ pub async fn rotate_org_keys(
 ///
 /// # Errors
 /// Returns an error if the reads, the transaction, or the gate math fail.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "operator-driven key rotation, not a request-path comparison"
+)]
 pub async fn revoke_org_previous_keys(
     state: &AppState,
     org_id: &str,
@@ -537,18 +535,20 @@ pub async fn revoke_org_previous_keys(
             (JwsAlgorithm::Rs256, rs256_kid),
         ] {
             let Some(kid) = kid else { continue };
-            audit_best_effort(
-                &state.audit,
-                db::AuditEventKind::OrgIssuerKeyRevoked,
-                operator,
-                &db::documents::audit::OrgIssuerKeyRevocationData {
-                    action: "revoke_org_issuer_key",
-                    org_id,
-                    alg: alg.as_str(),
-                    kid,
-                },
-            )
-            .await;
+            state
+                .audit
+                .record_event(
+                    db::AuditEventKind::OrgIssuerKeyRevoked,
+                    operator.user_id,
+                    operator.email,
+                    &db::documents::audit::OrgIssuerKeyRevocationData {
+                        action: "revoke_org_issuer_key",
+                        org_id,
+                        alg: alg.as_str(),
+                        kid,
+                    },
+                )
+                .await;
         }
         tracing::info!(org_id, "revoked previous org issuer keys");
     }
@@ -632,6 +632,10 @@ struct EmergencyKeyPair {
 /// # Errors
 /// Returns an error if key generation or the transaction fails after the OCC
 /// retry budget is exhausted.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "operator-driven key rotation, not a request-path comparison"
+)]
 pub async fn emergency_rotate_org_keys(
     state: &AppState,
     org_id: &str,
@@ -686,19 +690,21 @@ pub async fn emergency_rotate_org_keys(
         (JwsAlgorithm::Es256, &old_es256_kid, &es256.current.kid),
         (JwsAlgorithm::Rs256, &old_rs256_kid, &rs256.current.kid),
     ] {
-        audit_best_effort(
-            &state.audit,
-            db::AuditEventKind::OrgIssuerKeyEmergencyRotation,
-            operator,
-            &db::documents::audit::OrgIssuerKeyRotationData {
-                action: "emergency_rotate_org_issuer_key",
-                org_id,
-                alg: alg.as_str(),
-                old_kid,
-                new_kid,
-            },
-        )
-        .await;
+        state
+            .audit
+            .record_event(
+                db::AuditEventKind::OrgIssuerKeyEmergencyRotation,
+                operator.user_id,
+                operator.email,
+                &db::documents::audit::OrgIssuerKeyRotationData {
+                    action: "emergency_rotate_org_issuer_key",
+                    org_id,
+                    alg: alg.as_str(),
+                    old_kid,
+                    new_kid,
+                },
+            )
+            .await;
     }
 
     tracing::warn!(org_id, "emergency org issuer key rotation completed");
@@ -739,6 +745,10 @@ pub(crate) struct OrgKeyPanel {
 /// # Errors
 /// Returns an error if the key list cannot be loaded or a stored key is
 /// missing its state timestamp.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "operator-driven key rotation, not a request-path comparison"
+)]
 pub(crate) async fn org_key_panel(state: &AppState, org_id: &str) -> Result<OrgKeyPanel> {
     let now = Timestamp::now();
     let mut docs = db::list_org_signing_keys(&state.store, org_id).await?;
@@ -838,13 +848,13 @@ pub(crate) async fn org_key_panel(state: &AppState, org_id: &str) -> Result<OrgK
 mod tests {
     use jiff::{Span, Timestamp};
 
-    use super::super::test_support::{NO_OPERATOR, backdate, setup};
     use super::*;
     use crate::crypto::alg::JwsAlgorithm;
     use crate::db::documents::organization::SigningKeyState;
     use crate::db::{
-        OrgSigningKeyDoc, deterministic_org_key_id, get_org_signing_key, release_subdomain,
+        self, OrgSigningKeyDoc, deterministic_org_key_id, get_org_signing_key, release_subdomain,
     };
+    use crate::services::oidc::org_keys::test_support::{NO_OPERATOR, backdate, setup};
     use crate::services::oidc::resolve_org_keys;
 
     #[test]
@@ -965,7 +975,7 @@ mod tests {
 
         // The promoted key signs; the demoted key is Previous; a fresh Next
         // was restaged in the same transaction.
-        let org = crate::db::get_organization(&state.store, &org_id)
+        let org = db::get_organization(&state.store, &org_id)
             .await
             .unwrap()
             .unwrap();

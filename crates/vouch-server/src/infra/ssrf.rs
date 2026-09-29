@@ -28,6 +28,7 @@ use std::net::IpAddr;
 use url::Host;
 
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
+use crate::infra::dns;
 
 /// Returns `true` for IP addresses that must never be the target of a
 /// server-side fetch of a client-controlled URL: loopback, RFC 1918 private,
@@ -111,12 +112,10 @@ pub(crate) async fn assert_public_destination(
         Some(Host::Ipv4(v4)) => reject_if_blocked(IpAddr::V4(v4), allow_loopback, code),
         Some(Host::Ipv6(v6)) => reject_if_blocked(IpAddr::V6(v6), allow_loopback, code),
         Some(Host::Domain(domain)) => {
-            let ips = crate::infra::dns::resolve_host_ips(domain)
-                .await
-                .map_err(|e| {
-                    tracing::warn!("SSRF guard: failed to resolve {domain}: {e}");
-                    ServiceError::oauth(code, "destination host could not be resolved")
-                })?;
+            let ips = dns::resolve_host_ips(domain).await.map_err(|e| {
+                tracing::warn!("SSRF guard: failed to resolve {domain}: {e}");
+                ServiceError::oauth(code, "destination host could not be resolved")
+            })?;
             if ips.is_empty() {
                 return Err(ServiceError::oauth(
                     code,

@@ -2,6 +2,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use vouch_httpsig::sfv::parse::{parse_dictionary, parse_inner_list, parse_item, parse_list};
+use vouch_httpsig::digest;
 use vouch_httpsig::signature_params::SignatureParams;
 
 fuzz_target!(|data: &[u8]| {
@@ -24,5 +25,5 @@ fuzz_target!(|data: &[u8]| {
 
     // Exercise Content-Digest verification with arbitrary header values.
     // The body doesn't matter here — we're fuzzing the parsing path.
-    let _ = vouch_httpsig::digest::verify_content_digest(input, b"");
+    let _ = digest::verify_content_digest(input, b"");
 });

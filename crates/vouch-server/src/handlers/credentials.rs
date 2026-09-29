@@ -2,6 +2,7 @@
 //! Credential issuance handlers (SSH certificates, AWS tokens, GitHub tokens, etc.).
 
 use crate::AppState;
+use crate::arrival::ArrivalTime;
 use crate::db::{
     self, AwsCredentialDetails, CredentialAuditEnvelope, GitHubCredentialDetails,
     SshCredentialDetails,
@@ -22,8 +23,10 @@ use vouch_common::{
 
 use super::session::{AuthenticatedToken, HardwareVerifiedToken};
 use crate::db::ClientInfo;
+use crate::infra::metrics;
 use crate::redact_email;
 use crate::services::auth::ValidatedResourceToken;
+use vouch_common::aws::Arn;
 
 /// Issue an SSH certificate for the authenticated user.
 ///
@@ -31,6 +34,10 @@ use crate::services::auth::ValidatedResourceToken;
 ///
 /// Requires Bearer token authentication. Signs the provided SSH public key
 /// as a user certificate with principals extracted from the user's email.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "records the issued certificate's expiry for revocation tracking"
+)]
 pub(crate) async fn issue_ssh_certificate(
     State(state): State<Arc<AppState>>,
     client_info: ClientInfo,
@@ -146,7 +153,10 @@ pub(crate) async fn issue_ssh_certificate(
                 success: true,
                 ..Default::default()
             }
-            .with_client(client_info.client_ip, client_info.user_agent.clone()),
+            .with_client(
+                client_info.client_ip(),
+                client_info.user_agent().map(String::from),
+            ),
             &SshCredentialDetails {
                 serial: signed.serial,
                 principals: signed.principals.clone(),
@@ -155,7 +165,7 @@ pub(crate) async fn issue_ssh_certificate(
         )
         .await;
 
-    crate::infra::metrics::record_credential_issuance("ssh");
+    metrics::record_credential_issuance("ssh");
 
     tracing::info!(
         "Issued SSH certificate for {} with principals {:?}, serial {}",
@@ -228,6 +238,10 @@ pub(crate) struct SshKrlResponse {
 ///
 /// This endpoint does not require authentication to allow SSH servers
 /// to check revocation status without needing credentials.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "reports when the KRL was generated"
+)]
 pub(crate) async fn get_ssh_krl(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<SshKrlResponse>, ServiceError> {
@@ -258,6 +272,10 @@ pub(crate) async fn get_ssh_krl(
 /// GET /v1/credentials/ssh/krl/:serial
 ///
 /// Returns whether the certificate with the given serial is revoked.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "reports when the revocation check ran"
+)]
 pub(crate) async fn check_ssh_revocation(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(serial): axum::extract::Path<String>,
@@ -271,6 +289,19 @@ pub(crate) async fn check_ssh_revocation(
             "Serial must be a numeric string (u64)",
         ));
     }
+    // Canonicalize to the u64 decimal the write path stores
+    // (record_ssh_certificate_issuance / revoke_all_ssh_certificates_for_user
+    // both use u64::to_string()). The validator above admits leading-zero
+    // forms (e.g. "012345"); without normalization the byte-equality DB
+    // lookup would miss the stored "12345" and report revoked:false for a
+    // genuinely revoked serial.
+    let serial = serial.parse::<u64>().map(|n| n.to_string()).map_err(|_| {
+        ServiceError::api(
+            StatusCode::BAD_REQUEST,
+            "invalid_serial",
+            "Serial must be a numeric string (u64)",
+        )
+    })?;
 
     let revoked = db::is_ssh_certificate_revoked(&state.store, &serial)
         .await
@@ -418,7 +449,7 @@ const MAX_ROLE_ARN_LEN: usize = 2048;
 /// clients hit this.
 fn validate_pinned_role(role_arn: &str) -> Result<(), ServiceError> {
     let is_role = role_arn.len() <= MAX_ROLE_ARN_LEN
-        && vouch_common::aws::Arn::parse(role_arn).is_ok_and(|arn| arn.is_iam_role());
+        && Arn::parse(role_arn).is_ok_and(|arn| arn.is_iam_role());
     if is_role {
         Ok(())
     } else {
@@ -456,6 +487,7 @@ pub(crate) async fn get_aws_token(
     Query(params): Query<AwsTokenParams>,
     client_info: ClientInfo,
     HardwareVerifiedToken(token): HardwareVerifiedToken,
+    arrival: ArrivalTime,
 ) -> Result<Json<AwsTokenResponse>, ServiceError> {
     let pinned_role = params.role_arn.as_deref();
     if let Some(role_arn) = pinned_role {
@@ -484,6 +516,11 @@ pub(crate) async fn get_aws_token(
             )
         })?;
 
+    // The request's arrival instant anchors the issued token's `iat`/`exp`
+    // and the audit record's `token_expires_at` to the same clock reading,
+    // so the signed JWT and the audit row cannot disagree by the latency
+    // between the two stamps — see `arrival.rs` for the contract.
+    let now = arrival.timestamp();
     let config = state.config();
     let result = issue_aws_token(
         &ctx.issuer,
@@ -492,20 +529,18 @@ pub(crate) async fn get_aws_token(
         &ctx.user_email,
         &ctx.token,
         pinned_role,
+        now,
     )
     .await
     .map_err(map_aws_error)?;
 
     // Record issuance — including the role ARN the token is pinned to — as a
     // queryable audit event, so operators can see which role each OIDC token
-    // was created for.
+    // was created for. `token_expires_at` reads the same `now` the JWT was
+    // stamped from, so the audit row and the signed token report one expiry.
     let token_expires_at = i64::try_from(result.expires_in)
         .ok()
-        .and_then(|secs| {
-            Timestamp::now()
-                .checked_add(jiff::Span::new().seconds(secs))
-                .ok()
-        })
+        .and_then(|secs| now.checked_add(jiff::Span::new().seconds(secs)).ok())
         .map(|t| t.to_string());
     state
         .audit
@@ -520,7 +555,10 @@ pub(crate) async fn get_aws_token(
                 success: true,
                 ..Default::default()
             }
-            .with_client(client_info.client_ip, client_info.user_agent.clone()),
+            .with_client(
+                client_info.client_ip(),
+                client_info.user_agent().map(String::from),
+            ),
             &AwsCredentialDetails {
                 role_arn: pinned_role.map(str::to_string),
                 token_expires_at,
@@ -528,7 +566,7 @@ pub(crate) async fn get_aws_token(
         )
         .await;
 
-    crate::infra::metrics::record_credential_issuance("aws");
+    metrics::record_credential_issuance("aws");
 
     Ok(Json(AwsTokenResponse {
         id_token: result.id_token,
@@ -597,6 +635,7 @@ pub(crate) async fn get_github_status(
     reason = "sequential GitHub installation token validation and issuance"
 )]
 pub(crate) async fn get_github_token(
+    arrival: ArrivalTime,
     client_info: ClientInfo,
     State(state): State<Arc<AppState>>,
     HardwareVerifiedToken(token): HardwareVerifiedToken,
@@ -743,9 +782,9 @@ pub(crate) async fn get_github_token(
             "Failed to parse token expires_at '{}': {e}",
             gh_token.expires_at
         );
-        Timestamp::now()
+        arrival.timestamp()
     });
-    let now = Timestamp::now();
+    let now = arrival.timestamp();
     let expires_in = expires_at
         .as_second()
         .saturating_sub(now.as_second())
@@ -762,10 +801,14 @@ pub(crate) async fn get_github_token(
                 event_type: "token_issued".to_string(),
                 org_id: Some(org_id.to_string()),
                 authenticator_id: token.authenticator_id.clone(),
+                agent: token.dpop_source.clone(),
                 success: true,
                 ..Default::default()
             }
-            .with_client(client_info.client_ip, client_info.user_agent),
+            .with_client(
+                client_info.client_ip(),
+                client_info.user_agent().map(String::from),
+            ),
             &GitHubCredentialDetails {
                 installation_id: Some(installation.installation_id),
                 repositories: request.repositories.clone(),
@@ -776,7 +819,7 @@ pub(crate) async fn get_github_token(
         )
         .await;
 
-    crate::infra::metrics::record_credential_issuance("github");
+    metrics::record_credential_issuance("github");
 
     tracing::info!(
         "Issued GitHub token for {} (org {}, installation {})",
@@ -811,8 +854,11 @@ pub(crate) async fn get_github_token(
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
+    use crate::db::{self, AuditEventFilter, CreateGitHubInstallationParams};
+    use crate::infra::router;
     use crate::test_utils::*;
     use axum::http::StatusCode;
+    use vouch_common::jwk::JwkThumbprintKey;
 
     // ========================================================================
     // SSH Serial Validation Tests — Positive
@@ -1046,6 +1092,142 @@ mod tests {
         assert_ne!(status, StatusCode::INTERNAL_SERVER_ERROR);
     }
 
+    // ------------------------------------------------------------------------
+    // SSH serial canonicalization — regressions for the leading-zero
+    // byte-equality mismatch. The write path (record_ssh_certificate_issuance /
+    // revoke_all_ssh_certificates_for_user) stores serials only as the canonical
+    // u64::to_string(); the per-serial read path must normalize to the same form
+    // before the byte-equality DB lookup, or a validator-accepted non-canonical
+    // decimal of a revoked serial (e.g. "012345" for stored "12345") reports
+    // revoked:false — contradicting the canonical-form answer and the KRL list.
+    // ------------------------------------------------------------------------
+
+    /// Primary regression: a validator-accepted non-canonical (leading-zero)
+    /// decimal of a revoked serial must report `revoked: true` and echo back the
+    /// canonical serial, matching the canonical-form answer for the same u64.
+    /// Before the fix, `GET .../krl/12345` returned `revoked:true` while
+    /// `GET .../krl/012345` returned `{serial:"012345", revoked:false}`.
+    #[tokio::test]
+    async fn test_ssh_revocation_check_leading_zero_matches_canonical_for_revoked() {
+        let (app, state) = test_app().await;
+
+        let user = create_test_user(&state.store, "leadzero@example.com").await;
+        let serial: u64 = 12_345;
+        let expires_at = jiff::Timestamp::now()
+            .checked_add(jiff::Span::new().hours(8))
+            .expect("future expires_at");
+        db::record_ssh_certificate_issuance(
+            &state.store,
+            serial,
+            &user.id,
+            "leadzero@example.com",
+            &["leadzero".to_string()],
+            expires_at,
+        )
+        .await
+        .expect("record issuance");
+        db::revoke_user_credentials(&state.store, &user.id, None, None)
+            .await
+            .expect("revoke user credentials");
+
+        // Canonical form: revoked.
+        let (status, body) = http_get(&app, "/v1/credentials/ssh/krl/12345", &[]).await;
+        assert_eq!(status, StatusCode::OK);
+        let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(resp["serial"], "12345");
+        assert_eq!(resp["revoked"], true);
+
+        // Non-canonical leading-zero form: same logical u64, must agree AND echo
+        // back the canonical serial so the response signals which value was
+        // actually looked up (the raw input used to be echoed back unchanged).
+        let (status, body) = http_get(&app, "/v1/credentials/ssh/krl/012345", &[]).await;
+        assert_eq!(status, StatusCode::OK);
+        let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(
+            resp["serial"], "12345",
+            "leading-zero input must be echoed back as the canonical u64 decimal"
+        );
+        assert_eq!(
+            resp["revoked"], true,
+            "leading-zero form of a revoked serial must match the canonical-form answer"
+        );
+    }
+
+    /// `"0"` is already canonical and must round-trip unchanged; `"00"` denotes
+    /// the same u64 and must normalize to the canonical `"0"`. Guards the
+    /// zero-special-case (the write path stores `0u64.to_string() == "0"`).
+    #[tokio::test]
+    async fn test_ssh_revocation_check_zero_forms_canonical() {
+        let (app, _state) = test_app().await;
+
+        let (status, body) = http_get(&app, "/v1/credentials/ssh/krl/0", &[]).await;
+        assert_eq!(status, StatusCode::OK);
+        let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(resp["serial"], "0");
+        assert_eq!(resp["revoked"], false);
+
+        let (status, body) = http_get(&app, "/v1/credentials/ssh/krl/00", &[]).await;
+        assert_eq!(status, StatusCode::OK);
+        let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(
+            resp["serial"], "0",
+            "\"00\" must normalize to canonical \"0\""
+        );
+        assert_eq!(resp["revoked"], false);
+    }
+
+    /// The per-serial endpoint must not contradict the KRL list for the same
+    /// logical serial. After revoking serial 12345, the KRL list contains the
+    /// canonical `"12345"`, and the per-serial endpoint — queried with a
+    /// leading-zero form of the same logical serial — must agree it is revoked.
+    /// This is the cross-endpoint consistency the bug report flagged as a
+    /// codebase inconsistency (`get_ssh_krl` returns canonical strings; the
+    /// per-serial endpoint used to return the opposite answer for a
+    /// validator-accepted non-canonical formatting of the same u64).
+    #[tokio::test]
+    async fn test_per_serial_endpoint_agrees_with_krl_list_for_same_logical_serial() {
+        let (app, state) = test_app().await;
+
+        let user = create_test_user(&state.store, "krl-agree@example.com").await;
+        let serial: u64 = 12_345;
+        let expires_at = jiff::Timestamp::now()
+            .checked_add(jiff::Span::new().hours(8))
+            .expect("future expires_at");
+        db::record_ssh_certificate_issuance(
+            &state.store,
+            serial,
+            &user.id,
+            "krl-agree@example.com",
+            &["krl-agree".to_string()],
+            expires_at,
+        )
+        .await
+        .expect("record issuance");
+        db::revoke_user_credentials(&state.store, &user.id, None, None)
+            .await
+            .expect("revoke");
+
+        // KRL list returns the canonical stored string.
+        let (status, body) = http_get(&app, "/v1/credentials/ssh/krl", &[]).await;
+        assert_eq!(status, StatusCode::OK);
+        let list: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        let revoked_serials = list["revoked_serials"]
+            .as_array()
+            .expect("revoked_serials array");
+        assert!(
+            revoked_serials.iter().any(|s| s == "12345"),
+            "KRL list must contain the canonical revoked serial, got: {revoked_serials:?}"
+        );
+
+        // Per-serial endpoint queried with a leading-zero form must agree with
+        // the KRL list for the same logical serial.
+        let (status, body) = http_get(&app, "/v1/credentials/ssh/krl/00012345", &[]).await;
+        assert_eq!(status, StatusCode::OK);
+        let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(resp["serial"], "12345");
+        assert_eq!(resp["revoked"], true);
+    }
+
     // ========================================================================
     // AWS Token Tests
     // ========================================================================
@@ -1091,11 +1273,20 @@ mod tests {
 
         let state = test_app_state_with_rsa_key().await;
         let config = state.config();
-        let app = crate::infra::router::build_app(state.clone(), &config).expect("build app");
+        let app = router::build_app(state.clone(), &config).expect("build app");
 
         let user = create_test_user(&state.store, "user@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let (status, body) = http_get(
             &app,
@@ -1119,6 +1310,291 @@ mod tests {
         assert_eq!(header["alg"], "RS256");
     }
 
+    /// The AWS token's signed `exp` claim must agree with the `token_expires_at`
+    /// recorded in the `aws_credential` audit event for the same request.
+    /// Commit addbaecd left `OidcIdTokenClaimsBuilder::build` on
+    /// `Timestamp::now()` while the handler's audit `token_expires_at` read
+    /// a separate `Timestamp::now()`, so the signed JWT and the audit row
+    /// could disagree about the token's expiry. The fix threads the request's
+    /// `arrival` into both, so the two records share one instant.
+    #[tokio::test]
+    async fn test_aws_token_exp_matches_audit_token_expires_at() {
+        use base64::Engine;
+
+        let state = test_app_state_with_rsa_key().await;
+        let config = state.config();
+        let app = router::build_app(state.clone(), &config).expect("build app");
+
+        let user = create_test_user(&state.store, "aws-audit@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let (status, body) = http_get(
+            &app,
+            "/v1/credentials/aws/token",
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "AWS token request should succeed: {body}"
+        );
+        let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        let id_token = resp["id_token"].as_str().expect("id_token string");
+
+        // Decode the signed JWT's `exp` claim (Unix seconds).
+        let payload_b64 = id_token.split('.').nth(1).expect("jwt payload");
+        let payload_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload_b64)
+            .expect("base64url payload");
+        let claims: serde_json::Value =
+            serde_json::from_slice(&payload_bytes).expect("payload JSON");
+        let jwt_exp = claims["exp"].as_i64().expect("ID token exp present");
+
+        // The audit row's `token_expires_at` must agree with the JWT's `exp`.
+        let events = state
+            .audit
+            .query_events(&AuditEventFilter {
+                event_types: Some(vec!["aws_credential".to_string()]),
+                ..Default::default()
+            })
+            .await
+            .expect("query audit events");
+        assert_eq!(events.len(), 1, "one AWS token request -> one audit event");
+        let data: serde_json::Value = serde_json::from_str(&events[0].data).expect("event data");
+        let token_expires_at_str = data["token_expires_at"]
+            .as_str()
+            .expect("token_expires_at present in audit event");
+        let token_expires_at: jiff::Timestamp = token_expires_at_str
+            .parse()
+            .expect("parse RFC 3339 timestamp");
+        assert_eq!(
+            token_expires_at.as_second(),
+            jwt_exp,
+            "audit token_expires_at ({}) must equal the issued JWT's exp ({jwt_exp}) — \
+             both are anchored on the request's arrival instant",
+            token_expires_at.as_second(),
+        );
+    }
+
+    /// Generate an EC P-256 DPoP key pair and return the signer + public JWK.
+    /// Used by the GitHub end-to-end audit test below to build a DPoP-bound
+    /// session whose proof carries an AI `source` claim.
+    fn generate_dpop_key_pair() -> (aws_lc_rs::signature::EcdsaKeyPair, serde_json::Value) {
+        use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, KeyPair};
+        use base64::Engine;
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+        let rng = aws_lc_rs::rand::SystemRandom::new();
+        let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng)
+            .expect("generate DPoP key");
+        let key_pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref())
+            .expect("parse DPoP key");
+        let pub_bytes = key_pair.public_key().as_ref();
+        let x = URL_SAFE_NO_PAD.encode(pub_bytes.get(1..33).expect("x coordinate"));
+        let y = URL_SAFE_NO_PAD.encode(pub_bytes.get(33..65).expect("y coordinate"));
+        let jwk = serde_json::json!({ "kty": "EC", "crv": "P-256", "x": x, "y": y });
+        (key_pair, jwk)
+    }
+
+    /// Build and sign a DPoP proof JWT (RFC 9449 §4.2) carrying an optional
+    /// `source` claim, for the given method/URI/nonce/access token.
+    fn create_dpop_proof_with_source(
+        key: &aws_lc_rs::signature::EcdsaKeyPair,
+        jwk: &serde_json::Value,
+        method: &str,
+        uri: &str,
+        nonce: Option<&str>,
+        access_token: Option<&str>,
+        source: Option<&str>,
+    ) -> String {
+        use base64::Engine;
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+        let header = serde_json::json!({ "typ": "dpop+jwt", "alg": "ES256", "jwk": jwk });
+        let header_b64 =
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).expect("serialize header"));
+
+        let mut claims = serde_json::json!({
+            "jti": uuid::Uuid::now_v7().to_string(),
+            "htm": method,
+            "htu": uri,
+            "iat": jiff::Timestamp::now().as_second(),
+        });
+        if let Some(obj) = claims.as_object_mut() {
+            if let Some(n) = nonce {
+                obj.insert("nonce".to_string(), serde_json::json!(n));
+            }
+            if let Some(tok) = access_token {
+                let ath = URL_SAFE_NO_PAD.encode(aws_lc_rs::digest::digest(
+                    &aws_lc_rs::digest::SHA256,
+                    tok.as_bytes(),
+                ));
+                obj.insert("ath".to_string(), serde_json::json!(ath));
+            }
+            if let Some(s) = source {
+                obj.insert("source".to_string(), serde_json::json!(s));
+            }
+        }
+        let claims_b64 =
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).expect("serialize claims"));
+
+        let signing_input = format!("{header_b64}.{claims_b64}");
+        let rng = aws_lc_rs::rand::SystemRandom::new();
+        let sig = key
+            .sign(&rng, signing_input.as_bytes())
+            .expect("sign DPoP proof");
+        let sig_b64 = URL_SAFE_NO_PAD.encode(sig);
+        format!("{signing_input}.{sig_b64}")
+    }
+
+    // ------------------------------------------------------------------------
+    // End-to-end GitHub token issuance with an AI-attributed DPoP proof.
+    //
+    // The GitHub handler's success path is otherwise unreachable in a hermetic
+    // test: `GitHubApp::get_installation_token` posts to a hardcoded
+    // `https://api.github.com/app/installations/{id}/access_tokens`. This test
+    // intercepts that call with `GitHubMock`, so no real egress occurs. It is the direct regression
+    // catcher for the bug: the GitHub audit row's `agent` must carry the DPoP
+    // proof's `source` claim, mirroring the SSH and AWS siblings.
+    // ------------------------------------------------------------------------
+
+    /// End-to-end GitHub token issuance with a DPoP proof carrying
+    /// `source: "claude-code"` must record `agent: "claude-code"` on the
+    /// `github_credential` audit row. Direct regression catcher for the bug:
+    /// the GitHub handler used `..Default::default()` and left `agent` null
+    /// while its SSH and AWS siblings set `agent: token.dpop_source.clone()`.
+    #[tokio::test]
+    async fn test_github_token_audit_agent_attributed_from_dpop_source() {
+        // 1. In-process TLS mock for the installation-token endpoint.
+        let mock = GitHubMock::spawn(|_| async {
+            (
+                200,
+                serde_json::json!({
+                    "token": "ghs_test_installation_token",
+                    "expires_at": "2099-01-01T00:00:00Z",
+                    "permissions": {"contents": "write", "metadata": "read"}
+                }),
+            )
+        })
+        .await;
+
+        // 2. AppState with a loaded GitHubApp wired to the mock client.
+        let state = test_app_state_with_github_app(mock.client()).await;
+        let config = state.config();
+        let app = router::build_app(state.clone(), &config).expect("build app");
+
+        // 3. Org + user + installation DB row (owner "acme").
+        let org = create_test_org(&state.store, "example.com").await;
+        let user =
+            create_test_user_in_org(&state.store, "gh-agent@example.com", &org.id, false).await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let perms = std::collections::HashMap::from([
+            ("contents".to_string(), "write".to_string()),
+            ("metadata".to_string(), "read".to_string()),
+        ]);
+        db::create_github_installation(
+            &state.store,
+            &CreateGitHubInstallationParams {
+                org_id: &org.id,
+                installation_id: 7,
+                github_account_login: "acme",
+                github_account_type: "Organization",
+                permissions: &perms,
+                repository_selection: "selected",
+                installed_by_user_id: Some(&user.id),
+            },
+        )
+        .await
+        .expect("create installation");
+
+        // 4. DPoP-bound, hardware-verified session + proof carrying source.
+        let (key, jwk) = generate_dpop_key_pair();
+        let jkt = JwkThumbprintKey::from_json(&jwk)
+            .expect("test JWK carries the required members")
+            .thumbprint();
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                binding: TestBinding::Dpop(&jkt),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let nonce = db::generate_dpop_nonce(&state.store, 300)
+            .await
+            .expect("generate nonce");
+        let resource_uri = format!("{}/v1/credentials/github/token", state.config().base_url);
+        let proof = create_dpop_proof_with_source(
+            &key,
+            &jwk,
+            "POST",
+            &resource_uri,
+            Some(&nonce),
+            Some(&token),
+            Some("claude-code"),
+        );
+
+        // 5. POST /v1/credentials/github/token with owner=acme.
+        let body = serde_json::json!({ "owner": "acme", "repositories": [] });
+        let body_str = body.to_string();
+        let auth = format!("DPoP {token}");
+        let (status, resp_body) = http_post_json(
+            &app,
+            "/v1/credentials/github/token",
+            &body_str,
+            &[("Authorization", &auth), ("DPoP", &proof)],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "DPoP-bound GitHub token request should succeed: {resp_body}"
+        );
+
+        // 6. The github_credential audit row must carry the AI agent attribution.
+        let events = state
+            .audit
+            .query_events(&AuditEventFilter {
+                event_types: Some(vec!["github_credential".to_string()]),
+                ..Default::default()
+            })
+            .await
+            .expect("query audit events");
+        assert_eq!(
+            events.len(),
+            1,
+            "one GitHub token request -> one audit event"
+        );
+        let data: serde_json::Value =
+            serde_json::from_str(&events[0].data).expect("parse event data");
+        assert_eq!(
+            data["agent"], "claude-code",
+            "GitHub credential audit row must carry the DPoP proof's source claim as agent"
+        );
+        // Sibling fields are unchanged: the fix touches only the audit row's
+        // `agent`, not the issued token or the rest of the audit payload.
+        assert_eq!(data["event_type"], "token_issued");
+        assert_eq!(data["org_id"], org.id);
+        assert_eq!(data["installation_id"], 7);
+        assert_eq!(data["success"], true);
+    }
+
     /// Without an RSA key in AppState the handler fails closed with 501.
     /// Startup always initializes the key, so this exercises the defensive
     /// branch rather than a reachable production state.
@@ -1128,7 +1604,16 @@ mod tests {
 
         let user = create_test_user(&state.store, "norsa@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let (status, body) = http_get(
             &app,
@@ -1154,11 +1639,15 @@ mod tests {
 
         let user = create_test_user(&state.store, "bootstrap@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_bootstrap_session_with_authenticator(
+        let token = create_test_session_with(
             &state,
-            &user.id,
-            &user.email,
-            &auth_id,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                verification: TestVerification::NotVerified,
+                ..Default::default()
+            },
         )
         .await;
 
@@ -1182,7 +1671,16 @@ mod tests {
         let (app, state) = test_app().await;
 
         let user = create_test_user(&state.store, "newuser@example.com").await;
-        let token = create_test_bootstrap_session(&state, &user.id, &user.email).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                verification: TestVerification::NotVerified,
+                ..Default::default()
+            },
+        )
+        .await;
 
         let (status, body) = http_get(
             &app,
@@ -1200,13 +1698,22 @@ mod tests {
     async fn test_aws_token_returns_token_for_org_user() {
         let state = test_app_state_with_rsa_key().await;
         let config = state.config();
-        let app = crate::infra::router::build_app(state.clone(), &config).expect("build app");
+        let app = router::build_app(state.clone(), &config).expect("build app");
 
         let org = create_test_org(&state.store, "example.com").await;
         let user =
             create_test_user_in_org(&state.store, "orguser@example.com", &org.id, false).await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let (status, body) = http_get(
             &app,
@@ -1237,11 +1744,20 @@ mod tests {
     async fn test_aws_token_pins_role_from_query() {
         let state = test_app_state_with_rsa_key().await;
         let config = state.config();
-        let app = crate::infra::router::build_app(state.clone(), &config).expect("build app");
+        let app = router::build_app(state.clone(), &config).expect("build app");
 
         let user = create_test_user(&state.store, "pinned@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let (status, body) = http_get(
             &app,
@@ -1265,11 +1781,20 @@ mod tests {
     async fn test_aws_token_without_query_omits_roles_claim() {
         let state = test_app_state_with_rsa_key().await;
         let config = state.config();
-        let app = crate::infra::router::build_app(state.clone(), &config).expect("build app");
+        let app = router::build_app(state.clone(), &config).expect("build app");
 
         let user = create_test_user(&state.store, "unpinned@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let (status, body) = http_get(
             &app,
@@ -1295,7 +1820,16 @@ mod tests {
 
         let user = create_test_user(&state.store, "badarn@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let (status, body) = http_get(
             &app,
@@ -1317,7 +1851,16 @@ mod tests {
 
         let user = create_test_user(&state.store, "userarn@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let (status, body) = http_get(
             &app,
@@ -1365,7 +1908,16 @@ mod tests {
 
         let user = create_test_user(&state.store, "ghstatus@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let (status, body) = http_get(
             &app,
@@ -1385,7 +1937,16 @@ mod tests {
 
         let user = create_test_user(&state.store, "ghnoorg@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let (status, body) = http_get(
             &app,
@@ -1414,7 +1975,16 @@ mod tests {
 
         let user = create_test_user(&state.store, "ghtoken@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let body = serde_json::json!({ "repositories": [] });
         let (status, resp_body) = http_post_json(
@@ -1457,10 +2027,19 @@ mod tests {
 
         let user = create_test_user(&state.store, "deactivated-aws@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         // Deactivate the user
-        crate::db::update_user_active_status(&state.store, &user.id, false)
+        db::update_user_active_status(&state.store, &user.id, false)
             .await
             .expect("deactivate user");
 
@@ -1483,9 +2062,18 @@ mod tests {
 
         let user = create_test_user(&state.store, "deactivated-gh@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
-        crate::db::update_user_active_status(&state.store, &user.id, false)
+        db::update_user_active_status(&state.store, &user.id, false)
             .await
             .expect("deactivate user");
 

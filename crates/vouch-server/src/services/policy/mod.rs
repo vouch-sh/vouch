@@ -37,13 +37,17 @@ pub(crate) use preconfigured::{
 };
 pub(crate) use remediation::remediation_for_slug;
 
+use crate::arrival::ArrivalTime;
 use crate::db;
+use crate::db::documents::audit::PolicyDenialData;
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
+use crate::infra::i18n::Tr;
+use crate::infra::metrics;
 use dogwood_language::{
     Authorizer, Decision, Event, EventBuilder, LoweredPolicySet, ParsedPolicySet, Validator, Value,
 };
 use preconfigured::BASE_ALLOW;
-use vouch_common::posture::DevicePosture;
+use vouch_common::posture::{DevicePosture, POSTURE_TYPE};
 
 /// Outcome of one stateless policy-set evaluation (playground path; the
 /// enforcement path's decisions carry rule attribution via
@@ -142,7 +146,7 @@ fn lower_composed(text: &str) -> ServiceResult<LoweredPolicySet> {
         return Err(ServiceError::api(
             axum::http::StatusCode::BAD_REQUEST,
             "invalid_policy_expression",
-            crate::infra::i18n::Tr::new("admin-policies-err-empty").to_string(),
+            Tr::new("admin-policies-err-empty").to_string(),
         ));
     }
     let Some(policy_schema) = schema::policy_schema() else {
@@ -159,7 +163,7 @@ fn lower_composed(text: &str) -> ServiceResult<LoweredPolicySet> {
                 return Err(ServiceError::api(
                     axum::http::StatusCode::BAD_REQUEST,
                     "invalid_policy_expression",
-                    crate::infra::i18n::Tr::new("admin-policies-err-invalid")
+                    Tr::new("admin-policies-err-invalid")
                         .arg("detail", e.to_string())
                         .to_string(),
                 ));
@@ -172,7 +176,7 @@ fn lower_composed(text: &str) -> ServiceResult<LoweredPolicySet> {
         return Err(ServiceError::api(
             axum::http::StatusCode::BAD_REQUEST,
             "invalid_policy_expression",
-            crate::infra::i18n::Tr::new("admin-policies-err-invalid")
+            Tr::new("admin-policies-err-invalid")
                 .arg("detail", errors.join("; "))
                 .to_string(),
         ));
@@ -456,14 +460,14 @@ async fn record_denial(
         DecisionKind::IssueToken { .. } => "issue_token",
         DecisionKind::ExchangeToken { .. } => "exchange_token",
     };
-    let data = crate::db::documents::audit::PolicyDenialData {
+    let data = PolicyDenialData {
         action,
         policy,
         org_id,
     };
-    if let Err(e) = state
+    state
         .audit
-        .insert_event(
+        .record_event(
             db::AuditEventKind::PolicyDenied,
             Some(user_id),
             // The email sets `email_domain`, which is how the org audit
@@ -472,10 +476,7 @@ async fn record_denial(
             Some(user_email),
             &data,
         )
-        .await
-    {
-        tracing::warn!(error = %e, "failed to write policy_denied audit event");
-    }
+        .await;
 }
 
 /// The metrics label and audit policy identifier for a deny decision.
@@ -506,19 +507,18 @@ fn deny_error(denying: Option<engine::DenyingPolicy>, os: Option<&str>) -> Servi
         Some(engine::DenyingPolicy::Preconfigured(slug)) => {
             (slug.name(), remediation_for_slug(slug, os))
         }
-        Some(engine::DenyingPolicy::Custom { name }) => (
-            name,
-            crate::infra::i18n::Tr::new("admin-policies-deny-generic").to_string(),
-        ),
+        Some(engine::DenyingPolicy::Custom { name }) => {
+            (name, Tr::new("admin-policies-deny-generic").to_string())
+        }
         None => (
-            crate::infra::i18n::Tr::new("admin-policies-deny-unattributed").to_string(),
-            crate::infra::i18n::Tr::new("admin-policies-deny-generic").to_string(),
+            Tr::new("admin-policies-deny-unattributed").to_string(),
+            Tr::new("admin-policies-deny-generic").to_string(),
         ),
     };
     tracing::debug!(policy = name, "policy denied");
     ServiceError::oauth(
         OAuthErrorCode::AccessDenied,
-        crate::infra::i18n::Tr::new("admin-policies-deny-message")
+        Tr::new("admin-policies-deny-message")
             .arg("policy", name.as_str())
             .arg("remediation", remediation.as_str())
             .to_string(),
@@ -546,6 +546,7 @@ async fn authorize_decision(
     request: DecisionRequest<'_>,
     active_slugs: &[String],
     active_custom: &[db::CustomPosturePolicy],
+    arrival: ArrivalTime,
 ) -> ServiceResult<()> {
     let DecisionRequest {
         org_id,
@@ -577,7 +578,7 @@ async fn authorize_decision(
             // cardinality a function of how many policies have been written.
             let denying = engine::DenyingPolicy::Custom { name };
             let (metrics_label, audit_policy) = deny_attribution(&Some(denying.clone()));
-            crate::infra::metrics::record_policy_decision("deny", metrics_label);
+            metrics::record_policy_decision("deny", metrics_label);
             record_denial(state, org_id, user_id, user_email, &kind, &audit_policy).await;
             return Err(deny_error(Some(denying), os));
         }
@@ -592,7 +593,7 @@ async fn authorize_decision(
     // Orgs running only device-posture policies never read event history,
     // so they pay neither the audit query nor the replay.
     let history = if needs_history {
-        events::fetch_user_history(&state.audit, user_id)
+        events::fetch_user_history(&state.audit, user_id, arrival)
             .await
             .map_err(|msg| {
                 tracing::error!(org_id, "policy history fetch failed: {msg}");
@@ -614,7 +615,9 @@ async fn authorize_decision(
                 ServiceError::Internal("policy engine unavailable".to_string())
             })?;
 
-    let now = jiff::Timestamp::now().as_second();
+    // The same instant the history window was cut at, so a policy rule and the
+    // events it reasons about are judged on one clock.
+    let now = arrival.as_second();
     let decision = engine::evaluate(lowered, &set.refs, &history, org_id, now, |ts| {
         decision_event(&kind, user_id, org_id, ts)
     })
@@ -622,19 +625,16 @@ async fn authorize_decision(
         tracing::error!(org_id, "policy decision failed: {msg}");
         ServiceError::Internal("policy engine unavailable".to_string())
     })?;
-    crate::infra::metrics::record_policy_decision_duration(
-        started.elapsed().as_secs_f64(),
-        needs_history,
-    );
+    metrics::record_policy_decision_duration(started.elapsed().as_secs_f64(), needs_history);
 
     match decision {
         engine::OrgDecision::Allow => {
-            crate::infra::metrics::record_policy_decision("allow", "none");
+            metrics::record_policy_decision("allow", "none");
             Ok(())
         }
         engine::OrgDecision::Deny(denying) => {
             let (metrics_label, audit_policy) = deny_attribution(&denying);
-            crate::infra::metrics::record_policy_decision("deny", metrics_label);
+            metrics::record_policy_decision("deny", metrics_label);
             record_denial(state, org_id, user_id, user_email, &kind, &audit_policy).await;
             Err(deny_error(denying, os))
         }
@@ -656,6 +656,10 @@ async fn authorize_decision(
 /// Returns `ServiceError::Internal` if the engine itself is unavailable
 /// (embedded schema broken, composed set fails to lower) — also
 /// fail-closed: no token is issued.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "policy decision inputs: subject, client, posture, clock"
+)]
 pub(crate) async fn evaluate_posture_policies(
     state: &crate::AppState,
     org_id: &str,
@@ -664,6 +668,7 @@ pub(crate) async fn evaluate_posture_policies(
     client_ip: Option<std::net::IpAddr>,
     client_id: &str,
     authorization_details: Option<&serde_json::Value>,
+    arrival: ArrivalTime,
 ) -> ServiceResult<()> {
     let active_slugs = db::get_active_preconfigured_slugs(&state.store, org_id)
         .await
@@ -729,6 +734,7 @@ pub(crate) async fn evaluate_posture_policies(
         },
         &active_slugs,
         &active_custom,
+        arrival,
     )
     .await
 }
@@ -743,6 +749,10 @@ pub(crate) async fn evaluate_posture_policies(
 ///
 /// Returns `AccessDenied` when an active exchange policy denies, or
 /// `Internal` when the engine is unavailable (fail-closed).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "policy decision inputs: subject, client, audience, clock"
+)]
 pub(crate) async fn evaluate_exchange_policies(
     state: &crate::AppState,
     org_id: &str,
@@ -751,6 +761,7 @@ pub(crate) async fn evaluate_exchange_policies(
     client_ip: Option<std::net::IpAddr>,
     client_id: &str,
     audience: Option<&str>,
+    arrival: ArrivalTime,
 ) -> ServiceResult<()> {
     let active_slugs = db::get_active_preconfigured_slugs(&state.store, org_id)
         .await
@@ -776,6 +787,83 @@ pub(crate) async fn evaluate_exchange_policies(
         },
         &active_slugs,
         &active_custom,
+        arrival,
+    )
+    .await
+}
+
+/// Evaluate the `logout_invalidates_exchange` policy for an RFC 8693
+/// token-exchange *actor* token's user.
+///
+/// Of the four ExchangeToken policies, only `logout_invalidates_exchange`
+/// maps meaningfully onto the actor principal. `exchange_ip_consistency`
+/// and `token_exchange_step_up` reason about the *request* environment
+/// (the caller's IP and the caller's recent login), and
+/// `exchange_rate_limit` counts `ExchangeToken` responses keyed on the
+/// *subject's* `user_id` — none should gate the actor.
+/// `logout_invalidates_exchange`, by contrast, checks whether the actor's
+/// own `Logout` audit event has occurred since the actor's last `Login`,
+/// which is exactly "a token issued before logout being exchanged for
+/// credentials" — the case the policy exists to stop.
+///
+/// This closes the temporal half of the #550 "mirroring" gap: the
+/// structural `user.active` check was mirrored onto the actor path, but
+/// the temporal `logout_invalidates_exchange` gate was wired only to the
+/// subject's `user_id`, so a still-signed, still-row-backed access token
+/// belonging to a browser-logged-out user was accepted as the
+/// `actor_token`.
+///
+/// Composes only the base permits with `logout_invalidates_exchange` —
+/// not the org's full active set — so the other ExchangeToken forbids
+/// never fire against the actor principal. The policy is evaluated with
+/// the `ExchangeToken` decision kind (the Cedar action the forbid scopes
+/// itself to), but its `input` fields are left empty because the rule
+/// only reasons over `Login`/`Logout` history, never `context.input`.
+///
+/// # Errors
+///
+/// Returns `AccessDenied` when the policy denies, or `Internal` when the
+/// engine is unavailable (fail-closed). The exchange caller remaps
+/// `AccessDenied` to `invalid_request` per RFC 8693 §2.2.2: an actor
+/// token "unacceptable based on policy" MUST be reported with the
+/// `invalid_request` error code.
+pub(crate) async fn evaluate_actor_logout_policy(
+    state: &crate::AppState,
+    org_id: &str,
+    user_id: &str,
+    user_email: &str,
+    arrival: ArrivalTime,
+) -> ServiceResult<()> {
+    let active_slugs = db::get_active_preconfigured_slugs(&state.store, org_id)
+        .await
+        .map_err(|e| ServiceError::Internal(format!("Failed to load posture config: {e}")))?;
+    if !active_slugs
+        .iter()
+        .any(|s| s == PreconfiguredSlug::LogoutInvalidatesExchange.as_str())
+    {
+        return Ok(());
+    }
+    let actor_slugs = vec![
+        PreconfiguredSlug::LogoutInvalidatesExchange
+            .as_str()
+            .to_string(),
+    ];
+    authorize_decision(
+        state,
+        DecisionRequest {
+            org_id,
+            user_id,
+            user_email,
+            kind: DecisionKind::ExchangeToken {
+                ip: None,
+                client_id: "",
+                audience: None,
+            },
+            os: None,
+        },
+        &actor_slugs,
+        &[],
+        arrival,
     )
     .await
 }
@@ -803,7 +891,7 @@ fn extract_device_posture(ad_value: Option<&serde_json::Value>) -> ServiceResult
 
     for entry in entries {
         let type_name = entry.get("type").and_then(serde_json::Value::as_str);
-        if type_name == Some(vouch_common::posture::POSTURE_TYPE) {
+        if type_name == Some(POSTURE_TYPE) {
             let mut posture: DevicePosture =
                 serde_json::from_value(entry.clone()).map_err(|e| {
                     tracing::warn!("Failed to deserialize device posture: {e}");
@@ -830,6 +918,10 @@ fn extract_device_posture(ad_value: Option<&serde_json::Value>) -> ServiceResult
 /// Fuzzing entry for the runtime evaluation path. Builds a trace from raw
 /// row shapes and decides against the full preconfigured policy set — the
 /// same `engine::evaluate` call the login and exchange paths make.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "fuzz harness fixture, not request-serving code"
+)]
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) fn fuzz_evaluate_history(rows: &[(String, String, String, i64)]) {
     let Some(policy_schema) = schema::policy_schema() else {

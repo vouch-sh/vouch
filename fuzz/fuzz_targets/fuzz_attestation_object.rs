@@ -1,6 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
+use vouch_common::aaguid;
 
 fuzz_target!(|data: &[u8]| {
     // Exercise CBOR attestation object parsing with arbitrary bytes.
@@ -15,11 +16,11 @@ fuzz_target!(|data: &[u8]| {
                     match k.as_str() {
                         "authData" => {
                             if let ciborium::Value::Bytes(auth_data) = val {
-                                let _ = vouch_common::aaguid::extract_aaguid_from_auth_data(
+                                let _ = aaguid::extract_aaguid_from_auth_data(
                                     auth_data,
                                 );
                                 let _ =
-                                    vouch_common::aaguid::extract_public_key_from_auth_data(
+                                    aaguid::extract_public_key_from_auth_data(
                                         auth_data,
                                     );
                             }
@@ -32,6 +33,6 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // Also try raw auth data extraction directly
-    let _ = vouch_common::aaguid::extract_aaguid_from_auth_data(data);
-    let _ = vouch_common::aaguid::extract_public_key_from_auth_data(data);
+    let _ = aaguid::extract_aaguid_from_auth_data(data);
+    let _ = aaguid::extract_public_key_from_auth_data(data);
 });

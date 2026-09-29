@@ -37,6 +37,7 @@
 
 use std::time::Duration;
 
+use crate::config;
 use anyhow::{Context, Result, bail};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
@@ -55,14 +56,23 @@ pub struct PoolConfig {
     pub acquire_timeout_secs: u64,
 }
 
+impl PoolConfig {
+    /// Defaults for every field, and the source of the `VOUCH_DB_*` flag
+    /// defaults in `config::Args`.
+    pub const DEFAULT: Self = Self {
+        max_connections: 25,
+        min_connections: 2,
+        idle_timeout_secs: 300,
+        // Together with an outbound call (at most 5s), this has to fit inside
+        // the 10s request timeout, so a request that waits for a connection
+        // and then fetches a client's JWKS still gets its own error, not a 408.
+        acquire_timeout_secs: 3,
+    };
+}
+
 impl Default for PoolConfig {
     fn default() -> Self {
-        Self {
-            max_connections: 25,
-            min_connections: 2,
-            idle_timeout_secs: 300,
-            acquire_timeout_secs: 5,
-        }
+        Self::DEFAULT
     }
 }
 
@@ -230,9 +240,7 @@ impl Pool {
         // override: the token generator presigns locally from credentials and
         // never dispatches an SDK operation, so FIPS endpoint resolution is
         // never exercised on this path.
-        let sdk_config = crate::config::aws_config_loader(Some(&region), None)?
-            .load()
-            .await;
+        let sdk_config = config::aws_config_loader(Some(&region), None)?.load().await;
 
         // Generate initial authentication token (against the token hostname)
         let token =
@@ -730,7 +738,7 @@ fn spawn_token_refresh(pool: sqlx::PgPool, dsql: DsqlEndpoint, user: String, is_
                 }
                 _ = interval.tick() => {
                     // Reload AWS credentials (in case they've been rotated)
-                    let sdk_config = match crate::config::aws_config_loader(Some(&region), None) {
+                    let sdk_config = match config::aws_config_loader(Some(&region), None) {
                         Ok(loader) => loader.load().await,
                         Err(e) => {
                             tracing::warn!(
@@ -827,6 +835,16 @@ fn is_retryable_code(code: &str) -> bool {
 /// Downcasts through `anyhow::Error` → `sqlx::Error::Database` and
 /// inspects the SQLSTATE code.
 pub(crate) fn is_retryable_db_error(err: &anyhow::Error) -> bool {
+    // An application-level version-guard loss inside a transaction (see
+    // `StoreTransaction::update_by_index`) is the same event as a DSQL
+    // serialization abort: the row moved under the writer, re-run from a
+    // fresh read.
+    if err
+        .downcast_ref::<super::store::VersionConflict>()
+        .is_some()
+    {
+        return true;
+    }
     if let Some(sqlx_err) = err.downcast_ref::<sqlx::Error>()
         && let sqlx::Error::Database(db_err) = sqlx_err
         && let Some(code) = db_err.code()

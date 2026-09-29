@@ -2,9 +2,10 @@
 //! RFC 7662 — Token Introspection tests.
 
 use super::helpers::*;
+use crate::db;
 
 // ========================================================================
-// P1: RFC 7662 — Token Introspection
+// RFC 7662 — Token Introspection
 // ========================================================================
 
 #[tokio::test]
@@ -81,7 +82,16 @@ async fn test_introspect_revoked_token() {
     // Create user, OAuth client, and session
     let user = create_test_user(&state.store, "introspect-revoked@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
@@ -202,7 +212,16 @@ async fn test_rfc7662_response_content_type() {
 
     let user = create_test_user(&state.store, "introspect-ct@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
@@ -497,32 +516,14 @@ async fn test_rfc7662_introspect_with_private_key_jwt_succeeds() {
 
     // Issue a token for the JWT client via auth code flow
 
-    let scope_set = ScopeSet::parse("openid email");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &jwt_client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
-        },
+        &user,
+        &auth_id,
+        &jwt_client.client_id,
+        TestCodeSpec::default(),
     )
-    .await
-    .expect("Failed to issue code");
+    .await;
 
     // Exchange code using private_key_jwt
     let token_url = format!("{}/oauth/token", state.config().base_url);
@@ -723,7 +724,7 @@ async fn test_introspection_returns_inactive_for_deactivated_user_with_session()
     // This simulates the scenario where session deletion fails after
     // user deactivation succeeds. Each operation commits independently
     // since there is no transaction wrapping both.
-    crate::db::update_user_active_status(&state.store, &user.id, false)
+    db::update_user_active_status(&state.store, &user.id, false)
         .await
         .expect("deactivate user");
 
@@ -774,10 +775,10 @@ async fn test_introspection_returns_active_for_reactivated_user() {
     let (access_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
 
     // Deactivate, then reactivate.
-    crate::db::update_user_active_status(&state.store, &user.id, false)
+    db::update_user_active_status(&state.store, &user.id, false)
         .await
         .expect("deactivate user");
-    crate::db::update_user_active_status(&state.store, &user.id, true)
+    db::update_user_active_status(&state.store, &user.id, true)
         .await
         .expect("reactivate user");
 

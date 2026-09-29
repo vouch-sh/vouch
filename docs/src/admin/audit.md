@@ -24,6 +24,7 @@ code, ASN, and network organization resolved from the client IP.
 | `logout` | User logged out (including RFC 7009 token revocation) |
 | `key_registered` | Additional hardware key registered (`vouch register`) |
 | `key_removed` | Hardware key removed |
+| `key_renamed` | Hardware key renamed |
 | `device_auth_approved` | Browser approved a CLI device-authorization request |
 | `key_registration_replay` | Replayed key-registration link rejected (possible attack) |
 | `identity_bound` | Upstream IdP identity (issuer + subject) bound to an account on its first IdP login; `data.idp_issuer` names the issuer |
@@ -115,7 +116,10 @@ entirely, and events then accumulate without bound.
 ## Browsing and exporting
 
 `/admin/audit` provides a paginated view scoped to your organization, with filters for event
-type, user ID, email, and a date range.
+type, user ID, email, and a date range. A filter field left empty is ignored. The **Since** and
+**Until** bounds take RFC 3339 timestamps, either UTC (`2026-01-01T13:00:00Z`) or with an offset
+(`2026-01-01T08:00:00-05:00`, the same instant); anything else is reported on the page instead of
+being applied.
 
 For programmatic access — SIEM ingestion, backfills, ad hoc scripting — use the audit events
 API described below. The raw `audit_events` table is still available as an operator escape
@@ -203,10 +207,11 @@ org-scoped.
 ### Cursor semantics and delivery guarantee
 
 `next_cursor` is present whenever there may be more matching events; pass it back as `after`
-(or `before`, if you're walking backward) to continue. IDs are UUID v7 (time-ordered), but
-authentication events are written from detached background tasks, so **commit order can trail
-ID order by a few seconds under load** — a naive high-water-mark poller that just tracks "the
-highest ID seen" can miss events that commit late.
+(or `before`, if you're walking backward) to continue. IDs are UUID v7 (time-ordered) and
+every event is written before the request that caused it receives its response, but
+concurrent requests can still commit in a different order than they minted IDs — a naive
+high-water-mark poller that just tracks "the highest ID seen" can miss an event that commits
+a moment after a higher ID from an overlapping request.
 
 The API's delivery guarantee instead of ID ordering: **an event is never returned with
 `created_at` newer than `now - 30s`**, regardless of the `until` you pass. A poller that
@@ -215,13 +220,12 @@ requests `after=<last cursor>` no more often than every 30 seconds, and persists
 window. Because pages can be byte-capped (see NDJSON below), always follow `next_cursor` until a
 page comes back without one rather than assuming one poll drains everything new.
 
-This guarantee assumes an audit write actually commits within the window. `created_at` is
-stamped when the event is minted, not when it commits, so a detached write task delayed past
-30 seconds (executor saturation, a DSQL OCC retry storm) — or one that fails outright — is not
-currently surfaced by any metric; the event would land later than the poller expects, or not at
-all. Size your polling interval with margin above 30 seconds if your environment is prone to
-write-path contention, and treat this as a best-effort guarantee under normal operating
-conditions rather than a hard real-time bound.
+An event's ID and `created_at` are stamped together immediately before its insert, and the
+insert completes before the response is sent, so a committed event's timestamp trails its
+commit only by the write itself. Audit writes are best-effort, however: a write that fails
+outright is logged server-side and not retried, so the event is absent rather than late —
+treat the guarantee as best-effort under write-path failure rather than a hard real-time
+bound.
 
 ### NDJSON
 
@@ -260,7 +264,14 @@ event types onto four Identity & Access Management classes. Native JSON stays th
 lossless representation — this is a projection for SIEM ingestion, and every field Vouch
 records is still present in `data`.
 
-Six event types map to OCSF `activity_id: 99` ("Other") because the OCSF IAM classes have no
+`status_id` is `Success` unless the event type is itself a failure (`login_failed`, for
+example) or `data` carries a top-level `refusal` member. `admin_remove_user`, `admin_deactivate`,
+and a `scim_operation` delete or deactivating update record `"refusal": "last_admin"` when
+removing the organization's last active admin was refused after the member's sessions and
+certificates had already been revoked; those rows export with `status_id` `Failure`. SCIM rows
+written by v2026.9.4 carry the refusal inside `details` instead and export as `Success`.
+
+Seven event types map to OCSF `activity_id: 99` ("Other") because the OCSF IAM classes have no
 predefined activity for them. Per the OCSF 1.9.0 spec, when `activity_id` is `99` the
 `activity_name` attribute **must** carry a source-specific label (not the literal "Other"), so
 each of these events emits a distinct `activity_name` and also preserves the original Vouch
@@ -272,6 +283,7 @@ each of these events emits a distinct `activity_name` and also preserves the ori
 | `admin_demote` | Account Change (3001) | 99 | `Admin Demote` |
 | `admin_revoke_credentials` | Account Change (3001) | 99 | `Admin Revoke Credentials` |
 | `identity_bound` | Account Change (3001) | 99 | `Identity Bound` |
+| `key_renamed` | Account Change (3001) | 99 | `Key Renamed` |
 | `oauth_token_revoked` | Authorize Session (3003) | 99 | `OAuth Token Revoked` |
 | `scim_operation` | Entity Management (3004) | 99 | `SCIM Operation` |
 
@@ -286,6 +298,7 @@ each of these events emits a distinct `activity_name` and also preserves the ori
 | `identity_bound` | 3001 | Account Change |
 | `key_registered` | 3001 | Account Change |
 | `key_removed` | 3001 | Account Change |
+| `key_renamed` | 3001 | Account Change |
 | `key_registration_replay` | 3001 | Account Change |
 | `admin_promote` | 3001 | Account Change |
 | `admin_demote` | 3001 | Account Change |
@@ -329,7 +342,7 @@ yet) is emitted as an OCSF Base Event (`class_uid: 0`) with the raw type preserv
 `unmapped.event_type`, never a `500`.
 
 This table and the mapping code are kept in sync by an automated test
-(`ocsf_class` in `handlers/admin/ocsf.rs`) that fails the build if they drift apart.
+(`ocsf_class` in `handlers/api/org/ocsf.rs`) that fails the build if they drift apart.
 
 ## Known gap: events written before the NULL-domain fix
 

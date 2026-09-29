@@ -11,6 +11,13 @@ use crate::db::document_type::{DocumentType, IndexEntry};
 /// An organization (tenant).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrganizationDoc {
+    /// The org's primary domain. Write-once: the document's own ID is
+    /// `deterministic_org_id(domain)`, so changing this in place would
+    /// desync the doc from its identity, and no rename or delete path
+    /// exists. Each member's
+    /// [`crate::db::documents::user::UserDoc::org_domain`] copy relies on
+    /// this; a rename feature must migrate those copies, not just write
+    /// this field.
     pub domain: String,
     pub name: Option<String>,
     pub created_by_user_id: Option<String>,

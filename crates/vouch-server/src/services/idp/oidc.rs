@@ -9,6 +9,26 @@ use serde::Deserialize;
 use url::Url;
 
 use super::IdentityResult;
+use crate::crypto;
+use crate::crypto::jwt::{Jws, JwsError};
+use crate::db::{Domain, UpstreamLogin};
+use crate::email::Email;
+use crate::infra::csp::CspOrigin;
+use crate::infra::egress::read_capped_json;
+
+/// Maximum size of an upstream IdP's OIDC discovery document (256 KB).
+///
+/// Discovery documents are a flat metadata object; the largest real ones are a
+/// few kilobytes.
+const MAX_DISCOVERY_DOCUMENT_SIZE: usize = 256 * 1024;
+
+/// Maximum size of an upstream IdP's JWKS (256 KB).
+///
+/// Matches the cap applied to a client's `jwks_uri` in [`crate::infra::jwks`].
+/// This one is worth capping for the same reason rather than as hardening: the
+/// URI is read out of the discovery document fetched above, so it is chosen by
+/// the remote host rather than by an operator.
+const MAX_IDP_JWKS_SIZE: usize = 256 * 1024;
 
 /// A fully configured OIDC provider: discovery endpoints + client credentials.
 ///
@@ -43,12 +63,12 @@ impl ConfiguredOidcProvider {
         use base64::Engine;
         use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
-        let state_bytes = crate::crypto::generate_random_bytes(32)?;
-        let nonce_bytes = crate::crypto::generate_random_bytes(32)?;
+        let state_bytes = crypto::generate_random_bytes(32)?;
+        let nonce_bytes = crypto::generate_random_bytes(32)?;
         let state_key = URL_SAFE_NO_PAD.encode(state_bytes);
         let nonce = URL_SAFE_NO_PAD.encode(nonce_bytes);
 
-        let verifier_bytes = crate::crypto::generate_random_bytes(32)?;
+        let verifier_bytes = crypto::generate_random_bytes(32)?;
         let code_verifier = URL_SAFE_NO_PAD.encode(verifier_bytes);
         let challenge_digest =
             aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, code_verifier.as_bytes());
@@ -98,8 +118,8 @@ impl OidcProvider {
     /// in practice this never happens because `fetch_discovery` rejects such
     /// inputs, but the type expresses the invariant.
     #[must_use]
-    pub fn form_action_origin(&self) -> Option<crate::infra::csp::CspOrigin> {
-        crate::infra::csp::CspOrigin::from_url(&self.authorization_endpoint)
+    pub fn form_action_origin(&self) -> Option<CspOrigin> {
+        CspOrigin::from_url(&self.authorization_endpoint)
     }
 }
 
@@ -308,10 +328,9 @@ pub(crate) async fn fetch_discovery(
         );
     }
 
-    let doc: DiscoveryDocument = response
-        .json()
+    let doc: DiscoveryDocument = read_capped_json(response, MAX_DISCOVERY_DOCUMENT_SIZE)
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to parse discovery document: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("Failed to read discovery document: {e}"))?;
 
     // RFC 8414 Section 3.3: validate discovered issuer against configured issuer.
     // Entra /organizations/ endpoint returns a per-tenant issuer; validate_discovered_issuer
@@ -362,14 +381,14 @@ pub(crate) async fn verify_id_token(
     // Parameters are not understood and supported by the recipient, then the
     // JWS is invalid." Vouch supports no `crit` extension, so a `crit`-bearing
     // ID token never yields a header at all.
-    let jws = crate::crypto::jwt::Jws::parse(id_token).map_err(|e| match e {
-        crate::crypto::jwt::JwsError::Critical => {
+    let jws = Jws::parse(id_token).map_err(|e| match e {
+        JwsError::Critical => {
             anyhow::anyhow!("ID token header carries an unsupported 'crit' extension")
         }
-        crate::crypto::jwt::JwsError::Malformed(reason) => {
+        JwsError::Malformed(reason) => {
             anyhow::anyhow!("Invalid ID token: {reason}")
         }
-        crate::crypto::jwt::JwsError::PrivateKey => {
+        JwsError::PrivateKey => {
             anyhow::anyhow!("ID token header JWK contains private key material")
         }
     })?;
@@ -401,10 +420,9 @@ pub(crate) async fn verify_id_token(
         );
     }
 
-    let jwks: jsonwebtoken::jwk::JwkSet = jwks_response
-        .json()
+    let jwks: jsonwebtoken::jwk::JwkSet = read_capped_json(jwks_response, MAX_IDP_JWKS_SIZE)
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to parse JWKS: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("Failed to read JWKS: {e}"))?;
 
     // Find matching key by kid, then by algorithm
     let decoding_key = find_decoding_key(&jwks, jws.header().kid.as_deref(), alg)?;
@@ -503,24 +521,40 @@ pub(crate) async fn verify_id_token(
     //   address. Personal Microsoft accounts cannot reach this point because
     //   `/common/` is rejected at discovery and `/organizations/` excludes MSA.
     //
-    // Normalize to ASCII lowercase so that org lookups match regardless of
-    // the case the IdP returned. Org domains are stored lowercase.
+    // `Domain::parse` normalizes to ASCII lowercase (org domains are stored
+    // lowercase, so lookups must match regardless of the case the IdP
+    // returned) and rejects anything that is not a DNS domain. Parsing here
+    // rather than at the enrollment chokepoint is what keeps the checked
+    // value and the persisted value the same one: the domain travels typed
+    // from here to `enroll_user_with_org`.
+    //
     // `Email::domain_of` splits on the last `@` — the same semantics the
     // audit and org-domain layers use — where `split('@').nth(1)` picked
     // the wrong "domain" for a quoted local part containing `@`.
     let is_google = is_google_host(&provider.issuer);
-    let domain = if is_google {
-        claims.hd.as_deref().map(str::to_ascii_lowercase)
+    let raw_domain = if is_google {
+        claims.hd.clone()
     } else {
-        crate::email::Email::domain_of(&claims.email)
+        Email::domain_of(&claims.email)
     };
+    let domain = raw_domain
+        .as_deref()
+        .map(Domain::parse)
+        .transpose()
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "IdP asserted a domain that is not a valid DNS domain: {e}. The ID token's \
+                 {source} must carry a domain Vouch can use as an organization domain.",
+                source = if is_google { "'hd' claim" } else { "email" }
+            )
+        })?;
 
     // Bind to `claims.iss` (the validated token issuer), not
     // `provider.issuer`: for Entra `/organizations/` the configured issuer
     // is the literal `{tenantid}` template, while `claims.iss` names the
     // concrete tenant — the identity must be pinned to the real tenant.
     Ok(IdentityResult {
-        upstream: Some(crate::db::UpstreamLogin {
+        upstream: Some(UpstreamLogin {
             issuer: claims.iss,
             durable_subject: Some(claims.sub),
         }),
@@ -554,41 +588,100 @@ fn extract_entra_tenant_from_issuer(issuer: &str) -> Option<&str> {
 ///
 /// A JWKS may contain key types this crate cannot use — `jsonwebtoken` keeps
 /// them as `AlgorithmParameters::Other` rather than rejecting the whole set —
-/// so the algorithm and last-resort searches skip entries that fail to convert.
+/// so the algorithm and last-resort searches skip entries that fail to
+/// convert. `jsonwebtoken::DecodingKey::from_jwk` dispatches solely on `kty`
+/// and never reads the JWK's `alg` member, so two same-`kid` JWKs whose `kty`
+/// differs (e.g. an RSA and an EC sharing a `kid`) both build as `Ok`. A
+/// built key whose `AlgorithmFamily` does not match the ID token's `alg`
+/// would be rejected by `jsonwebtoken::decode` at verifier construction with
+/// `InvalidKeyFormat`, but returning the first buildable same-`kid` key would
+/// mask a valid same-`kid`/same-family sibling later in the set. Every branch
+/// therefore accepts a candidate only when its built `AlgorithmFamily` matches
+/// the token's `alg`.
 fn find_decoding_key(
     jwks: &jsonwebtoken::jwk::JwkSet,
     kid: Option<&str>,
     alg: jsonwebtoken::Algorithm,
 ) -> Result<jsonwebtoken::DecodingKey, anyhow::Error> {
     let expected_key_alg = jsonwebtoken::jwk::KeyAlgorithm::from(alg);
+    let expected_family = alg.family();
 
-    // Try matching by kid first
+    // Try matching by kid first. RFC 7517 Section 4.5 makes `kid` uniqueness a
+    // SHOULD, not a MUST, so a kid-matching entry that cannot be used (a key
+    // type this crate has no decoder for, missing/invalid components, or a
+    // buildable key whose `AlgorithmFamily` does not match the ID token's
+    // `alg`) is skipped and the scan continues, exactly like the algorithm
+    // and last-resort searches below. The first build error is preserved so
+    // the all-candidates-fail case reports the same error a single-key set
+    // would; a wrong-family sentinel is preserved second so the reported
+    // error names the family mismatch rather than the misleading "No key
+    // with kid … found".
     if let Some(kid) = kid {
+        let mut first_build_err = None;
+        let mut first_wrong_family = None;
         for jwk in &jwks.keys {
             if jwk.common.key_id.as_deref() == Some(kid) {
-                return jsonwebtoken::DecodingKey::from_jwk(jwk)
-                    .map_err(|e| anyhow::anyhow!("Failed to build key from JWK (kid={kid}): {e}"));
+                match jsonwebtoken::DecodingKey::from_jwk(jwk) {
+                    Ok(key) if key.family() == expected_family => return Ok(key),
+                    Ok(_) => {
+                        tracing::warn!(
+                            "Skipping kid-matched JWK with wrong algorithm family for kid '{kid}'"
+                        );
+                        if first_wrong_family.is_none() {
+                            first_wrong_family = Some(anyhow::anyhow!(
+                                "Key with kid '{kid}' found but its family does not match the ID token alg ({alg:?})"
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Skipping unusable JWK with kid '{kid}'");
+                        if first_build_err.is_none() {
+                            first_build_err = Some(anyhow::anyhow!(
+                                "Failed to build key from JWK (kid={kid}): {e}"
+                            ));
+                        }
+                    }
+                }
             }
         }
-        anyhow::bail!("No key with kid '{kid}' found in upstream JWKS");
+        return Err(first_build_err
+            .or(first_wrong_family)
+            .unwrap_or_else(|| anyhow::anyhow!("No key with kid '{kid}' found in upstream JWKS")));
     }
 
-    // Fall back to matching by algorithm
+    // Fall back to matching by algorithm. The `alg`-member filter on
+    // `jwk.common.key_algorithm` excludes well-formed wrong-family JWKs (an
+    // RSA key advertising `RS256` is not selected for an `ES256` token), but a
+    // self-inconsistent JWK (e.g. `kty=RSA, alg=ES256`) passes the filter and
+    // builds as RSA — rejected downstream with `InvalidKeyFormat`. The same
+    // `family()` guard that closes the duplicate-`kid` case skips that build
+    // and keeps scanning, so a later same-family sibling is reached.
     for jwk in &jwks.keys {
         if jwk.common.key_algorithm != Some(expected_key_alg) {
             continue;
         }
         match jsonwebtoken::DecodingKey::from_jwk(jwk) {
-            Ok(key) => return Ok(key),
+            Ok(key) if key.family() == expected_family => return Ok(key),
+            Ok(_) => tracing::warn!(
+                "Skipping {expected_key_alg}-tagged JWK whose built family disagrees (kty/alg self-inconsistent)"
+            ),
             Err(e) => tracing::warn!(error = %e, "Skipping unusable {expected_key_alg} JWK"),
         }
     }
 
-    // Last resort: the first key we can actually use (no kid/algorithm matched)
+    // Last resort: the first key of the token's algorithm family (no
+    // kid/algorithm matched). The same `family()` guard as the branches above
+    // applies: a wrong-family key here would be rejected downstream with
+    // `InvalidKeyFormat` anyway, and returning it would mask a usable
+    // same-family key later in the set, making acceptance depend on JWKS
+    // array order.
     tracing::warn!("No JWK matched by kid or algorithm, falling back to first usable key in JWKS");
     for jwk in &jwks.keys {
         match jsonwebtoken::DecodingKey::from_jwk(jwk) {
-            Ok(key) => return Ok(key),
+            Ok(key) if key.family() == expected_family => return Ok(key),
+            Ok(_) => tracing::warn!(
+                "Skipping last-resort JWK whose family does not match the ID token alg ({alg:?})"
+            ),
             Err(e) => tracing::warn!(error = %e, "Skipping unusable JWK"),
         }
     }

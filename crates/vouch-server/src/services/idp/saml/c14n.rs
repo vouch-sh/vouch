@@ -20,14 +20,26 @@
 //! - `Node::text()` -- text content for text nodes
 //! - `Node::parent()` -- parent node (for prefix resolution walk)
 //!
-//! # Known Limitation: Prefix Resolution
+//! # Prefix Resolution
 //!
-//! roxmltree does NOT expose the original prefix on `tag_name()`. We reconstruct
-//! prefixes by walking namespace declarations from the element up through ancestors,
-//! preferring the declaration closest to the element. In the rare case where
-//! multiple prefixes map to the same namespace URI, the prefix declared closest to
-//! the element is used. This is documented as a known limitation and a
-//! `tracing::warn` is emitted when detected.
+//! roxmltree does not expose the original prefix on `tag_name()` or on an
+//! attribute's name, only the resolved namespace URI. Exc-c14n renders a
+//! namespace declaration by the prefix a name was written with, so
+//! [`element_prefix`] and [`attr_prefix`] read that prefix from the source text
+//! at the node's or attribute's byte range (the `positions` feature). Only when
+//! the written prefix does not resolve to the name's URI do they fall back to
+//! walking namespace declarations from the element up through its ancestors,
+//! preferring the declaration closest to the element; a `tracing::warn` is
+//! emitted when that fallback finds several prefixes for one URI at one depth.
+//!
+//! Element and attribute prefix resolution differ: an element in the default
+//! namespace is emitted unprefixed (the default binding is a valid "prefix" for
+//! an element name), but an unprefixed attribute never takes the default namespace
+//! per XML Names. The attribute fallback, [`find_attr_prefix_for_uri`], therefore
+//! excludes the default binding and resolves to the closest non-empty (prefixed)
+//! binding, so an element co-declaring the same URI as both `xmlns="urn:X"` and
+//! `xmlns:a="urn:X"` with a `a:attr="v"` attribute canonicalizes as `a:attr` with
+//! `xmlns:a="urn:X"` rendered -- matching libxml2/xmlsec1 byte-for-byte.
 //!
 //! # CDATA Sections
 //!
@@ -102,8 +114,63 @@ fn canonicalize_node(
     let mut sorted_ns: Vec<(String, String)> = ns_to_render.into_iter().collect();
     sorted_ns.sort_by(|a, b| a.0.cmp(&b.0));
 
+    // Step 3: Handle default namespace undeclaration (`xmlns=""`).
+    //
+    // Per exc-c14n §3 point 4 / §3.1 step 3.3.1, `xmlns=""` is emitted on this
+    // element iff ALL of the following hold:
+    //   1. the default namespace is visibly utilized by this element (i.e. it
+    //      is rendered with no prefix) OR the `#default` token is present in
+    //      InclusiveNamespaces PrefixList. The "no prefix" restriction is the
+    //      special case exc-c14n adds *only* when `#default` is absent; when
+    //      `#default` is present the ordinary Canonical XML 1.0 `xmlns=""`
+    //      rules apply and the gate is bypassed -- so a *prefixed* element
+    //      that explicitly undeclares an ancestor-rendered non-empty default
+    //      namespace still renders `xmlns=""` on itself.
+    //   2. the element has no namespace node declaring a value for the default
+    //      namespace (i.e. its in-scope default is empty), and
+    //   3. the nearest output ancestor rendered a non-empty default namespace
+    //      (`ns_rendered[""]` is non-empty).
+    //
+    // The undeclaration is inserted into `sorted_ns` (empty prefix sorts before
+    // every other prefix) rather than appended after the emission loop, so an
+    // element that emits both `xmlns=""` and one or more `xmlns:foo`
+    // declarations on the same start tag matches libxml2/xmlsec1 byte-for-byte.
+    let elem_default_ns = node.default_namespace().unwrap_or("");
+    let ancestor_default_ns = rendered_ns.get("").map_or("", String::as_str);
+
+    // Condition 1: the element visibly utilizes the default namespace iff it
+    // is rendered with no prefix. This mirrors `node_qualified_name` exactly
+    // so the gate agrees with the emitted tag name: an element with no
+    // namespace, the xml namespace, or whose prefix resolves to "" is emitted
+    // unprefixed and therefore visibly uses the default namespace. Per
+    // §3.1 3.3.1 cond. 1, `#default` in InclusiveNamespaces PrefixList forces
+    // visibly-utilizes regardless of prefix.
+    let elem_ns_uri = node.tag_name().namespace().unwrap_or("");
+    let default_in_prefixlist = inclusive_prefixes.contains(&"#default");
+    let elem_uses_default_ns = elem_ns_uri.is_empty()
+        || elem_ns_uri == "http://www.w3.org/XML/1998/namespace"
+        || element_prefix(node).is_none_or(str::is_empty)
+        || default_in_prefixlist;
+
+    // Undeclare if: the element visibly utilizes the default namespace, its
+    // in-scope default is empty, an output ancestor rendered a non-empty
+    // default, and we haven't already emitted a default-namespace declaration
+    // on this element (which happens when it explicitly declares xmlns="uri").
+    let already_emitted_default = sorted_ns.iter().any(|(p, _)| p.is_empty());
+    if elem_uses_default_ns
+        && !already_emitted_default
+        && elem_default_ns.is_empty()
+        && !ancestor_default_ns.is_empty()
+    {
+        sorted_ns.push((String::new(), String::new()));
+        sorted_ns.sort_by(|a, b| a.0.cmp(&b.0));
+    }
+
     for (prefix, uri) in &sorted_ns {
         if prefix.is_empty() {
+            // Renders both a real default-namespace declaration
+            // (`xmlns="uri"`, uri non-empty) and the `xmlns=""` undeclaration
+            // (uri empty) inserted by the Step 3 logic above.
             output.push_str(" xmlns=\"");
             output.push_str(uri);
             output.push('"');
@@ -115,21 +182,6 @@ fn canonicalize_node(
             output.push('"');
         }
         new_rendered_ns.insert(prefix.clone(), uri.clone());
-    }
-
-    // Step 3: Handle default namespace undeclaration.
-    // If this element has no namespace (or the default NS is now empty), check
-    // if an ancestor rendered a default namespace that must be undeclared.
-    let elem_default_ns = node.default_namespace().unwrap_or("");
-    let ancestor_default_ns = rendered_ns.get("").map_or("", String::as_str);
-
-    // Undeclare if: element has no default NS but ancestor rendered one,
-    // AND we haven't already emitted xmlns="" (which would happen if this
-    // element itself declares xmlns="").
-    let already_emitted_default = sorted_ns.iter().any(|(p, _)| p.is_empty());
-    if !already_emitted_default && elem_default_ns.is_empty() && !ancestor_default_ns.is_empty() {
-        output.push_str(" xmlns=\"\"");
-        new_rendered_ns.insert(String::new(), String::new());
     }
 
     // Step 5-6: Collect and sort attributes.
@@ -151,8 +203,13 @@ fn canonicalize_node(
         }
         output.push(' ');
         if !attr_ns.is_empty() && attr_ns != "http://www.w3.org/XML/1998/namespace" {
-            let prefix = find_prefix_for_uri(node, attr_ns);
-            if let Some(p) = prefix {
+            // Attributes cannot use the default namespace (unprefixed attributes
+            // never take it per XML Names), so resolve the prefix with the
+            // default-namespace binding excluded. Selecting the empty (default)
+            // prefix here would emit a bare-colon `:attr` name and drop the
+            // `xmlns:prefix` declaration the attribute depends on, diverging from
+            // libxml2/xmlsec1 (the engine every mainstream SAML IdP signs with).
+            if let Some(p) = attr_prefix(node, attr) {
                 output.push_str(p);
                 output.push(':');
             }
@@ -211,7 +268,7 @@ fn collect_namespaces(
         && !ns_uri.is_empty()
         && ns_uri != "http://www.w3.org/XML/1998/namespace"
     {
-        let prefix = find_prefix_for_uri(node, ns_uri).unwrap_or("").to_string();
+        let prefix = element_prefix(node).unwrap_or("").to_string();
         // Only add if this is a non-default-namespace prefixed element.
         // Default namespace elements (no prefix) are handled by the xmlns="" logic.
         if !prefix.is_empty() || {
@@ -231,8 +288,18 @@ fn collect_namespaces(
         {
             continue;
         }
-        let prefix = find_prefix_for_uri(node, attr_ns).unwrap_or("").to_string();
-        result.insert((prefix, attr_ns.to_string()));
+        // Attributes never use the default namespace: resolve with the default
+        // binding excluded so the attribute's prefixed binding is recorded (and
+        // the matching `xmlns:prefix` declaration is rendered). Otherwise an
+        // element co-declaring the same URI as both default and prefixed would
+        // record ("", uri) here, dropping `xmlns:prefix` as already rendered by
+        // the default binding -- a byte-for-byte divergence from libxml2/xmlsec1.
+        // roxmltree rejects an undeclared prefix, so `None` does not occur.
+        // Skip to match the emitter, which renders no declaration here.
+        let Some(prefix) = attr_prefix(node, &attr) else {
+            continue;
+        };
+        result.insert((prefix.to_string(), attr_ns.to_string()));
     }
 
     // InclusiveNamespaces PrefixList: force listed prefixes if in scope.
@@ -245,7 +312,7 @@ fn collect_namespaces(
         {
             result.insert((lookup_prefix.to_string(), uri.to_string()));
         }
-        // If the prefix is not in scope, silently skip it (per C4 fix).
+        // If the prefix is not in scope, silently skip it.
     }
 
     // Exclude pairs whose prefix's current ancestor binding is the same URI.
@@ -265,11 +332,10 @@ fn collect_namespaces(
 /// For elements: searches namespace declarations on this node first, then walks
 /// ancestors. This ensures the closest declaration wins (handles shadowing).
 ///
-/// # Multi-prefix-same-URI (Known Limitation)
-///
-/// When multiple prefixes are bound to the same URI in the same scope,
-/// the prefix declared first (closest to the element) is returned, and a
-/// warning is emitted. In practice, SAML documents do not use this pattern.
+/// This is the fallback for [`element_prefix`], used only when the element's
+/// written prefix cannot be read from the source. When multiple prefixes are
+/// bound to the same URI in the same scope, the prefix declared first (closest
+/// to the element) is returned, and a warning is emitted.
 fn find_prefix_for_uri<'a>(node: roxmltree::Node<'_, 'a>, uri: &str) -> Option<&'a str> {
     let mut candidates: Vec<(&'a str, usize)> = Vec::new();
     let mut depth = 0usize;
@@ -279,7 +345,7 @@ fn find_prefix_for_uri<'a>(node: roxmltree::Node<'_, 'a>, uri: &str) -> Option<&
         for ns in n.namespaces() {
             if ns.uri() == uri {
                 let prefix = ns.name().unwrap_or("");
-                // A2 fix: never return the xml prefix via this path.
+                // Never return the xml prefix via this path.
                 // xml: is implicitly bound; it must never appear in ns declarations output.
                 if prefix != "xml" {
                     candidates.push((prefix, depth));
@@ -321,6 +387,79 @@ fn find_prefix_for_uri<'a>(node: roxmltree::Node<'_, 'a>, uri: &str) -> Option<&
     candidates.first().map(|&(prefix, _)| prefix)
 }
 
+/// Find a non-empty (prefixed) namespace binding for a URI, searching from
+/// this node upward.
+///
+/// This is the attribute-prefix resolver. Per XML Names, unprefixed attributes
+/// never take the default namespace, so the default-namespace binding (empty
+/// prefix) is never a valid prefix for a namespaced attribute. Unlike
+/// [`find_prefix_for_uri`], this skips the default binding entirely and returns
+/// the closest non-empty (prefixed) binding -- the one the attribute's prefix
+/// must be drawn from even when the same URI is ALSO bound to the default
+/// namespace on this element (e.g. `xmlns="urn:X" xmlns:a="urn:X"` with
+/// `a:attr="v"`).
+///
+/// Returns `Some(prefix)` for the closest non-empty binding, or `None` if no
+/// non-empty binding is in scope (which, for a validly-prefixed attribute, never
+/// occurs: roxmltree only assigns a namespace to a `prefix:local` attribute
+/// when a prefixed binding exists).
+///
+/// This is the fallback for [`attr_prefix`], used only when the attribute's
+/// written prefix cannot be read from the source. When multiple non-empty
+/// prefixes are bound to the same URI at the same depth, the one declared
+/// first (closest to the element) is returned and a `tracing::warn` is emitted.
+fn find_attr_prefix_for_uri<'a>(node: roxmltree::Node<'_, 'a>, uri: &str) -> Option<&'a str> {
+    let mut candidates: Vec<(&'a str, usize)> = Vec::new();
+    let mut depth = 0usize;
+
+    let mut current = Some(node);
+    while let Some(n) = current {
+        for ns in n.namespaces() {
+            if ns.uri() == uri {
+                let prefix = ns.name().unwrap_or("");
+                // Attributes cannot use the default namespace (empty prefix),
+                // and the xml: prefix is implicitly bound (never declared).
+                if !prefix.is_empty() && prefix != "xml" {
+                    candidates.push((prefix, depth));
+                }
+            }
+        }
+        current = n.parent();
+        depth = depth.saturating_add(1);
+    }
+
+    if candidates.is_empty() {
+        return None;
+    }
+
+    // Prefer the closest declaration (smallest depth = closest to element).
+    candidates.sort_by_key(|&(_, d)| d);
+
+    if candidates.len() > 1
+        && let Some(&(_, min_depth)) = candidates.first()
+    {
+        // Only warn if multiple DIFFERENT non-empty prefixes map to the same
+        // URI at the same depth (the genuinely ambiguous case for attributes).
+        let same_depth: Vec<_> = candidates
+            .iter()
+            .filter(|&&(_, d)| d == min_depth)
+            .collect();
+        if same_depth.len() > 1
+            && let Some(&&(first_prefix, _)) = same_depth.first()
+        {
+            tracing::warn!(
+                uri,
+                "multiple non-empty prefixes bound to same namespace URI at same \
+                 depth for an attribute; using first one ({}). This is a known \
+                 limitation of the c14n implementation.",
+                first_prefix
+            );
+        }
+    }
+
+    candidates.first().map(|&(prefix, _)| prefix)
+}
+
 /// Resolve a prefix to its URI by searching the element and its ancestors.
 ///
 /// Returns `Some(uri)` if the prefix is in scope, `None` if not declared.
@@ -345,7 +484,7 @@ fn resolve_prefix_in_scope<'a>(node: roxmltree::Node<'a, 'a>, prefix: &str) -> O
 /// If the element is in a default namespace (no prefix), returns just `"localname"`.
 /// If the element has no namespace, returns just `"localname"`.
 ///
-/// Note: The `xml:` prefix is never returned by `find_prefix_for_uri` (see A2 fix).
+/// Note: The `xml:` prefix is never returned by `find_prefix_for_uri`.
 /// Element names with the xml namespace would be extremely unusual (elements in
 /// http://www.w3.org/XML/1998/namespace). In practice this never occurs in SAML.
 fn node_qualified_name(node: roxmltree::Node<'_, '_>) -> String {
@@ -360,10 +499,65 @@ fn node_qualified_name(node: roxmltree::Node<'_, '_>) -> String {
         return local.to_string();
     }
 
-    match find_prefix_for_uri(node, ns_uri) {
+    match element_prefix(node) {
         Some("") | None => local.to_string(), // default namespace or unresolvable
         Some(prefix) => format!("{prefix}:{local}"),
     }
+}
+
+/// Return the prefix the element was written with, or `""` when it uses the
+/// default namespace.
+///
+/// roxmltree drops the prefix when it resolves `tag_name()`, so a URI search
+/// cannot tell `<a:signed>` from `<signed>` when one URI is bound as both
+/// `xmlns` and `xmlns:a`. exc-c14n §3 item 3 renders a namespace node only
+/// if "it is visibly utilized by its parent element", and §1.1 ties default
+/// namespace utilization to the element having no prefix. The prefix is read
+/// from the start tag at `node.range()` and used only when it resolves to the
+/// element's namespace URI.
+fn element_prefix<'a>(node: roxmltree::Node<'_, 'a>) -> Option<&'a str> {
+    let ns_uri = node.tag_name().namespace().unwrap_or("");
+    let source_prefix = node
+        .document()
+        .input_text()
+        .get(node.range())
+        .and_then(|src| src.strip_prefix('<'))
+        .map(|src| {
+            src.split(|c: char| c.is_whitespace() || c == '>' || c == '/')
+                .next()
+                .unwrap_or("")
+        })
+        .and_then(|qname| qname.split_once(':'))
+        .map(|(prefix, _)| prefix)
+        .filter(|prefix| node.lookup_namespace_uri(Some(prefix)) == Some(ns_uri));
+    match source_prefix {
+        Some(prefix) => Some(prefix),
+        None if node.default_namespace() == Some(ns_uri) => Some(""),
+        None => find_prefix_for_uri(node, ns_uri),
+    }
+}
+
+/// Return the prefix an attribute was written with.
+///
+/// exc-c14n §1.1: "An element E in a document subset visibly utilizes a
+/// namespace declaration, i.e. a namespace prefix P and bound value V, if E
+/// or an attribute node in the document subset with parent E has a qualified
+/// name in which P is the namespace prefix." When one URI is bound to two
+/// prefixes in scope, a URI search cannot tell `b:attr` from `a:attr`, so the
+/// prefix is read from the attribute's qualified name at `range_qname()` and
+/// used only when it resolves to the attribute's namespace URI.
+fn attr_prefix<'input>(
+    node: roxmltree::Node<'_, 'input>,
+    attr: &roxmltree::Attribute<'_, 'input>,
+) -> Option<&'input str> {
+    let ns_uri = attr.namespace()?;
+    node.document()
+        .input_text()
+        .get(attr.range_qname())
+        .and_then(|qname| qname.split_once(':'))
+        .map(|(prefix, _)| prefix)
+        .filter(|prefix| node.lookup_namespace_uri(Some(prefix)) == Some(ns_uri))
+        .or_else(|| find_attr_prefix_for_uri(node, ns_uri))
 }
 
 /// Concatenate every text child of an element, skipping comments.
@@ -455,6 +649,89 @@ mod tests {
         doc.root()
             .descendants()
             .find(|n| n.is_element() && n.tag_name().name() == local_name)
+    }
+
+    // =========================================================================
+    // Attribute prefix when one URI is bound to two prefixes in scope
+    // =========================================================================
+
+    // exc-c14n §1.1: "An element E in a document subset visibly utilizes a
+    // namespace declaration, i.e. a namespace prefix P and bound value V, if E
+    // or an attribute node in the document subset with parent E has a
+    // qualified name in which P is the namespace prefix." An attribute keeps
+    // the prefix it was written with, whichever binding for its URI is
+    // closest. Expected strings come from libxml2 2.14.6 exclusive C14N of
+    // the `e` subtree.
+    #[test]
+    fn attribute_keeps_its_own_prefix_among_bindings_for_one_uri() {
+        let cases = [
+            (
+                r#"<p xmlns:b="urn:X"><e b:attr="v"/></p>"#,
+                r#"<e xmlns:b="urn:X" b:attr="v"></e>"#,
+            ),
+            (
+                r#"<p xmlns:b="urn:X"><e xmlns:a="urn:X" b:attr="v"/></p>"#,
+                r#"<e xmlns:b="urn:X" b:attr="v"></e>"#,
+            ),
+            (
+                r#"<p xmlns:b="urn:X"><e xmlns:a="urn:X" a:attr="v"/></p>"#,
+                r#"<e xmlns:a="urn:X" a:attr="v"></e>"#,
+            ),
+            (
+                r#"<p xmlns:b="urn:X"><e xmlns:a="urn:X" a:x="1" b:y="2"/></p>"#,
+                r#"<e xmlns:a="urn:X" xmlns:b="urn:X" a:x="1" b:y="2"></e>"#,
+            ),
+            (
+                r#"<e xmlns:a="urn:X" xmlns:b="urn:X" b:attr="v"/>"#,
+                r#"<e xmlns:b="urn:X" b:attr="v"></e>"#,
+            ),
+            (
+                r#"<p xmlns:b="urn:X"><e b:attr="1"><f xmlns:a="urn:X" b:attr="2"/></e></p>"#,
+                r#"<e xmlns:b="urn:X" b:attr="1"><f b:attr="2"></f></e>"#,
+            ),
+        ];
+        for (xml, expected) in cases {
+            assert_eq!(c14n(xml, "e", &[]), expected, "{xml}");
+        }
+    }
+
+    // =========================================================================
+    // Element prefix when one URI is bound as both default and prefixed
+    // =========================================================================
+
+    // exc-c14n §3 item 3: a namespace node renders only if "it is visibly
+    // utilized by its parent element". §1.1: an element utilizes the default
+    // namespace only if it has no prefix. `<a:signed>` has a prefix, so
+    // `xmlns="urn:X"` does not render. Expected strings come from libxml2
+    // `xmllint --exc-c14n`.
+    #[test]
+    fn prefixed_element_keeps_prefix_when_default_binds_same_uri() {
+        let xml = r#"<a:signed xmlns="urn:X" xmlns:a="urn:X" ID="s1">text</a:signed>"#;
+        assert_eq!(
+            c14n(xml, "signed", &[]),
+            r#"<a:signed xmlns:a="urn:X" ID="s1">text</a:signed>"#
+        );
+    }
+
+    #[test]
+    fn prefixed_element_and_attribute_with_default_binding_same_uri() {
+        let xml = r#"<a:signed xmlns="urn:X" xmlns:a="urn:X" a:attr="v" ID="s1">text</a:signed>"#;
+        assert_eq!(
+            c14n(xml, "signed", &[]),
+            r#"<a:signed xmlns:a="urn:X" ID="s1" a:attr="v">text</a:signed>"#
+        );
+    }
+
+    // Unprefixed element with the same URI also bound to `a:`. The element
+    // utilizes the default namespace, so `xmlns="urn:X"` renders and
+    // `xmlns:a` does not.
+    #[test]
+    fn unprefixed_element_keeps_default_when_prefix_binds_same_uri() {
+        let xml = r#"<signed xmlns:a="urn:X" xmlns="urn:X" ID="s1">text</signed>"#;
+        assert_eq!(
+            c14n(xml, "signed", &[]),
+            r#"<signed xmlns="urn:X" ID="s1">text</signed>"#
+        );
     }
 
     // =========================================================================
@@ -566,7 +843,7 @@ mod tests {
         );
     }
 
-    /// C1: Multiple unprefixed attributes must sort alphabetically by local name.
+    /// Multiple unprefixed attributes must sort alphabetically by local name.
     #[test]
     fn multiple_unprefixed_attributes_sort_alphabetically() {
         let result = c14n(
@@ -648,6 +925,201 @@ mod tests {
         );
     }
 
+    // =========================================================================
+    // exc-c14n §3 point 4 condition 1: xmlns="" only on unprefixed elements
+    //
+    // A prefixed element that explicitly writes xmlns="" against an
+    // ancestor-rendered non-empty default namespace must NOT itself receive
+    // xmlns="" (it does not visibly utilize the default namespace). The
+    // undeclaration moves to the nearest unprefixed descendant. The reference
+    // forms below were verified against `xmllint --exc-c14n` (libxml2, the
+    // engine xmlsec1 is built on).
+    // =========================================================================
+
+    // exc-c14n §3 point 4 cond. 1: a prefixed element does not visibly utilize the default namespace,
+    // so xmlns="" is never emitted on it even when it declares xmlns="".
+    #[test]
+    fn prefixed_element_xmlns_undeclaration_emits_nothing() {
+        // No unprefixed descendant exists, so the undeclaration is dropped
+        // entirely (a prefixed element has no default namespace node in the
+        // node-set and there is no unprefixed descendant to receive xmlns="").
+        let result = c14n(
+            r#"<root xmlns="urn:a"><x:mid xmlns:x="urn:x" xmlns="">text</x:mid></root>"#,
+            "root",
+            &[],
+        );
+        assert_eq!(
+            result,
+            r#"<root xmlns="urn:a"><x:mid xmlns:x="urn:x">text</x:mid></root>"#
+        );
+    }
+
+    // exc-c14n §3 point 4 cond. 1: the xmlns="" required by the undeclaration lands on the nearest
+    // unprefixed descendant, never on the prefixed element that wrote xmlns="".
+    #[test]
+    fn prefixed_xmlns_undeclaration_moves_to_unprefixed_descendant() {
+        let result = c14n(
+            r#"<root xmlns="urn:a"><b:mid xmlns:b="urn:b" xmlns=""><leaf>text</leaf></b:mid></root>"#,
+            "root",
+            &[],
+        );
+        assert_eq!(
+            result,
+            r#"<root xmlns="urn:a"><b:mid xmlns:b="urn:b"><leaf xmlns="">text</leaf></b:mid></root>"#
+        );
+    }
+
+    // exc-c14n §3 point 4 cond. 1: the undeclaration reaches the nearest unprefixed descendant even
+    // when the prefixed element has attributes (no namespace prefix => visibly utilizes default).
+    #[test]
+    fn prefixed_xmlns_undeclaration_with_attributes_reaches_unprefixed_descendant() {
+        let result = c14n(
+            r#"<root xmlns="urn:a"><b:mid xmlns:b="urn:b" b:kind="x" xmlns=""><leaf>text</leaf></b:mid></root>"#,
+            "root",
+            &[],
+        );
+        assert_eq!(
+            result,
+            r#"<root xmlns="urn:a"><b:mid xmlns:b="urn:b" b:kind="x"><leaf xmlns="">text</leaf></b:mid></root>"#
+        );
+    }
+
+    // exc-c14n §3 point 4 cond. 1 + SAML Core §2.7.3: a signed assertion body may carry arbitrary
+    // XML in AttributeValue; a prefixed element there that undeclares an ancestor-rendered
+    // default namespace must place xmlns="" on its unprefixed descendant.
+    #[test]
+    fn saml_attribute_value_prefixed_xmlns_undeclaration_reaches_inner() {
+        let xml = r#"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion"><saml:AttributeStatement><saml:Attribute Name="doc"><saml:AttributeValue><doc xmlns="urn:doc"><sig:detached xmlns:sig="urn:sig" xmlns=""><inner>payload</inner></sig:detached></doc></saml:AttributeValue></saml:Attribute></saml:AttributeStatement></saml:Assertion>"#;
+        let result = c14n(xml, "Assertion", &[]);
+        assert_eq!(
+            result,
+            r#"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion"><saml:AttributeStatement><saml:Attribute Name="doc"><saml:AttributeValue><doc xmlns="urn:doc"><sig:detached xmlns:sig="urn:sig"><inner xmlns="">payload</inner></sig:detached></doc></saml:AttributeValue></saml:Attribute></saml:AttributeStatement></saml:Assertion>"#
+        );
+    }
+
+    // exc-c14n §3 point 4 cond. 1 + §4 (InclusiveNamespaces #default): when `#default` is
+    // NOT in the PrefixList the "no prefix" gate applies and `xmlns=""` lands on the nearest
+    // unprefixed descendant. When `#default` IS in the PrefixList, §3.1 step 3.3.1 cond. 1
+    // bypasses the gate, so a *prefixed* element that explicitly undeclares an ancestor-rendered
+    // non-empty default namespace renders `xmlns=""` on itself -- matching libxml2/xmlsec1
+    // (the engine every mainstream SAML IdP uses) byte-for-byte. Reference form below was
+    // verified against `xmllint --exc-c14n` with `inclusive_prefixes=["#default"]`.
+    #[test]
+    fn prefixed_xmlns_undeclaration_with_inclusive_default_emits_on_declaring_element() {
+        let xml = r#"<root xmlns="urn:a"><b:mid xmlns:b="urn:b" xmlns=""><leaf>text</leaf></b:mid></root>"#;
+        let without = c14n(xml, "root", &[]);
+        let with_default = c14n(xml, "root", &["#default"]);
+
+        // No #default: the "no prefix" gate keeps xmlns="" off the prefixed <b:mid>;
+        // it lands on the nearest unprefixed descendant <leaf>.
+        assert_eq!(
+            without,
+            r#"<root xmlns="urn:a"><b:mid xmlns:b="urn:b"><leaf xmlns="">text</leaf></b:mid></root>"#
+        );
+
+        // With #default: the gate is bypassed and xmlns="" is emitted on <b:mid> itself,
+        // sorted before xmlns:b (empty prefix sorts first) -- exactly as libxml2 produces.
+        assert_eq!(
+            with_default,
+            r#"<root xmlns="urn:a"><b:mid xmlns="" xmlns:b="urn:b"><leaf>text</leaf></b:mid></root>"#
+        );
+
+        // #default changes the placement of xmlns="" (the old code asserted equality here
+        // and so locked in the bug; this inequality guards against any regression of the gate).
+        assert_ne!(with_default, without);
+    }
+
+    // exc-c14n §3.1 3.3.1 cond. 1 (deeper shape): with `#default` the undeclaration is emitted
+    // on the prefixed declaring element even when that element has a deeper unprefixed
+    // descendant that itself re-undeclares a redeclared default. Verified against
+    // `xmllint --exc-c14n` with `inclusive_prefixes=["#default"]`.
+    #[test]
+    fn prefixed_xmlns_undeclaration_with_inclusive_default_deeper_shape() {
+        let xml = r#"<root xmlns="urn:a"><b:mid xmlns:b="urn:b" xmlns=""><b:inner xmlns="urn:i"><leaf xmlns="">text</leaf></b:inner></b:mid></root>"#;
+        let without = c14n(xml, "root", &[]);
+        let with_default = c14n(xml, "root", &["#default"]);
+
+        // No #default: xmlns="" is deferred from <b:mid> to the nearest unprefixed descendant.
+        // <b:inner> is prefixed (inherits xmlns:b) and declares xmlns="urn:i", but that
+        // declaration is not visibly utilized by b:inner itself, so it is dropped by exc-c14n;
+        // the rendered default at <leaf> is still urn:a, which <leaf> then undeclares.
+        assert_eq!(
+            without,
+            r#"<root xmlns="urn:a"><b:mid xmlns:b="urn:b"><b:inner><leaf xmlns="">text</leaf></b:inner></b:mid></root>"#
+        );
+
+        // With #default: xmlns="" is emitted on <b:mid> (sorted first), xmlns="urn:i" is now
+        // visibly utilized on <b:inner> (forced by #default) so it is rendered there, and
+        // <leaf> then undeclares urn:i. Matches libxml2 byte-for-byte.
+        assert_eq!(
+            with_default,
+            r#"<root xmlns="urn:a"><b:mid xmlns="" xmlns:b="urn:b"><b:inner xmlns="urn:i"><leaf xmlns="">text</leaf></b:inner></b:mid></root>"#
+        );
+        assert_ne!(with_default, without);
+    }
+
+    // XML Signature §4.4.1: the #default-corrected canonical form is a stable fixed point
+    // (canonicalizing canonical output changes nothing), guarding against a re-canonicalization
+    // drift for the bug-trigger shape under the production PrefixList.
+    #[test]
+    fn idempotency_prefixed_xmlns_undeclaration_with_inclusive_default() {
+        let input = r#"<root xmlns="urn:a"><b:mid xmlns:b="urn:b" xmlns=""><leaf>text</leaf></b:mid></root>"#;
+        let doc1 = roxmltree::Document::parse(input).unwrap();
+        let root1 = doc1
+            .root()
+            .children()
+            .find(|n| n.is_element())
+            .expect("No root element");
+        let first = exclusive_c14n(root1, &["#default"]);
+
+        let doc2 = roxmltree::Document::parse(&first).expect("First c14n output is invalid XML");
+        let root2 = doc2
+            .root()
+            .children()
+            .find(|n| n.is_element())
+            .expect("No root in re-parsed c14n output");
+        let second = exclusive_c14n(root2, &["#default"]);
+
+        assert_eq!(
+            first, second,
+            "Idempotency failed for #default input: {input}"
+        );
+        assert_eq!(
+            first,
+            r#"<root xmlns="urn:a"><b:mid xmlns="" xmlns:b="urn:b"><leaf>text</leaf></b:mid></root>"#
+        );
+    }
+
+    // XML Signature §4.4.1: canonicalizing canonical output changes nothing, including for the
+    // bug-trigger shapes (confirms the fixed output is a stable fixed point).
+    #[test]
+    fn idempotency_prefixed_xmlns_undeclaration() {
+        let inputs = [
+            r#"<root xmlns="urn:a"><x:mid xmlns:x="urn:x" xmlns="">text</x:mid></root>"#,
+            r#"<root xmlns="urn:a"><b:mid xmlns:b="urn:b" xmlns=""><leaf>text</leaf></b:mid></root>"#,
+        ];
+        for input in inputs {
+            let doc1 = roxmltree::Document::parse(input).unwrap();
+            let root1 = doc1
+                .root()
+                .children()
+                .find(|n| n.is_element())
+                .expect("No root element");
+            let first = exclusive_c14n(root1, &[]);
+
+            let doc2 =
+                roxmltree::Document::parse(&first).expect("First c14n output is invalid XML");
+            let root2 = doc2
+                .root()
+                .children()
+                .find(|n| n.is_element())
+                .expect("No root in re-parsed c14n output");
+            let second = exclusive_c14n(root2, &[]);
+
+            assert_eq!(first, second, "Idempotency failed for input: {input}");
+        }
+    }
+
     /// A prefix re-bound to a different URI by a descendant must be
     /// re-emitted even if the original (prefix, uri) pair was rendered by
     /// an outer ancestor (dictionary lookup, not exact-pair membership).
@@ -708,7 +1180,7 @@ mod tests {
         assert_eq!(result, r#"<child xmlns="urn:default">text</child>"#);
     }
 
-    /// C2: Namespace re-declaration with different URI must re-emit the declaration.
+    /// Namespace re-declaration with different URI must re-emit the declaration.
     #[test]
     fn namespace_redeclaration_with_different_uri() {
         let xml = r#"<root xmlns:a="urn:one"><child xmlns:a="urn:two"><a:elem/></child></root>"#;
@@ -718,7 +1190,7 @@ mod tests {
         assert_eq!(result, r#"<a:elem xmlns:a="urn:two"></a:elem>"#);
     }
 
-    /// C4: InclusiveNamespaces with prefixes not in scope must be silently skipped.
+    /// InclusiveNamespaces with prefixes not in scope must be silently skipped.
     #[test]
     fn inclusive_prefixes_out_of_scope_silently_skipped() {
         let xml = r##"<root xmlns:ds="http://www.w3.org/2000/09/xmldsig#"><ds:Info/></root>"##;
@@ -744,7 +1216,7 @@ mod tests {
 </n0:local>"#;
         let result = c14n(xml, "elem2", &[]);
         // n1:elem2 is visibly utilized so xmlns:n1 appears.
-        // xml:lang renders the attribute but NOT xmlns:xml (A2 fix).
+        // xml:lang renders the attribute but NOT xmlns:xml.
         // n3 is not visibly utilized by elem2 itself, so NOT rendered on elem2.
         // n3:stuff has n3 visibly utilized, so it DOES re-declare xmlns:n3.
         assert!(
@@ -985,6 +1457,208 @@ mod tests {
         assert!(
             !result.contains("/>"),
             "No self-closing tags in canonical form: {result}"
+        );
+    }
+
+    // =========================================================================
+    // Attribute prefix resolution: default-namespace binding exclusion
+    //
+    // Namespaces in XML §6.3: "the default namespace does not apply to
+    // attribute names". exc-c14n §3 item 3 renders a namespace node only if
+    // "it is visibly utilized by its parent element" or its attributes. An
+    // element that binds one URI as both `xmlns="urn:X"` and `xmlns:a="urn:X"`
+    // and carries `a:attr="v"` therefore emits `a:attr` and renders
+    // `xmlns:a="urn:X"`. Expected strings come from libxml2 2.9.14
+    // (`xmllint --exc-c14n`).
+    // =========================================================================
+
+    // A default and a prefixed binding of one URI: the attribute takes the
+    // prefixed binding, so the output has `a:attr` and `xmlns:a`.
+    #[test]
+    fn attribute_uses_prefixed_binding_when_default_and_prefixed_co_declared() {
+        let result = c14n(
+            r#"<signed xmlns="urn:X" xmlns:a="urn:X" a:attr="v" ID="s1">text</signed>"#,
+            "signed",
+            &[],
+        );
+        assert_eq!(
+            result,
+            r#"<signed xmlns="urn:X" xmlns:a="urn:X" ID="s1" a:attr="v">text</signed>"#
+        );
+        // A bare-colon name with no `xmlns:a` is the form libxml2 rejects.
+        assert_ne!(
+            result, r#"<signed xmlns="urn:X" ID="s1" :attr="v">text</signed>"#,
+            "fix must not emit a bare-colon attribute name or drop xmlns:a"
+        );
+        assert!(
+            !result.contains(" :attr="),
+            "no bare-colon attribute name allowed: {result}"
+        );
+        assert!(
+            result.contains(r#"xmlns:a="urn:X""#),
+            "xmlns:a declaration the attribute depends on must be rendered: {result}"
+        );
+    }
+
+    // exc-c14n §1: the method "excludes ancestor context from a canonicalized
+    // subdocument". The subtree canonicalizes to the same bytes at the root and
+    // under an ancestor whose bindings it does not utilize.
+    #[test]
+    fn attribute_prefixed_binding_is_context_independent() {
+        let nested = c14n(
+            r#"<wrap xmlns="urn:R" xmlns:b="urn:R"><signed xmlns="urn:X" xmlns:a="urn:X" a:attr="v" ID="s1">text</signed></wrap>"#,
+            "signed",
+            &[],
+        );
+        assert_eq!(
+            nested,
+            r#"<signed xmlns="urn:X" xmlns:a="urn:X" ID="s1" a:attr="v">text</signed>"#
+        );
+    }
+
+    // exc-c14n §3 item 3 condition 3: a namespace node renders only if "the
+    // prefix has not yet been rendered by any output ancestor". The child reuses
+    // `a:` from its parent and renders only its own `xmlns:b`.
+    #[test]
+    fn attribute_prefixed_binding_not_re_rendered_on_child() {
+        let result = c14n(
+            r#"<signed xmlns="urn:X" xmlns:a="urn:X" xmlns:b="urn:Y" a:attr="v" ID="s1"><b:inner a:z="1">t</b:inner></signed>"#,
+            "signed",
+            &[],
+        );
+        assert_eq!(
+            result,
+            r#"<signed xmlns="urn:X" xmlns:a="urn:X" ID="s1" a:attr="v"><b:inner xmlns:b="urn:Y" a:z="1">t</b:inner></signed>"#
+        );
+    }
+
+    // XML Names: the prefixed binding an attribute needs may live on an ANCESTOR
+    // while the element itself only re-declares the same URI as the default
+    // namespace. The resolver must skip the element's own default binding (invalid
+    // for an attribute) and use the ancestor's prefixed binding, rendering
+    // `xmlns:a` on the element. Verified against `xmllint --exc-c14n`.
+    #[test]
+    fn attribute_prefix_resolved_from_ancestor_when_element_only_declares_default() {
+        let result = c14n(
+            r#"<outer xmlns:a="urn:X"><signed xmlns="urn:X" a:attr="v" ID="s1">text</signed></outer>"#,
+            "signed",
+            &[],
+        );
+        assert_eq!(
+            result,
+            r#"<signed xmlns="urn:X" xmlns:a="urn:X" ID="s1" a:attr="v">text</signed>"#
+        );
+    }
+
+    // XML Names: the element may inherit an ancestor default namespace (rendered
+    // as `xmlns="..."`) while declaring the prefixed binding its attribute needs
+    // on itself. Both the default (for the element) and the prefixed (for the
+    // attribute) bindings render. Verified against `xmllint --exc-c14n`.
+    #[test]
+    fn attribute_prefix_default_from_ancestor_prefixed_on_self() {
+        let result = c14n(
+            r#"<root xmlns="urn:R"><signed xmlns:a="urn:X" a:attr="v" ID="s1">text</signed></root>"#,
+            "signed",
+            &[],
+        );
+        assert_eq!(
+            result,
+            r#"<signed xmlns="urn:R" xmlns:a="urn:X" ID="s1" a:attr="v">text</signed>"#
+        );
+    }
+
+    // Production-shaped trigger: a prefixed `<ds:SignedInfo>` (the exact node
+    // `exclusive_c14n` is called on directly at `signature.rs:230`) that
+    // co-declares a default+prefixed binding and carries a prefixed attribute
+    // using that URI. The prefixed element does NOT visibly utilize the default
+    // namespace, so `xmlns="urn:X"` is omitted; only `xmlns:a` (the attribute's
+    // prefix) and `xmlns:ds` (the element's prefix, inherited from the parent)
+    // render. Verified against `xmllint --exc-c14n`.
+    #[test]
+    fn signed_info_shape_default_and_prefixed_collision_with_prefixed_attr() {
+        let result = c14n(
+            r##"<ds:Signature xmlns:ds="urn:ds"><ds:SignedInfo xmlns="urn:X" xmlns:a="urn:X" a:attr="v" ID="s1"><ds:Reference URI="#s1"/></ds:SignedInfo></ds:Signature>"##,
+            "SignedInfo",
+            &[],
+        );
+        assert_eq!(
+            result,
+            r##"<ds:SignedInfo xmlns:a="urn:X" xmlns:ds="urn:ds" ID="s1" a:attr="v"><ds:Reference URI="#s1"></ds:Reference></ds:SignedInfo>"##
+        );
+    }
+
+    // A namespaced attribute with no default binding for the same URI.
+    #[test]
+    fn attribute_prefixed_binding_regression_without_default_collision() {
+        let result = c14n(
+            r#"<root xmlns:a="urn:X" a:attr="v" ID="s1">text</root>"#,
+            "root",
+            &[],
+        );
+        assert_eq!(
+            result,
+            r#"<root xmlns:a="urn:X" ID="s1" a:attr="v">text</root>"#
+        );
+    }
+
+    // Canonical output canonicalizes to itself.
+    #[test]
+    fn idempotency_attribute_prefixed_binding_after_default_collision() {
+        let input = r#"<signed xmlns="urn:X" xmlns:a="urn:X" a:attr="v" ID="s1">text</signed>"#;
+        let doc1 = roxmltree::Document::parse(input).unwrap();
+        let root1 = doc1
+            .root()
+            .children()
+            .find(|n| n.is_element())
+            .expect("No root element");
+        let first = exclusive_c14n(root1, &[]);
+
+        let doc2 = roxmltree::Document::parse(&first).expect("First c14n output is invalid XML");
+        let root2 = doc2
+            .root()
+            .children()
+            .find(|n| n.is_element())
+            .expect("No root in re-parsed c14n output");
+        let second = exclusive_c14n(root2, &[]);
+
+        assert_eq!(first, second, "Idempotency failed for input: {input}");
+        assert_eq!(
+            first,
+            r#"<signed xmlns="urn:X" xmlns:a="urn:X" ID="s1" a:attr="v">text</signed>"#
+        );
+    }
+
+    // exc-c14n §4 + XML Names: InclusiveNamespaces PrefixList interactively
+    // listing the attribute's own prefix is a no-op here (already visibly
+    // utilized), and the prefixed binding is still chosen over the default for
+    // the attribute. Verified against libxml2 (inclusive_ns_prefixes=["a"]).
+    #[test]
+    fn attribute_prefixed_binding_with_inclusive_prefix_listed() {
+        let result = c14n(
+            r#"<signed xmlns="urn:X" xmlns:a="urn:X" a:attr="v" ID="s1">text</signed>"#,
+            "signed",
+            &["a"],
+        );
+        assert_eq!(
+            result,
+            r#"<signed xmlns="urn:X" xmlns:a="urn:X" ID="s1" a:attr="v">text</signed>"#
+        );
+    }
+
+    // exc-c14n §4 + XML Names: `#default` in InclusiveNamespaces PrefixList
+    // forces the default namespace visible but does NOT cause the attribute to
+    // take it; the prefixed binding is still chosen for the attribute.
+    // Verified against libxml2 (inclusive_ns_prefixes=["#default"]).
+    #[test]
+    fn attribute_prefixed_binding_with_inclusive_default_listed() {
+        let result = c14n(
+            r#"<signed xmlns="urn:X" xmlns:a="urn:X" a:attr="v" ID="s1">text</signed>"#,
+            "signed",
+            &["#default"],
+        );
+        assert_eq!(
+            result,
+            r#"<signed xmlns="urn:X" xmlns:a="urn:X" ID="s1" a:attr="v">text</signed>"#
         );
     }
 }

@@ -78,8 +78,9 @@ Covered in [Behind a Reverse Proxy](../configuration/reverse-proxy.md). The two 
 for a multi-instance deployment specifically:
 
 - Health check **`/health/ready`**, not `/health`. An instance that lost its database connection
-  keeps passing `/health` and stays in rotation. Behind a TCP-passthrough NLB this has to be an
-  HTTPS health check on port 443, because port 80 serves only `/health`.
+  keeps passing `/health` and stays in rotation. Behind a TCP-passthrough NLB prefer an HTTPS
+  health check on port 443, which also exercises the TLS listener; port 80 also serves
+  `/health/ready`, but a check there cannot notice a TLS listener that has stopped answering.
 - Preserve the client IP, or all rate limiting collapses onto the load balancer's IP. With TCP
   passthrough that means enabling client IP preservation on the target group; with a proxy that
   terminates TLS it means setting `VOUCH_TRUSTED_PROXIES`.
@@ -87,11 +88,11 @@ for a multi-instance deployment specifically:
 ## Graceful shutdown
 
 On `SIGTERM` or Ctrl-C, the server stops accepting connections and gives in-flight requests up to
-**30 seconds** to finish, then closes the database pool and flushes any pending OpenTelemetry
+**10 seconds** to finish, then closes the database pool and flushes any pending OpenTelemetry
 spans.
 
-Set your orchestrator's termination grace period above 30 seconds so it does not `SIGKILL` mid-
-drain — Kubernetes defaults to 30, which leaves no margin.
+Set your orchestrator's termination grace period above 10 seconds so it does not `SIGKILL` mid-
+drain. Kubernetes' default of 30 seconds is enough.
 
 The background cleanup and S3 polling tasks are aborted rather than drained; an interrupted cleanup
 pass resumes on the next instance's next tick.

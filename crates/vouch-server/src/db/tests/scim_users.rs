@@ -8,6 +8,7 @@
 )]
 
 use super::*;
+use crate::db::ScimAuditData;
 
 // ========================================================================
 // SCIM User Tests (RFC 7643/7644)
@@ -94,7 +95,7 @@ async fn test_scim_user_list_and_filter() {
     let (users, _) = list_scim_users(
         &store,
         TEST_ORG_ID,
-        Some("userName eq \"user2@example.com\""),
+        Some(&user_filter("userName eq \"user2@example.com\"")),
         1,
         100,
     )
@@ -142,7 +143,7 @@ async fn test_scim_filter_user_name_eq_is_case_insensitive() {
     let (users, total) = list_scim_users(
         &store,
         TEST_ORG_ID,
-        Some("userName eq \"Alice@Example.com\""),
+        Some(&user_filter("userName eq \"Alice@Example.com\"")),
         1,
         100,
     )
@@ -174,7 +175,7 @@ async fn test_scim_filter_email_eq_is_case_insensitive() {
     let (users, total) = list_scim_users(
         &store,
         TEST_ORG_ID,
-        Some("email eq \"BOB@example.com\""),
+        Some(&user_filter("email eq \"BOB@example.com\"")),
         1,
         100,
     )
@@ -232,7 +233,7 @@ async fn test_scim_filter_user_name_eq_case_insensitive_is_org_scoped() {
     let (users, total) = list_scim_users(
         &store,
         TEST_ORG_ID,
-        Some("userName eq \"Carol@Example.com\""),
+        Some(&user_filter("userName eq \"Carol@Example.com\"")),
         1,
         100,
     )
@@ -248,7 +249,7 @@ async fn test_scim_filter_user_name_eq_case_insensitive_is_org_scoped() {
     let (users, total) = list_scim_users(
         &store,
         "other-org",
-        Some("userName eq \"Carol-Other@Example.com\""),
+        Some(&user_filter("userName eq \"Carol-Other@Example.com\"")),
         1,
         100,
     )
@@ -285,7 +286,7 @@ async fn test_scim_filter_external_id_eq_is_case_sensitive() {
     let (users, total) = list_scim_users(
         &store,
         TEST_ORG_ID,
-        Some(r#"externalId eq "Ext-Case-123""#),
+        Some(&user_filter(r#"externalId eq "Ext-Case-123""#)),
         1,
         100,
     )
@@ -299,7 +300,7 @@ async fn test_scim_filter_external_id_eq_is_case_sensitive() {
     let (users, total) = list_scim_users(
         &store,
         TEST_ORG_ID,
-        Some(r#"externalId eq "ext-case-123""#),
+        Some(&user_filter(r#"externalId eq "ext-case-123""#)),
         1,
         100,
     )
@@ -336,7 +337,7 @@ async fn test_scim_filter_external_id_co_is_case_sensitive() {
     let (users, total) = list_scim_users(
         &store,
         TEST_ORG_ID,
-        Some(r#"externalId co "CaseSensitive""#),
+        Some(&user_filter(r#"externalId co "CaseSensitive""#)),
         1,
         100,
     )
@@ -350,7 +351,7 @@ async fn test_scim_filter_external_id_co_is_case_sensitive() {
     let (users, total) = list_scim_users(
         &store,
         TEST_ORG_ID,
-        Some(r#"externalId co "casesensitive""#),
+        Some(&user_filter(r#"externalId co "casesensitive""#)),
         1,
         100,
     )
@@ -382,10 +383,15 @@ async fn test_scim_filter_user_name_co_remains_case_insensitive() {
     .await
     .expect("Failed to create user");
 
-    let (users, total) =
-        list_scim_users(&store, TEST_ORG_ID, Some(r#"userName co "SWCASE""#), 1, 100)
-            .await
-            .expect("Failed to filter users");
+    let (users, total) = list_scim_users(
+        &store,
+        TEST_ORG_ID,
+        Some(&user_filter(r#"userName co "SWCASE""#)),
+        1,
+        100,
+    )
+    .await
+    .expect("Failed to filter users");
     assert_eq!(
         total, 1,
         "userName is caseExact: false; co must stay case-insensitive"
@@ -411,18 +417,18 @@ async fn test_scim_session_invalidation_on_deactivation() {
     .await
     .expect("Failed to create user");
 
-    // Create authenticator (with user_email parameter)
+    // Create authenticator
     let auth_id = create_authenticator(
         &store,
         &CreateAuthenticatorParams {
             user_id: &user.id,
-            user_email: "invalidate@example.com",
             name: "SCIM Key",
             credential_id: b"scim-cred-id",
             public_key: &[0u8; 32],
             aaguid: None,
             user_handle: Some(user.id.as_bytes()),
             attestation_verified: false,
+            counter: 0,
         },
     )
     .await
@@ -441,6 +447,9 @@ async fn test_scim_session_invalidation_on_deactivation() {
             authorization_details: None,
             hardware_aaguid: None,
             org_domain: None,
+            client_id: None,
+            source_code_hash: None,
+            authenticated_at: None,
         },
     )
     .await
@@ -469,26 +478,146 @@ async fn test_scim_session_invalidation_on_deactivation() {
 async fn test_scim_audit_logging() {
     let (_store, audit) = test_db().await;
 
-    // Insert audit log (insert_scim_audit now uses AuditStore directly)
-    let audit_id = insert_scim_audit(
+    record_scim_audit(
         &audit,
-        "CREATE",
-        "User",
-        "user-123",
-        Some("token-123"),
-        Some("Created user via SCIM"),
+        &ScimAuditData {
+            operation: "CREATE",
+            resource_type: "User",
+            resource_id: "user-123",
+            actor_token_id: Some("token-123"),
+            details: Some("Created user via SCIM"),
+            refusal: None,
+        },
         Some("example.com"),
     )
-    .await
-    .expect("Failed to insert audit log");
+    .await;
 
-    assert!(!audit_id.is_empty());
+    // Record another audit log without token or org domain (None is valid)
+    record_scim_audit(
+        &audit,
+        &ScimAuditData {
+            operation: "DELETE",
+            resource_type: "User",
+            resource_id: "user-789",
+            actor_token_id: None,
+            details: None,
+            refusal: None,
+        },
+        None,
+    )
+    .await;
 
-    // Insert another audit log without token or org domain (None is valid)
-    let audit_id2 = insert_scim_audit(&audit, "DELETE", "User", "user-789", None, None, None)
+    // The write is best-effort (failures are swallowed), so assert both
+    // rows landed by querying them back.
+    let events = audit
+        .query_events(&AuditEventFilter {
+            event_types: Some(vec!["scim_operation".to_string()]),
+            ..AuditEventFilter::default()
+        })
         .await
-        .expect("Failed to insert audit log");
+        .expect("query audit events");
+    assert_eq!(events.len(), 2, "both SCIM audit rows must be stored");
+    assert_ne!(events[0].id, events[1].id);
+}
 
-    assert!(!audit_id2.is_empty());
-    assert_ne!(audit_id, audit_id2);
+/// SCIM `active=false` is a third path to removing an organization's last
+/// admin, alongside delete and demote, so it takes the same floor. A
+/// `UsersWrite` token could otherwise deactivate every admin in sequence.
+#[tokio::test]
+async fn test_update_scim_user_refuses_to_deactivate_the_last_active_admin() {
+    use crate::db::documents::user::UserDoc;
+
+    let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
+
+    let admin = create_scim_user(
+        &store,
+        Some(TEST_ORG_ID),
+        "scim-sole-admin@example.com",
+        Some("Sole Admin"),
+        None,
+        true,
+    )
+    .await
+    .expect("create admin");
+    // SCIM provisioning never grants admin, so promote through the store.
+    update_user_admin_status(&store, &admin.id, true)
+        .await
+        .expect("promote");
+
+    let err = update_scim_user(&store, &admin.id, TEST_ORG_ID, Some("Renamed"), None, false)
+        .await
+        .expect_err("deactivating the last admin must be refused");
+    assert!(
+        matches!(err, ScimUpdateError::LastAdmin),
+        "expected LastAdmin, got {err:?}"
+    );
+
+    // A refused write leaves every field untouched, not just `active` — the
+    // whole transaction rolls back.
+    let after = store
+        .get::<UserDoc>(&admin.id)
+        .await
+        .expect("get")
+        .expect("must exist");
+    assert!(after.data.active, "active must be unchanged");
+    assert_eq!(
+        after.data.name.as_deref(),
+        Some("Sole Admin"),
+        "the rename in the same request must not land either"
+    );
+
+    // Renames and reactivations are untouched by the floor.
+    assert!(
+        update_scim_user(&store, &admin.id, TEST_ORG_ID, Some("Renamed"), None, true)
+            .await
+            .expect("rename must be allowed"),
+        "a write that does not clear `active` must not consult the floor"
+    );
+
+    // With a second active admin the deactivation goes through.
+    let peer = create_scim_user(
+        &store,
+        Some(TEST_ORG_ID),
+        "scim-peer-admin@example.com",
+        Some("Peer"),
+        None,
+        true,
+    )
+    .await
+    .expect("create peer");
+    update_user_admin_status(&store, &peer.id, true)
+        .await
+        .expect("promote peer");
+    assert!(
+        update_scim_user(&store, &admin.id, TEST_ORG_ID, Some("Renamed"), None, false)
+            .await
+            .expect("deactivation with a peer admin must be allowed"),
+        "an admin with a surviving active peer must be deactivatable"
+    );
+}
+
+/// Deactivating a plain member is never blocked, regardless of admin count.
+#[tokio::test]
+async fn test_update_scim_user_deactivates_non_admin_without_floor() {
+    let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
+
+    let member = create_scim_user(
+        &store,
+        Some(TEST_ORG_ID),
+        "scim-member@example.com",
+        Some("Member"),
+        None,
+        true,
+    )
+    .await
+    .expect("create member");
+
+    assert!(
+        update_scim_user(&store, &member.id, TEST_ORG_ID, Some("Member"), None, false)
+            .await
+            .expect("member deactivation must be allowed"),
+        "a non-admin is not part of the admin count"
+    );
 }

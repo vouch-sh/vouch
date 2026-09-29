@@ -49,6 +49,8 @@ governor = { workspace = true, features = ["std"] }
 hex = { workspace = true, features = ["std"] }
 hickory-resolver = { workspace = true, features = ["dnssec-aws-lc-rs", "https-aws-lc-rs", "system-config", "tokio", "webpki-roots"] }
 http = { workspace = true }
+hyper = { workspace = true, features = ["http1", "http2", "server"] }
+hyper-util = { workspace = true, features = ["server-auto", "service", "tokio"] }
 i18n-embed = { workspace = true, features = ["fluent-system", "rust-embed"] }
 idna = { workspace = true, features = ["compiled_data"] }
 ipnet = { workspace = true, features = ["std"] }
@@ -62,9 +64,10 @@ opentelemetry = { workspace = true, features = ["trace"] }
 opentelemetry-otlp = { workspace = true, features = ["trace", "grpc-tonic", "tls-aws-lc"] }
 opentelemetry_sdk = { workspace = true, features = ["rt-tokio", "trace"] }
 p256 = { workspace = true, features = ["alloc", "ecdsa", "jwk", "pkcs8", "pem"] }
+proxy-header = { workspace = true, features = ["tokio"] }
 psl = { workspace = true, features = ["helpers"] }
 reqwest = { workspace = true, features = ["json", "rustls", "form"] }
-roxmltree = { workspace = true }
+roxmltree = { workspace = true, features = ["positions"] }
 rust-embed = { workspace = true, features = ["axum-ex", "compression", "deterministic-timestamps", "mime-guess"] }
 rustls = { workspace = true, features = ["aws-lc-rs", "std", "prefer-post-quantum", "tls12"] }
 sea-query = { workspace = true, features = ["backend-sqlite", "backend-postgres", "derive"] }
@@ -107,6 +110,8 @@ zeroize = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 aws-lc-rs = { workspace = true, features = ["fips"] }
+rustls = { workspace = true, features = ["fips"] }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 wiremock = { workspace = true }

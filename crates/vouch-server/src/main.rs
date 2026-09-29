@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Vouch identity server.
 
+// See the matching attribute in `lib.rs`: request-path comparisons take
+// `vouch_server::arrival::ArrivalTime` rather than reading their own clock.
+#![warn(clippy::disallowed_methods)]
 // Avoid musl's default allocator due to lackluster performance
 // https://nickb.dev/blog/default-musl-allocator-considered-harmful-to-performance
 #[cfg(target_env = "musl")]
@@ -42,7 +45,18 @@ enum Commands {
 async fn main() -> Result<()> {
     // Install the aws-lc-rs crypto provider for rustls before any TLS usage;
     // rustls requires an explicitly installed CryptoProvider.
-    rustls::crypto::aws_lc_rs::default_provider()
+    //
+    // On Linux the rustls `fips` feature is enabled, which restricts the
+    // provider's key-exchange groups to the FIPS-approved set.
+    // `default_fips_provider` exists only under that feature and returns the
+    // same provider, so naming it here fails the build if the feature is ever
+    // dropped rather than silently restoring non-FIPS key exchange.
+    #[cfg(target_os = "linux")]
+    let provider = rustls::crypto::default_fips_provider();
+    #[cfg(not(target_os = "linux"))]
+    let provider = rustls::crypto::aws_lc_rs::default_provider();
+
+    provider
         .install_default()
         .map_err(|_| anyhow::anyhow!("failed to install rustls CryptoProvider"))?;
 
@@ -138,7 +152,9 @@ async fn prepare_serve(
 
 async fn run_server(args: config::Args, instance: Option<bootstrap::Bootstrap>) -> Result<()> {
     // Initialize all server components (config, database, state, background tasks)
-    let components = startup::initialize(args, instance.as_ref()).await?;
+    // Boxed: holding `Args` puts this future over clippy's `large_futures`
+    // threshold.
+    let components = Box::pin(startup::initialize(args, instance.as_ref())).await?;
 
     // Build the HTTP router with all routes, middleware, and state
     let app = components.build_app()?;

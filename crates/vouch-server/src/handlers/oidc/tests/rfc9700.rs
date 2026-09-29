@@ -2,44 +2,8 @@
 //! RFC 9700 — OAuth 2.0 Security Best Current Practice tests.
 
 use super::helpers::*;
-
-/// Issue an authorization code for `client`, optionally bound to a PKCE
-/// `code_challenge`, using the real service path so the code is stored
-/// server-side and single-use enforcement applies.
-async fn issue_code_for(
-    state: &std::sync::Arc<crate::AppState>,
-    user: &crate::db::User,
-    authenticator_id: &str,
-    client: &TestOAuthClient,
-    code_challenge: Option<&str>,
-) -> String {
-    let scope_set = ScopeSet::parse("openid email");
-    issue_authorization_code(
-        state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge,
-            code_challenge_method: code_challenge.map(|_| CodeChallengeMethod::S256),
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
-        },
-    )
-    .await
-    .expect("Failed to issue authorization code")
-}
+use crate::crypto;
+use crate::db::{OAuthClientType, ResponseMode, TokenEndpointAuthMethod};
 
 // ============================================================================
 // RFC 9700 — PKCE Enforcement
@@ -142,7 +106,14 @@ async fn test_rfc9700_client_id_matching_at_token_endpoint() {
     let client_a = create_test_oauth_client(&state.store, &user.id).await;
     let client_b = create_test_oauth_client(&state.store, &user.id).await;
 
-    let code = issue_code_for(&state, &user, &auth_id, &client_a, None).await;
+    let code = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client_a.client_id,
+        TestCodeSpec::default(),
+    )
+    .await;
 
     // Try to exchange with client_b credentials — must fail
     let auth_header_b = client_b.basic_auth_header();
@@ -175,7 +146,14 @@ async fn test_rfc9700_redirect_uri_exact_match_at_token() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
-    let code = issue_code_for(&state, &user, &auth_id, &client, None).await;
+    let code = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec::default(),
+    )
+    .await;
 
     let auth_header = client.basic_auth_header();
 
@@ -209,7 +187,14 @@ async fn test_rfc9700_redirect_uri_required_when_present_in_auth() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
-    let code = issue_code_for(&state, &user, &auth_id, &client, None).await;
+    let code = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec::default(),
+    )
+    .await;
 
     let auth_header = client.basic_auth_header();
 
@@ -247,7 +232,14 @@ async fn test_rfc9700_authorization_code_single_use() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
-    let code = issue_code_for(&state, &user, &auth_id, &client, None).await;
+    let code = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec::default(),
+    )
+    .await;
 
     let auth_header = client.basic_auth_header();
 
@@ -561,7 +553,14 @@ async fn test_rfc9700_client_authentication_offers_asymmetric_methods() {
     let user = create_test_user(&state.store, "clientauth@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
-    let code = issue_code_for(&state, &user, &auth_id, &client, None).await;
+    let code = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec::default(),
+    )
+    .await;
     let (status, body) = http_post_form(
         &app,
         "/oauth/token",
@@ -812,7 +811,7 @@ async fn test_rfc9700_authorization_response_is_never_delivered_in_browser() {
     // No code path can select one either: the parser has no such variant, so
     // `response_mode=web_message` cannot reach a delivery branch.
     assert!(
-        crate::db::ResponseMode::parse("web_message").is_none(),
+        ResponseMode::parse("web_message").is_none(),
         "web_message must not parse to a delivery mode"
     );
 
@@ -907,9 +906,9 @@ async fn test_rfc9700_loopback_redirect_uri_allows_a_variable_port() {
         &user.id,
         TestClientSpec {
             name: "Native App".to_string(),
-            application_type: crate::db::OAuthClientType::Native,
+            application_type: OAuthClientType::Native,
             redirect_uris: vec!["http://127.0.0.1:8080/callback".to_string()],
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::None),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::None),
             with_secret: false,
             ..Default::default()
         },
@@ -971,7 +970,14 @@ async fn test_rfc9700_code_replay_revokes_the_tokens_it_issued() {
     let user = create_test_user(&state.store, "replay@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
-    let code = issue_code_for(&state, &user, &auth_id, &client, None).await;
+    let code = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec::default(),
+    )
+    .await;
 
     let auth_header = client.basic_auth_header();
     let form = format!(
@@ -1118,7 +1124,14 @@ async fn test_rfc9700_code_verifier_without_a_bound_challenge_is_rejected() {
     // A confidential Web client: the one shape for which Vouch does not
     // mandate PKCE, and therefore the shape this requirement is about.
     let client = create_test_oauth_client(&state.store, &user.id).await;
-    let code = issue_code_for(&state, &user, &auth_id, &client, None).await;
+    let code = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec::default(),
+    )
+    .await;
 
     let (status, body) = http_post_form(
         &app,
@@ -1159,7 +1172,17 @@ async fn test_rfc9700_challenge_presence_is_bound_to_the_code() {
     let challenge = sha256_base64url(verifier);
 
     // Bound to a challenge: the verifier is required.
-    let code = issue_code_for(&state, &user, &auth_id, &client, Some(&challenge)).await;
+    let code = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            code_challenge: Some(&challenge),
+            ..Default::default()
+        },
+    )
+    .await;
     let (status, body) = http_post_form(
         &app,
         "/oauth/token",
@@ -1176,7 +1199,14 @@ async fn test_rfc9700_challenge_presence_is_bound_to_the_code() {
     );
 
     // Not bound: redeeming without a verifier is the only accepted shape.
-    let code = issue_code_for(&state, &user, &auth_id, &client, None).await;
+    let code = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec::default(),
+    )
+    .await;
     let (status, body) = http_post_form(
         &app,
         "/oauth/token",
@@ -1214,7 +1244,7 @@ async fn test_rfc9700_access_tokens_are_not_stored_in_plaintext() {
 
     let now = jiff::Timestamp::now();
     let by_hash =
-        db::get_session_by_token_hash(&state.store, &crate::crypto::hash_token(&access_token), now)
+        db::get_session_by_token_hash(&state.store, &crypto::hash_token(&access_token), now)
             .await
             .expect("session lookup succeeds");
     assert!(by_hash.is_some(), "the token is recorded under its hash");

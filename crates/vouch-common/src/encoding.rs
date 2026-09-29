@@ -389,16 +389,6 @@ impl<T, E: Encoding> std::fmt::Debug for Encoded<T, E> {
     }
 }
 
-// Hex formatting for debugging (aws-lc-rs pattern)
-impl<T, E: Encoding> std::fmt::LowerHex for Encoded<T, E> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        for byte in &self.data {
-            write!(f, "{byte:02x}")?;
-        }
-        Ok(())
-    }
-}
-
 // ============================================================================
 // Tests
 // ============================================================================
@@ -521,13 +511,6 @@ mod tests {
         let encoded: Encoded<TestData, Raw> = Encoded::from_raw(vec![0xAB, 0xCD]);
         let debug = format!("{:?}", encoded);
         assert!(debug.contains("abcd"));
-    }
-
-    #[test]
-    fn test_lower_hex() {
-        let encoded: Encoded<TestData, Raw> = Encoded::from_raw(vec![0xAB, 0xCD, 0xEF]);
-        let hex = format!("{:x}", encoded);
-        assert_eq!(hex, "abcdef");
     }
 
     #[test]

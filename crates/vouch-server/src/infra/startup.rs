@@ -12,6 +12,17 @@ use arc_swap::ArcSwap;
 use secrecy::ExposeSecret;
 use tokio::task::JoinHandle;
 
+use crate::config::{IdpConfig, ServerConfig};
+use crate::crypto::document_crypto::{DocumentCrypto, HpkeDocumentCrypto, PlaintextDocumentCrypto};
+use crate::crypto::jwt::StateTokenSigner;
+use crate::db::audit::AuditStore;
+use crate::db::store::DocumentStore;
+use crate::db::{self, SessionCache};
+use crate::geo;
+use crate::infra::egress;
+use crate::services::idp::saml::{SamlProvider, metadata};
+use crate::services::idp::{ConfiguredIdp, ConfiguredOidcProvider, IdpBrand, oidc};
+use crate::services::oidc::mtls::ClientCertTrust;
 use crate::{
     AppState, config,
     crypto::{
@@ -24,6 +35,15 @@ use crate::{
     },
     services::integrations::github::GitHubApp,
 };
+use vouch_common::AaguidPolicy;
+use vouch_common::http;
+
+/// Maximum size of an upstream IdP's SAML metadata document (1 MB).
+///
+/// A single-entity descriptor with several signing certificates is a few tens
+/// of kilobytes; 1 MB leaves room for a verbose issuer without letting the
+/// metadata host decide how much memory boot allocates.
+const MAX_SAML_METADATA_SIZE: usize = 1024 * 1024;
 
 /// All components needed to run the server after initialization.
 pub struct ServerComponents {
@@ -102,7 +122,7 @@ pub async fn initialize(
         use_attestation,
     );
 
-    crate::geo::warmup();
+    geo::warmup();
     tracing::info!("GeoIP database initialized");
 
     log_startup_summary(&config);
@@ -226,7 +246,7 @@ async fn load_s3_config(
     // Only override the region when VOUCH_S3_CONFIG_REGION is set; passing
     // Option::<Region>::None to `.region(...)` disables the default region
     // provider chain (env / shared config / IMDS) and breaks S3 requests.
-    let sdk_config = crate::config::aws_config_loader(
+    let sdk_config = config::aws_config_loader(
         config.s3_config_region.as_deref(),
         config.aws_use_fips_endpoint,
     )?
@@ -386,12 +406,10 @@ async fn build_app_state(
         || config.jwt_hmac_kms_key_id.is_some();
     let kms_client = if kms_needs && kms_client.is_none() {
         tracing::info!("Creating KMS client for signing key access");
-        let sdk_config = crate::config::aws_config_loader(
-            kms_region(config).as_deref(),
-            config.aws_use_fips_endpoint,
-        )?
-        .load()
-        .await;
+        let sdk_config =
+            config::aws_config_loader(kms_region(config).as_deref(), config.aws_use_fips_endpoint)?
+                .load()
+                .await;
         Some(aws_sdk_kms::Client::from_conf(
             aws_sdk_kms::config::Builder::from(&sdk_config)
                 .timeout_config(kms_timeout_config())
@@ -521,9 +539,9 @@ async fn build_app_state(
             .clone();
         let key_arn = kms_arn_resolver.resolve(key_id);
         tracing::info!("State token signer initialized (KMS HMAC): {key_arn}");
-        crate::crypto::jwt::StateTokenSigner::from_kms(client, key_arn)
+        StateTokenSigner::from_kms(client, key_arn)
     } else {
-        crate::crypto::jwt::StateTokenSigner::local(config.jwt_secret_bytes().to_vec())
+        StateTokenSigner::local(config.jwt_secret_bytes().to_vec())
     };
 
     // Build shared HTTP client for outbound API calls (GitHub, OIDC, etc.)
@@ -537,15 +555,36 @@ async fn build_app_state(
         })
         .transpose()
         .context("Failed to read VOUCH_EXTRA_CA_CERTS file")?;
-    let http_client = vouch_common::http::server_client(&user_agent, extra_ca_pem.as_deref())
+    let http_client = http::server_client(&user_agent, extra_ca_pem.as_deref())
         .context("Failed to create shared HTTP client")?;
+
+    let client_cert_trust = match config.mtls_client_ca_certs.as_deref() {
+        Some(path) => {
+            tracing::info!("Loading tls_client_auth client CA certificates from {path}");
+            let pem =
+                std::fs::read(path).context("Failed to read VOUCH_MTLS_CLIENT_CA_CERTS file")?;
+            Some(
+                ClientCertTrust::from_pem(&pem)
+                    .context("Invalid VOUCH_MTLS_CLIENT_CA_CERTS bundle")?,
+            )
+        }
+        None => {
+            if config.tls_configured() {
+                tracing::warn!(
+                    "tls_client_auth disabled: VOUCH_MTLS_CLIENT_CA_CERTS is not set, so no \
+                     client certificate chain can be validated (RFC 8705 section 2.1)"
+                );
+            }
+            None
+        }
+    };
 
     // Build unified IdP list (OIDC + SAML) from the configured `idps` Vec.
     let enrollment_domains = match &config.allowed_domains {
         Some(domains) => domains.join(", "),
         None => "(open enrollment)".to_string(),
     };
-    let mut idps: Vec<crate::services::idp::ConfiguredIdp> = Vec::with_capacity(config.idps.len());
+    let mut idps: Vec<ConfiguredIdp> = Vec::with_capacity(config.idps.len());
     for idp_cfg in &config.idps {
         let configured = build_configured_idp(idp_cfg, &http_client, config, &enrollment_domains)
             .await
@@ -561,6 +600,12 @@ async fn build_app_state(
                 config.github_webhook_secret.is_some(),
                 config.github_oauth_configured(),
             );
+            if !config.github_oauth_configured() {
+                tracing::warn!(
+                    "GitHub App installations cannot be linked without \
+                     VOUCH_GITHUB_APP_CLIENT_ID and VOUCH_GITHUB_APP_CLIENT_SECRET"
+                );
+            }
             Some(Arc::new(app))
         }
         Ok(None) => {
@@ -589,27 +634,22 @@ async fn build_app_state(
     // When document keys are available (from config.document_key), use
     // HpkeDocumentCrypto for database-level encryption. Otherwise fall
     // back to PlaintextDocumentCrypto for development.
-    let crypto: std::sync::Arc<dyn crate::crypto::document_crypto::DocumentCrypto> =
-        if let Some(keys) = doc_keys {
-            tracing::info!(
-                "Document encryption initialized (KMS HPKE): {} ({})",
-                keys.suite_id.label(),
-                keys.suite_id
-            );
-            std::sync::Arc::new(
-                crate::crypto::document_crypto::HpkeDocumentCrypto::new(
-                    keys.suite_id,
-                    keys.public_key,
-                    keys.private_key,
-                )
+    let crypto: std::sync::Arc<dyn DocumentCrypto> = if let Some(keys) = doc_keys {
+        tracing::info!(
+            "Document encryption initialized (KMS HPKE): {} ({})",
+            keys.suite_id.label(),
+            keys.suite_id
+        );
+        std::sync::Arc::new(
+            HpkeDocumentCrypto::new(keys.suite_id, keys.public_key, keys.private_key)
                 .context("Failed to initialize HpkeDocumentCrypto from document key")?,
-            )
-        } else {
-            tracing::info!("Document encryption: plaintext (no document key configured)");
-            std::sync::Arc::new(crate::crypto::document_crypto::PlaintextDocumentCrypto)
-        };
-    let store = crate::db::store::DocumentStore::new(db.clone(), crypto.clone());
-    let audit = crate::db::audit::AuditStore::new(db.clone(), crypto);
+        )
+    } else {
+        tracing::info!("Document encryption: plaintext (no document key configured)");
+        std::sync::Arc::new(PlaintextDocumentCrypto)
+    };
+    let store = DocumentStore::new(db.clone(), crypto.clone());
+    let audit = AuditStore::new(db.clone(), crypto);
 
     let state = Arc::new(AppState {
         db,
@@ -623,20 +663,21 @@ async fn build_app_state(
         state_signer,
         github_app,
         http_client,
-        session_cache: crate::db::SessionCache::new(
+        session_cache: SessionCache::new(
             config.session_cache_max_capacity,
             config.session_cache_ttl_secs,
         ),
         org_keys_cache: Default::default(),
         policy: Default::default(),
         idps,
+        client_cert_trust,
     });
 
     // Per-org issuer signing keys exist only when the document store encrypts
     // at rest. Refuse to start an unencrypted server that has claimed issuer
     // subdomains: it would advertise per-org issuer hosts as a tenant boundary
     // while signing everything with the shared platform key.
-    if !state.store.is_encrypted() && crate::db::any_subdomain_claimed(&state.store).await? {
+    if !state.store.is_encrypted() && db::any_subdomain_claimed(&state.store).await? {
         anyhow::bail!(
             "issuer subdomains are claimed but document encryption is not configured; \
              configure the KMS document key or release all issuer subdomains before starting"
@@ -649,24 +690,23 @@ async fn build_app_state(
 /// Build a `ConfiguredIdp` from an `IdpConfig` entry by performing the
 /// type-specific discovery step (OIDC discovery, SAML metadata fetch).
 async fn build_configured_idp(
-    idp_cfg: &crate::config::IdpConfig,
+    idp_cfg: &IdpConfig,
     http_client: &reqwest::Client,
-    config: &crate::config::ServerConfig,
+    config: &ServerConfig,
     enrollment_domains: &str,
-) -> Result<crate::services::idp::ConfiguredIdp> {
+) -> Result<ConfiguredIdp> {
     match idp_cfg {
-        crate::config::IdpConfig::Oidc(oidc_cfg) => {
-            let discovered =
-                crate::services::idp::oidc::fetch_discovery(http_client, &oidc_cfg.issuer_url)
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "Failed to fetch OIDC discovery for IdP '{}' (issuer: {}). \
+        IdpConfig::Oidc(oidc_cfg) => {
+            let discovered = oidc::fetch_discovery(http_client, &oidc_cfg.issuer_url)
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to fetch OIDC discovery for IdP '{}' (issuer: {}). \
                              Check that the issuer URL is reachable.",
-                            oidc_cfg.id, oidc_cfg.issuer_url
-                        )
-                    })?;
-            let brand = crate::services::idp::IdpBrand::from_issuer(&discovered.issuer);
+                        oidc_cfg.id, oidc_cfg.issuer_url
+                    )
+                })?;
+            let brand = IdpBrand::from_issuer(&discovered.issuer);
             tracing::info!(
                 "IdP '{}' (oidc): brand={}, issuer={}, auth={}, token={}, jwks={}, \
                  enrollment_domains={}",
@@ -678,17 +718,15 @@ async fn build_configured_idp(
                 discovered.jwks_uri,
                 enrollment_domains,
             );
-            Ok(crate::services::idp::ConfiguredIdp::Oidc(
-                crate::services::idp::ConfiguredOidcProvider {
-                    id: oidc_cfg.id.clone(),
-                    client_id: oidc_cfg.client_id.clone(),
-                    client_secret: oidc_cfg.client_secret.clone(),
-                    provider: discovered,
-                },
-            ))
+            Ok(ConfiguredIdp::Oidc(ConfiguredOidcProvider {
+                id: oidc_cfg.id.clone(),
+                client_id: oidc_cfg.client_id.clone(),
+                client_secret: oidc_cfg.client_secret.clone(),
+                provider: discovered,
+            }))
         }
-        crate::config::IdpConfig::Saml(saml_cfg) => {
-            let metadata_xml = http_client
+        IdpConfig::Saml(saml_cfg) => {
+            let metadata_response = http_client
                 .get(&saml_cfg.metadata_url)
                 .send()
                 .await
@@ -701,8 +739,8 @@ async fn build_configured_idp(
                         "SAML metadata fetch returned error for IdP '{}'",
                         saml_cfg.id
                     )
-                })?
-                .text()
+                })?;
+            let metadata_xml = egress::read_capped_text(metadata_response, MAX_SAML_METADATA_SIZE)
                 .await
                 .with_context(|| {
                     format!(
@@ -710,12 +748,10 @@ async fn build_configured_idp(
                         saml_cfg.id
                     )
                 })?;
-            let idp_metadata =
-                crate::services::idp::saml::metadata::parse_idp_metadata(&metadata_xml)
-                    .with_context(|| {
-                        format!("Failed to parse SAML metadata for IdP '{}'", saml_cfg.id)
-                    })?;
-            let brand = crate::services::idp::IdpBrand::from_entity_id(&idp_metadata.entity_id);
+            let idp_metadata = metadata::parse_idp_metadata(&metadata_xml).with_context(|| {
+                format!("Failed to parse SAML metadata for IdP '{}'", saml_cfg.id)
+            })?;
+            let brand = IdpBrand::from_entity_id(&idp_metadata.entity_id);
             let sp_entity_id = saml_cfg
                 .sp_entity_id
                 .clone()
@@ -739,16 +775,14 @@ async fn build_configured_idp(
                 },
                 idp_metadata.signing_certificates.len(),
             );
-            Ok(crate::services::idp::ConfiguredIdp::Saml(
-                crate::services::idp::saml::SamlProvider {
-                    id: saml_cfg.id.clone(),
-                    idp_metadata,
-                    sp_entity_id,
-                    acs_url,
-                    email_attribute: saml_cfg.email_attribute.clone(),
-                    domain_attribute: saml_cfg.domain_attribute.clone(),
-                },
-            ))
+            Ok(ConfiguredIdp::Saml(SamlProvider {
+                id: saml_cfg.id.clone(),
+                idp_metadata,
+                sp_entity_id,
+                acs_url,
+                email_attribute: saml_cfg.email_attribute.clone(),
+                domain_attribute: saml_cfg.domain_attribute.clone(),
+            }))
         }
     }
 }
@@ -793,10 +827,18 @@ fn log_startup_summary(config: &config::ServerConfig) {
             .iter()
             .map(ToString::to_string)
             .collect();
-        tracing::warn!(
-            "Trusted proxies configured: {} -- X-Forwarded-For will be parsed for client IP",
-            cidrs.join(", "),
-        );
+        if config.proxy_protocol {
+            tracing::warn!(
+                "PROXY protocol required on the HTTPS and mTLS listeners from: {} -- the \
+                 header's source address is the client address; X-Forwarded-For is ignored",
+                cidrs.join(", "),
+            );
+        } else {
+            tracing::warn!(
+                "Trusted proxies configured: {} -- X-Forwarded-For will be parsed for client IP",
+                cidrs.join(", "),
+            );
+        }
     }
 
     let pool_cfg = &config.pool_config;
@@ -857,18 +899,14 @@ fn log_startup_summary(config: &config::ServerConfig) {
 /// Log authenticator policy settings at startup.
 fn log_authenticator_policy(config: &config::ServerConfig) {
     let aaguid_policy = match &config.allowed_aaguids {
-        vouch_common::AaguidPolicy::Any => "any".to_string(),
-        vouch_common::AaguidPolicy::FipsOnly => "fips-only".to_string(),
-        vouch_common::AaguidPolicy::YubiKey5Only => "yubikey-5-only".to_string(),
-        vouch_common::AaguidPolicy::AllowList(set) => {
+        AaguidPolicy::Any => "any".to_string(),
+        AaguidPolicy::FipsOnly => "fips-only".to_string(),
+        AaguidPolicy::YubiKey5Only => "yubikey-5-only".to_string(),
+        AaguidPolicy::AllowList(set) => {
             format!("allowlist ({} AAGUIDs)", set.len())
         }
     };
-    tracing::info!(
-        "Authenticator policy: aaguid={}, require_attestation_cert={}",
-        aaguid_policy,
-        config.require_attestation_cert,
-    );
+    tracing::info!("Authenticator policy: aaguid={}", aaguid_policy);
 }
 
 /// Timeout configuration for AWS KMS API calls.
@@ -907,6 +945,7 @@ fn kms_region(config: &config::ServerConfig) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils;
 
     /// Regression for the cross-region KMS bug: every KMS key lives in the
     /// same region as the S3 config bucket, so the shared region source
@@ -916,7 +955,7 @@ mod tests {
     /// failed with `NotFoundException` / `AccessDeniedException`.
     #[test]
     fn kms_region_prefers_s3_config_region() {
-        let mut config = crate::test_utils::test_config();
+        let mut config = test_utils::test_config();
         config.aws_region = Some("us-east-1".to_string());
         config.s3_config_region = Some("us-west-2".to_string());
 
@@ -931,7 +970,7 @@ mod tests {
     /// falls back to the server's own `aws_region`.
     #[test]
     fn kms_region_falls_back_to_aws_region() {
-        let mut config = crate::test_utils::test_config();
+        let mut config = test_utils::test_config();
         config.aws_region = Some("us-east-1".to_string());
         config.s3_config_region = None;
 
@@ -943,7 +982,7 @@ mod tests {
     /// IMDS) instead of pinning a blank region.
     #[test]
     fn kms_region_none_when_unset() {
-        let mut config = crate::test_utils::test_config();
+        let mut config = test_utils::test_config();
         config.aws_region = None;
         config.s3_config_region = None;
 

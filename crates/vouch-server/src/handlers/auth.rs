@@ -2,8 +2,10 @@
 //! Authentication handlers for session management.
 
 use crate::AppState;
+use crate::arrival::ArrivalTime;
 use crate::db;
 use crate::error::ServiceError;
+use crate::services::auth::AccessTokenClaims;
 use axum::{
     Json,
     body::Body,
@@ -12,18 +14,20 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
-use jiff::Timestamp;
 use std::sync::Arc;
 use vouch_common::{SessionStatus, protocol};
 
 use super::{clear_session_cookie, hash_token};
 use crate::db::ClientInfo;
+use crate::http;
+use crate::services::auth::{self, DecodedToken};
 
 /// Get current session status.
 ///
 /// Accepts an OAuth access token (Bearer or DPoP scheme) and returns
 /// authenticated status, email, expiration, and device name.
 pub(crate) async fn status(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<SessionStatus>, ServiceError> {
@@ -39,8 +43,8 @@ pub(crate) async fn status(
     // `starts_with`. An unrecognized scheme (or no header at all) yields
     // `authenticated: false` — this endpoint never 401s.
     let token = match auth_header.and_then(|h| {
-        crate::http::strip_auth_scheme(h, protocol::AUTH_SCHEME_BEARER)
-            .or_else(|| crate::http::strip_auth_scheme(h, protocol::AUTH_SCHEME_DPOP))
+        http::strip_auth_scheme(h, protocol::AUTH_SCHEME_BEARER)
+            .or_else(|| http::strip_auth_scheme(h, protocol::AUTH_SCHEME_DPOP))
     }) {
         Some(tok) => tok,
         None => {
@@ -64,26 +68,25 @@ pub(crate) async fn status(
 
     // Validate as OAuth access token (ES256, at+jwt)
     let config = state.config();
-    let decoded =
-        match crate::services::auth::decode_token(token, &state.oidc_key, &config.base_url) {
-            Some(d) => d,
-            None => {
-                return Ok(Json(SessionStatus {
-                    authenticated: false,
-                    email: None,
-                    expires_in_seconds: None,
-                    device_name: None,
-                }));
-            }
-        };
+    let decoded = match auth::decode_token(token, &state.oidc_key, &config.base_url) {
+        Some(d) => d,
+        None => {
+            return Ok(Json(SessionStatus {
+                authenticated: false,
+                email: None,
+                expires_in_seconds: None,
+                device_name: None,
+            }));
+        }
+    };
 
-    let crate::services::auth::DecodedToken::AccessToken(access_claims) = decoded;
+    let DecodedToken::AccessToken(access_claims) = decoded;
 
     // Check session exists in database
     let token_hash = hash_token(token);
     let session = state
         .session_cache
-        .get_session_by_token_hash(&state.store, &token_hash)
+        .get_session_by_token_hash(&state.store, &token_hash, arrival)
         .await?;
 
     if session.is_none() {
@@ -96,8 +99,11 @@ pub(crate) async fn status(
     }
 
     // Get authenticator name from server-side session record
-    let device_name = match session.and_then(|s| s.authenticator_id) {
-        Some(auth_id) => db::get_authenticator_by_id(&state.store, &auth_id)
+    let device_name = match session
+        .as_deref()
+        .and_then(|s| s.authenticator_id.as_deref())
+    {
+        Some(auth_id) => db::get_authenticator_by_id(&state.store, auth_id)
             .await
             .ok()
             .flatten()
@@ -105,20 +111,41 @@ pub(crate) async fn status(
         None => None,
     };
 
-    // Calculate time remaining
-    let now = Timestamp::now().as_second();
+    Ok(Json(build_status(&access_claims, device_name, arrival)))
+}
+
+/// Build the [`SessionStatus`] for the success path of [`status`].
+///
+/// `authenticated` derives from the server's authoritative strict-`>`
+/// re-check (`exp > now`), matching the expiry rule in
+/// `db::sessions::get_session_by_token_hash`. Per the `SessionStatus::email`
+/// contract ("User's email if authenticated"), `email` is gated on that same
+/// decision: it is `None` whenever `authenticated == false`. `device_name`
+/// carries no "if authenticated" qualifier in the contract and is returned
+/// unconditionally.
+fn build_status(
+    access_claims: &AccessTokenClaims,
+    device_name: Option<String>,
+    arrival: ArrivalTime,
+) -> SessionStatus {
+    let now = arrival.as_second();
     let expires_in = if access_claims.exp > now {
         u64::try_from(access_claims.exp.saturating_sub(now)).ok()
     } else {
         None
     };
 
-    Ok(Json(SessionStatus {
-        authenticated: expires_in.is_some(),
-        email: access_claims.email,
+    let authenticated = expires_in.is_some();
+    SessionStatus {
+        authenticated,
+        email: if authenticated {
+            access_claims.email.clone()
+        } else {
+            None
+        },
         expires_in_seconds: expires_in,
         device_name,
-    }))
+    }
 }
 
 /// Handle sign-out (clears session cookie).
@@ -135,33 +162,27 @@ pub(crate) async fn logout(
     {
         let token_hash = hash_token(token);
 
-        // Look up session before deletion to capture user info for audit
-        let session_info = state
-            .session_cache
-            .get_session_by_token_hash(&state.store, &token_hash)
-            .await
-            .ok()
-            .flatten();
-
+        // The deleted row, expired or not, carries the user for the `Logout`
+        // audit event (see `db::delete_session_by_token_hash`).
         match db::delete_session_by_token_hash(&state.store, &token_hash).await {
-            Ok(deleted) => {
-                if deleted {
-                    state.session_cache.invalidate(&token_hash);
-                    tracing::info!("Session deleted during logout");
+            Ok(Some(session)) => {
+                state.session_cache.invalidate(&token_hash);
+                tracing::info!("Session deleted during logout");
 
-                    // Fire-and-forget logout audit event
-                    if let Some(session) = session_info {
-                        let params = db::AuthEventParams {
-                            user_id: session.user_id.clone(),
-                            event_type: db::AuthEventType::Logout,
-                            success: true,
-                            client: client_info,
-                            ..Default::default()
-                        };
-                        db::spawn_audit_event(&state.audit, params, Some(session.user_email));
-                    }
-                }
+                // Best-effort logout audit event
+                let params = db::AuthEventParams {
+                    user_id: db::Principal::Verified(session.user_id.clone()),
+                    event_type: db::AuthEventType::Logout,
+                    success: true,
+                    client: client_info,
+                    authenticator_id: None,
+                    failure_reason: None,
+                    client_id: None,
+                    idp_issuer: None,
+                };
+                db::record_auth_event(&state.audit, params, Some(session.user_email.clone())).await;
             }
+            Ok(None) => {}
             Err(e) => {
                 tracing::warn!("Failed to delete session during logout: {}", e);
             }
@@ -184,6 +205,10 @@ pub(crate) async fn logout(
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
+    use crate::arrival::ArrivalTime;
+    use crate::crypto;
+    use crate::db::{self, AuditEvent, AuditEventFilter, AuditEventKind, SessionPurpose};
+    use crate::services::auth::AccessTokenClaims;
     use crate::test_utils::*;
     use axum::http::StatusCode;
 
@@ -192,7 +217,16 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "valid@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let auth_header = format!("Bearer {token}");
         let (status, body) =
@@ -212,7 +246,16 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "email-check@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let auth_header = format!("Bearer {token}");
         let (status, body) =
@@ -265,5 +308,322 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
         assert_eq!(json["authenticated"], false);
         assert!(json["email"].is_null());
+    }
+
+    fn claims_with_exp(exp: i64, email: Option<&str>) -> AccessTokenClaims {
+        use crate::services::oidc::ScopeSet;
+        AccessTokenClaims {
+            iss: "test-issuer".to_string(),
+            sub: "user-123".to_string(),
+            aud: "client-abc".to_string(),
+            exp,
+            iat: exp.saturating_sub(3600),
+            nbf: None,
+            jti: "jti-1".to_string(),
+            client_id: "client-abc".to_string(),
+            scope: Some(ScopeSet::parse("openid email")),
+            email: email.map(str::to_string),
+            email_verified: Some(true),
+            hardware_verified: true,
+            cnf: None,
+            auth_time: None,
+            act: None,
+            amr: None,
+            acr: None,
+        }
+    }
+
+    /// A fixed instant, so a test about the `exp == now` edge compares against
+    /// exactly the second it constructed its claims from.
+    const FIXED: i64 = 1_800_000_000;
+
+    #[test]
+    fn build_status_email_is_none_at_exp_boundary() {
+        let claims = claims_with_exp(FIXED, Some("user@example.com"));
+        let status = super::build_status(&claims, None, ArrivalTime::for_test_second(FIXED));
+        // `exp == now` is the sharp edge of the strict `exp > now` re-check:
+        // jsonwebtoken accepts it, but the server's authoritative rule rejects
+        // it, so `authenticated == false` and `email` must be `None`.
+        assert!(!status.authenticated);
+        assert!(
+            status.email.is_none(),
+            "email must be None when authenticated is false, but got {:?}",
+            status.email
+        );
+        assert_eq!(status.expires_in_seconds, None);
+    }
+
+    #[test]
+    fn build_status_email_is_some_when_authenticated() {
+        let claims = claims_with_exp(FIXED.saturating_add(3600), Some("user@example.com"));
+        let status = super::build_status(&claims, None, ArrivalTime::for_test_second(FIXED));
+        assert!(status.authenticated);
+        assert_eq!(status.email.as_deref(), Some("user@example.com"));
+        assert!(status.expires_in_seconds.unwrap_or(0) > 0);
+    }
+
+    #[test]
+    fn build_status_device_name_returned_regardless_of_auth() {
+        let live = super::build_status(
+            &claims_with_exp(FIXED.saturating_add(3600), Some("user@example.com")),
+            Some("YubiKey 5C".to_string()),
+            ArrivalTime::for_test_second(FIXED),
+        );
+        assert!(live.authenticated);
+        assert_eq!(live.device_name.as_deref(), Some("YubiKey 5C"));
+
+        let expired = super::build_status(
+            &claims_with_exp(FIXED.saturating_sub(3600), Some("user@example.com")),
+            Some("YubiKey 5C".to_string()),
+            ArrivalTime::for_test_second(FIXED),
+        );
+        // `device_name` is documented without an "if authenticated" qualifier,
+        // so it is returned unconditionally — do not gate it on `authenticated`.
+        assert!(!expired.authenticated);
+        assert_eq!(expired.device_name.as_deref(), Some("YubiKey 5C"));
+    }
+
+    /// End-to-end through the real router: when a token is decoded at its own
+    /// expiry second, the handler reaches `build_status` with
+    /// `authenticated == false`, and `email` is `null` per the `SessionStatus`
+    /// contract ("User's email if authenticated").
+    ///
+    /// Reachability without a clock seam: forge a JWT with `exp == now`
+    /// (jsonwebtoken accepts `exp == now`; only `exp < now` is rejected) and
+    /// persist a *valid* session row keyed by the forged token's hash with
+    /// `expires_at` one hour in the future, so the cache-miss DB lookup returns
+    /// the row and the handler reaches `build_status` rather than bailing at
+    /// `session.is_none()`. `build_status`'s strict-`>` re-check then yields
+    /// `authenticated == false`.
+    #[tokio::test]
+    async fn test_auth_status_email_null_at_jwt_exp_boundary_via_router() {
+        use crate::db::{CreateSessionParams, SessionPurpose, create_session};
+        use crate::services::auth::{DecodedToken, decode_token};
+        use jiff::Timestamp;
+
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "boundary@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+
+        // Mint a real token to copy valid iss/aud/client_id claims, then
+        // re-sign with `exp == now`.
+        let real_token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let DecodedToken::AccessToken(mut claims) =
+            decode_token(&real_token, &state.oidc_key, &state.config().base_url)
+                .expect("real token must decode");
+        let now = Timestamp::now().as_second();
+        claims.exp = now;
+        claims.jti = uuid::Uuid::now_v7().to_string();
+        let forged = state
+            .oidc_key
+            .sign_access_token_jwt(&claims)
+            .await
+            .expect("sign forged access token");
+
+        // Persist a *valid* session row (expires_at 1h out) keyed by the forged
+        // hash so the cache-miss DB lookup returns the row.
+        let forged_hash = crypto::hash_token(&forged);
+        let expires_at =
+            Timestamp::from_second(now.saturating_add(3600)).expect("valid expires_at");
+        create_session(
+            &state.store,
+            &CreateSessionParams {
+                user_id: &user.id,
+                user_email: &user.email,
+                token_hash: &forged_hash,
+                authenticator_id: Some(&auth_id),
+                expires_at,
+                session_type: SessionPurpose::OAuthAccessToken,
+                authorization_details: None,
+                hardware_aaguid: None,
+                org_domain: None,
+                source_code_hash: None,
+                authenticated_at: None,
+                client_id: None,
+            },
+        )
+        .await
+        .expect("create session for forged token");
+
+        let auth_header = format!("Bearer {forged}");
+        let (status, body) =
+            http_get(&app, "/v1/auth/status", &[("Authorization", &auth_header)]).await;
+
+        assert_eq!(status, StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+        assert_eq!(json["authenticated"], false);
+        assert!(
+            json["email"].is_null(),
+            "email must be null when authenticated == false (boundary), got: {json}"
+        );
+    }
+
+    // ====================================================================
+    // logout handler — `Logout` audit event coverage
+    // ====================================================================
+
+    /// Query the audit store for `Logout` events for `user_id`, the way the
+    /// `logout_invalidates_exchange` policy and any audit-analytics consumer
+    /// would.
+    async fn logout_audit_events(state: &crate::AppState, user_id: &str) -> Vec<AuditEvent> {
+        state
+            .audit
+            .query_events(&AuditEventFilter {
+                event_types: Some(vec![AuditEventKind::Logout.as_str().to_string()]),
+                user_id: Some(user_id.to_string()),
+                ..AuditEventFilter::default()
+            })
+            .await
+            .expect("query audit events")
+    }
+
+    /// Regression test for the audit-integrity bug: a `POST /logout` whose
+    /// cookie session row is already expired (but still present in the DB)
+    /// must still record a `Logout` audit event. Before the fix the handler
+    /// fetched the audit context via the expiry-filtering
+    /// `get_session_by_token_hash`, which returned `None` for the expired
+    /// row, so the audit was silently dropped — even though
+    /// `delete_session_by_token_hash` successfully deleted the row.
+    #[tokio::test]
+    async fn test_logout_records_audit_event_for_expired_session_row() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "logout-expired@example.com").await;
+
+        let (token, token_hash) = create_test_expired_session_row(
+            &state,
+            &user.id,
+            &user.email,
+            None,
+            SessionPurpose::OAuthAccessToken,
+        )
+        .await;
+
+        // Sanity: the expiry-filtering lookup returns `None` for this row, so
+        // a fix that still gated the audit on that lookup would skip the
+        // event. This is the precondition the bug report describes.
+        let filtered =
+            db::get_session_by_token_hash(&state.store, &token_hash, jiff::Timestamp::now())
+                .await
+                .expect("filtered lookup");
+        assert!(filtered.is_none(), "expired row must be filtered out");
+
+        let cookie = format!("{}={token}", vouch_common::SESSION_COOKIE_NAME);
+        let (status, _body) = http_post_form(
+            &app,
+            "/logout",
+            "",
+            &[
+                ("Cookie", cookie.as_str()),
+                // `/logout` is mounted under the `same_origin` CSRF layer;
+                // it is the route's only CSRF defense. Same-origin passes.
+                ("Origin", "https://test.example.com"),
+            ],
+        )
+        .await;
+        assert_ne!(
+            status,
+            StatusCode::FORBIDDEN,
+            "same-origin POST must reach the handler"
+        );
+
+        // The row must be gone after logout.
+        let after = db::find_session_by_token_hash(&state.store, &token_hash)
+            .await
+            .expect("post-logout lookup");
+        assert!(after.is_none(), "session row must be deleted by logout");
+
+        // The `Logout` audit event must exist for this user — the bug dropped it.
+        let events = logout_audit_events(&state, &user.id).await;
+        assert_eq!(
+            events.len(),
+            1,
+            "a single Logout audit event must be recorded for the expired-but-present row"
+        );
+    }
+
+    /// A `POST /logout` for a session row that is still live must also record
+    /// the `Logout` audit event — guarding against a fix that broke the
+    /// happy path while repairing the expired-row case.
+    #[tokio::test]
+    async fn test_logout_records_audit_event_for_live_session() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "logout-live@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let token_hash = crypto::hash_token(&token);
+
+        let cookie = format!("{}={token}", vouch_common::SESSION_COOKIE_NAME);
+        let (status, _body) = http_post_form(
+            &app,
+            "/logout",
+            "",
+            &[
+                ("Cookie", cookie.as_str()),
+                ("Origin", "https://test.example.com"),
+            ],
+        )
+        .await;
+        assert_ne!(
+            status,
+            StatusCode::FORBIDDEN,
+            "same-origin POST must reach the handler"
+        );
+
+        let after = db::find_session_by_token_hash(&state.store, &token_hash)
+            .await
+            .expect("post-logout lookup");
+        assert!(
+            after.is_none(),
+            "live session row must be deleted by logout"
+        );
+
+        let events = logout_audit_events(&state, &user.id).await;
+        assert_eq!(
+            events.len(),
+            1,
+            "a single Logout audit event must be recorded for a live row"
+        );
+    }
+
+    /// A `POST /logout` with no cookie / no session row must NOT record a
+    /// `Logout` audit event — the audit fires only when a row was actually
+    /// deleted. Guards against a fix that records the event unconditionally.
+    #[tokio::test]
+    async fn test_logout_no_audit_event_when_no_session_row() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "logout-none@example.com").await;
+
+        let (status, _body) = http_post_form(
+            &app,
+            "/logout",
+            "",
+            &[("Origin", "https://test.example.com")],
+        )
+        .await;
+        assert_ne!(status, StatusCode::FORBIDDEN);
+
+        let events = logout_audit_events(&state, &user.id).await;
+        assert!(
+            events.is_empty(),
+            "no Logout audit event when there is no session to delete"
+        );
     }
 }

@@ -239,37 +239,53 @@ pub(crate) fn validate_hardware_attestation(attestation: &[u8]) -> AttestationVa
     }
 }
 
-/// Extract x5c DER certificate arrays from a CBOR-encoded attestation object.
+/// Extract the x5c DER certificate array from a CBOR-encoded attestation object.
 ///
-/// Parses the attestation object to find `attStmt.x5c` and returns the
-/// DER-encoded certificates as byte vectors.
-#[must_use]
-pub(crate) fn extract_x5c_from_attestation(attestation: &[u8]) -> Option<Vec<Vec<u8>>> {
-    let value: Value = ciborium::from_reader(attestation).ok()?;
-    let map = value.as_map()?;
+/// Returns `Ok(None)` when the object carries no `attStmt.x5c` member (or is
+/// not a parseable attestation object at all — the format gate rejects those
+/// separately). A present `x5c` must be a non-empty CBOR array whose every
+/// element is a byte string — the CDDL of every x5c-bearing format types the
+/// elements as `bytes` (WebAuthn Level 2 Section 8.2:
+/// `x5c: [ attestnCert: bytes, * (caCert: bytes) ]`) — so a non-conforming
+/// element is reported as `Err`, never silently dropped: this helper feeds the
+/// registration chokepoint, which must not accept a statement the verification
+/// libraries on either path would reject.
+pub(crate) fn extract_x5c_from_attestation(
+    attestation: &[u8],
+) -> Result<Option<Vec<Vec<u8>>>, &'static str> {
+    let Ok(value) = ciborium::from_reader::<Value, _>(attestation) else {
+        return Ok(None);
+    };
+    let Some(map) = value.as_map() else {
+        return Ok(None);
+    };
 
-    let att_stmt = map
+    let Some(att_stmt) = map
         .iter()
         .find(|(k, _)| k.as_text() == Some("attStmt"))
-        .and_then(|(_, v)| v.as_map())?;
+        .and_then(|(_, v)| v.as_map())
+    else {
+        return Ok(None);
+    };
 
-    let x5c_array = att_stmt
-        .iter()
-        .find(|(k, _)| k.as_text() == Some("x5c"))
-        .and_then(|(_, v)| v.as_array())?;
+    let Some((_, x5c_value)) = att_stmt.iter().find(|(k, _)| k.as_text() == Some("x5c")) else {
+        return Ok(None);
+    };
+    let Some(x5c_array) = x5c_value.as_array() else {
+        return Err("attStmt x5c is not an array");
+    };
+    if x5c_array.is_empty() {
+        return Err("attStmt x5c array is empty");
+    }
 
-    let certs: Vec<Vec<u8>> = x5c_array
-        .iter()
-        .filter_map(|item| {
-            if let Value::Bytes(bytes) = item {
-                Some(bytes.clone())
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    if certs.is_empty() { None } else { Some(certs) }
+    let mut certs = Vec::with_capacity(x5c_array.len());
+    for item in x5c_array {
+        let Value::Bytes(bytes) = item else {
+            return Err("attStmt x5c contains a non-byte-string element");
+        };
+        certs.push(bytes.clone());
+    }
+    Ok(Some(certs))
 }
 
 #[cfg(test)]
@@ -479,5 +495,84 @@ mod tests {
 
         let result = extract_attestation_format(&cbor_data);
         assert_eq!(result, None);
+    }
+
+    /// A minimal attestation object whose `attStmt.x5c` is the given value.
+    fn attestation_with_x5c(x5c: Value) -> Vec<u8> {
+        let mut cbor = Vec::new();
+        ciborium::into_writer(
+            &Value::Map(vec![
+                (
+                    Value::Text("fmt".to_string()),
+                    Value::Text("packed".to_string()),
+                ),
+                (
+                    Value::Text("authData".to_string()),
+                    Value::Bytes(vec![0u8; 37]),
+                ),
+                (
+                    Value::Text("attStmt".to_string()),
+                    Value::Map(vec![(Value::Text("x5c".to_string()), x5c)]),
+                ),
+            ]),
+            &mut cbor,
+        )
+        .ok();
+        cbor
+    }
+
+    #[test]
+    fn test_extract_x5c_returns_all_byte_string_elements() {
+        let att = attestation_with_x5c(Value::Array(vec![
+            Value::Bytes(vec![1, 2, 3]),
+            Value::Bytes(vec![4, 5, 6]),
+        ]));
+        assert_eq!(
+            extract_x5c_from_attestation(&att),
+            Ok(Some(vec![vec![1, 2, 3], vec![4, 5, 6]]))
+        );
+    }
+
+    #[test]
+    fn test_extract_x5c_absent_is_none() {
+        // No attStmt.x5c member at all: self attestation, not malformed.
+        let mut cbor = Vec::new();
+        ciborium::into_writer(
+            &Value::Map(vec![
+                (
+                    Value::Text("fmt".to_string()),
+                    Value::Text("packed".to_string()),
+                ),
+                (Value::Text("attStmt".to_string()), Value::Map(vec![])),
+            ]),
+            &mut cbor,
+        )
+        .ok();
+        assert_eq!(extract_x5c_from_attestation(&cbor), Ok(None));
+    }
+
+    /// WebAuthn L2 §8.2 CDDL types every x5c element as `bytes`
+    /// (`x5c: [ attestnCert: bytes, * (caCert: bytes) ]`). A non-byte-string
+    /// element makes the statement malformed; it is reported as an error,
+    /// never silently dropped (issue #1167).
+    #[test]
+    fn test_extract_x5c_rejects_non_byte_string_element() {
+        let att = attestation_with_x5c(Value::Array(vec![
+            Value::Bytes(vec![1, 2, 3]),
+            Value::Text("junk".to_string()),
+        ]));
+        assert!(extract_x5c_from_attestation(&att).is_err());
+    }
+
+    #[test]
+    fn test_extract_x5c_rejects_non_array_value() {
+        let att = attestation_with_x5c(Value::Bytes(vec![1, 2, 3]));
+        assert!(extract_x5c_from_attestation(&att).is_err());
+    }
+
+    #[test]
+    fn test_extract_x5c_rejects_empty_array() {
+        let att = attestation_with_x5c(Value::Array(vec![]));
+        assert!(extract_x5c_from_attestation(&att).is_err());
     }
 }

@@ -3,14 +3,18 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "2026.8.5"
+version = "2026.9.5"
 edition = "2024"
 license = "Apache-2.0 OR MIT"
-rust-version = "1.97.1"
+rust-version = "1.98.0"
 repository = "https://github.com/vouch-sh/vouch"
 publish = false
 
 [workspace.lints.rust]
+# Apple ld's "__eh_frame section too large (max 16MB)" note on the vouch-server
+# lib test binary is a known false positive with no rustc filter yet:
+# https://github.com/rust-lang/rust/issues/159105. Remove when rustc filters it.
+linker_messages = "allow"
 unsafe_code = "deny"
 unreachable_pub = "warn"
 non_ascii_idents = "deny"
@@ -20,6 +24,14 @@ unused_lifetimes = "warn"
 single_use_lifetimes = "warn"
 
 [workspace.lints.clippy]
+# Configured in `.clippy.toml`, enabled only in vouch-server's crate roots.
+disallowed_methods = "allow"
+
+# Own-crate items are imported with `use`, not spelled inline as deep paths.
+# Configured in `.clippy.toml` (`absolute-paths-*`) so only `crate::` and
+# `vouch_*::` paths are reported.
+absolute_paths = "deny"
+
 # Panic-prevention lints
 # See: https://blog.reverberate.org/2025/02/03/no-panic-rust.html
 # See: https://github.com/trailofbits/claude-code-config/blob/main/claude-md-template.md#rust
@@ -133,62 +145,65 @@ allow_attributes_without_reason = "deny"
 anyhow = { version = "=1.0.104", default-features = false }
 apple-native-keyring-store = { version = "=1.0.2", default-features = false }
 arc-swap = { version = "=1.9.2", default-features = false }
-askama = { version = "=0.16.0", default-features = false }
-aws-config = { version = "=1.11.0", default-features = false }
-aws-lc-rs = { version = "=1.18.0", default-features = false }
-aws-sdk-dsql = { version = "=1.68.0", default-features = false }
-aws-sdk-kms = { version = "=1.117.0", default-features = false }
-aws-sdk-s3 = { version = "=1.144.0", default-features = false }
-aws-sdk-ssm = { version = "=1.121.0", default-features = false }
-aws-smithy-types = { version = "=1.6.2", default-features = false }
+askama = { version = "=0.16.1", default-features = false }
+aws-config = { version = "=1.12.0", default-features = false }
+aws-lc-rs = { version = "=1.18.1", default-features = false }
+aws-sdk-dsql = { version = "=1.72.0", default-features = false }
+aws-sdk-kms = { version = "=1.121.0", default-features = false }
+aws-sdk-s3 = { version = "=1.149.0", default-features = false }
+aws-sdk-ssm = { version = "=1.125.0", default-features = false }
+aws-smithy-types = { version = "=1.8.0", default-features = false }
 axum = { version = "=0.8.9", default-features = false }
 axum-extra = { version = "=0.12.6", default-features = false }
 axum-server = { version = "=0.8.0", default-features = false }
 base64 = { version = "=0.23.1", default-features = false }
 ciborium = { version = "=0.2.2", default-features = false }
-clap = { version = "=4.6.6", default-features = false }
-clap_complete = { version = "=4.6.9", default-features = false }
+clap = { version = "=4.6.7", default-features = false }
+clap_complete = { version = "=4.6.11", default-features = false }
 const-oid = { version = "=0.9.6", default-features = false }
-ctap-hid-fido2 = { version = "=3.5.13", default-features = false }
+ctap-hid-fido2 = { version = "=3.6.0", default-features = false }
 der = { version = "=0.7.10", default-features = false }
-dirs = { version = "=6.0.0", default-features = false }
-dogwood-language = { git = "https://github.com/dogwood-policy/dogwood", rev = "c6237c88099b3f492ecc5fcee42df06a19224b97", package = "amzn-dogwood-language", default-features = false }
+dirs = { version = "=7.0.0", default-features = false }
+dogwood-language = { git = "https://github.com/dogwood-policy/dogwood", rev = "996d756de1013b7ae209a14f566a80375a59f2f0", package = "dogwood-language", default-features = false }
 dotenvy = { version = "=0.15.7", default-features = false }
 ed25519-dalek = { version = "=3.0.0", default-features = false }
-flate2 = { version = "=1.1.9", default-features = false }
+flate2 = { version = "=1.1.10", default-features = false }
 gethostname = { version = "=1.1.0", default-features = false }
 governor = { version = "=0.10.4", default-features = false }
-ipnet = { version = "=2.12.1", default-features = false }
+ipnet = { version = "=2.12.2", default-features = false }
 hex = { version = "=0.4.3", default-features = false }
-hickory-resolver = { version = "=0.26.1", default-features = false }
+hickory-resolver = { version = "=0.26.3", default-features = false }
 http = { version = "=1.5.0", default-features = false }
+hyper = { version = "=1.11.1", default-features = false }
+hyper-util = { version = "=0.1.21", default-features = false }
 fluent-bundle = { version = "=0.16.0", default-features = false }
 i18n-embed = { version = "=0.16.0", default-features = false }
 i18n-embed-fl = { version = "=0.10.1", default-features = false }
 idna = { version = "=1.1.0", default-features = false }
 inquire = { version = "=0.9.4", default-features = false }
-jiff = { version = "=0.2.35", default-features = false }
-jsonwebtoken = { version = "=11.0.0", default-features = false }
+jiff = { version = "=0.2.37", default-features = false }
+jsonwebtoken = { version = "=11.1.0", default-features = false }
 keyring-core = { version = "=1.0.0", default-features = false }
 libc = { version = "=0.2.189", default-features = false }
 linux-keyutils-keyring-store = { version = "=1.0.0", default-features = false }
-maxminddb = { version = "=0.30.3", default-features = false }
+maxminddb = { version = "=0.32.0", default-features = false }
 metrics = { version = "=0.24.6", default-features = false }
 metrics-exporter-prometheus = { version = "=0.18.3", default-features = false }
 mimalloc = { version = "=0.1.52", default-features = false }
-open = { version = "=5.4.2", default-features = false }
-opentelemetry = { version = "=0.32.0", default-features = false }
-opentelemetry_sdk = { version = "=0.32.1", default-features = false }
-opentelemetry-otlp = { version = "=0.32.0", default-features = false }
+open = { version = "=5.4.4", default-features = false }
+opentelemetry = { version = "=0.33.0", default-features = false }
+opentelemetry_sdk = { version = "=0.33.0", default-features = false }
+opentelemetry-otlp = { version = "=0.33.0", default-features = false }
 p256 = { version = "=0.13.2", default-features = false }
 proptest = { version = "=1.11.0", default-features = false }
-psl = { version = "=2.1.226", default-features = false }
-reqwest = { version = "=0.13.4", default-features = false }
+proxy-header = { version = "=0.1.3", default-features = false }
+psl = { version = "=2.1.237", default-features = false }
+reqwest = { version = "=0.13.5", default-features = false }
 roxmltree = { version = "=0.21.1", default-features = false }
 rpassword = { version = "=7.5.4", default-features = false }
 rust-embed = { version = "=8.12.0", default-features = false }
 rust-ini = { version = "=0.21.3", default-features = false }
-rustls = { version = "=0.23.43", default-features = false }
+rustls = { version = "=0.23.45", default-features = false }
 sea-query = { version = "=1.0.2", default-features = false }
 sea-query-sqlx = { version = "=0.9.1", default-features = false }
 sha2 = { version = "=0.10.9", default-features = false }
@@ -196,7 +211,7 @@ secrecy = { version = "=0.10.3", default-features = false }
 serde = { version = "=1.0.229", default-features = false }
 serde_json = { version = "=1.0.151", default-features = false }
 serde_urlencoded = { version = "=0.7.1", default-features = false }
-serde-saphyr = { version = "=1.1.0", default-features = false }
+serde-saphyr = { version = "=1.3.0", default-features = false }
 sqlx = { version = "=0.9.0", default-features = false }
 signature = { version = "=2.2.0", default-features = false }
 spki = { version = "=0.7.3", default-features = false }
@@ -204,22 +219,22 @@ ssh-key = { version = "=0.6.7", default-features = false }
 subtle = { version = "=2.6.1", default-features = false }
 sys-locale = { version = "=0.3.2", default-features = false }
 tempfile = { version = "=3.27.0", default-features = false }
-thiserror = { version = "=2.0.20", default-features = false }
+thiserror = { version = "=2.0.21", default-features = false }
 time = { version = "=0.3.55", default-features = false }
 tokio = { version = "=1.53.1", default-features = false }
-tokio-rustls = { version = "=0.26.4", default-features = false }
+tokio-rustls = { version = "=0.26.5", default-features = false }
 tokio-util = { version = "=0.7.19", default-features = false }
-toml_edit = { version = "=0.25.13", default-features = false }
+toml_edit = { version = "=0.25.15", default-features = false }
 tower = { version = "=0.5.3", default-features = false }
-tower-http = { version = "=0.7.0", default-features = false }
+tower-http = { version = "=0.7.1", default-features = false }
 tower_governor = { version = "=0.8.0", default-features = false }
 tracing = { version = "=0.1.44", default-features = false }
-tracing-opentelemetry = { version = "=0.33.0", default-features = false }
+tracing-opentelemetry = { version = "=0.34.0", default-features = false }
 tracing-subscriber = { version = "=0.3.23", default-features = false }
 unic-langid = { version = "=0.9.6", default-features = false }
 url = { version = "=2.5.8", default-features = false }
 urlencoding = { version = "=2.1.3", default-features = false }
-uuid = { version = "=1.26.0", default-features = false }
+uuid = { version = "=1.26.1", default-features = false }
 vouch-agent = { path = "crates/vouch-agent" }
 vouch-common = { path = "crates/vouch-common" }
 vouch-httpsig = { path = "crates/vouch-httpsig" }

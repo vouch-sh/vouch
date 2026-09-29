@@ -87,6 +87,55 @@ redirect. On Linux, binding below 1024 needs `CAP_NET_BIND_SERVICE`.
 - Tokens are shown once at creation and cannot be retrieved after
 - Generate a new token via the admin API (`POST /api/v1/org/scim-tokens`) and update the IdP configuration
 
+### Mutual-TLS Client Authentication Issues
+
+A client whose certificate fails authentication receives only `invalid_client`. The server logs
+the reason at `warn` with the client ID: search the log for `mTLS client authentication failed`.
+
+**`certificate chain not trusted` for a client using `tls_client_auth`**
+
+The client's certificate does not chain to a CA in `VOUCH_MTLS_CLIENT_CA_CERTS`, has expired or
+is not yet valid, or carries an extended key usage without client authentication. Check the chain
+against the same bundle the server loads:
+
+```bash
+openssl verify -purpose sslclient -CAfile /etc/vouch/mtls-client-cas.pem \
+  -untrusted intermediates.pem client.crt
+```
+
+A self-signed certificate never passes; register such a client with
+`self_signed_tls_client_auth` and its certificate in the JWKS `x5c` instead.
+
+**`tls_client_auth is not enabled`**
+
+`VOUCH_MTLS_CLIENT_CA_CERTS` is not set, so the server cannot validate any `tls_client_auth`
+certificate. Set it to the bundle of CAs that issue your clients' certificates and restart. See
+[TLS, Ports, and mTLS](../configuration/tls.md#client-certificate-authorities-for-tls_client_auth).
+
+**`subject mismatch` for a client using `tls_client_auth`**
+
+The registered `tls_client_auth_subject_dn` must be the **RFC 4514** string
+representation of the certificate subject, which lists RDNs in the reverse of
+their DER order. OpenSSL prints that order only when you ask for it:
+
+```bash
+openssl x509 -in client.crt -noout -subject -nameopt rfc2253
+```
+
+The default `-subject` output, the `Subject:` line in `-text`, and
+`-nameopt oneline` all print the **opposite** RDN order, so pasting any of them
+for a subject with two or more RDNs gives `subject mismatch`. For example, a
+certificate issued with `-subj '/O=Acme/CN=foo'` prints `O=Acme, CN=foo` by
+default but must be registered as `CN=foo,O=Acme`.
+
+When the registered value matches only after reversing the RDN order, the
+server logs a warning naming this as the cause — search the log for
+`RDN order reversed`.
+
+Spacing and attribute-name case are *not* significant: `O = Acme`, `o=acme`,
+and `O=Acme` all compare equal, as does a multi-valued RDN written
+`CN=foo + O=Acme` or `CN=foo+O=Acme`.
+
 ### Identity Provider Issues
 
 **"Failed to fetch upstream OIDC discovery document"**

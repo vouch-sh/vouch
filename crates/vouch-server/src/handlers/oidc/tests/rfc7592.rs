@@ -6,6 +6,14 @@
 //! Reference: <https://www.rfc-editor.org/rfc/rfc7592>
 
 use super::helpers::*;
+use crate::crypto::alg::JwsAlgorithm;
+use crate::db::documents::oauth::OAuthClientDoc;
+use crate::db::documents::session::SessionDoc;
+use crate::db::store::DocumentStore;
+use crate::db::{self, UpdateClientRegistrationParams, User};
+use crate::infra::router;
+use crate::test_utils::{TEST_JWK_EC_X, TEST_JWK_EC_Y, TEST_JWK_RSA_N};
+use crate::{crypto, test_utils};
 
 /// Register a client via POST /oauth/register, return (client_id, registration_access_token).
 async fn register_dynamic_client(app: &axum::Router) -> (String, String) {
@@ -75,7 +83,7 @@ fn es256_jwk() -> serde_json::Value {
 // =========================================================================
 // FAPI 2.0 JWKS algorithm usability on PUT — RFC 7592 §2.2 is a full
 // replacement, so a PUT that swaps in an RS256-only JWKS must be rejected
-// exactly like initial registration. See JwkSet::has_fapi_allowed_key.
+// exactly like initial registration. See JwkSet::has_client_assertion_key.
 // =========================================================================
 
 #[tokio::test]
@@ -91,7 +99,7 @@ async fn test_rfc7592_put_rejects_rs256_only_jwks_for_fapi_client() {
     let update_body = serde_json::json!({
         "redirect_uris": ["https://example.com/callback"],
         "jwks": {
-            "keys": [{"kty": "RSA", "alg": "RS256", "n": "n", "e": "AQAB"}]
+            "keys": [{"kty": "RSA", "alg": "RS256", "n": TEST_JWK_RSA_N, "e": "AQAB"}]
         }
     });
 
@@ -129,7 +137,7 @@ async fn test_rfc7592_put_accepts_unpinned_rsa_jwks_for_fapi_client() {
     let update_body = serde_json::json!({
         "redirect_uris": ["https://example.com/callback"],
         "jwks": {
-            "keys": [{"kty": "RSA", "n": "n", "e": "AQAB"}]
+            "keys": [{"kty": "RSA", "n": TEST_JWK_RSA_N, "e": "AQAB"}]
         }
     });
 
@@ -175,7 +183,7 @@ async fn test_rfc7592_put_accepts_rs256_only_jwks_for_non_fapi_client() {
     let update_body = serde_json::json!({
         "redirect_uris": ["https://example.com/callback"],
         "jwks": {
-            "keys": [{"kty": "RSA", "alg": "RS256", "n": "n", "e": "AQAB"}]
+            "keys": [{"kty": "RSA", "alg": "RS256", "n": TEST_JWK_RSA_N, "e": "AQAB"}]
         }
     });
 
@@ -196,6 +204,62 @@ async fn test_rfc7592_put_accepts_rs256_only_jwks_for_non_fapi_client() {
         StatusCode::OK,
         "RS256 must remain unrestricted for a non-FAPI client's PUT: {body}"
     );
+}
+
+// RFC 7592 §2.2 is a full replacement, so a PUT that swaps in a JWKS with
+// no usable client-assertion signing key must be rejected for a standard
+// (non-FAPI) private_key_jwt client — symmetric with the admin application
+// API/console update path (`validate_update_fapi`) and with initial
+// registration's create-side guard. An `use: "enc"`-only EC key has no key
+// the runtime matcher ever selects for signature verification, so the
+// client would be stored but permanently unable to authenticate.
+#[tokio::test]
+async fn test_rfc7592_put_rejects_unusable_jwks_for_non_fapi_private_key_jwt_client() {
+    let (app, _state) = test_app().await;
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "token_endpoint_auth_method": "private_key_jwt",
+        "jwks": {"keys": [es256_jwk()]}
+    });
+    let (status, reg_body) = http_post_json(&app, "/oauth/register", &body.to_string(), &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "registration failed: {reg_body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&reg_body).expect("Valid JSON");
+    let client_id = json["client_id"].as_str().expect("client_id").to_string();
+    let token = json["registration_access_token"]
+        .as_str()
+        .expect("registration_access_token")
+        .to_string();
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "jwks": {
+            "keys": [{"kty": "EC", "x": TEST_JWK_EC_X, "y": TEST_JWK_EC_Y, "crv": "P-256", "use": "enc"}]
+        }
+    });
+
+    let (status, body) = http_request(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(update_body.to_string()),
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an enc-only JWKS must be rejected on PUT for a non-FAPI private_key_jwt client: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_client_metadata");
 }
 
 #[tokio::test]
@@ -394,7 +458,7 @@ async fn test_rfc7592_put_rejects_self_signed_client_swapping_in_certificate_les
 
     let update_body = serde_json::json!({
         "redirect_uris": ["https://example.com/callback"],
-        "jwks": {"keys": [{"kty": "RSA", "n": "n", "e": "AQAB"}]}
+        "jwks": {"keys": [{"kty": "RSA", "n": TEST_JWK_RSA_N, "e": "AQAB"}]}
     });
 
     let (status, body) = http_request(
@@ -430,7 +494,7 @@ async fn test_rfc7592_put_rejects_jwks_with_type_invalid_key_member() {
 
     let update_body = serde_json::json!({
         "redirect_uris": ["https://example.com/callback"],
-        "jwks": {"keys": [{"kty": "EC", "use": 123}]}
+        "jwks": {"keys": [{"kty": "EC", "x": TEST_JWK_EC_X, "y": TEST_JWK_EC_Y, "use": 123}]}
     });
 
     let (status, body) = http_request(
@@ -491,6 +555,13 @@ async fn test_rfc7592_put_updates_redirect_uris() {
         uris[0].as_str().unwrap(),
         "https://new-callback.example.com/callback"
     );
+    // The PUT body includes `client_name`; it MUST be echoed back rather
+    // than silently ignored (RFC 7592 §2.2 — accepted fields replace).
+    assert_eq!(
+        json["client_name"].as_str().unwrap(),
+        "Updated Client",
+        "PUT must persist the client_name it accepted"
+    );
     // PUT must return a new registration_access_token (token rotation)
     let new_token = json["registration_access_token"]
         .as_str()
@@ -511,6 +582,1101 @@ async fn test_rfc7592_put_updates_redirect_uris() {
         get_json["redirect_uris"][0].as_str().unwrap(),
         "https://new-callback.example.com/callback",
         "Stored redirect_uri should match the PUT update"
+    );
+}
+
+/// Register a dynamically registered client whose `client_name` is `name`,
+/// returning `(client_id, registration_access_token)`.
+async fn register_named_client(app: &axum::Router, name: &str) -> (String, String) {
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": name
+    });
+
+    let (status, body) = http_post_json(app, "/oauth/register", &body.to_string(), &[]).await;
+    assert_eq!(status, StatusCode::CREATED, "Registration failed: {body}");
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let client_id = json["client_id"].as_str().expect("client_id").to_string();
+    let token = json["registration_access_token"]
+        .as_str()
+        .expect("registration_access_token")
+        .to_string();
+
+    (client_id, token)
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_updates_client_name() {
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_named_client(&app, "Original Client Name").await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "Updated Client Name"
+    });
+
+    let (status, body) = http_request(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(update_body.to_string()),
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "PUT failed: {body}");
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        json["client_name"].as_str().unwrap(),
+        "Updated Client Name",
+        "PUT response must echo updated client_name"
+    );
+
+    // The rotated token must be used to read back the persisted name.
+    let new_token = json["registration_access_token"]
+        .as_str()
+        .expect("PUT response must include a new registration_access_token")
+        .to_string();
+
+    let (status, body) = http_request(
+        &app,
+        "GET",
+        &format!("/oauth/register/{client_id}"),
+        None,
+        &[("Authorization", &format!("Bearer {new_token}"))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "GET after PUT failed: {body}");
+    let get_json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        get_json["client_name"].as_str().unwrap(),
+        "Updated Client Name",
+        "Stored client_name must match the PUT update"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_omitting_client_name_reverts_to_default() {
+    // RFC 7592 §2.2 is a full replacement: a PUT that omits `client_name`
+    // clears it. The `name` column is non-nullable, so the server reverts
+    // to the registration default ("Unnamed Client"), the same fallback
+    // `register_client` applies for an initial registration.
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_named_client(&app, "Branded Client").await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"]
+    });
+
+    let (status, body) = http_request(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(update_body.to_string()),
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "PUT failed: {body}");
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        json["client_name"].as_str().unwrap(),
+        "Unnamed Client",
+        "Omitting client_name on a full-replacement PUT must revert to the default"
+    );
+
+    let new_token = json["registration_access_token"]
+        .as_str()
+        .expect("registration_access_token")
+        .to_string();
+
+    // Read back via GET to confirm the default was persisted, not just echoed.
+    let (status, body) = http_request(
+        &app,
+        "GET",
+        &format!("/oauth/register/{client_id}"),
+        None,
+        &[("Authorization", &format!("Bearer {new_token}"))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "GET after PUT failed: {body}");
+    let get_json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        get_json["client_name"].as_str().unwrap(),
+        "Unnamed Client",
+        "Persisted client_name must be the default after being omitted on PUT"
+    );
+}
+
+// ========================================================================
+// RFC 7592 §2.2 full replacement — every metadata field with a dedicated
+// column, and the fields a PUT may not change.
+// ========================================================================
+
+/// PUT `body` to a client's configuration endpoint, returning `(status, body)`.
+async fn put_client_config(
+    app: &axum::Router,
+    client_id: &str,
+    token: &str,
+    body: &serde_json::Value,
+) -> (StatusCode, String) {
+    http_request(
+        app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(body.to_string()),
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await
+}
+
+/// GET a client's configuration with `token`, returning the parsed body.
+async fn get_client_config(app: &axum::Router, client_id: &str, token: &str) -> serde_json::Value {
+    let (status, body) = http_request(
+        app,
+        "GET",
+        &format!("/oauth/register/{client_id}"),
+        None,
+        &[("Authorization", &format!("Bearer {token}"))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "GET failed: {body}");
+    serde_json::from_str(&body).expect("Valid JSON")
+}
+
+/// The rotated registration access token from a successful PUT response.
+fn rotated_token(response: &serde_json::Value) -> String {
+    response["registration_access_token"]
+        .as_str()
+        .expect("PUT response must include a new registration_access_token")
+        .to_string()
+}
+
+/// Register a client carrying every metadata field with a dedicated column
+/// that an RFC 7592 PUT may replace. Returns `(client_id, token)`.
+async fn register_fully_specified_client(app: &axum::Router) -> (String, String) {
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "Fully Specified Client",
+        "software_id": "urn:example:software",
+        "software_version": "1.0.0",
+        "id_token_signed_response_alg": "ES256",
+        "authorization_signed_response_alg": "ES256",
+        "introspection_signed_response_alg": "ES256",
+        "tls_client_auth_subject_dn": "CN=original.example.com",
+        "tls_client_auth_san_dns": "original.example.com",
+        "tls_client_auth_san_uri": "https://original.example.com/id",
+        "tls_client_auth_san_ip": "198.51.100.1",
+        "tls_client_auth_san_email": "original@example.com"
+    });
+
+    let (status, body) = http_post_json(app, "/oauth/register", &body.to_string(), &[]).await;
+    assert_eq!(status, StatusCode::CREATED, "Registration failed: {body}");
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let client_id = json["client_id"].as_str().expect("client_id").to_string();
+    let token = json["registration_access_token"]
+        .as_str()
+        .expect("registration_access_token")
+        .to_string();
+
+    (client_id, token)
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_updates_software_id_and_version() {
+    // RFC 7592 §2.2: "Valid values of client metadata fields in this request
+    // MUST replace, not augment, the values previously associated with this
+    // client."
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_fully_specified_client(&app).await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "software_id": "urn:example:software-v2",
+        "software_version": "2.5.1"
+    });
+
+    let (status, body) = put_client_config(&app, &client_id, &token, &update_body).await;
+    assert_eq!(status, StatusCode::OK, "PUT failed: {body}");
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        json["software_id"].as_str(),
+        Some("urn:example:software-v2"),
+        "PUT response must echo the updated software_id: {json}"
+    );
+    assert_eq!(
+        json["software_version"].as_str(),
+        Some("2.5.1"),
+        "PUT response must echo the updated software_version: {json}"
+    );
+
+    let stored = get_client_config(&app, &client_id, &rotated_token(&json)).await;
+    assert_eq!(
+        stored["software_id"].as_str(),
+        Some("urn:example:software-v2"),
+        "software_id must be persisted, not just echoed: {stored}"
+    );
+    assert_eq!(
+        stored["software_version"].as_str(),
+        Some("2.5.1"),
+        "software_version must be persisted, not just echoed: {stored}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_omitting_software_fields_clears_them() {
+    // RFC 7592 §2.2: "Omitted fields MUST be treated as null or empty values
+    // by the server, indicating the client's request to delete them from the
+    // client's registration."
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_fully_specified_client(&app).await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"]
+    });
+
+    let (status, body) = put_client_config(&app, &client_id, &token, &update_body).await;
+    assert_eq!(status, StatusCode::OK, "PUT failed: {body}");
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let stored = get_client_config(&app, &client_id, &rotated_token(&json)).await;
+    for field in ["software_id", "software_version"] {
+        assert!(
+            stored.get(field).is_none_or(serde_json::Value::is_null),
+            "{field} must be cleared by a PUT that omits it, got: {stored}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_rejects_software_id_containing_nul() {
+    // software_id is an indexed field and the store refuses a NUL byte in an
+    // index value. That is a malformed metadata value, so it is reported as
+    // RFC 7591 Section 3.2.2 `invalid_client_metadata`, not as a server fault.
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_dynamic_client(&app).await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "software_id": "urn:example:soft\u{0}ware"
+    });
+
+    let (status, body) = put_client_config(&app, &client_id, &token, &update_body).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a NUL byte in software_id is a client error, not a 500: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(json["error"].as_str(), Some("invalid_client_metadata"));
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_updates_signed_response_algs() {
+    // RFC 7592 §2.2 replacement applied to the JARM Section 2.3.2 and
+    // RFC 9701 Section 6.1 signing algorithms, which have dedicated columns.
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_dynamic_client(&app).await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "id_token_signed_response_alg": "ES256",
+        "authorization_signed_response_alg": "ES256",
+        "introspection_signed_response_alg": "ES256"
+    });
+
+    let (status, body) = put_client_config(&app, &client_id, &token, &update_body).await;
+    assert_eq!(status, StatusCode::OK, "PUT failed: {body}");
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let stored = get_client_config(&app, &client_id, &rotated_token(&json)).await;
+    for field in [
+        "id_token_signed_response_alg",
+        "authorization_signed_response_alg",
+        "introspection_signed_response_alg",
+    ] {
+        assert_eq!(
+            stored[field].as_str(),
+            Some("ES256"),
+            "{field} must be persisted by PUT: {stored}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_omitting_signed_response_algs_clears_them() {
+    // The JARM and RFC 9701 algorithms are nullable and clear on omission.
+    // `id_token_signed_response_alg` cannot: OIDC Core Section 3.1.3.7 gives it a
+    // default, so an omitted field resolves to the server default (ES256
+    // here, with no RSA signing key configured) rather than to null.
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_fully_specified_client(&app).await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"]
+    });
+
+    let (status, body) = put_client_config(&app, &client_id, &token, &update_body).await;
+    assert_eq!(status, StatusCode::OK, "PUT failed: {body}");
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let stored = get_client_config(&app, &client_id, &rotated_token(&json)).await;
+    for field in [
+        "authorization_signed_response_alg",
+        "introspection_signed_response_alg",
+    ] {
+        assert!(
+            stored.get(field).is_none_or(serde_json::Value::is_null),
+            "{field} must be cleared by a PUT that omits it, got: {stored}"
+        );
+    }
+    assert_eq!(
+        stored["id_token_signed_response_alg"].as_str(),
+        Some("ES256"),
+        "id_token_signed_response_alg must fall back to the server default: {stored}"
+    );
+}
+
+/// RFC 7592 §3 (GET) uses the same response format as RFC 7591 §3.2.1, so the
+/// five RFC 8705 §2.1.2 certificate-subject parameters registered by
+/// `register_fully_specified_client` must be readable back via GET.
+#[tokio::test]
+async fn test_rfc7592_get_response_echoes_rfc8705_identity() {
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_fully_specified_client(&app).await;
+
+    let stored = get_client_config(&app, &client_id, &token).await;
+    // RFC 8705 §2.1.2: each registered certificate-subject parameter is echoed.
+    assert_eq!(
+        stored["tls_client_auth_subject_dn"].as_str(),
+        Some("CN=original.example.com"),
+        "GET must echo the registered subject DN: {stored}"
+    );
+    assert_eq!(
+        stored["tls_client_auth_san_dns"].as_str(),
+        Some("original.example.com"),
+        "GET must echo the registered san_dns: {stored}"
+    );
+    assert_eq!(
+        stored["tls_client_auth_san_uri"].as_str(),
+        Some("https://original.example.com/id"),
+        "GET must echo the registered san_uri: {stored}"
+    );
+    assert_eq!(
+        stored["tls_client_auth_san_ip"].as_str(),
+        Some("198.51.100.1"),
+        "GET must echo the registered san_ip: {stored}"
+    );
+    assert_eq!(
+        stored["tls_client_auth_san_email"].as_str(),
+        Some("original@example.com"),
+        "GET must echo the registered san_email: {stored}"
+    );
+    // The cert-bound flag was not registered, so it is omitted (None), as is
+    // the unrelated DPoP flag.
+    for field in [
+        "tls_client_certificate_bound_access_tokens",
+        "dpop_bound_access_tokens",
+    ] {
+        assert!(
+            stored.get(field).is_none_or(serde_json::Value::is_null),
+            "{field} must be absent when not registered, got: {stored}"
+        );
+    }
+}
+
+/// RFC 7592 §3 (GET) must echo RFC 8705 §3's `tls_client_certificate_bound_
+/// access_tokens` for a cert-bound client, so a client can read back that its
+/// access tokens are certificate-bound.
+#[tokio::test]
+async fn test_rfc7592_get_response_echoes_tls_certificate_bound_flag() {
+    let (app, _state) = test_app().await;
+
+    let cert_der = make_test_cert_der("rfc7592-cert-bound-get-echo");
+    let x5c_b64 = base64::engine::general_purpose::STANDARD.encode(&cert_der);
+
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "Cert-Bound GET Echo Client",
+        "token_endpoint_auth_method": "self_signed_tls_client_auth",
+        "tls_client_certificate_bound_access_tokens": true,
+        "jwks": {
+            "keys": [{"kty": "RSA", "alg": "RS256", "x5c": [x5c_b64]}]
+        }
+    });
+
+    let (status, body) = http_post_json(&app, "/oauth/register", &body.to_string(), &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "cert-bound registration must succeed: {body}"
+    );
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    // The RFC 7591 registration response already echoes the flag.
+    assert_eq!(
+        json["tls_client_certificate_bound_access_tokens"], true,
+        "registration response must echo the cert-bound flag: {json}"
+    );
+    let client_id = json["client_id"].as_str().expect("client_id").to_string();
+    let token = json["registration_access_token"]
+        .as_str()
+        .expect("registration_access_token")
+        .to_string();
+
+    let stored = get_client_config(&app, &client_id, &token).await;
+    // RFC 7592 §3 GET echoes the stored cert-bound flag.
+    assert_eq!(
+        stored["tls_client_certificate_bound_access_tokens"], true,
+        "GET must echo the stored cert-bound flag: {stored}"
+    );
+    // The five RFC 8705 §2.1.2 parameters were not registered, so they're absent.
+    for field in [
+        "tls_client_auth_subject_dn",
+        "tls_client_auth_san_dns",
+        "tls_client_auth_san_uri",
+        "tls_client_auth_san_ip",
+        "tls_client_auth_san_email",
+    ] {
+        assert!(
+            stored.get(field).is_none_or(serde_json::Value::is_null),
+            "{field} must be absent when not registered, got: {stored}"
+        );
+    }
+}
+
+/// RFC 7592 §3 marks `registration_access_token` as REQUIRED in every Client
+/// Information Response, and §2.1 states the GET response uses "a payload as
+/// described in Section 3" (`specs/rfc/rfc7592.txt:315-318`). The GET response
+/// must therefore include a `registration_access_token` member; it may not be
+/// elided by `#[serde(skip_serializing_if = "Option::is_none")]`.
+///
+/// The GET is a read (RFC 7592 §2.1, "Client Configuration Read Request"), so
+/// the presented bearer token is echoed back unchanged rather than rotated:
+/// rotation on a read is MAY per §5, not MUST, and would invalidate the
+/// caller's stored credential. This test pins both the field's presence
+/// (§3 conformance) and the idempotent, non-rotating read semantics that
+/// `vouch-cli`'s `is_client_registered` relies on.
+#[tokio::test]
+async fn test_rfc7592_get_includes_registration_access_token_per_section_3() {
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_fully_specified_client(&app).await;
+
+    let stored = get_client_config(&app, &client_id, &token).await;
+
+    // RFC 7592 §3: registration_access_token is REQUIRED. The field MUST
+    // appear in the GET response (it must not be elided by
+    // `skip_serializing_if = "Option::is_none"`).
+    assert!(
+        stored.get("registration_access_token").is_some(),
+        "RFC 7592 §3: registration_access_token is REQUIRED but absent from \
+         GET response: {stored}"
+    );
+
+    // RFC 7592 §3 also marks registration_client_uri REQUIRED; its presence
+    // confirms the response is shaped as a §3 Client Information Response.
+    assert!(
+        stored.get("registration_client_uri").is_some(),
+        "RFC 7592 §3: registration_client_uri is REQUIRED but absent from GET \
+         response: {stored}"
+    );
+
+    // A read is idempotent (RFC 7592 §2.1): the GET echoes the presented
+    // bearer token verbatim rather than rotating it. Rotation on a read is
+    // MAY per §5, not MUST, and rotating would silently invalidate the
+    // caller's stored credential (see `read_client_configuration`).
+    assert_eq!(
+        stored["registration_access_token"].as_str(),
+        Some(token.as_str()),
+        "GET must echo the presented registration_access_token, not a rotated \
+         one: {stored}"
+    );
+
+    // The echoed token must still be valid for a subsequent read — a GET
+    // must not rotate the credential out from under its caller. This guards
+    // against a regression to rotation-on-read, which would break management
+    // clients that reuse the token they already hold (e.g. `vouch-cli`'s
+    // `is_client_registered`).
+    let (status, body) = http_request(
+        &app,
+        "GET",
+        &format!("/oauth/register/{client_id}"),
+        None,
+        &[("Authorization", &format!("Bearer {token}"))],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the original registration_access_token must still work after a GET \
+         (a read must not rotate it): {body}"
+    );
+}
+
+/// RFC 7592 §2.2 (PUT) uses the same response format as RFC 7591 §3.2.1, so an
+/// updated RFC 8705 §2.1.2 certificate-subject parameter must be echoed in the
+/// PUT response and persisted to a subsequent GET.
+#[tokio::test]
+async fn test_rfc7592_put_response_echoes_rfc8705_identity() {
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_fully_specified_client(&app).await;
+
+    // Restate the registered certificate-subject parameters, rotating san_dns,
+    // so the PUT response and the subsequent GET must both reflect the change.
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "tls_client_auth_subject_dn": "CN=original.example.com",
+        "tls_client_auth_san_dns": "rotated.example.com",
+        "tls_client_auth_san_uri": "https://original.example.com/id",
+        "tls_client_auth_san_ip": "198.51.100.1",
+        "tls_client_auth_san_email": "original@example.com"
+    });
+
+    let (status, body) = put_client_config(&app, &client_id, &token, &update_body).await;
+    assert_eq!(status, StatusCode::OK, "PUT failed: {body}");
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    // RFC 8705 §2.1.2: the updated value is echoed in the PUT response.
+    assert_eq!(
+        json["tls_client_auth_san_dns"].as_str(),
+        Some("rotated.example.com"),
+        "PUT response must echo the updated san_dns: {json}"
+    );
+    // The restated parameters echo their registered values.
+    assert_eq!(
+        json["tls_client_auth_subject_dn"].as_str(),
+        Some("CN=original.example.com"),
+        "PUT response must echo the restated subject DN: {json}"
+    );
+    assert_eq!(
+        json["tls_client_auth_san_uri"].as_str(),
+        Some("https://original.example.com/id"),
+        "PUT response must echo the restated san_uri: {json}"
+    );
+    assert_eq!(
+        json["tls_client_auth_san_ip"].as_str(),
+        Some("198.51.100.1"),
+        "PUT response must echo the restated san_ip: {json}"
+    );
+    assert_eq!(
+        json["tls_client_auth_san_email"].as_str(),
+        Some("original@example.com"),
+        "PUT response must echo the restated san_email: {json}"
+    );
+
+    // Persisted, not just echoed: a subsequent GET reflects the PUT.
+    let stored = get_client_config(&app, &client_id, &rotated_token(&json)).await;
+    assert_eq!(
+        stored["tls_client_auth_san_dns"].as_str(),
+        Some("rotated.example.com"),
+        "GET must reflect the PUT-updated san_dns: {stored}"
+    );
+    assert_eq!(
+        stored["tls_client_auth_subject_dn"].as_str(),
+        Some("CN=original.example.com"),
+        "GET must reflect the restated subject DN: {stored}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_omitting_id_token_alg_keeps_the_registered_one() {
+    // A server with an RSA key defaults new registrations to RS256 (OIDC Core
+    // Section 3.1.3.7), which every deployment has — `oidc_rsa_key` is always
+    // initialized at startup. Re-deriving that default for a PUT that omits
+    // the field would move a client that chose ES256 onto RS256, so an
+    // omitted value keeps what the client registered instead. RFC 7592 §2.2:
+    // "The authorization server MAY ignore any null or empty value in the
+    // request just as any other value."
+    let state = test_utils::test_app_state_with_rsa_key().await;
+    let config = state.config();
+    let app = router::build_app(state.clone(), &config).expect("Failed to build test app router");
+
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "ES256 Client",
+        "id_token_signed_response_alg": "ES256"
+    });
+    let (status, reg_body) = http_post_json(&app, "/oauth/register", &body.to_string(), &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "Registration failed: {reg_body}"
+    );
+    let reg: serde_json::Value = serde_json::from_str(&reg_body).expect("Valid JSON");
+    assert_eq!(
+        reg["id_token_signed_response_alg"].as_str(),
+        Some("ES256"),
+        "setup: the client must start on ES256, not the RS256 default: {reg}"
+    );
+    let client_id = reg["client_id"].as_str().expect("client_id").to_string();
+    let token = rotated_token(&reg);
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback2"]
+    });
+    let (status, body) = put_client_config(&app, &client_id, &token, &update_body).await;
+    assert_eq!(status, StatusCode::OK, "PUT failed: {body}");
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        json["id_token_signed_response_alg"].as_str(),
+        Some("ES256"),
+        "a PUT that omits id_token_signed_response_alg must not downgrade the \
+         client from ES256 to the server's RS256 default: {json}"
+    );
+
+    let stored = get_client_config(&app, &client_id, &rotated_token(&json)).await;
+    assert_eq!(
+        stored["id_token_signed_response_alg"].as_str(),
+        Some("ES256"),
+        "the registered algorithm must survive the update: {stored}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_rejects_invalid_id_token_signing_alg() {
+    // RFC 7592 §2.2: "If the client attempts to set an invalid metadata field
+    // and the authorization server does not set a default value, the
+    // authorization server responds with an error as described in [RFC7591]."
+    // PS256 parses as a JWS algorithm but is not offered for ID tokens.
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_dynamic_client(&app).await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "id_token_signed_response_alg": "PS256"
+    });
+
+    let (status, body) = put_client_config(&app, &client_id, &token, &update_body).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an unsupported id_token_signed_response_alg must be rejected, not \
+         accepted and dropped: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(json["error"].as_str(), Some("invalid_client_metadata"));
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_rejects_invalid_introspection_signing_alg() {
+    // RFC 9701 Section 6.1 responses are signed with the server's P-256 key, so
+    // ES256 is the only value this server accepts.
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_dynamic_client(&app).await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "introspection_signed_response_alg": "RS256"
+    });
+
+    let (status, body) = put_client_config(&app, &client_id, &token, &update_body).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an unsupported introspection_signed_response_alg must be rejected: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(json["error"].as_str(), Some("invalid_client_metadata"));
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_rejects_rs256_id_token_alg_for_fapi_client() {
+    // FAPI 2.0 Section 5.4 forbids RS256 for a FAPI client. The profile is fixed at
+    // registration, so the update path re-applies the restriction.
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_fapi_dynamic_client(
+        &app,
+        "private_key_jwt",
+        serde_json::json!({"keys": [es256_jwk()]}),
+    )
+    .await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "dpop_bound_access_tokens": true,
+        "jwks": {"keys": [es256_jwk()]},
+        "id_token_signed_response_alg": "RS256"
+    });
+
+    let (status, body) = put_client_config(&app, &client_id, &token, &update_body).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "RS256 must stay refused for a FAPI client on PUT: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(json["error"].as_str(), Some("invalid_client_metadata"));
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_updates_mtls_client_auth_fields() {
+    // RFC 8705 Section 2.1.2 certificate-matching metadata. Each has a
+    // dedicated column, so RFC 7592 §2.2 replacement applies to all five.
+    let (app, state) = test_app().await;
+    let (client_id, token) = register_fully_specified_client(&app).await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "tls_client_auth_subject_dn": "CN=rotated.example.com",
+        "tls_client_auth_san_dns": "rotated.example.com",
+        "tls_client_auth_san_uri": "https://rotated.example.com/id",
+        "tls_client_auth_san_ip": "203.0.113.9",
+        "tls_client_auth_san_email": "rotated@example.com"
+    });
+
+    let (status, body) = put_client_config(&app, &client_id, &token, &update_body).await;
+    assert_eq!(status, StatusCode::OK, "PUT failed: {body}");
+
+    // These five are not echoed in the client information response, so the
+    // stored record is the only place the update is observable.
+    let stored = db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup ok")
+        .expect("client exists");
+    assert_eq!(
+        stored.tls_client_auth_subject_dn.as_deref(),
+        Some("CN=rotated.example.com")
+    );
+    assert_eq!(
+        stored.tls_client_auth_san_dns.as_deref(),
+        Some("rotated.example.com")
+    );
+    assert_eq!(
+        stored.tls_client_auth_san_uri.as_deref(),
+        Some("https://rotated.example.com/id")
+    );
+    assert_eq!(
+        stored.tls_client_auth_san_ip.as_deref(),
+        Some("203.0.113.9")
+    );
+    assert_eq!(
+        stored.tls_client_auth_san_email.as_deref(),
+        Some("rotated@example.com")
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_omitting_mtls_client_auth_fields_clears_them() {
+    // RFC 7592 §2.2 full replacement, applied to the RFC 8705 Section 2.1.2 fields.
+    let (app, state) = test_app().await;
+    let (client_id, token) = register_fully_specified_client(&app).await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"]
+    });
+
+    let (status, body) = put_client_config(&app, &client_id, &token, &update_body).await;
+    assert_eq!(status, StatusCode::OK, "PUT failed: {body}");
+
+    let stored = db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup ok")
+        .expect("client exists");
+    assert_eq!(stored.tls_client_auth_subject_dn, None);
+    assert_eq!(stored.tls_client_auth_san_dns, None);
+    assert_eq!(stored.tls_client_auth_san_uri, None);
+    assert_eq!(stored.tls_client_auth_san_ip, None);
+    assert_eq!(stored.tls_client_auth_san_email, None);
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_empty_optional_strings_are_not_stored() {
+    // The empty-is-absent rule is in the shared `RegistrationRequest`, so it
+    // applies to the PUT body too: emptying these is the same request as
+    // omitting them, which RFC 7592 §2.2 replacement treats as a delete.
+    let (app, state) = test_app().await;
+    let (client_id, token) = register_fully_specified_client(&app).await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "",
+        "software_id": "",
+        "software_version": "",
+        "scope": "",
+        "contacts": [],
+        "request_uris": []
+    });
+
+    let (status, body) = put_client_config(&app, &client_id, &token, &update_body).await;
+    assert_eq!(status, StatusCode::OK, "PUT failed: {body}");
+
+    let stored = db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup ok")
+        .expect("client exists");
+
+    // The name column is non-nullable, so it takes the registration default.
+    assert_eq!(stored.name, "Unnamed Client");
+    assert_eq!(stored.software_id, None);
+    assert_eq!(stored.software_version, None);
+    assert_eq!(stored.request_uris, None);
+    let metadata = stored
+        .registration_metadata
+        .unwrap_or(serde_json::Value::Null);
+    assert!(
+        metadata.get("scope").is_none() && metadata.get("contacts").is_none(),
+        "empty scope/contacts must not be stored: {metadata}"
+    );
+}
+
+/// Register a `tls_client_auth` client carrying exactly one RFC 8705 §2.1.2
+/// certificate-subject parameter, returning its `client_id` and registration
+/// access token.
+///
+/// The five parameters are only load-bearing for this authentication method,
+/// so the full-replacement tests above — which register `client_secret_basic`
+/// — cannot exercise the rule that governs them.
+async fn register_mtls_client(app: &axum::Router) -> (String, String) {
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "mTLS Client",
+        "token_endpoint_auth_method": "tls_client_auth",
+        "tls_client_auth_subject_dn": "CN=original.example.com"
+    });
+
+    let (status, body) = http_post_json(app, "/oauth/register", &body.to_string(), &[]).await;
+    assert_eq!(status, StatusCode::CREATED, "Registration failed: {body}");
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let client_id = json["client_id"].as_str().expect("client_id").to_string();
+    let token = json["registration_access_token"]
+        .as_str()
+        .expect("registration_access_token")
+        .to_string();
+
+    (client_id, token)
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_refuses_to_clear_mtls_identity_of_tls_client_auth_client() {
+    // RFC 8705 §2.1.2: "A client using the "tls_client_auth" authentication
+    // method MUST use exactly one of the below metadata parameters to indicate
+    // the certificate subject value that the authorization server is to expect
+    // when authenticating the respective client."
+    //
+    // RFC 7592 §2.2 replacement would otherwise clear all five, leaving a
+    // client `verify_tls_client_auth` reads as CertificateNotRegistered.
+    let (app, state) = test_app().await;
+    let (client_id, token) = register_mtls_client(&app).await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "token_endpoint_auth_method": "tls_client_auth"
+    });
+
+    let (status, body) = put_client_config(&app, &client_id, &token, &update_body).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "clearing every identity field of a tls_client_auth client must be refused: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(json["error"].as_str(), Some("invalid_client_metadata"));
+
+    // A refused update must not have written anything.
+    let stored = db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup ok")
+        .expect("client exists");
+    assert_eq!(
+        stored.tls_client_auth_subject_dn.as_deref(),
+        Some("CN=original.example.com"),
+        "the registered identity field must survive a refused PUT"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_replaces_the_single_mtls_identity_of_tls_client_auth_client() {
+    // RFC 7592 §2.2 replacement still applies within the one-field rule: a PUT
+    // naming a different parameter moves the client onto it and clears the old.
+    let (app, state) = test_app().await;
+    let (client_id, token) = register_mtls_client(&app).await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "token_endpoint_auth_method": "tls_client_auth",
+        "tls_client_auth_san_dns": "rotated.example.com"
+    });
+
+    let (status, body) = put_client_config(&app, &client_id, &token, &update_body).await;
+    assert_eq!(status, StatusCode::OK, "PUT failed: {body}");
+
+    let stored = db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup ok")
+        .expect("client exists");
+    assert_eq!(
+        stored.tls_client_auth_san_dns.as_deref(),
+        Some("rotated.example.com")
+    );
+    assert_eq!(stored.tls_client_auth_subject_dn, None);
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_refuses_empty_mtls_identity_for_tls_client_auth_client() {
+    // An empty string is not a certificate subject anything can match, so it
+    // deserializes as absent and cannot satisfy RFC 8705 §2.1.2's one-field
+    // rule. Otherwise a PUT could blank the client's identity while passing.
+    let (app, state) = test_app().await;
+    let (client_id, token) = register_mtls_client(&app).await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "token_endpoint_auth_method": "tls_client_auth",
+        "tls_client_auth_subject_dn": ""
+    });
+
+    let (status, body) = put_client_config(&app, &client_id, &token, &update_body).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an empty identity field must not satisfy the one-field rule: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(json["error"].as_str(), Some("invalid_client_metadata"));
+
+    let stored = db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup ok")
+        .expect("client exists");
+    assert_eq!(
+        stored.tls_client_auth_subject_dn.as_deref(),
+        Some("CN=original.example.com"),
+        "the registered identity field must survive a refused PUT"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_refuses_multiple_mtls_identities_for_tls_client_auth_client() {
+    // RFC 8705 §2.1.2 requires exactly one. `verify_tls_client_auth` consults
+    // the parameters in a fixed precedence order and returns on the first one
+    // present, so a second would be silently ignored.
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_mtls_client(&app).await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "token_endpoint_auth_method": "tls_client_auth",
+        "tls_client_auth_subject_dn": "CN=rotated.example.com",
+        "tls_client_auth_san_dns": "rotated.example.com"
+    });
+
+    let (status, body) = put_client_config(&app, &client_id, &token, &update_body).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "two identity fields must be refused: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(json["error"].as_str(), Some("invalid_client_metadata"));
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_accepts_restated_immutable_fields() {
+    // RFC 7592 §2.2: "This request MUST include all client metadata fields as
+    // returned to the client from a previous registration, read, or update
+    // operation." A conforming client restates the immutable fields on every
+    // update, so restating them must succeed.
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_dynamic_client(&app).await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "token_endpoint_auth_method": "client_secret_basic",
+        "application_type": "web",
+        "dpop_bound_access_tokens": false,
+        "tls_client_certificate_bound_access_tokens": false
+    });
+
+    let (status, body) = put_client_config(&app, &client_id, &token, &update_body).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "restating a client's registered immutable values must not be an error: {body}"
+    );
+}
+
+/// Every field an RFC 7592 PUT refuses to change, with the value that differs
+/// from what `register_dynamic_client` registers.
+///
+/// Each fixes the client's security class rather than describing it, so a PUT
+/// that changes one is refused with RFC 7591 Section 3.2.2 `invalid_client_metadata`
+/// instead of returning 200 for an update that did nothing.
+#[tokio::test]
+async fn test_rfc7592_put_rejects_changed_immutable_fields() {
+    let (app, _state) = test_app().await;
+
+    let changes = [
+        ("token_endpoint_auth_method", serde_json::json!("none")),
+        ("application_type", serde_json::json!("native")),
+        ("dpop_bound_access_tokens", serde_json::json!(true)),
+        (
+            "tls_client_certificate_bound_access_tokens",
+            serde_json::json!(true),
+        ),
+    ];
+
+    for (field, changed) in changes {
+        let (client_id, token) = register_dynamic_client(&app).await;
+        let mut update_body = serde_json::json!({
+            "redirect_uris": ["https://example.com/callback"]
+        });
+        update_body[field] = changed.clone();
+
+        let (status, body) = put_client_config(&app, &client_id, &token, &update_body).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "changing {field} to {changed} must be refused, not silently \
+             dropped behind a 200: {body}"
+        );
+        let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(
+            json["error"].as_str(),
+            Some("invalid_client_metadata"),
+            "changing {field} must report invalid_client_metadata: {json}"
+        );
+        assert!(
+            json["error_description"]
+                .as_str()
+                .is_some_and(|d| d.contains(field)),
+            "the error must name the field that was refused: {json}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_rejects_native_redirect_scheme_for_web_client() {
+    // `application_type` is immutable, so a web client cannot declare itself
+    // native to slip a private-use URI scheme past the redirect URI rules
+    // (OIDC Core Section 3.1.2.1 permits the scheme for native clients only).
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_dynamic_client(&app).await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["com.example.app://callback"],
+        "application_type": "native"
+    });
+
+    let (status, body) = put_client_config(&app, &client_id, &token, &update_body).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a web client must not register a private-use URI scheme by \
+         redeclaring itself native: {body}"
     );
 }
 
@@ -638,13 +1804,16 @@ async fn test_rfc7592_put_invalid_bearer_token() {
 
 #[tokio::test]
 async fn test_rfc7592_put_nonexistent_client() {
+    // RFC 7592 §2.2 + §5: a `client_id` that does not exist must be
+    // indistinguishable from an invalid-token case — both return 401
+    // `invalid_token`, never 404 (which would disclose client existence).
     let (app, _state) = test_app().await;
 
     let update_body = serde_json::json!({
         "redirect_uris": ["https://example.com/callback"]
     });
 
-    let (status, _body) = http_request(
+    let response = http_request_full(
         &app,
         "PUT",
         "/oauth/register/nonexistent-client-id",
@@ -655,7 +1824,19 @@ async fn test_rfc7592_put_nonexistent_client() {
         ],
     )
     .await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        response.status,
+        StatusCode::UNAUTHORIZED,
+        "Non-existent client must return 401, not 404: {}",
+        response.body
+    );
+    let json: serde_json::Value = serde_json::from_str(&response.body).expect("Valid JSON");
+    assert_eq!(
+        json["error"], "invalid_token",
+        "Non-existent client must return invalid_token: {}",
+        response.body
+    );
+    assert_invalid_token_challenge(&response);
 }
 
 // =========================================================================
@@ -701,6 +1882,793 @@ async fn test_rfc7592_get_invalid_bearer_token() {
     assert_invalid_token_challenge(&response);
 }
 
+// A client a user registered is managed on that user's behalf, so its
+// registration access token stops working while the owner is deactivated.
+// RFC 6750 §3.1 `invalid_token`: "The access token provided is expired,
+// revoked, malformed, or invalid for other reasons."
+#[tokio::test]
+async fn test_rfc7592_deactivated_owner_token_is_invalid() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "rfc7592-owner@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let bearer = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "Owned Client"
+    });
+    let (status, body) = http_post_json(
+        &app,
+        "/oauth/register",
+        &body.to_string(),
+        &[("Authorization", &format!("Bearer {bearer}"))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let client_id = json["client_id"].as_str().expect("client_id").to_string();
+    let token = json["registration_access_token"]
+        .as_str()
+        .expect("registration_access_token")
+        .to_string();
+    let uri = format!("/oauth/register/{client_id}");
+    let auth = format!("Bearer {token}");
+
+    assert!(
+        db::update_user_active_status(&state.store, &user.id, false)
+            .await
+            .expect("deactivate")
+    );
+    let put_body = serde_json::json!({
+        "client_id": client_id,
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "Renamed"
+    })
+    .to_string();
+    for (method, body) in [("GET", None), ("PUT", Some(put_body)), ("DELETE", None)] {
+        let response = http_request_full(
+            &app,
+            method,
+            &uri,
+            body,
+            &[
+                ("Authorization", &auth),
+                ("Content-Type", "application/json"),
+            ],
+        )
+        .await;
+        assert_eq!(
+            response.status,
+            StatusCode::UNAUTHORIZED,
+            "{method}: {}",
+            response.body
+        );
+        let error: serde_json::Value = serde_json::from_str(&response.body).expect("Valid JSON");
+        assert_eq!(
+            error["error"], "invalid_token",
+            "{method}: {}",
+            response.body
+        );
+    }
+    assert!(
+        db::get_oauth_client_by_client_id(&state.store, &client_id)
+            .await
+            .expect("lookup")
+            .is_some(),
+        "the client is not deleted while its owner is deactivated"
+    );
+
+    assert!(
+        db::update_user_active_status(&state.store, &user.id, true)
+            .await
+            .expect("reactivate")
+    );
+    let response = http_get_full(&app, &uri, &[("Authorization", &auth)]).await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+}
+
+// Deleting a client's owner unlinks that client (`user_id = None`) rather than
+// just deactivating them (`user_id` stays `Some`). The owner-active guard is
+// keyed on `client.user_id`, so once it is `None` the guard is skipped and the
+// token would verify against the untouched `registration_access_token_hash`
+// forever. `delete_user` therefore clears the hash on the same write that
+// unlinks the client, so every RFC 7592 operation returns `invalid_token`.
+// Regression for the deletion case the deactivation test above does not reach.
+#[tokio::test]
+async fn test_rfc7592_deleted_owner_token_is_invalid() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "rfc7592-deleted-owner@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let bearer = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "Owned Client (delete probe)"
+    });
+    let (status, body) = http_post_json(
+        &app,
+        "/oauth/register",
+        &body.to_string(),
+        &[("Authorization", &format!("Bearer {bearer}"))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let client_id = json["client_id"].as_str().expect("client_id").to_string();
+    let token = json["registration_access_token"]
+        .as_str()
+        .expect("registration_access_token")
+        .to_string();
+    let uri = format!("/oauth/register/{client_id}");
+    let auth = format!("Bearer {token}");
+
+    assert!(
+        db::delete_user(&state.store, &user.id, db::LastAdminGuard::Bypass)
+            .await
+            .expect("delete owner"),
+        "owner must be deleted"
+    );
+
+    // Post-delete db state: the client is unlinked AND its registration access
+    // token hash is cleared. The unlink alone is what skipped the owner-active
+    // guard; clearing the hash is what makes the token actually invalid.
+    let stored = db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup")
+        .expect("client survives owner deletion");
+    assert_eq!(
+        stored.user_id, None,
+        "delete_user unlinks a deleted owner's personal client"
+    );
+    assert_eq!(
+        stored.registration_access_token_hash, None,
+        "delete_user must clear the registration_access_token_hash of an unlinked \
+         client so the deleted owner's token stops verifying"
+    );
+
+    let put_body = serde_json::json!({
+        "client_id": client_id,
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "Renamed"
+    })
+    .to_string();
+    for (method, body) in [("GET", None), ("PUT", Some(put_body)), ("DELETE", None)] {
+        let response = http_request_full(
+            &app,
+            method,
+            &uri,
+            body,
+            &[
+                ("Authorization", &auth),
+                ("Content-Type", "application/json"),
+            ],
+        )
+        .await;
+        assert_eq!(
+            response.status,
+            StatusCode::UNAUTHORIZED,
+            "DELETE probe: {method} with deleted owner's registration access token must be \
+             401, got {}: {}",
+            response.status.as_u16(),
+            response.body
+        );
+        let error: serde_json::Value = serde_json::from_str(&response.body).expect("Valid JSON");
+        assert_eq!(
+            error["error"], "invalid_token",
+            "{method}: {}",
+            response.body
+        );
+        assert_invalid_token_challenge(&response);
+    }
+
+    // No operation should have mutated the client: it survives, still unlinked
+    // and unmanageable with the deleted owner's token.
+    assert!(
+        db::get_oauth_client_by_client_id(&state.store, &client_id)
+            .await
+            .expect("lookup")
+            .is_some(),
+        "the client must not be deleted by a rejected RFC 7592 DELETE"
+    );
+}
+
+// Deleting an org-scoped client's owner transfers the client to an active org
+// admin successor rather than unlinking it. The owner-active guard then sees
+// the *successor* (active) and would pass, so the prior owner's token must be
+// revoked on the same write that reassigns ownership — otherwise the deleted
+// owner's registration access token keeps authorizing GET/PUT/DELETE against a
+// client now attributed to the successor. This is the transfer path the unlink
+// test above does not reach.
+#[tokio::test]
+async fn test_rfc7592_deleted_owner_transferred_client_revokes_token() {
+    let (app, state) = test_app().await;
+    let org = create_test_org(&state.store, "rfc7592-transfer-owner.example").await;
+    // Non-admin creator: deleting them does not trip the last-admin floor, so
+    // the removal proceeds and `transfer_org_clients` hands the org-scoped
+    // client to the admin successor.
+    let creator =
+        create_test_user_in_org(&state.store, "transfer-creator@example.com", &org.id, false).await;
+    let successor =
+        create_test_user_in_org(&state.store, "transfer-admin@example.com", &org.id, true).await;
+
+    let plaintext_token = "test-rfc7592-transfer-owner-token";
+    let client = create_test_client(
+        &state.store,
+        &creator.id,
+        TestClientSpec {
+            name: "Org App (transfer probe)".to_string(),
+            access_scope: db::AccessScope::Organization,
+            org_id: Some(org.id.clone()),
+            registration_access_token_hash: Some(crypto::hash_token(plaintext_token)),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    assert!(
+        db::delete_user(&state.store, &creator.id, db::LastAdminGuard::Enforce)
+            .await
+            .expect("delete creator"),
+        "creator must be deleted"
+    );
+
+    let stored = db::get_oauth_client_by_client_id(&state.store, &client.client_id)
+        .await
+        .expect("lookup")
+        .expect("client survives owner deletion");
+    assert_eq!(
+        stored.user_id.as_deref(),
+        Some(successor.id.as_str()),
+        "org-scoped client must transfer to the admin successor"
+    );
+    assert_eq!(
+        stored.registration_access_token_hash, None,
+        "transfer must clear the prior owner's registration_access_token_hash so the \
+         deleted owner's token stops verifying against the successor-owned client"
+    );
+
+    let uri = format!("/oauth/register/{}", client.client_id);
+    // The deleted creator's token must not authorize any RFC 7592 operation,
+    // even though the client is now attributed to an active admin successor.
+    let response = http_get_full(
+        &app,
+        &uri,
+        &[("Authorization", &format!("Bearer {plaintext_token}"))],
+    )
+    .await;
+    assert_eq!(
+        response.status,
+        StatusCode::UNAUTHORIZED,
+        "GET with the deleted creator's token must be 401 after transfer, got {}: {}",
+        response.status.as_u16(),
+        response.body
+    );
+    let error: serde_json::Value = serde_json::from_str(&response.body).expect("Valid JSON");
+    assert_eq!(error["error"], "invalid_token", "{}", response.body);
+    assert_invalid_token_challenge(&response);
+}
+
+// =========================================================================
+// E2E: the two production offboarding vectors drive `delete_user` through
+// the real HTTP handlers — admin UI `POST /admin/members/{id}/remove` and
+// SCIM `DELETE /scim/v2/Users/{id}`. Both call `revoke_user_access` then
+// `db::delete_user` (the function the fix above changes); neither touches
+// `registration_access_token_hash` directly. These tests exercise the actual
+// handler, authorization, and audit log at the HTTP boundary (via the same
+// `build_app` router `oneshot` path `vouch-tests` uses for all its E2E) and
+// confirm the deleted member's RFC 7592 token is dead afterward — closing the
+// gap between the db-level tests above and the bug report's exploit scenario.
+// =========================================================================
+
+/// Register a client with `owner`'s bearer session, returning
+/// `(client_id, registration_access_token)`.
+async fn owner_register_client(app: &axum::Router, bearer: &str, name: &str) -> (String, String) {
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": name
+    });
+    let (status, body) = http_post_json(
+        app,
+        "/oauth/register",
+        &body.to_string(),
+        &[("Authorization", &format!("Bearer {bearer}"))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "registration failed: {body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    (
+        json["client_id"].as_str().expect("client_id").to_string(),
+        json["registration_access_token"]
+            .as_str()
+            .expect("registration_access_token")
+            .to_string(),
+    )
+}
+
+/// Provision an org, an admin (with cookie-bearing session), and a member
+/// (with a bearer session so the member can self-register an OAuth client).
+async fn org_admin_member(state: &crate::AppState) -> (User, String, User, String) {
+    let org = create_test_org(&state.store, "rfc7592-e2e.example").await;
+    let admin =
+        create_test_user_in_org(&state.store, "rfc7592-admin@example.com", &org.id, true).await;
+    let admin_auth = create_test_authenticator(&state.store, &admin.id).await;
+    let admin_token = create_test_session_with(
+        state,
+        TestSessionSpec {
+            user_id: &admin.id,
+            email: &admin.email,
+            auth_id: Some(&admin_auth),
+            ..Default::default()
+        },
+    )
+    .await;
+    let member =
+        create_test_user_in_org(&state.store, "rfc7592-member@example.com", &org.id, false).await;
+    let member_auth = create_test_authenticator(&state.store, &member.id).await;
+    let member_token = create_test_session_with(
+        state,
+        TestSessionSpec {
+            user_id: &member.id,
+            email: &member.email,
+            auth_id: Some(&member_auth),
+            ..Default::default()
+        },
+    )
+    .await;
+    (admin, admin_token, member, member_token)
+}
+
+/// Admin UI offboarding: `POST /admin/members/{id}/remove` runs
+/// `revoke_user_access` then `db::delete_user`, unlinking the deleted
+/// member's personal client. The member's RFC 7592 registration access token
+/// must stop authorizing GET/PUT/DELETE immediately after the removal.
+#[tokio::test]
+async fn test_rfc7592_admin_remove_member_revokes_deleted_owner_registration_token() {
+    let (app, state) = test_app().await;
+    let (admin, admin_token, member, member_token) = org_admin_member(&state).await;
+    let (client_id, reg_token) =
+        owner_register_client(&app, &member_token, "Member-Owned Client (admin remove)").await;
+    let uri = format!("/oauth/register/{client_id}");
+
+    // Sanity: the member can read its client before removal.
+    let (status, _body) = http_request(
+        &app,
+        "GET",
+        &uri,
+        None,
+        &[("Authorization", &format!("Bearer {reg_token}"))],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "setup: member's reg token must work before removal"
+    );
+
+    let cookie = format!("{}={admin_token}", vouch_common::SESSION_COOKIE_NAME);
+    let (status, body) = http_post_form(
+        &app,
+        &format!("/admin/members/{}/remove", member.id),
+        "",
+        &[("Cookie", &cookie), ("Origin", "https://test.example.com")],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::SEE_OTHER,
+        "admin remove_member must succeed: {body}"
+    );
+    assert!(
+        db::get_user_by_id(&state.store, &member.id)
+            .await
+            .expect("lookup")
+            .is_none(),
+        "member must be deleted by admin remove"
+    );
+
+    // The deleted member's registration access token must no longer authorize
+    // any RFC 7592 operation — the unlink cleared the hash.
+    let put_body = serde_json::json!({
+        "client_id": client_id,
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "Hijacked"
+    })
+    .to_string();
+    for (method, body) in [("GET", None), ("PUT", Some(put_body)), ("DELETE", None)] {
+        let response = http_request_full(
+            &app,
+            method,
+            &uri,
+            body,
+            &[
+                ("Authorization", &format!("Bearer {reg_token}")),
+                ("Content-Type", "application/json"),
+            ],
+        )
+        .await;
+        assert_eq!(
+            response.status,
+            StatusCode::UNAUTHORIZED,
+            "admin-removed owner: {method} must be 401, got {}: {}",
+            response.status.as_u16(),
+            response.body
+        );
+        let error: serde_json::Value = serde_json::from_str(&response.body).expect("Valid JSON");
+        assert_eq!(error["error"], "invalid_token", "{}", response.body);
+        assert_invalid_token_challenge(&response);
+    }
+    let _ = admin;
+}
+
+/// SCIM offboarding: `DELETE /scim/v2/Users/{id}` runs the same
+/// `revoke_user_access` + `db::delete_user` pair (the primary automated
+/// offboarding vector in the bug report). The deleted member's RFC 7592
+/// registration access token must stop authorizing GET/PUT/DELETE immediately.
+#[tokio::test]
+async fn test_rfc7592_scim_delete_user_revokes_deleted_owner_registration_token() {
+    let (app, state) = test_app().await;
+    let (_admin, _admin_token, member, member_token) = org_admin_member(&state).await;
+    let (client_id, reg_token) =
+        owner_register_client(&app, &member_token, "Member-Owned Client (scim delete)").await;
+    let uri = format!("/oauth/register/{client_id}");
+    let org_id = member.org_id.clone().expect("member has org");
+
+    // An attacker (or automated IdP) holding a `users:write` SCIM token — the
+    // sole scope the DELETE handler authorizes.
+    let scim_token = create_test_org_token_with_scope(
+        &state.store,
+        "scim-delete",
+        &org_id,
+        db::ScimScopeSet::from_scopes(vec![db::ScimScope::UsersWrite]),
+    )
+    .await;
+
+    let (status, body) = http_delete(
+        &app,
+        &format!("/scim/v2/Users/{}", member.id),
+        &[("Authorization", &format!("Bearer {scim_token}"))],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "SCIM delete must succeed with 204: {body}"
+    );
+    assert!(
+        db::get_user_by_id(&state.store, &member.id)
+            .await
+            .expect("lookup")
+            .is_none(),
+        "member must be deleted by SCIM delete"
+    );
+
+    let put_body = serde_json::json!({
+        "client_id": client_id,
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "Hijacked"
+    })
+    .to_string();
+    for (method, body) in [("GET", None), ("PUT", Some(put_body)), ("DELETE", None)] {
+        let response = http_request_full(
+            &app,
+            method,
+            &uri,
+            body,
+            &[
+                ("Authorization", &format!("Bearer {reg_token}")),
+                ("Content-Type", "application/json"),
+            ],
+        )
+        .await;
+        assert_eq!(
+            response.status,
+            StatusCode::UNAUTHORIZED,
+            "scim-deleted owner: {method} must be 401, got {}: {}",
+            response.status.as_u16(),
+            response.body
+        );
+        let error: serde_json::Value = serde_json::from_str(&response.body).expect("Valid JSON");
+        assert_eq!(error["error"], "invalid_token", "{}", response.body);
+        assert_invalid_token_challenge(&response);
+    }
+}
+
+// =========================================================================
+// Owner offboarding × client kind: every path that ends a user's authority
+// over their clients (admin remove, admin deactivate, SCIM DELETE, SCIM
+// `active=false`) revokes the RFC 7592 registration access token of every
+// client they own, whether the client stays with them, moves to a successor
+// admin, or is unlinked. RFC 7592 §5 only covers a deprovisioned *client*;
+// revoking on owner offboarding is our decision, because a client a user
+// registered is managed on that user's behalf.
+// =========================================================================
+
+#[derive(Clone, Copy, Debug)]
+enum OwnerOffboarding {
+    AdminRemove,
+    AdminDeactivate,
+    ScimDelete,
+    ScimDeactivate,
+}
+
+impl OwnerOffboarding {
+    fn by_admin(self) -> bool {
+        matches!(self, Self::AdminRemove | Self::AdminDeactivate)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum OwnedClientKind {
+    /// A `Personal` client; it stays with a deactivated owner and is unlinked
+    /// from a deleted one.
+    Personal,
+    /// An `Organization` client holding a token, with an active admin to
+    /// inherit it.
+    OrgWithSuccessor,
+    /// An `Organization` client holding a token in an org with no admin, so
+    /// nothing inherits it.
+    OrgWithoutSuccessor,
+}
+
+async fn offboarding_revokes_registration_token(
+    offboarding: OwnerOffboarding,
+    kind: OwnedClientKind,
+) {
+    let case = format!("{offboarding:?} × {kind:?}");
+    let (app, state) = test_app().await;
+    let org = create_test_org(&state.store, "rfc7592-offboard.example").await;
+    let owner =
+        create_test_user_in_org(&state.store, "offboard-owner@example.com", &org.id, false).await;
+
+    // The acting admin is also the successor, so an admin path always has one.
+    let admin_cookie =
+        if offboarding.by_admin() || matches!(kind, OwnedClientKind::OrgWithSuccessor) {
+            let admin =
+                create_test_user_in_org(&state.store, "offboard-admin@example.com", &org.id, true)
+                    .await;
+            let auth_id = create_test_authenticator(&state.store, &admin.id).await;
+            let token = create_test_session_with(
+                &state,
+                TestSessionSpec {
+                    user_id: &admin.id,
+                    email: &admin.email,
+                    auth_id: Some(&auth_id),
+                    ..Default::default()
+                },
+            )
+            .await;
+            Some(format!("{}={token}", vouch_common::SESSION_COOKIE_NAME))
+        } else {
+            None
+        };
+
+    let reg_token = "vouch_reg_offboarding_matrix";
+    let client = create_test_client(
+        &state.store,
+        &owner.id,
+        TestClientSpec {
+            access_scope: match kind {
+                OwnedClientKind::Personal => db::AccessScope::Personal,
+                OwnedClientKind::OrgWithSuccessor | OwnedClientKind::OrgWithoutSuccessor => {
+                    db::AccessScope::Organization
+                }
+            },
+            org_id: Some(org.id.clone()),
+            with_secret: false,
+            registration_access_token_hash: Some(crypto::hash_token(reg_token)),
+            ..Default::default()
+        },
+    )
+    .await;
+    let uri = format!("/oauth/register/{}", client.client_id);
+    let bearer = format!("Bearer {reg_token}");
+
+    let (status, body) = http_request(&app, "GET", &uri, None, &[("Authorization", &bearer)]).await;
+    assert_eq!(status, StatusCode::OK, "{case}: setup GET: {body}");
+
+    let scim_bearer = format!(
+        "Bearer {}",
+        create_test_org_token_with_scope(
+            &state.store,
+            "offboarding",
+            &org.id,
+            db::ScimScopeSet::from_scopes(vec![db::ScimScope::UsersWrite]),
+        )
+        .await
+    );
+    match offboarding {
+        OwnerOffboarding::AdminRemove | OwnerOffboarding::AdminDeactivate => {
+            let action = if matches!(offboarding, OwnerOffboarding::AdminRemove) {
+                "remove"
+            } else {
+                "deactivate"
+            };
+            let cookie = admin_cookie.expect("an admin path has an admin session");
+            let (status, body) = http_post_form(
+                &app,
+                &format!("/admin/members/{}/{action}", owner.id),
+                "",
+                &[("Cookie", &cookie), ("Origin", "https://test.example.com")],
+            )
+            .await;
+            assert_eq!(status, StatusCode::SEE_OTHER, "{case}: {body}");
+        }
+        OwnerOffboarding::ScimDelete => {
+            let (status, body) = http_delete(
+                &app,
+                &format!("/scim/v2/Users/{}", owner.id),
+                &[("Authorization", &scim_bearer)],
+            )
+            .await;
+            assert_eq!(status, StatusCode::NO_CONTENT, "{case}: {body}");
+        }
+        OwnerOffboarding::ScimDeactivate => {
+            let patch = serde_json::json!({
+                "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+                "Operations": [{"op": "replace", "path": "active", "value": false}]
+            });
+            let (status, body) = http_request(
+                &app,
+                "PATCH",
+                &format!("/scim/v2/Users/{}", owner.id),
+                Some(patch.to_string()),
+                &[
+                    ("Content-Type", "application/json"),
+                    ("Authorization", &scim_bearer),
+                ],
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{case}: {body}");
+        }
+    }
+
+    let stored = db::get_oauth_client_by_client_id(&state.store, &client.client_id)
+        .await
+        .expect("lookup")
+        .expect("offboarding never deletes the client");
+    assert_eq!(
+        stored.registration_access_token_hash, None,
+        "{case}: the owner's registration access token must be revoked"
+    );
+
+    let put_body = serde_json::json!({
+        "client_id": client.client_id,
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "Hijacked"
+    })
+    .to_string();
+    for (method, body) in [("GET", None), ("PUT", Some(put_body)), ("DELETE", None)] {
+        let response = http_request_full(
+            &app,
+            method,
+            &uri,
+            body,
+            &[
+                ("Authorization", &bearer),
+                ("Content-Type", "application/json"),
+            ],
+        )
+        .await;
+        assert_eq!(
+            response.status,
+            StatusCode::UNAUTHORIZED,
+            "{case}: {method} with the offboarded owner's token: {}",
+            response.body
+        );
+        let error: serde_json::Value = serde_json::from_str(&response.body).expect("Valid JSON");
+        assert_eq!(error["error"], "invalid_token", "{case}: {method}");
+        assert_invalid_token_challenge(&response);
+    }
+    assert!(
+        db::get_oauth_client_by_client_id(&state.store, &client.client_id)
+            .await
+            .expect("lookup")
+            .is_some(),
+        "{case}: a rejected RFC 7592 DELETE must not delete the client"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7592_owner_offboarding_revokes_registration_token_matrix() {
+    for offboarding in [
+        OwnerOffboarding::AdminRemove,
+        OwnerOffboarding::AdminDeactivate,
+        OwnerOffboarding::ScimDelete,
+        OwnerOffboarding::ScimDeactivate,
+    ] {
+        for kind in [
+            OwnedClientKind::Personal,
+            OwnedClientKind::OrgWithSuccessor,
+            OwnedClientKind::OrgWithoutSuccessor,
+        ] {
+            // The acting admin always inherits org clients, so an admin path
+            // has no "without successor" case.
+            if offboarding.by_admin() && matches!(kind, OwnedClientKind::OrgWithoutSuccessor) {
+                continue;
+            }
+            Box::pin(offboarding_revokes_registration_token(offboarding, kind)).await;
+        }
+    }
+}
+
+// An owner-less client is open registration only when it is `Public`. A
+// `Personal` or `Organization` client with no owner was unlinked from a
+// deleted user, so a token still stored on it (by a writer that forgot to
+// clear it) must not verify.
+#[tokio::test]
+async fn test_rfc7592_unlinked_non_public_client_token_is_invalid() {
+    let (app, state) = test_app().await;
+    let owner = create_test_user(&state.store, "rfc7592-unlinked@example.com").await;
+    let reg_token = "vouch_reg_unlinked_personal";
+    let client = create_test_client(
+        &state.store,
+        &owner.id,
+        TestClientSpec {
+            access_scope: db::AccessScope::Personal,
+            with_secret: false,
+            registration_access_token_hash: Some(crypto::hash_token(reg_token)),
+            ..Default::default()
+        },
+    )
+    .await;
+    // Simulate a writer that unlinks without going through
+    // `reassign_client_owner`: the hash survives.
+    state
+        .store
+        .modify::<OAuthClientDoc, _>(&client.app_id, |d| {
+            d.user_id = None;
+        })
+        .await
+        .expect("unlink");
+
+    let response = http_get_full(
+        &app,
+        &format!("/oauth/register/{}", client.client_id),
+        &[("Authorization", &format!("Bearer {reg_token}"))],
+    )
+    .await;
+    assert_eq!(
+        response.status,
+        StatusCode::UNAUTHORIZED,
+        "{}",
+        response.body
+    );
+    assert_invalid_token_challenge(&response);
+
+    // An unauthenticated registration is `Public` with no owner and keeps
+    // working.
+    let (client_id, token) = register_dynamic_client(&app).await;
+    let (status, body) = http_request(
+        &app,
+        "GET",
+        &format!("/oauth/register/{client_id}"),
+        None,
+        &[("Authorization", &format!("Bearer {token}"))],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "open registration still works: {body}"
+    );
+}
+
 // =========================================================================
 // DELETE /oauth/register/:client_id — Delete Client Configuration
 // =========================================================================
@@ -719,7 +2687,9 @@ async fn test_rfc7592_delete_client_succeeds() {
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 
-    // GET after delete — expect 404
+    // GET after delete — RFC 7592 §2.1/§5: the client no longer exists, so the
+    // response must be 401 `invalid_token`, indistinguishable from any other
+    // token-validation failure (not 404, which would disclose the deletion).
     let (status, _body) = http_request(
         &app,
         "GET",
@@ -730,8 +2700,106 @@ async fn test_rfc7592_delete_client_succeeds() {
     .await;
     assert_eq!(
         status,
-        StatusCode::NOT_FOUND,
-        "Deleted client should return 404"
+        StatusCode::UNAUTHORIZED,
+        "Deleted client must return 401, not 404"
+    );
+}
+
+/// RFC 7592 §2.3: "the authorization server SHOULD ... invalidate all
+/// existing authorization grants and currently active access tokens ...
+/// associated with this client."
+///
+/// Regression for the dynamic-registration sibling of the
+/// `revoke_tokens_api` bug: `delete_client_configuration` used to call the
+/// bare `delete_oauth_client`, so sessions minted for the deleted client —
+/// both user-issued grants (session keyed by the resource owner's `user_id`,
+/// tagged with the issuing `client_id`) and M2M `client_credentials`
+/// sessions (`user_id == client_id`, RFC 9068 §2.2) — kept validating at
+/// resource endpoints until `exp`. Without the fix the session rows survive
+/// the DELETE and this test fails.
+#[tokio::test]
+async fn test_rfc7592_delete_client_revokes_minted_sessions() {
+    let (app, state) = test_app().await;
+    let (client_id, token) = register_dynamic_client(&app).await;
+
+    // A user-issued access token minted for the dynamically registered
+    // client, plus an M2M session (user_id == client_id).
+    let user = create_test_user(&state.store, "rfc7592-delete-revokes@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let user_access_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            client_id: Some(&client_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &client_id,
+            email: &format!("{client_id}@clients"),
+            auth_id: Some(&auth_id),
+            client_id: Some(&client_id),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // The user-issued token validates before the client is deleted.
+    let (status, _body) = http_get(
+        &app,
+        "/oauth/userinfo",
+        &[("Authorization", &format!("Bearer {user_access_token}"))],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "user-issued token should validate before the client is deleted"
+    );
+
+    // DELETE the dynamically registered client — 204.
+    let (status, _body) = http_delete(
+        &app,
+        &format!("/oauth/register/{client_id}"),
+        &[("Authorization", &format!("Bearer {token}"))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // The user-issued token must be dead and every session row gone.
+    let (status, _body) = http_get(
+        &app,
+        "/oauth/userinfo",
+        &[("Authorization", &format!("Bearer {user_access_token}"))],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "user-issued access token must NOT validate after the client is deleted"
+    );
+    assert_eq!(
+        state
+            .store
+            .count::<SessionDoc>("client_id", &client_id)
+            .await
+            .expect("count must not error"),
+        0,
+        "sessions tagged with the deleted client must be gone"
+    );
+    assert_eq!(
+        state
+            .store
+            .count::<SessionDoc>("user_id", &client_id)
+            .await
+            .expect("count must not error"),
+        0,
+        "M2M sessions for the deleted client must be gone"
     );
 }
 
@@ -778,16 +2846,30 @@ async fn test_rfc7592_delete_client_invalid_bearer_token() {
 
 #[tokio::test]
 async fn test_rfc7592_delete_client_nonexistent() {
+    // RFC 7592 §2.3 + §5: a `client_id` that does not exist must be
+    // indistinguishable from an invalid-token case — both return 401
+    // `invalid_token`, never 404 (which would disclose client existence).
     let (app, _state) = test_app().await;
 
-    // DELETE for a client_id that doesn't exist — expect 404
-    let (status, _body) = http_delete(
+    let response = http_delete_full(
         &app,
         "/oauth/register/nonexistent-client-id",
         &[("Authorization", "Bearer some_token")],
     )
     .await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        response.status,
+        StatusCode::UNAUTHORIZED,
+        "Non-existent client must return 401, not 404: {}",
+        response.body
+    );
+    let json: serde_json::Value = serde_json::from_str(&response.body).expect("Valid JSON");
+    assert_eq!(
+        json["error"], "invalid_token",
+        "Non-existent client must return invalid_token: {}",
+        response.body
+    );
+    assert_invalid_token_challenge(&response);
 }
 
 #[tokio::test]
@@ -804,7 +2886,9 @@ async fn test_rfc7592_delete_client_already_deleted() {
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 
-    // Second delete — 404 (idempotent)
+    // Second delete — RFC 7592 §2.3/§5: the client is gone, so the response
+    // must be 401 `invalid_token` (indistinguishable from any other
+    // token-validation failure), not 404.
     let (status, _body) = http_delete(
         &app,
         &format!("/oauth/register/{client_id}"),
@@ -813,8 +2897,60 @@ async fn test_rfc7592_delete_client_already_deleted() {
     .await;
     assert_eq!(
         status,
-        StatusCode::NOT_FOUND,
-        "Second delete should return 404"
+        StatusCode::UNAUTHORIZED,
+        "Second delete must return 401, not 404"
+    );
+}
+
+/// Deleting an org-owned client whose owning user has no org of their own
+/// must still attribute the `ClientDeleted` audit event to the client's org.
+///
+/// Regression test: the client doc is deleted before the audit event is
+/// recorded, so a naive client-org lookup by `client_id` would always miss
+/// (the row is already gone). `delete_client_configuration` resolves the
+/// fallback from the already-in-scope `client.org_id` instead.
+#[tokio::test]
+async fn test_rfc7592_delete_client_attributes_org_domain_when_owner_has_no_org() {
+    let (app, state) = test_app().await;
+
+    let org = create_test_org(&state.store, "org-owned-deleted.example").await;
+    let owner = create_test_user(&state.store, "solo-owner@personal.example").await;
+
+    let plaintext_token = "test-rfc7592-delete-org-attribution-token";
+    let client = create_test_client(
+        &state.store,
+        &owner.id,
+        TestClientSpec {
+            org_id: Some(org.id.clone()),
+            registration_access_token_hash: Some(crypto::hash_token(plaintext_token)),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let (status, _body) = http_delete(
+        &app,
+        &format!("/oauth/register/{}", client.client_id),
+        &[("Authorization", &format!("Bearer {plaintext_token}"))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let events = state
+        .audit
+        .query_events(&db::AuditEventFilter {
+            event_types: Some(vec!["oauth_client_deleted".to_string()]),
+            user_id: Some(owner.id.clone()),
+            ..Default::default()
+        })
+        .await
+        .expect("query audit events");
+    assert_eq!(events.len(), 1, "delete must write exactly one audit event");
+    assert_eq!(
+        events[0].email_domain.as_deref(),
+        Some("org-owned-deleted.example"),
+        "the client's own org must be attributed even though the owning user has no org \
+         and the client doc is already deleted by the time the event is recorded"
     );
 }
 
@@ -1441,4 +3577,1479 @@ async fn test_rfc7592_put_cannot_clear_jwks_for_private_key_jwt_client() {
         StatusCode::OK,
         "PUT keeping JWKS must succeed: {body}"
     );
+}
+
+// =========================================================================
+// RFC 7592 §2.1/2.2/2.3 + §5 — uniform 401 across all token-validation
+// failures (no information disclosure).
+//
+// A `client_id` is a public identifier, so the configuration endpoints must
+// not let a caller distinguish between:
+//   (a) a `client_id` that does not exist,
+//   (b) a dynamically-registered client presented with the wrong bearer token,
+//   (c) an admin-created client (no registration access token), and
+//   (d) a deprovisioned (inactive) client, even presented with the right token.
+// Every case returns the same 401 `invalid_token` response with the same
+// `error_description`; the only diagnostics live in the server log.
+// =========================================================================
+
+/// Assert the response is the canonical, uniform RFC 7592 §5 rejection:
+/// 401, `error="invalid_token"`, `error_description="Invalid registration
+/// access token"`, no `error_uri`, and a matching `WWW-Authenticate` challenge.
+///
+/// Asserting the *full* `error_description` (not just `error`) is what locks
+/// the differing-message leak in place — the old "Client has no registration
+/// access token" string disclosed that a client was admin-created.
+fn assert_uniform_invalid_token_401(label: &str, status: StatusCode, body: &str, www_auth: &str) {
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "{label}: must be 401, not 404 or any other status (body: {body})"
+    );
+    let json: serde_json::Value = serde_json::from_str(body).expect("body must be valid JSON");
+    assert_eq!(
+        json["error"], "invalid_token",
+        "{label}: error must be invalid_token: {body}"
+    );
+    assert_eq!(
+        json["error_description"], "Invalid registration access token",
+        "{label}: error_description must be the uniform string — differing messages leak client \
+         type: {body}"
+    );
+    assert!(
+        json.get("error_uri").is_none(),
+        "{label}: no error_uri expected: {body}"
+    );
+    assert!(
+        www_auth.contains("error=\"invalid_token\""),
+        "{label}: WWW-Authenticate must carry error=\"invalid_token\": {www_auth}"
+    );
+    assert!(
+        www_auth.contains("error_description=\"Invalid registration access token\""),
+        "{label}: WWW-Authenticate must mirror the uniform error_description: {www_auth}"
+    );
+}
+
+/// Create an admin-created client (no registration access token) and return
+/// its public `client_id` for probing the configuration endpoints.
+async fn make_admin_client(state: &crate::AppState) -> String {
+    let user = create_test_user(&state.store, "rfc7592-admin@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    client.client_id
+}
+
+#[tokio::test]
+async fn test_rfc7592_get_nonexistent_client() {
+    // RFC 7592 §2.1 + §5: GET for a `client_id` that does not exist must
+    // return 401 `invalid_token`, not 404.
+    let (app, _state) = test_app().await;
+
+    let response = http_get_full(
+        &app,
+        "/oauth/register/nonexistent-client-id",
+        &[("Authorization", "Bearer some_token")],
+    )
+    .await;
+    assert_uniform_invalid_token_401(
+        "GET nonexistent",
+        response.status,
+        &response.body,
+        www_authenticate(&response),
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7592_admin_created_client_rejected_uniformly() {
+    // RFC 7592 §5: an admin-created client has no registration access token,
+    // so every configuration request must fail with the *same* 401
+    // `invalid_token` response as any other invalid token — and must NOT carry
+    // the old "Client has no registration access token" message that disclosed
+    // the client's admin-created type. Probe all three endpoints.
+    let (app, state) = test_app().await;
+    let client_id = make_admin_client(&state).await;
+
+    // GET
+    let response = http_get_full(
+        &app,
+        &format!("/oauth/register/{client_id}"),
+        &[("Authorization", "Bearer any_token")],
+    )
+    .await;
+    assert_uniform_invalid_token_401(
+        "GET admin-created",
+        response.status,
+        &response.body,
+        www_authenticate(&response),
+    );
+
+    // PUT — well-formed body so the JSON extractor succeeds and we reach auth.
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"]
+    });
+    let response = http_request_full(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(update_body.to_string()),
+        &[
+            ("Authorization", "Bearer any_token"),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_uniform_invalid_token_401(
+        "PUT admin-created",
+        response.status,
+        &response.body,
+        www_authenticate(&response),
+    );
+
+    // DELETE
+    let response = http_delete_full(
+        &app,
+        &format!("/oauth/register/{client_id}"),
+        &[("Authorization", "Bearer any_token")],
+    )
+    .await;
+    assert_uniform_invalid_token_401(
+        "DELETE admin-created",
+        response.status,
+        &response.body,
+        www_authenticate(&response),
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7592_inactive_client_rejected_uniformly() {
+    // RFC 7592 §2.1/2.2/2.3 + §5: a deprovisioned (inactive) client must be
+    // indistinguishable from any other token-validation failure — even when
+    // the caller presents the *correct* registration access token. The old
+    // behaviour (404 for inactive clients) disclosed that the client once
+    // existed.
+    let (app, state) = test_app().await;
+    let (client_id, token) = register_dynamic_client(&app).await;
+
+    // Look up the internal doc id and deactivate the client.
+    let stored = db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("client lookup must succeed")
+        .expect("registered client must exist");
+    db::set_oauth_client_active(&state.store, &stored.id, false)
+        .await
+        .expect("deactivate client");
+
+    // GET with the correct token — must be 401 invalid_token, not 404.
+    let response = http_get_full(
+        &app,
+        &format!("/oauth/register/{client_id}"),
+        &[("Authorization", &format!("Bearer {token}"))],
+    )
+    .await;
+    assert_uniform_invalid_token_401(
+        "GET inactive (correct token)",
+        response.status,
+        &response.body,
+        www_authenticate(&response),
+    );
+
+    // PUT with the correct token — must be 401 invalid_token, not 404.
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"]
+    });
+    let response = http_request_full(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(update_body.to_string()),
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_uniform_invalid_token_401(
+        "PUT inactive (correct token)",
+        response.status,
+        &response.body,
+        www_authenticate(&response),
+    );
+
+    // DELETE with the correct token — must be 401 invalid_token, not 404.
+    let response = http_delete_full(
+        &app,
+        &format!("/oauth/register/{client_id}"),
+        &[("Authorization", &format!("Bearer {token}"))],
+    )
+    .await;
+    assert_uniform_invalid_token_401(
+        "DELETE inactive (correct token)",
+        response.status,
+        &response.body,
+        www_authenticate(&response),
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7592_failures_indistinguishable_across_client_types() {
+    // RFC 7592 §5: the four token-validation failure classes must be
+    // byte-for-byte indistinguishable on the wire. Probe GET in each class and
+    // assert the status, body, and WWW-Authenticate challenge are all
+    // identical — no message, header, or status difference an attacker could
+    // use as a distinguisher.
+    let (app, state) = test_app().await;
+
+    // (a) Non-existent client_id.
+    let a = http_get_full(
+        &app,
+        "/oauth/register/nonexistent-client-id",
+        &[("Authorization", "Bearer some_token")],
+    )
+    .await;
+
+    // (b) Existing dynamically-registered client with the wrong bearer token.
+    let (dyn_client_id, _dyn_token) = register_dynamic_client(&app).await;
+    let b = http_get_full(
+        &app,
+        &format!("/oauth/register/{dyn_client_id}"),
+        &[("Authorization", "Bearer the_wrong_token")],
+    )
+    .await;
+
+    // (c) Admin-created client (no registration access token hash).
+    let admin_client_id = make_admin_client(&state).await;
+    let c = http_get_full(
+        &app,
+        &format!("/oauth/register/{admin_client_id}"),
+        &[("Authorization", "Bearer some_token")],
+    )
+    .await;
+
+    // (d) Inactive dynamically-registered client presented with its (now
+    // rejected) correct token.
+    let (inactive_client_id, inactive_token) = register_dynamic_client(&app).await;
+    let stored = db::get_oauth_client_by_client_id(&state.store, &inactive_client_id)
+        .await
+        .expect("client lookup must succeed")
+        .expect("registered client must exist");
+    db::set_oauth_client_active(&state.store, &stored.id, false)
+        .await
+        .expect("deactivate client");
+    let d = http_get_full(
+        &app,
+        &format!("/oauth/register/{inactive_client_id}"),
+        &[("Authorization", &format!("Bearer {inactive_token}"))],
+    )
+    .await;
+
+    // All four must be valid, uniform 401 invalid_token responses...
+    assert_uniform_invalid_token_401("non-existent", a.status, &a.body, www_authenticate(&a));
+    assert_uniform_invalid_token_401("wrong-token", b.status, &b.body, www_authenticate(&b));
+    assert_uniform_invalid_token_401("admin-created", c.status, &c.body, www_authenticate(&c));
+    assert_uniform_invalid_token_401("inactive", d.status, &d.body, www_authenticate(&d));
+
+    // ...and byte-for-byte identical to one another.
+    assert_eq!(
+        a.status, b.status,
+        "status must be uniform across failure types"
+    );
+    assert_eq!(
+        a.status, c.status,
+        "status must be uniform across failure types"
+    );
+    assert_eq!(
+        a.status, d.status,
+        "status must be uniform across failure types"
+    );
+    assert_eq!(a.body, b.body, "body must be uniform across failure types");
+    assert_eq!(a.body, c.body, "body must be uniform across failure types");
+    assert_eq!(a.body, d.body, "body must be uniform across failure types");
+    assert_eq!(
+        www_authenticate(&a),
+        www_authenticate(&b),
+        "WWW-Authenticate must be uniform across failure types"
+    );
+    assert_eq!(
+        www_authenticate(&a),
+        www_authenticate(&c),
+        "WWW-Authenticate must be uniform across failure types"
+    );
+    assert_eq!(
+        www_authenticate(&a),
+        www_authenticate(&d),
+        "WWW-Authenticate must be uniform across failure types"
+    );
+}
+
+// =========================================================================
+// RFC 7592 §2.1/2.2/2.3 — revoke a registration access token presented
+// against a client_id that does not exist.
+//
+// §2.1 (identically §2.2, and §2.3 with "if possible"):
+//   "If the client does not exist on this server, the server MUST respond
+//    with HTTP 401 Unauthorized and the registration access token used to
+//    make this request SHOULD be immediately revoked."
+// =========================================================================
+
+#[tokio::test]
+async fn test_rfc7592_misdirected_token_is_revoked() {
+    // RFC 7592 §2.1: a live registration access token presented against a
+    // client_id that does not exist is revoked, so it can no longer manage the
+    // client it actually belongs to.
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_dynamic_client(&app).await;
+
+    // The token works for its own client before the misdirected request.
+    let before = http_get_full(
+        &app,
+        &format!("/oauth/register/{client_id}"),
+        &[("Authorization", &format!("Bearer {token}"))],
+    )
+    .await;
+    assert_eq!(
+        before.status,
+        StatusCode::OK,
+        "token must work for its own client first: {}",
+        before.body
+    );
+
+    // Present that same token against a client_id that does not exist.
+    let misdirected = http_get_full(
+        &app,
+        "/oauth/register/nonexistent-client-id",
+        &[("Authorization", &format!("Bearer {token}"))],
+    )
+    .await;
+    assert_uniform_invalid_token_401(
+        "misdirected live token",
+        misdirected.status,
+        &misdirected.body,
+        www_authenticate(&misdirected),
+    );
+
+    // The token is now revoked for its real client too.
+    let after = http_get_full(
+        &app,
+        &format!("/oauth/register/{client_id}"),
+        &[("Authorization", &format!("Bearer {token}"))],
+    )
+    .await;
+    assert_uniform_invalid_token_401(
+        "token after revocation",
+        after.status,
+        &after.body,
+        www_authenticate(&after),
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7592_revocation_does_not_disturb_other_clients() {
+    // Revocation is keyed on the presented token's hash, so it must clear
+    // exactly one client's token and leave every other registration alone.
+    let (app, _state) = test_app().await;
+    let (victim_id, victim_token) = register_dynamic_client(&app).await;
+    let (bystander_id, bystander_token) = register_dynamic_client(&app).await;
+
+    let misdirected = http_get_full(
+        &app,
+        "/oauth/register/nonexistent-client-id",
+        &[("Authorization", &format!("Bearer {victim_token}"))],
+    )
+    .await;
+    assert_eq!(misdirected.status, StatusCode::UNAUTHORIZED);
+
+    let victim = http_get_full(
+        &app,
+        &format!("/oauth/register/{victim_id}"),
+        &[("Authorization", &format!("Bearer {victim_token}"))],
+    )
+    .await;
+    assert_eq!(
+        victim.status,
+        StatusCode::UNAUTHORIZED,
+        "the presented token must be the one revoked: {}",
+        victim.body
+    );
+
+    let bystander = http_get_full(
+        &app,
+        &format!("/oauth/register/{bystander_id}"),
+        &[("Authorization", &format!("Bearer {bystander_token}"))],
+    )
+    .await;
+    assert_eq!(
+        bystander.status,
+        StatusCode::OK,
+        "an unrelated client's token must survive: {}",
+        bystander.body
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7592_unknown_token_against_unknown_client_still_401() {
+    // The common case: a token that matches no client at all. Revocation finds
+    // nothing to clear and the response is the same uniform 401 as every other
+    // failure — the revocation SHOULD must not become a distinguisher.
+    let (app, _state) = test_app().await;
+
+    let response = http_get_full(
+        &app,
+        "/oauth/register/nonexistent-client-id",
+        &[("Authorization", "Bearer vouch_reg_not_a_real_token")],
+    )
+    .await;
+    assert_uniform_invalid_token_401(
+        "unknown token, unknown client",
+        response.status,
+        &response.body,
+        www_authenticate(&response),
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7592_wrong_token_for_existing_client_is_not_revoked() {
+    // The revocation SHOULD is scoped to the "client does not exist" branch.
+    // A live token presented against a *real* client that it does not own is
+    // rejected, but must not be revoked — §2.1 attaches revocation only to the
+    // non-existent-client case, and revoking here would let any caller who
+    // learns two client_ids disable a token by pointing it at the wrong one.
+    let (app, _state) = test_app().await;
+    let (own_id, own_token) = register_dynamic_client(&app).await;
+    let (other_id, _other_token) = register_dynamic_client(&app).await;
+
+    let crossed = http_get_full(
+        &app,
+        &format!("/oauth/register/{other_id}"),
+        &[("Authorization", &format!("Bearer {own_token}"))],
+    )
+    .await;
+    assert_eq!(crossed.status, StatusCode::UNAUTHORIZED);
+
+    let still_valid = http_get_full(
+        &app,
+        &format!("/oauth/register/{own_id}"),
+        &[("Authorization", &format!("Bearer {own_token}"))],
+    )
+    .await;
+    assert_eq!(
+        still_valid.status,
+        StatusCode::OK,
+        "a token pointed at another existing client must not be revoked: {}",
+        still_valid.body
+    );
+}
+
+// =========================================================================
+// RFC 7592 §5 — Security Considerations for the registration access token.
+// =========================================================================
+
+#[tokio::test]
+async fn test_rfc7592_registration_access_token_has_sufficient_entropy() {
+    // RFC 7592 §5: "Since possession of the registration access token
+    // authorizes the holder to potentially read, modify, or delete a client's
+    // registration (including its credentials such as a client_secret), the
+    // registration access token MUST contain sufficient entropy to prevent a
+    // random guessing attack of this token, such as described in Section 5.2
+    // of [RFC6750] and Section 5.1.4.2.2 of [RFC6819]."
+    //
+    // The OAuth 2.0 core specification supplies the numeric floor those
+    // sections point at: "The probability of an attacker guessing generated
+    // tokens (and other credentials not intended for handling by end-users)
+    // MUST be less than or equal to 2^(-128) and SHOULD be less than or equal
+    // to 2^(-160)." Only the registration access token is asserted here, so
+    // this test claims no coverage of that broader requirement.
+    use base64::Engine as _;
+
+    let (app, _state) = test_app().await;
+
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..8 {
+        let (_client_id, token) = register_dynamic_client(&app).await;
+
+        let random_part = token
+            .strip_prefix("vouch_reg_")
+            .expect("registration access token must carry the vouch_reg_ prefix");
+        let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(random_part)
+            .expect("the random part must be base64url");
+
+        assert!(
+            decoded.len() >= 20,
+            "token entropy is {} bits, below the 160-bit floor OAuth 2.0 recommends",
+            decoded.len().saturating_mul(8)
+        );
+        assert!(
+            seen.insert(token.clone()),
+            "registration access tokens must never repeat: {token}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_rfc7592_registration_access_token_does_not_expire_while_registered() {
+    // RFC 7592 §5: "While the client secret can expire, the registration access
+    // token SHOULD NOT expire while a client is still actively registered. If
+    // this token were to expire, a developer or client could be left in a
+    // situation where they have no means of retrieving, updating, or deleting
+    // the client's registration information."
+    //
+    // Vouch stores only the token's hash, with no expiry alongside it, so the
+    // token stays usable for the life of the registration. Two observable
+    // consequences pin that: the registration response advertises no expiry for
+    // the token, and the token keeps authenticating across repeated use.
+    let (app, _state) = test_app().await;
+
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "RFC7592 Token Lifetime Client"
+    });
+    let (status, body) = http_post_json(&app, "/oauth/register", &body.to_string(), &[]).await;
+    assert_eq!(status, StatusCode::CREATED, "registration failed: {body}");
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let client_id = json["client_id"].as_str().expect("client_id").to_string();
+    let token = json["registration_access_token"]
+        .as_str()
+        .expect("registration_access_token")
+        .to_string();
+
+    // RFC 7591 §3.2.1 defines `client_secret_expires_at` for the secret. There
+    // is no counterpart for the registration access token, and inventing one
+    // would be the expiry §5 warns against.
+    for member in [
+        "registration_access_token_expires_at",
+        "registration_access_token_expires_in",
+    ] {
+        assert!(
+            json.get(member).is_none(),
+            "the registration access token must carry no expiry, found {member}: {json}"
+        );
+    }
+
+    // Repeated use keeps working, and each PUT-rotated token is itself durable.
+    for round in 0..3 {
+        let response = http_get_full(
+            &app,
+            &format!("/oauth/register/{client_id}"),
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+        assert_eq!(
+            response.status,
+            StatusCode::OK,
+            "round {round}: the registration access token must not expire while the client is \
+             actively registered: {}",
+            response.body
+        );
+    }
+}
+
+// =========================================================================
+// RFC 7592 §2.1 — end-to-end (full axum router) regression for the
+// misdirected-token revoke vs. concurrent PUT rotation race.
+//
+// `db::revoke_registration_access_token` resolves the owner of a presented
+// token by hash, then clears the stored hash inside `store.modify`. The OCC
+// loop re-reads the latest document on every attempt, so a client that
+// concurrently rotates its registration access token via a PUT can land a
+// fresh hash between the revoke's read and its compare-and-update. With the
+// pre-fix unconditional clear, the retry wiped the rotated token — locking
+// the legitimate owner out of all RFC 7592 operations until an admin
+// reissued a token. The fix conditions the clear on the stored hash still
+// equaling the presented hash, making a rotate-then-racing-revoke a no-op.
+//
+// This test drives the race through the real HTTP handler path
+// (`GET /oauth/register/<nonexistent>` → `lookup_and_verify_registration_token`
+// → `revoke_token_for_unknown_client` → `revoke_registration_access_token`),
+// using `test_app_with_modify_hook` to rotate the victim's token inside the
+// revoke's OCC window deterministically. It is the HTTP-layer analogue of
+// `db::tests::occ_modify::test_revoke_registration_access_token_does_not_clobber_concurrently_rotated_token`.
+// =========================================================================
+
+#[tokio::test]
+async fn test_rfc7592_misdirected_revoke_does_not_lock_out_concurrent_rotation_e2e() {
+    use std::sync::{Arc, Mutex};
+
+    // The victim rotates from T_old (the token the server mints at registration,
+    // captured by the attacker) to T_new (chosen by the test, known only to the
+    // legitimate owner after the PUT returns it).
+    let t_new = "vouch_reg_NEW_TOKEN_rotated_e2e".to_string();
+    let new_hash = crypto::hash_token(&t_new);
+    let redirect_uris = vec!["https://example.com/callback".to_string()];
+
+    // The victim's internal doc id is only known after registration, which
+    // runs after the app (and hook) are built. The hook gates on this slot so
+    // it only fires for the victim doc, and only while the slot is set.
+    let slot: Arc<Mutex<Option<(String, String)>>> = Arc::new(Mutex::new(None));
+    let slot_for_hook = Arc::clone(&slot);
+    let new_hash_for_hook = new_hash.clone();
+    let redirect_uris_for_hook = redirect_uris.clone();
+    let (app, state) = test_app_with_modify_hook(move |store| {
+        // Hookless writer clone for the in-hook rotation: must not re-enter
+        // the hook when it writes through the store.
+        let writer = store.clone();
+        let new_hash = new_hash_for_hook.clone();
+        let redirect_uris = redirect_uris_for_hook.clone();
+        let slot = Arc::clone(&slot_for_hook);
+        store.set_modify_test_hook(Arc::new(move |doc_id: &str, attempt: u32| {
+            let writer = writer.clone();
+            let new_hash = new_hash.clone();
+            let redirect_uris = redirect_uris.clone();
+            let slot = Arc::clone(&slot);
+            let doc_id = doc_id.to_string();
+            Box::pin(async move {
+                if attempt != 0 {
+                    return;
+                }
+                // Only rotate the victim doc, and only once the slot is set.
+                let Some((victim, current_hash)) = slot.lock().expect("slot lock").clone() else {
+                    return;
+                };
+                if victim != doc_id {
+                    return;
+                }
+                // Run the victim's RFC 7592 PUT (rotating to T_new) inside the
+                // attacker's revoke `modify`'s first attempt — after it read
+                // the pre-rotation doc but before its compare-and-update. The
+                // PUT commits version V+1 (hash T_new), so the revoke's first
+                // CAS loses the version race and the modify loop retries
+                // against the freshly rotated document.
+                db::update_oauth_client_registration(
+                    &writer,
+                    &doc_id,
+                    &current_hash,
+                    &UpdateClientRegistrationParams {
+                        redirect_uris: &redirect_uris,
+                        grant_types: None,
+                        response_types: None,
+                        keys: None,
+                        registration_access_token_hash: &new_hash,
+                        registration_metadata: None,
+                        userinfo_signed_response_alg: None,
+                        request_uris: None,
+                        post_logout_redirect_uris: None,
+                        client_name: None,
+                        software_id: None,
+                        software_version: None,
+                        id_token_signed_response_alg: JwsAlgorithm::Es256,
+                        authorization_signed_response_alg: None,
+                        introspection_signed_response_alg: None,
+                        request_object_signing_alg: None,
+                        require_signed_request_object: None,
+                        tls_client_auth_subject_dn: None,
+                        tls_client_auth_san_dns: None,
+                        tls_client_auth_san_uri: None,
+                        tls_client_auth_san_ip: None,
+                        tls_client_auth_san_email: None,
+                    },
+                )
+                .await
+                .expect("hook rotation must not error")
+                .expect("hook rotation must succeed");
+            })
+        }));
+    })
+    .await;
+
+    // Register the victim dynamically; the server mints T_old, which the
+    // attacker has captured.
+    let (client_id, t_old) = register_dynamic_client(&app).await;
+
+    // Resolve the victim's internal doc id and arm the hook slot.
+    let victim = db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup")
+        .expect("client must exist");
+    let victim_id = victim.id.clone();
+    *slot.lock().expect("slot lock") = Some((victim_id.clone(), crypto::hash_token(&t_old)));
+
+    // The attacker replays the leaked T_old against a non-existent client_id;
+    // the misdirected-token path revokes whichever client holds hash(T_old),
+    // racing the victim's concurrent rotation. The 401 is uniform regardless.
+    let misdirected = http_get_full(
+        &app,
+        "/oauth/register/nonexistent-client-id",
+        &[("Authorization", &format!("Bearer {t_old}"))],
+    )
+    .await;
+    assert_uniform_invalid_token_401(
+        "misdirected live token (e2e race)",
+        misdirected.status,
+        &misdirected.body,
+        www_authenticate(&misdirected),
+    );
+
+    // The owner must NOT be locked out: the rotated T_new — which only the
+    // legitimate owner holds — must still authenticate against the real
+    // client.
+    let after = http_get_full(
+        &app,
+        &format!("/oauth/register/{client_id}"),
+        &[("Authorization", &format!("Bearer {t_new}"))],
+    )
+    .await;
+    assert_eq!(
+        after.status,
+        StatusCode::OK,
+        "the concurrently rotated T_new must not be wiped by the racing revoke; \
+         otherwise the legitimate owner is locked out of all RFC 7592 operations: {}",
+        after.body,
+    );
+
+    // Rotation still neutralises the leaked T_old: it must now fail with the
+    // uniform 401 `invalid_token`.
+    let old_after = http_get_full(
+        &app,
+        &format!("/oauth/register/{client_id}"),
+        &[("Authorization", &format!("Bearer {t_old}"))],
+    )
+    .await;
+    assert_uniform_invalid_token_401(
+        "old token after rotation (e2e race)",
+        old_after.status,
+        &old_after.body,
+        www_authenticate(&old_after),
+    );
+
+    // The stored hash must reflect the rotated token, not None.
+    let stored = db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup after")
+        .expect("client must still exist");
+    assert_eq!(
+        stored.registration_access_token_hash.as_deref(),
+        Some(new_hash.as_str()),
+        "the stored registration_access_token_hash must be hash(T_new), not None"
+    );
+}
+
+// =========================================================================
+// RFC 7592 §2.2 PUT — a faithful restatement of stored metadata
+//
+// RFC 7592 §2.2: the update request "MUST include all client metadata fields
+// as returned to the client from a previous registration, read, or update
+// operation". A client that was stored with `response_types: ["code"]` and
+// no `authorization_code` grant (the default an omitted `response_types`
+// once received) restates exactly that pair, and the server normalizes it to
+// `[]` rather than rejecting its own echoed metadata.
+// =========================================================================
+
+/// A dynamically registered client holding the `grant_types` /
+/// `response_types` pair exactly as stored, with a known registration access
+/// token for the PUT. Built directly because `register_client` refuses the
+/// pair.
+async fn make_legacy_dynamic_client(
+    state: &crate::AppState,
+    grant_types: &[&str],
+    response_types: &[&str],
+    application_type: db::OAuthClientType,
+    redirect_uris: &[&str],
+    plaintext_token: &str,
+) -> String {
+    let user = create_test_user(&state.store, "legacy-dynamic-client@example.com").await;
+    let owned = |v: &[&str]| v.iter().map(ToString::to_string).collect::<Vec<_>>();
+    let client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            application_type,
+            redirect_uris: owned(redirect_uris),
+            grant_types: Some(owned(grant_types)),
+            response_types: Some(owned(response_types)),
+            registration_access_token_hash: Some(crypto::hash_token(plaintext_token)),
+            ..Default::default()
+        },
+    )
+    .await;
+    client.client_id
+}
+
+/// A faithful full-replacement PUT restating the `grant_types:
+/// ["client_credentials"]` + `response_types: ["code"]` the server itself
+/// stored must be accepted, and must migrate the client off
+/// the legacy state by normalizing `response_types` to `[]` (the state the
+/// server would issue today).
+#[tokio::test]
+async fn test_rfc7592_put_accepts_stored_client_credentials_code_restatement() {
+    let (app, state) = test_app().await;
+    let token = "legacy-cc-code-restatement-token";
+    let client_id = make_legacy_dynamic_client(
+        &state,
+        &["client_credentials"],
+        &["code"],
+        db::OAuthClientType::Service,
+        &[],
+        token,
+    )
+    .await;
+
+    // A conforming RFC 7592 §2.2 client restates the metadata the server
+    // echoed — including the `["code"]` `response_types` it was issued.
+    let update_body = serde_json::json!({
+        "grant_types": ["client_credentials"],
+        "response_types": ["code"],
+    });
+    let (status, body) = http_request(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(update_body.to_string()),
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a faithful restatement of stored legacy metadata must be \
+         accepted by the management PUT, not rejected as inconsistent: {body}"
+    );
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        json["grant_types"],
+        serde_json::json!(["client_credentials"]),
+        "grant_types must be preserved on the legacy restatement PUT: {body}"
+    );
+    assert_eq!(
+        json["response_types"],
+        serde_json::json!([]),
+        "the legacy `response_types: [\"code\"]` must be normalized to `[]` on \
+         the response, migrating the client off the legacy state: {body}"
+    );
+
+    // The stored row must reflect the same migration: `grant_types` unchanged,
+    // `response_types` now `[]`.
+    let stored = db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup")
+        .expect("client must still exist");
+    assert_eq!(
+        stored.grant_types,
+        Some(vec!["client_credentials".to_string()]),
+        "grant_types must be preserved across the legacy restatement PUT"
+    );
+    assert_eq!(
+        stored.response_types,
+        Some(vec![]),
+        "stored response_types must be normalized to [] by the legacy PUT"
+    );
+}
+
+/// The recovery the server's error message prescribes (`response_types: []`)
+/// also succeeds against a legacy client, and is preserved as the fixed
+/// regression guard for the one-attempt recovery path.
+#[tokio::test]
+async fn test_rfc7592_put_workaround_empty_response_types_unlocks_client() {
+    let (app, state) = test_app().await;
+    let token = "legacy-cc-workaround-token";
+    let client_id = make_legacy_dynamic_client(
+        &state,
+        &["client_credentials"],
+        &["code"],
+        db::OAuthClientType::Service,
+        &[],
+        token,
+    )
+    .await;
+
+    let update_body = serde_json::json!({
+        "grant_types": ["client_credentials"],
+        "response_types": [],
+    });
+    let (status, body) = http_request(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(update_body.to_string()),
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the `response_types: []` workaround PUT must succeed: {body}"
+    );
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        json["grant_types"],
+        serde_json::json!(["client_credentials"])
+    );
+    assert_eq!(json["response_types"], serde_json::json!([]));
+
+    let stored = db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup")
+        .expect("client must still exist");
+    assert_eq!(
+        stored.grant_types,
+        Some(vec!["client_credentials".to_string()]),
+        "the workaround must preserve grant_types"
+    );
+    assert_eq!(
+        stored.response_types,
+        Some(vec![]),
+        "the workaround must store response_types = []"
+    );
+}
+
+/// A `device_code`-only client is the other legacy shape (an omitted
+/// `response_types` defaulted to
+/// `["code"]` with a non-`authorization_code` grant). Its faithful restatement
+/// must be accepted too, confirming the fix is not `client_credentials`-specific.
+#[tokio::test]
+async fn test_rfc7592_put_accepts_stored_device_code_code_restatement() {
+    let (app, state) = test_app().await;
+    let token = "legacy-device-code-restatement-token";
+    let client_id = make_legacy_dynamic_client(
+        &state,
+        &[
+            "urn:ietf:params:oauth:grant-type:device_code",
+            "client_credentials",
+        ],
+        &["code"],
+        db::OAuthClientType::Service,
+        &[],
+        token,
+    )
+    .await;
+
+    // RFC 7591 §2 places no ordering requirement on `grant_types`, so a
+    // reordered read-back is still a faithful restatement.
+    let update_body = serde_json::json!({
+        "grant_types": ["client_credentials", "urn:ietf:params:oauth:grant-type:device_code"],
+        "response_types": ["code"],
+    });
+    let (status, body) = http_request(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(update_body.to_string()),
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a faithful restatement of a device_code-only legacy client must be \
+         accepted: {body}"
+    );
+
+    let stored = db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup")
+        .expect("client must still exist");
+    assert_eq!(
+        stored.grant_types,
+        Some(vec![
+            "client_credentials".to_string(),
+            "urn:ietf:params:oauth:grant-type:device_code".to_string(),
+        ]),
+        "device_code grant_types must be preserved across the legacy PUT"
+    );
+    assert_eq!(
+        stored.response_types,
+        Some(vec![]),
+        "device_code legacy response_types must be normalized to []"
+    );
+}
+
+/// A PUT that tries to *move* a client into the legacy state from a different,
+/// consistent state (dropping `authorization_code` while keeping
+/// `response_types: ["code"]`) is not a faithful restatement — it must still
+/// be rejected by the reverse check, proving the fix does not over-tolerate
+/// genuinely new inconsistent state on the management endpoint.
+#[tokio::test]
+async fn test_rfc7592_put_rejects_moving_into_legacy_code_state() {
+    let (app, state) = test_app().await;
+    let token = "moving-into-legacy-token";
+    // A consistent `authorization_code` client the legacy tolerance must NOT
+    // touch: a faithful restatement of THIS state is what `["code"]` is for.
+    let client_id = make_legacy_dynamic_client(
+        &state,
+        &["authorization_code"],
+        &["code"],
+        db::OAuthClientType::Web,
+        &["https://example.com/callback"],
+        token,
+    )
+    .await;
+
+    let update_body = serde_json::json!({
+        "grant_types": ["client_credentials"],
+        "response_types": ["code"],
+    });
+    let (status, body) = http_request(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(update_body.to_string()),
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a PUT moving a client into the legacy state from a consistent state \
+         must be rejected by the reverse check, not silently normalized: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_client_metadata");
+    assert!(
+        json["error_description"]
+            .as_str()
+            .is_some_and(|d| d.contains("response_types includes 'code'")),
+        "the rejection must come from the reverse consistency check, not any \
+         other invalid_client_metadata path: {body}"
+    );
+
+    // The rejected PUT must not mutate the stored metadata.
+    let stored = db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup")
+        .expect("client must still exist");
+    assert_eq!(
+        stored.grant_types,
+        Some(vec!["authorization_code".to_string()]),
+        "a rejected PUT must not change grant_types"
+    );
+    assert_eq!(
+        stored.response_types,
+        Some(vec!["code".to_string()]),
+        "a rejected PUT must not change response_types"
+    );
+}
+
+/// A faithful restatement by a consistent `authorization_code` client is
+/// unaffected by the legacy tolerance: it must still succeed, proving no
+/// regression for the normal management-PUT path.
+#[tokio::test]
+async fn test_rfc7592_put_consistent_auth_code_restatement_unaffected() {
+    let (app, state) = test_app().await;
+    let token = "consistent-auth-code-restatement-token";
+    let client_id = make_legacy_dynamic_client(
+        &state,
+        &["authorization_code"],
+        &["code"],
+        db::OAuthClientType::Web,
+        &["https://example.com/callback"],
+        token,
+    )
+    .await;
+
+    let update_body = serde_json::json!({
+        "grant_types": ["authorization_code"],
+        "response_types": ["code"],
+        "redirect_uris": ["https://example.com/callback"],
+    });
+    let (status, body) = http_request(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(update_body.to_string()),
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a consistent authorization_code restatement must still succeed: {body}"
+    );
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        json["grant_types"],
+        serde_json::json!(["authorization_code"])
+    );
+    // The consistent client keeps its `["code"]` — the tolerance must not
+    // normalize a working authorization-code client out of the flow.
+    assert_eq!(json["response_types"], serde_json::json!(["code"]));
+
+    let stored = db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup")
+        .expect("client must still exist");
+    assert_eq!(
+        stored.grant_types,
+        Some(vec!["authorization_code".to_string()])
+    );
+    assert_eq!(stored.response_types, Some(vec!["code".to_string()]));
+}
+
+// ========================================================================
+// RFC 7592 §2.2/§2.3: the token is re-checked inside the write
+// ========================================================================
+
+/// An app whose store, on the first write attempt against the armed client
+/// doc, sets that doc's registration access token hash to the armed value
+/// before the write compares versions. It stands in for a concurrent PUT
+/// (`Some(hash)`, a rotation) or DELETE (`None`, a consumed token) that
+/// committed after this request verified its token.
+type ArmedTokenWrite = std::sync::Arc<std::sync::Mutex<Option<(String, Option<String>)>>>;
+
+async fn app_with_concurrent_token_write() -> (
+    axum::Router,
+    std::sync::Arc<crate::AppState>,
+    ArmedTokenWrite,
+) {
+    use crate::db::documents::oauth::OAuthClientDoc;
+
+    let armed: ArmedTokenWrite = std::sync::Arc::default();
+    let slot = armed.clone();
+    let (app, state) = test_app_with_modify_hook(move |store| {
+        let writer = store.clone();
+        store.set_modify_test_hook(std::sync::Arc::new(move |doc_id: &str, attempt: u32| {
+            let writer = writer.clone();
+            let mut guard = slot.lock().expect("slot lock");
+            let fire = attempt == 0 && guard.as_ref().is_some_and(|(id, _)| id == doc_id);
+            let write = if fire { guard.take() } else { None };
+            drop(guard);
+            Box::pin(async move {
+                let Some((doc_id, hash)) = write else {
+                    return;
+                };
+                writer
+                    .modify::<OAuthClientDoc, _>(&doc_id, |d| {
+                        d.registration_access_token_hash.clone_from(&hash);
+                    })
+                    .await
+                    .expect("concurrent token write");
+            })
+        }));
+    })
+    .await;
+    (app, state, armed)
+}
+
+async fn arm(
+    state: &crate::AppState,
+    armed: &ArmedTokenWrite,
+    client_id: &str,
+    hash: Option<String>,
+) {
+    let client = db::get_oauth_client_by_client_id(&state.store, client_id)
+        .await
+        .expect("lookup")
+        .expect("client exists");
+    *armed.lock().expect("slot lock") = Some((client.id, hash));
+}
+
+// RFC 7592 §2.2: "If the registration access token used to make this request
+// is not valid, the server MUST respond with an error". A PUT whose token was
+// rotated by a concurrent PUT after verification must not overwrite that
+// rotation.
+#[tokio::test]
+async fn test_rfc7592_put_rejects_token_rotated_before_write() {
+    let (app, state, armed) = app_with_concurrent_token_write().await;
+    let body = serde_json::json!({ "redirect_uris": ["https://example.com/callback"] });
+
+    // Control: an un-raced PUT succeeds.
+    let (control_id, control_token) = register_dynamic_client(&app).await;
+    let (status, response) = put_client_config(&app, &control_id, &control_token, &body).await;
+    assert_eq!(status, StatusCode::OK, "control PUT: {response}");
+
+    let (client_id, token) = register_dynamic_client(&app).await;
+    let concurrent = crypto::hash_token("concurrent-rotation");
+    arm(&state, &armed, &client_id, Some(concurrent.clone())).await;
+
+    let (status, response) = put_client_config(&app, &client_id, &token, &body).await;
+
+    assert!(armed.lock().expect("slot lock").is_none(), "hook must fire");
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{response}");
+    assert!(response.contains("invalid_token"), "{response}");
+    let stored = db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup")
+        .expect("client exists");
+    assert_eq!(
+        stored.registration_access_token_hash.as_deref(),
+        Some(concurrent.as_str()),
+        "the concurrent rotation must survive"
+    );
+}
+
+// RFC 7592 §2.3 requires the same error for an invalid token on DELETE. A
+// DELETE whose token was rotated after verification must not delete.
+#[tokio::test]
+async fn test_rfc7592_delete_rejects_token_rotated_before_write() {
+    let (app, state, armed) = app_with_concurrent_token_write().await;
+    let (client_id, token) = register_dynamic_client(&app).await;
+    arm(
+        &state,
+        &armed,
+        &client_id,
+        Some(crypto::hash_token("concurrent-rotation")),
+    )
+    .await;
+
+    let (status, response) = http_delete(
+        &app,
+        &format!("/oauth/register/{client_id}"),
+        &[("Authorization", &format!("Bearer {token}"))],
+    )
+    .await;
+
+    assert!(armed.lock().expect("slot lock").is_none(), "hook must fire");
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{response}");
+    assert!(
+        db::get_oauth_client_by_client_id(&state.store, &client_id)
+            .await
+            .expect("lookup")
+            .is_some(),
+        "the client must not be deleted"
+    );
+}
+
+// Of two DELETEs with one token, only the one that consumes the token deletes
+// and audits; the other finds the token already consumed.
+#[tokio::test]
+async fn test_rfc7592_delete_loses_to_concurrent_delete() {
+    let (app, state, armed) = app_with_concurrent_token_write().await;
+    let (client_id, token) = register_dynamic_client(&app).await;
+    arm(&state, &armed, &client_id, None).await;
+
+    let (status, response) = http_delete(
+        &app,
+        &format!("/oauth/register/{client_id}"),
+        &[("Authorization", &format!("Bearer {token}"))],
+    )
+    .await;
+
+    assert!(armed.lock().expect("slot lock").is_none(), "hook must fire");
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{response}");
+    let events = state
+        .audit
+        .query_events(&db::AuditEventFilter {
+            event_types: Some(vec!["oauth_client_deleted".to_string()]),
+            ..Default::default()
+        })
+        .await
+        .expect("query audit events");
+    assert!(events.is_empty(), "the losing DELETE must not audit");
+}
+
+// RFC 7592 §2.3 DELETE consumes the registration access token in its own
+// committed write before `delete_oauth_client_and_revoke_sessions`, whose
+// steps commit separately. If a step fails after the consume but before the
+// row is removed, the client survives; without an undo it would have no
+// token and the owner could never retry. `set_delete_by_index_remaining_successes(0)`
+// makes the cascade's first store-level `delete_by_index` fail with a
+// non-retryable error after the consume committed.
+#[tokio::test]
+async fn test_rfc7592_delete_partial_failure_restores_token_for_retry() {
+    let (app, state) = test_app_with_modify_hook(|store| {
+        store.set_delete_by_index_remaining_successes(0);
+    })
+    .await;
+    let (client_id, token) = register_dynamic_client(&app).await;
+    let presented_hash = crypto::hash_token(&token);
+    let bearer = format!("Bearer {token}");
+    let path = format!("/oauth/register/{client_id}");
+
+    let (status, response) = http_delete(&app, &path, &[("Authorization", &bearer)]).await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a failed delete must surface as 500, not 204: {response}"
+    );
+    let events = state
+        .audit
+        .query_events(&db::AuditEventFilter {
+            event_types: Some(vec!["oauth_client_deleted".to_string()]),
+            ..Default::default()
+        })
+        .await
+        .expect("query audit events");
+    assert!(events.is_empty(), "a failed delete must not audit");
+
+    let stored = db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup")
+        .expect("the client survives a failed delete");
+    assert_eq!(
+        stored.registration_access_token_hash.as_deref(),
+        Some(presented_hash.as_str()),
+        "the consume is undone so the owner can retry"
+    );
+    let (status, _body) =
+        http_request(&app, "GET", &path, None, &[("Authorization", &bearer)]).await;
+    assert_eq!(status, StatusCode::OK, "the restored token works again");
+
+    // A retry authenticates again and reaches the delete, which fails again.
+    let (status, _body) = http_delete(&app, &path, &[("Authorization", &bearer)]).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let stored = db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup")
+        .expect("the client survives the retried delete");
+    assert_eq!(
+        stored.registration_access_token_hash.as_deref(),
+        Some(presented_hash.as_str()),
+        "every failed attempt undoes its own consume"
+    );
+}
+
+// The undo above must not reinstate a token revoked between the consume and
+// the failure. Here the owner is deleted inside the failing delete (after the
+// consume, before the step that fails): `delete_user` unlinks the client and
+// clears its hash, so "the hash is None" holds either way, and only the
+// version the consume committed shows that someone else wrote since.
+#[tokio::test]
+async fn test_rfc7592_failed_delete_does_not_restore_token_revoked_by_owner_deletion() {
+    use std::sync::{Arc, OnceLock};
+
+    let store_cell: Arc<OnceLock<DocumentStore>> = Arc::new(OnceLock::new());
+    let owner_cell: Arc<OnceLock<String>> = Arc::new(OnceLock::new());
+    let (hook_store, hook_owner) = (store_cell.clone(), owner_cell.clone());
+    let (app, state) = test_app_with_modify_hook(move |store| {
+        store.set_delete_by_index_remaining_successes(0);
+        store.set_post_secret_revoke_test_hook(Arc::new(move |_client_id: &str| {
+            let store = hook_store.get().cloned();
+            let owner = hook_owner.get().cloned();
+            Box::pin(async move {
+                if let (Some(store), Some(owner)) = (store, owner) {
+                    assert!(
+                        db::delete_user(&store, &owner, db::LastAdminGuard::Enforce)
+                            .await
+                            .expect("delete owner mid-delete")
+                    );
+                }
+            })
+        }));
+    })
+    .await;
+
+    let owner = create_test_user(&state.store, "rfc7592-restore-race@example.com").await;
+    let reg_token = "vouch_reg_restore_after_owner_delete";
+    let client = create_test_client(
+        &state.store,
+        &owner.id,
+        TestClientSpec {
+            access_scope: db::AccessScope::Personal,
+            with_secret: false,
+            registration_access_token_hash: Some(crypto::hash_token(reg_token)),
+            ..Default::default()
+        },
+    )
+    .await;
+    // Arm the hook only now, so setup runs without it.
+    assert!(
+        store_cell.set(state.store.clone()).is_ok(),
+        "store set once"
+    );
+    assert!(owner_cell.set(owner.id.clone()).is_ok(), "owner set once");
+
+    let path = format!("/oauth/register/{}", client.client_id);
+    let bearer = format!("Bearer {reg_token}");
+    let (status, body) = http_delete(&app, &path, &[("Authorization", &bearer)]).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+
+    let stored = db::get_oauth_client_by_client_id(&state.store, &client.client_id)
+        .await
+        .expect("lookup")
+        .expect("the client survives the failed delete");
+    assert_eq!(
+        stored.user_id, None,
+        "the deleted owner's client is unlinked"
+    );
+    assert_eq!(
+        stored.registration_access_token_hash, None,
+        "the failed delete must not restore a token the owner's deletion revoked"
+    );
+    let response = http_get_full(&app, &path, &[("Authorization", &bearer)]).await;
+    assert_eq!(
+        response.status,
+        StatusCode::UNAUTHORIZED,
+        "{}",
+        response.body
+    );
+    assert_invalid_token_challenge(&response);
+}
+
+// ========================================================================
+// Transport metadata on the registration lifecycle audit rows
+// ========================================================================
+
+/// The `oauth_client_registered`, `oauth_client_updated`, and
+/// `oauth_client_deleted` rows written by RFC 7591 registration and the RFC
+/// 7592 PUT and DELETE record the requester's IP and User-Agent. Before the
+/// fix all three wrote `ip_address: None, user_agent: None` although each
+/// handler had the request in hand.
+#[tokio::test]
+async fn test_registration_lifecycle_audit_rows_record_transport() {
+    let (app, state) = test_app().await;
+    let ua = "vouch-registration-audit/1.0";
+
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "Audit Transport Client"
+    });
+    let (status, body) = http_post_json(
+        &app,
+        "/oauth/register",
+        &body.to_string(),
+        &[("User-Agent", ua)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "registration failed: {body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let client_id = json["client_id"].as_str().expect("client_id").to_string();
+    let token = json["registration_access_token"]
+        .as_str()
+        .expect("registration_access_token")
+        .to_string();
+
+    let bearer = format!("Bearer {token}");
+    let (status, body) = http_request(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(
+            serde_json::json!({
+                "client_id": client_id,
+                "redirect_uris": ["https://example.com/callback"],
+                "client_name": "Audit Transport Client (renamed)"
+            })
+            .to_string(),
+        ),
+        &[
+            ("Authorization", &bearer),
+            ("Content-Type", "application/json"),
+            ("User-Agent", ua),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "PUT failed: {body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let bearer = format!("Bearer {}", rotated_token(&json));
+
+    let (status, body) = http_delete(
+        &app,
+        &format!("/oauth/register/{client_id}"),
+        &[("Authorization", &bearer), ("User-Agent", ua)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "DELETE failed: {body}");
+
+    for event_type in [
+        "oauth_client_registered",
+        "oauth_client_updated",
+        "oauth_client_deleted",
+    ] {
+        assert_audit_rows_record_transport(&state, event_type, ua).await;
+    }
 }

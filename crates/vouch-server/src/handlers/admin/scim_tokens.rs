@@ -1,263 +1,32 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-//! SCIM token management — API and UI handlers.
+//! SCIM token management — browser UI handlers.
 
 use crate::AppState;
+use crate::arrival::ArrivalTime;
 use crate::db;
+use crate::db::CreateScimTokenParams;
 use crate::db::documents::audit::ScimTokenAdminData;
-use crate::db::{CreateScimTokenParams, ScimScope, ScimScopeSet};
 use crate::error::ServiceError;
 use crate::handlers::admin::flash;
 use crate::impl_template_response;
 use askama::Template;
-use axum::Json;
 use axum::extract::{OriginalUri, State};
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::cookie::CookieJar;
 use jiff::Timestamp;
-use secrecy::{ExposeSecret, SecretString};
+use secrecy::ExposeSecret;
 use serde::Deserialize;
 use std::sync::Arc;
 
-use super::{compute_token_expiry, generate_scim_token};
+use super::{
+    MAX_SCIM_TOKEN_DESCRIPTION_CHARS, compute_token_expiry, generate_scim_token, has_audit_read,
+    requested_scope,
+};
 use crate::filters;
-use crate::handlers::browser_login::validate_origin;
+use crate::handlers::extractors::{AdminPage, OrgAdmin};
 use crate::handlers::session::{AuthContext, extract_org_admin, get_resource_auth_context};
 use crate::handlers::{ValidPath, ValidUuid};
-
-// ============================================================================
-// SCIM Token Management API
-// ============================================================================
-
-/// The four SCIM provisioning scopes plus, if requested, `audit:read`.
-/// Shared by the API and UI create handlers so the scope set granted to a
-/// new token can't drift between the two entry points.
-fn requested_scope(audit_read: bool) -> ScimScopeSet {
-    let mut scopes = vec![
-        ScimScope::UsersRead,
-        ScimScope::UsersWrite,
-        ScimScope::GroupsRead,
-        ScimScope::GroupsWrite,
-    ];
-    if audit_read {
-        scopes.push(ScimScope::AuditRead);
-    }
-    ScimScopeSet::from_scopes(scopes)
-}
-
-/// Whether a stored scope string grants `audit:read`. Malformed scope
-/// strings (should not occur — always written by [`requested_scope`]) are
-/// treated as not granting it, matching `ScimAuth`'s fail-closed behavior.
-fn has_audit_read(scope: &str) -> bool {
-    ScimScopeSet::parse(scope).is_some_and(|s| s.contains(ScimScope::AuditRead))
-}
-
-/// Request to create an organization API token.
-#[derive(Debug, Deserialize)]
-pub(crate) struct CreateScimTokenRequest {
-    pub description: Option<String>,
-    /// Token expiration in days (required, 1-365 days).
-    pub expires_in_days: i64,
-    /// Grant the `audit:read` scope (`GET /api/v1/org/audit-events`).
-    #[serde(default)]
-    pub audit_read: bool,
-}
-
-/// Response for created SCIM token.
-///
-/// `Debug` is hand-implemented to redact the bearer token; do not derive.
-#[derive(serde::Serialize)]
-pub(crate) struct CreateScimTokenResponse {
-    pub id: String,
-    #[serde(serialize_with = "vouch_common::serialize_secret_string")]
-    pub token: SecretString,
-    pub description: Option<String>,
-    pub expires_at: Option<Timestamp>,
-    pub audit_read: bool,
-}
-
-impl std::fmt::Debug for CreateScimTokenResponse {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CreateScimTokenResponse")
-            .field("id", &self.id)
-            .field("token", &"[REDACTED]")
-            .field("description", &self.description)
-            .field("expires_at", &self.expires_at)
-            .field("audit_read", &self.audit_read)
-            .finish()
-    }
-}
-
-/// SCIM token info for listing.
-#[derive(Debug, serde::Serialize)]
-pub(crate) struct ScimTokenInfo {
-    pub id: String,
-    pub description: Option<String>,
-    pub created_at: Timestamp,
-    pub last_used_at: Option<Timestamp>,
-    pub expires_at: Option<Timestamp>,
-    pub audit_read: bool,
-}
-
-/// Response for listing SCIM tokens.
-#[derive(Debug, serde::Serialize)]
-pub(crate) struct ListScimTokensResponse {
-    pub tokens: Vec<ScimTokenInfo>,
-}
-
-/// Create a new SCIM token.
-/// POST /api/v1/org/scim-tokens
-pub(crate) async fn create_scim_token(
-    method: Method,
-    uri: OriginalUri,
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    jar: CookieJar,
-    Json(req): Json<CreateScimTokenRequest>,
-) -> Result<Json<CreateScimTokenResponse>, ServiceError> {
-    // Validate inputs before auth to fail fast on obviously bad requests
-    if let Some(ref desc) = req.description
-        && desc.len() > 256
-    {
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_request",
-            "Description must be 256 characters or less",
-        ));
-    }
-
-    if req.expires_in_days < 1 || req.expires_in_days > 365 {
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_expiration",
-            "expires_in_days must be between 1 and 365",
-        ));
-    }
-
-    let (user, org_id) =
-        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
-
-    let generated = generate_scim_token()?;
-    let expires_at = Some(compute_token_expiry(req.expires_in_days)?);
-    let scope = requested_scope(req.audit_read);
-
-    // The 2-token limit is enforced inside the transaction: counting here and
-    // inserting afterwards lets two concurrent requests both pass the check.
-    let token_id = db::create_scim_token(
-        &state.store,
-        &CreateScimTokenParams {
-            org_id: &org_id,
-            token_hash: &generated.hash,
-            description: req.description.as_deref(),
-            expires_at,
-            scope,
-        },
-    )
-    .await?;
-
-    let data = ScimTokenAdminData {
-        action: "create_scim_token",
-        token_id: &token_id,
-        admin_user_id: &user.id,
-    };
-    if let Err(e) = state
-        .audit
-        .insert_event(
-            db::AuditEventKind::AdminCreateScimToken,
-            Some(&user.id),
-            Some(&user.email),
-            &data,
-        )
-        .await
-    {
-        tracing::warn!(error = %e, "failed to write admin_create_scim_token audit event");
-    }
-
-    tracing::info!("Created SCIM token: {} for org: {}", token_id, org_id);
-
-    Ok(Json(CreateScimTokenResponse {
-        id: token_id,
-        token: generated.plaintext.clone(),
-        description: req.description,
-        expires_at,
-        audit_read: req.audit_read,
-    }))
-}
-
-/// List SCIM tokens for the organization.
-/// GET /api/v1/org/scim-tokens
-pub(crate) async fn list_scim_tokens(
-    method: Method,
-    uri: OriginalUri,
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    jar: CookieJar,
-) -> Result<Json<ListScimTokensResponse>, ServiceError> {
-    let (_user, org_id) =
-        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
-
-    let tokens = db::list_scim_tokens(&state.store, Some(&org_id)).await?;
-
-    let tokens: Vec<ScimTokenInfo> = tokens
-        .into_iter()
-        .map(|t| ScimTokenInfo {
-            id: t.id,
-            description: t.description,
-            created_at: t.created_at,
-            last_used_at: t.last_used_at,
-            expires_at: t.expires_at,
-            audit_read: has_audit_read(&t.scope),
-        })
-        .collect();
-
-    Ok(Json(ListScimTokensResponse { tokens }))
-}
-
-/// Delete a SCIM token.
-/// DELETE /api/v1/org/scim-tokens/:id
-pub(crate) async fn delete_scim_token(
-    method: Method,
-    uri: OriginalUri,
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    jar: CookieJar,
-    ValidPath(token_id): ValidPath<ValidUuid>,
-) -> Result<StatusCode, ServiceError> {
-    let (user, org_id) =
-        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
-
-    let deleted = db::delete_scim_token(&state.store, &token_id, &org_id).await?;
-
-    if !deleted {
-        return Err(ServiceError::api(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            "SCIM token not found",
-        ));
-    }
-
-    let data = ScimTokenAdminData {
-        action: "delete_scim_token",
-        token_id: &token_id,
-        admin_user_id: &user.id,
-    };
-    if let Err(e) = state
-        .audit
-        .insert_event(
-            db::AuditEventKind::AdminDeleteScimToken,
-            Some(&user.id),
-            Some(&user.email),
-            &data,
-        )
-        .await
-    {
-        tracing::warn!(error = %e, "failed to write admin_delete_scim_token audit event");
-    }
-
-    tracing::info!("Deleted SCIM token: {}", token_id);
-
-    Ok(StatusCode::NO_CONTENT)
-}
 
 // ============================================================================
 // Admin UI — SCIM Token Management
@@ -283,11 +52,34 @@ pub(crate) struct ScimTokenRow {
 pub(crate) struct AdminScimTokensTemplate {
     pub auth: AuthContext,
     pub tokens: Vec<ScimTokenRow>,
+    /// Tokens that still count against the per-org cap, mirroring the
+    /// active-only filter in [`db::create_scim_token`] (`expires_at > now`).
+    /// The create-form gate reads this, not `tokens.len()`, so an
+    /// expired-but-not-yet-cleaned-up row no longer hides the form when the
+    /// DB cap would accept creation.
+    pub active_count: usize,
+    /// The cap the create form and the "max reached" banner are keyed on;
+    /// the same constant the store enforces inside the create transaction.
+    pub max_tokens: usize,
     pub flash_message: Option<String>,
     pub new_token: Option<String>,
 }
 
 impl_template_response!(AdminScimTokensTemplate);
+
+/// Count tokens that still count against the per-org cap.
+///
+/// Mirrors the active-only filter in [`db::create_scim_token`]: a token with
+/// no expiration is always active, and one with an `expires_at` at or before
+/// `now` is not. Using the request's arrival instant for `now` keeps the
+/// display decision on the same clock the rest of the request uses; the DB
+/// cap remains authoritative for actual creation.
+fn count_active(tokens: &[ScimTokenRow], now: Timestamp) -> usize {
+    tokens
+        .iter()
+        .filter(|t| t.expires_at.is_none_or(|exp| exp > now))
+        .count()
+}
 
 /// Form data for creating a SCIM token.
 #[derive(Debug, Deserialize)]
@@ -308,30 +100,16 @@ fn redirect_error(jar: CookieJar, msg: impl Into<String>) -> Response {
 
 /// GET /admin/scim-tokens — SCIM token management page.
 pub(crate) async fn admin_scim_tokens_page(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
+    admin: AdminPage,
 ) -> Response {
-    let auth = get_resource_auth_context(&state, &jar).await;
-
-    if !auth.authenticated {
-        return Redirect::to("/enroll/start").into_response();
-    }
-    if !auth.is_org_admin {
-        return Redirect::to("/integrations").into_response();
-    }
-
-    let user_id = match auth.user_id {
-        Some(ref id) => id.clone(),
-        None => return Redirect::to("/enroll/start").into_response(),
-    };
-
-    let org_id = match db::get_user_by_id(&state.store, &user_id).await {
-        Ok(Some(user)) => match user.org_id {
-            Some(id) => id,
-            None => return Redirect::to("/integrations").into_response(),
-        },
-        _ => return Redirect::to("/integrations").into_response(),
-    };
+    let AdminPage {
+        auth,
+        user_id: _,
+        org_id,
+    } = admin;
 
     let db_tokens = match db::list_scim_tokens(&state.store, Some(&org_id)).await {
         Ok(t) => t,
@@ -353,6 +131,12 @@ pub(crate) async fn admin_scim_tokens_page(
         })
         .collect();
 
+    // Gate the create form on the active-token count, not the total row
+    // count, so an expired-but-not-yet-cleaned-up row no longer hides the
+    // form when the DB cap would accept creation. The DB cap stays
+    // authoritative; this only controls what the UI affords.
+    let active_count = count_active(&tokens, arrival.timestamp());
+
     // Consume any flash messages set by a prior POST → redirect, then expire
     // the cookies in the response so a refresh doesn't re-show them.
     let messages = flash::read(&jar);
@@ -361,6 +145,8 @@ pub(crate) async fn admin_scim_tokens_page(
     let body = AdminScimTokensTemplate {
         auth,
         tokens,
+        active_count,
+        max_tokens: db::MAX_SCIM_TOKENS,
         flash_message: messages.err,
         new_token: None,
     };
@@ -369,6 +155,7 @@ pub(crate) async fn admin_scim_tokens_page(
 
 /// POST /admin/scim-tokens — Create a new SCIM token (UI form).
 pub(crate) async fn admin_create_scim_token(
+    arrival: ArrivalTime,
     method: Method,
     uri: OriginalUri,
     State(state): State<Arc<AppState>>,
@@ -376,11 +163,9 @@ pub(crate) async fn admin_create_scim_token(
     jar: CookieJar,
     axum::Form(form): axum::Form<CreateScimTokenForm>,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-
     // Validate inputs before auth to fail fast on obviously bad requests
     if let Some(ref desc) = form.description
-        && desc.len() > 256
+        && desc.chars().count() > MAX_SCIM_TOKEN_DESCRIPTION_CHARS
     {
         return Ok(redirect_error(
             jar,
@@ -395,8 +180,16 @@ pub(crate) async fn admin_create_scim_token(
         ));
     }
 
-    let (admin, org_id) =
-        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
+    let (admin, org_id) = extract_org_admin(
+        &state,
+        &headers,
+        &jar,
+        method.as_str(),
+        uri.path(),
+        None,
+        arrival,
+    )
+    .await?;
 
     let generated = generate_scim_token()?;
     let expires_at = Some(compute_token_expiry(form.expires_in_days)?);
@@ -436,18 +229,15 @@ pub(crate) async fn admin_create_scim_token(
         token_id: &token_id,
         admin_user_id: &admin.id,
     };
-    if let Err(e) = state
+    state
         .audit
-        .insert_event(
+        .record_event(
             db::AuditEventKind::AdminCreateScimToken,
             Some(&admin.id),
             Some(&admin.email),
             &data,
         )
-        .await
-    {
-        tracing::warn!(error = %e, "failed to write admin_create_scim_token audit event");
-    }
+        .await;
 
     tracing::info!(
         "Admin {} created SCIM token {} for org {}",
@@ -471,11 +261,15 @@ pub(crate) async fn admin_create_scim_token(
         })
         .collect();
 
-    let auth = get_resource_auth_context(&state, &jar).await;
+    let active_count = count_active(&tokens, arrival.timestamp());
+
+    let auth = get_resource_auth_context(&state, &jar, arrival).await;
 
     Ok(AdminScimTokensTemplate {
         auth,
         tokens,
+        active_count,
+        max_tokens: db::MAX_SCIM_TOKENS,
         flash_message: None,
         // Deliberate render-boundary exposure: this page shows the token
         // once, at creation, which is its purpose (Askama needs Display).
@@ -486,17 +280,15 @@ pub(crate) async fn admin_create_scim_token(
 
 /// POST /admin/scim-tokens/{id}/revoke — Revoke a SCIM token (UI form).
 pub(crate) async fn admin_revoke_scim_token(
-    method: Method,
-    uri: OriginalUri,
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    admin: OrgAdmin,
     jar: CookieJar,
     ValidPath(token_id): ValidPath<ValidUuid>,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-
-    let (admin, org_id) =
-        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
+    let OrgAdmin {
+        user: admin,
+        org_id,
+    } = admin;
 
     let deleted = db::delete_scim_token(&state.store, &token_id, &org_id).await?;
 
@@ -509,18 +301,15 @@ pub(crate) async fn admin_revoke_scim_token(
         token_id: &token_id,
         admin_user_id: &admin.id,
     };
-    if let Err(e) = state
+    state
         .audit
-        .insert_event(
+        .record_event(
             db::AuditEventKind::AdminRevokeScimToken,
             Some(&admin.id),
             Some(&admin.email),
             &data,
         )
-        .await
-    {
-        tracing::warn!(error = %e, "failed to write admin_revoke_scim_token audit event");
-    }
+        .await;
 
     tracing::info!(
         "Admin {} revoked SCIM token {} for org {}",
@@ -535,535 +324,356 @@ pub(crate) async fn admin_revoke_scim_token(
 #[cfg(test)]
 #[expect(
     clippy::expect_used,
-    clippy::unwrap_used,
-    clippy::indexing_slicing,
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
-    use axum::http::StatusCode;
-    use secrecy::ExposeSecret;
-
+    use crate::db;
+    use crate::handlers::admin::MAX_SCIM_TOKEN_DESCRIPTION_CHARS;
     use crate::test_utils::*;
+    use axum::http::StatusCode;
 
-    // ValidPath<ValidUuid> is extracted before the handler body runs auth checks,
-    // so a malformed UUID must produce 400 regardless of authentication state.
+    const ORIGIN: &str = "https://test.example.com";
+
+    fn location(resp: &HttpResponse) -> &str {
+        resp.headers
+            .get("location")
+            .expect("redirect must carry a location header")
+            .to_str()
+            .expect("ascii location")
+    }
+
+    // ── GET /admin/scim-tokens (AdminPage: redirects, never JSON errors) ──
 
     #[tokio::test]
-    async fn test_delete_scim_token_invalid_uuid_returns_400() {
+    async fn page_without_session_redirects_to_enroll() {
         let (app, _state) = test_app().await;
 
-        let (status, body) = http_delete(&app, "/api/v1/org/scim-tokens/not-a-uuid", &[]).await;
+        let resp = http_get_full(&app, "/admin/scim-tokens", &[]).await;
 
-        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+        assert!(resp.status.is_redirection(), "got {}", resp.status);
+        assert_eq!(location(&resp), "/enroll/start");
     }
 
     #[tokio::test]
-    async fn test_delete_scim_token_invalid_uuid_error_is_json() {
-        let (app, _state) = test_app().await;
-
-        let (status, body) = http_delete(&app, "/api/v1/org/scim-tokens/not-a-uuid", &[]).await;
-
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        // ServiceError::api produces {"code": "...", "message": "..."}
-        let json: serde_json::Value =
-            serde_json::from_str(&body).expect("error response must be valid JSON");
-        assert!(
-            json.get("code").is_some(),
-            "JSON error must contain 'code' field; got: {json}"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_delete_scim_token_valid_uuid_proceeds_to_auth_check() {
-        // A valid UUID with no auth should fail with 401, not 400,
-        // confirming UUID validation passed and auth ran.
-        let (app, _state) = test_app().await;
-        let valid_uuid = uuid::Uuid::now_v7();
-
-        let (status, _body) =
-            http_delete(&app, &format!("/api/v1/org/scim-tokens/{valid_uuid}"), &[]).await;
-
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-    }
-
-    // ================================================================
-    // Input validation runs before auth (fail fast on bad input)
-    // ================================================================
-
-    #[tokio::test]
-    async fn test_create_scim_token_invalid_expiry_returns_400_without_auth() {
-        let (app, _state) = test_app().await;
-
-        // Invalid expires_in_days returns 400 (input validation before auth)
-        let (status, _body) = http_post_json(
-            &app,
-            "/api/v1/org/scim-tokens",
-            r#"{"description": "test", "expires_in_days": 0}"#,
-            &[], // No auth header
-        )
-        .await;
-
-        assert_eq!(
-            status,
-            StatusCode::BAD_REQUEST,
-            "Invalid input must return 400 before auth check"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_create_scim_token_long_description_returns_400_without_auth() {
-        let (app, _state) = test_app().await;
-
-        let long_desc = "x".repeat(257);
-        let body_json = format!(
-            r#"{{"description": "{}", "expires_in_days": 30}}"#,
-            long_desc
-        );
-
-        let (status, _body) = http_post_json(
-            &app,
-            "/api/v1/org/scim-tokens",
-            &body_json,
-            &[], // No auth header
-        )
-        .await;
-
-        assert_eq!(
-            status,
-            StatusCode::BAD_REQUEST,
-            "Invalid input must return 400 before auth check"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_create_scim_token_valid_input_returns_401_without_auth() {
-        let (app, _state) = test_app().await;
-
-        // Valid input but no auth → 401 (input validation passes, auth fails)
-        let (status, _body) = http_post_json(
-            &app,
-            "/api/v1/org/scim-tokens",
-            r#"{"description": "test", "expires_in_days": 30}"#,
-            &[], // No auth header
-        )
-        .await;
-
-        assert_eq!(
-            status,
-            StatusCode::UNAUTHORIZED,
-            "Valid input without auth must return 401"
-        );
-    }
-
-    // ================================================================
-    // Token generation helper tests
-    // ================================================================
-
-    #[test]
-    fn test_generate_scim_token_has_prefix_and_hash() {
-        let generated = super::super::generate_scim_token().unwrap();
-        let plaintext = generated.plaintext.expose_secret();
-
-        assert!(
-            plaintext.starts_with("vouch_scim_"),
-            "token must have vouch_scim_ prefix"
-        );
-        // 32 random bytes → 43 base64url chars + 11 char prefix
-        assert!(plaintext.len() > 40, "token must be sufficiently long");
-        // Hash should be 64-char hex (SHA-256)
-        assert_eq!(generated.hash.len(), 64, "hash must be 64 hex chars");
-        // Hash must match the plaintext
-        let expected_hash = hex::encode(aws_lc_rs::digest::digest(
-            &aws_lc_rs::digest::SHA256,
-            plaintext.as_bytes(),
-        ));
-        assert_eq!(generated.hash, expected_hash, "hash must match plaintext");
-    }
-
-    #[test]
-    fn test_generate_scim_token_unique() {
-        let a = super::super::generate_scim_token().unwrap();
-        let b = super::super::generate_scim_token().unwrap();
-        assert_ne!(
-            a.plaintext.expose_secret(),
-            b.plaintext.expose_secret(),
-            "tokens must be unique"
-        );
-    }
-
-    #[test]
-    fn test_compute_token_expiry_valid_days() {
-        let expiry = super::super::compute_token_expiry(30).unwrap();
-        let now = jiff::Timestamp::now();
-        let diff_secs = expiry.duration_since(now).as_secs();
-        let expected_secs = 30 * 24 * 3600;
-        assert!(
-            diff_secs >= expected_secs - 5 && diff_secs <= expected_secs + 5,
-            "30 days should be ~{expected_secs}s, got {diff_secs}s"
-        );
-    }
-
-    #[test]
-    fn test_compute_token_expiry_one_day() {
-        let expiry = super::super::compute_token_expiry(1).unwrap();
-        let now = jiff::Timestamp::now();
-        let diff_secs = expiry.duration_since(now).as_secs();
-        let expected_secs = 24 * 3600;
-        assert!(
-            diff_secs >= expected_secs - 5 && diff_secs <= expected_secs + 5,
-            "1 day should be ~{expected_secs}s, got {diff_secs}s"
-        );
-    }
-
-    #[test]
-    fn test_compute_token_expiry_365_days() {
-        let expiry = super::super::compute_token_expiry(365).unwrap();
-        let now = jiff::Timestamp::now();
-        let diff_secs = expiry.duration_since(now).as_secs();
-        let expected_secs: i64 = 365 * 24 * 3600;
-        assert!(
-            diff_secs >= expected_secs - 5 && diff_secs <= expected_secs + 5,
-            "365 days should be ~{expected_secs}s, got {diff_secs}s"
-        );
-    }
-
-    // ================================================================
-    // Authenticated CRUD — Create (positive)
-    // ================================================================
-
-    #[tokio::test]
-    async fn test_create_scim_token_succeeds() {
+    async fn page_for_non_admin_redirects_to_integrations() {
         let (app, state) = test_app().await;
         let org = create_test_org(&state.store, "example.com").await;
-        let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
-        let auth_id = create_test_authenticator(&state.store, &admin.id).await;
-        let token = create_test_session(&state, &admin.id, &admin.email, &auth_id).await;
-        let auth_header = format!("Bearer {token}");
-
-        let (status, body) = http_post_json(
-            &app,
-            "/api/v1/org/scim-tokens",
-            r#"{"description": "CI provisioning", "expires_in_days": 30}"#,
-            &[("Authorization", &auth_header)],
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::OK, "body: {body}");
-        let resp: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
-        assert!(resp["id"].as_str().is_some(), "response must contain id");
-        let scim_token = resp["token"].as_str().expect("response must contain token");
-        assert!(
-            scim_token.starts_with("vouch_scim_"),
-            "token must start with vouch_scim_, got: {scim_token}"
-        );
-        assert_eq!(
-            resp["description"].as_str(),
-            Some("CI provisioning"),
-            "description must match"
-        );
-        assert!(
-            resp["expires_at"].as_str().is_some(),
-            "expires_at must be present"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_create_scim_token_custom_expiry() {
-        let (app, state) = test_app().await;
-        let org = create_test_org(&state.store, "example.com").await;
-        let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
-        let auth_id = create_test_authenticator(&state.store, &admin.id).await;
-        let token = create_test_session(&state, &admin.id, &admin.email, &auth_id).await;
-        let auth_header = format!("Bearer {token}");
-
-        let (status, body) = http_post_json(
-            &app,
-            "/api/v1/org/scim-tokens",
-            r#"{"description": "long-lived", "expires_in_days": 365}"#,
-            &[("Authorization", &auth_header)],
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::OK, "body: {body}");
-        let resp: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
-        let expires_at_str = resp["expires_at"]
-            .as_str()
-            .expect("expires_at must be present");
-        let expires_at: jiff::Timestamp = expires_at_str
-            .parse()
-            .expect("expires_at must be valid timestamp");
-        let now = jiff::Timestamp::now();
-        let diff_secs = expires_at.duration_since(now).as_secs();
-        let expected_secs: i64 = 365 * 24 * 3600;
-        assert!(
-            diff_secs >= expected_secs - 60 && diff_secs <= expected_secs + 60,
-            "expires_at should be ~365 days from now, diff was {diff_secs}s"
-        );
-    }
-
-    // ================================================================
-    // Authenticated CRUD — Create (negative)
-    // ================================================================
-
-    #[tokio::test]
-    async fn test_create_scim_token_requires_auth() {
-        let (app, _state) = test_app().await;
-
-        let (status, _body) = http_post_json(
-            &app,
-            "/api/v1/org/scim-tokens",
-            r#"{"description": "test", "expires_in_days": 30}"#,
-            &[],
-        )
-        .await;
-
-        assert_eq!(
-            status,
-            StatusCode::UNAUTHORIZED,
-            "missing auth must return 401"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_create_scim_token_requires_admin() {
-        let (app, state) = test_app().await;
-        let org = create_test_org(&state.store, "example.com").await;
-        let member =
+        let user =
             create_test_user_in_org(&state.store, "member@example.com", &org.id, false).await;
-        let auth_id = create_test_authenticator(&state.store, &member.id).await;
-        let token = create_test_session(&state, &member.id, &member.email, &auth_id).await;
-        let auth_header = format!("Bearer {token}");
-
-        let (status, _body) = http_post_json(
-            &app,
-            "/api/v1/org/scim-tokens",
-            r#"{"description": "test", "expires_in_days": 30}"#,
-            &[("Authorization", &auth_header)],
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
         )
         .await;
+        let cookie = format!("__Host-vouch_session={token}");
 
-        assert_eq!(status, StatusCode::FORBIDDEN, "non-admin must receive 403");
+        let resp = http_get_full(&app, "/admin/scim-tokens", &[("Cookie", &cookie)]).await;
+
+        assert!(resp.status.is_redirection(), "got {}", resp.status);
+        assert_eq!(location(&resp), "/integrations");
     }
 
     #[tokio::test]
-    async fn test_create_scim_token_max_limit() {
+    async fn page_renders_for_unverified_admin() {
+        // The upstream IdP is the trust root for the browser: an admin
+        // session minted by IdP sign-in alone (no FIDO2 ceremony) reads the
+        // token-management page like any other signed-in admin.
         let (app, state) = test_app().await;
         let org = create_test_org(&state.store, "example.com").await;
         let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
         let auth_id = create_test_authenticator(&state.store, &admin.id).await;
-        let token = create_test_session(&state, &admin.id, &admin.email, &auth_id).await;
-        let auth_header = format!("Bearer {token}");
-
-        // Create first token
-        let (status, _) = http_post_json(
-            &app,
-            "/api/v1/org/scim-tokens",
-            r#"{"description": "first", "expires_in_days": 30}"#,
-            &[("Authorization", &auth_header)],
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &admin.id,
+                email: &admin.email,
+                auth_id: Some(&auth_id),
+                verification: TestVerification::NotVerified,
+                ..Default::default()
+            },
         )
         .await;
-        assert_eq!(status, StatusCode::OK, "first token must succeed");
+        let cookie = format!("__Host-vouch_session={token}");
 
-        // Create second token
-        let (status, _) = http_post_json(
-            &app,
-            "/api/v1/org/scim-tokens",
-            r#"{"description": "second", "expires_in_days": 30}"#,
-            &[("Authorization", &auth_header)],
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "second token must succeed");
+        let resp = http_get_full(&app, "/admin/scim-tokens", &[("Cookie", &cookie)]).await;
 
-        // Third token must be rejected with 409
-        let (status, body) = http_post_json(
-            &app,
-            "/api/v1/org/scim-tokens",
-            r#"{"description": "third", "expires_in_days": 30}"#,
-            &[("Authorization", &auth_header)],
-        )
-        .await;
         assert_eq!(
-            status,
-            StatusCode::CONFLICT,
-            "third token must return 409; body: {body}"
-        );
-    }
-
-    // ================================================================
-    // Authenticated CRUD — List (positive)
-    // ================================================================
-
-    #[tokio::test]
-    async fn test_list_scim_tokens_empty() {
-        let (app, state) = test_app().await;
-        let org = create_test_org(&state.store, "example.com").await;
-        let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
-        let auth_id = create_test_authenticator(&state.store, &admin.id).await;
-        let token = create_test_session(&state, &admin.id, &admin.email, &auth_id).await;
-        let auth_header = format!("Bearer {token}");
-
-        let (status, body) = http_get(
-            &app,
-            "/api/v1/org/scim-tokens",
-            &[("Authorization", &auth_header)],
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::OK, "body: {body}");
-        let resp: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
-        let tokens = resp["tokens"].as_array().expect("tokens must be an array");
-        assert!(tokens.is_empty(), "no tokens created, list must be empty");
-    }
-
-    #[tokio::test]
-    async fn test_list_scim_tokens_returns_created() {
-        let (app, state) = test_app().await;
-        let org = create_test_org(&state.store, "example.com").await;
-        let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
-        let auth_id = create_test_authenticator(&state.store, &admin.id).await;
-        let token = create_test_session(&state, &admin.id, &admin.email, &auth_id).await;
-        let auth_header = format!("Bearer {token}");
-
-        // Create a token
-        let (status, create_body) = http_post_json(
-            &app,
-            "/api/v1/org/scim-tokens",
-            r#"{"description": "listed token", "expires_in_days": 30}"#,
-            &[("Authorization", &auth_header)],
-        )
-        .await;
-        assert_eq!(
-            status,
+            resp.status,
             StatusCode::OK,
-            "create must succeed; body: {create_body}"
-        );
-        let created: serde_json::Value = serde_json::from_str(&create_body).expect("valid JSON");
-        let created_id = created["id"].as_str().expect("id present");
-
-        // List tokens — should contain the created one
-        let (status, list_body) = http_get(
-            &app,
-            "/api/v1/org/scim-tokens",
-            &[("Authorization", &auth_header)],
-        )
-        .await;
-        assert_eq!(
-            status,
-            StatusCode::OK,
-            "list must succeed; body: {list_body}"
-        );
-        let resp: serde_json::Value = serde_json::from_str(&list_body).expect("valid JSON");
-        let tokens = resp["tokens"].as_array().expect("tokens must be an array");
-        assert_eq!(tokens.len(), 1, "list must contain exactly one token");
-        assert_eq!(
-            tokens[0]["id"].as_str(),
-            Some(created_id),
-            "listed token id must match created id"
-        );
-        assert_eq!(
-            tokens[0]["description"].as_str(),
-            Some("listed token"),
-            "listed token description must match"
+            "a signed-in admin reads the page without a key ceremony"
         );
     }
 
-    // ================================================================
-    // Authenticated CRUD — List (negative)
-    // ================================================================
+    #[tokio::test]
+    async fn page_renders_org_tokens_for_admin() {
+        let (app, state) = test_app().await;
+        let (admin, token) = create_test_org_admin(&state).await;
+        let org_id = admin.org_id.expect("fixture admin belongs to an org");
+        create_test_scim_token(&state.store, "provisioning token", &org_id).await;
+        let cookie = format!("__Host-vouch_session={token}");
+
+        let resp = http_get_full(&app, "/admin/scim-tokens", &[("Cookie", &cookie)]).await;
+
+        assert_eq!(resp.status, StatusCode::OK, "body: {}", resp.body);
+        assert!(
+            resp.body.contains("provisioning token"),
+            "page must list the org's tokens"
+        );
+    }
+
+    // ── GET /admin/scim-tokens: create-form visibility mirrors the active-only cap ──
+    //
+    // `db::create_scim_token` rejects a third creation only when *active* tokens
+    // (`expires_at > now`) reach MAX_SCIM_TOKENS. The create form must gate on the
+    // same predicate so an expired-but-not-yet-cleaned-up row no longer hides the
+    // form when the cap would accept creation (#715).
+
+    async fn seed_token(
+        state: &crate::AppState,
+        org_id: &str,
+        description: &str,
+        expires_at: Option<jiff::Timestamp>,
+    ) {
+        create_test_scim_token_expiring(&state.store, description, org_id, expires_at).await;
+    }
 
     #[tokio::test]
-    async fn test_list_scim_tokens_requires_auth() {
+    async fn expired_row_does_not_hide_create_form_when_active_below_cap() {
+        // The cap counts only active tokens, so one active + one expired row
+        // must keep the create form visible — the UI must not say "max
+        // reached" when the DB cap would accept creation.
+        let (app, state) = test_app().await;
+        let (admin, token) = create_test_org_admin(&state).await;
+        let org_id = admin.org_id.expect("fixture admin belongs to an org");
+        let cookie = format!("__Host-vouch_session={token}");
+
+        let past = jiff::Timestamp::now() - jiff::Span::new().hours(1);
+        let future = jiff::Timestamp::now() + jiff::Span::new().hours(24);
+        seed_token(&state, &org_id, "active-row", Some(future)).await;
+        seed_token(&state, &org_id, "expired-row", Some(past)).await;
+
+        let resp = http_get_full(&app, "/admin/scim-tokens", &[("Cookie", &cookie)]).await;
+
+        assert_eq!(resp.status, StatusCode::OK, "body: {}", resp.body);
+        assert!(
+            resp.body.contains("active-row") && resp.body.contains("expired-row"),
+            "page must list both the active and expired rows"
+        );
+        assert!(
+            resp.body.contains(r#"name="expires_in_days""#),
+            "create form must be shown when active tokens are below the cap"
+        );
+        assert!(
+            !resp.body.contains("Maximum of 2 API tokens reached"),
+            "max-reached banner must not appear when the cap would accept creation"
+        );
+
+        // The DB cap agrees: a third (active) token can still be minted.
+        create_test_scim_token_expiring(&state.store, "third-active", &org_id, Some(future)).await;
+    }
+
+    #[tokio::test]
+    async fn two_active_tokens_hide_create_form() {
+        // Regression guard: with two active tokens the form must stay hidden
+        // and the max-reached banner must render, exactly as before the fix.
+        let (app, state) = test_app().await;
+        let (admin, token) = create_test_org_admin(&state).await;
+        let org_id = admin.org_id.expect("fixture admin belongs to an org");
+        let cookie = format!("__Host-vouch_session={token}");
+
+        create_test_scim_token(&state.store, "active-1", &org_id).await;
+        create_test_scim_token(&state.store, "active-2", &org_id).await;
+
+        let resp = http_get_full(&app, "/admin/scim-tokens", &[("Cookie", &cookie)]).await;
+
+        assert_eq!(resp.status, StatusCode::OK, "body: {}", resp.body);
+        assert!(
+            resp.body.contains("active-1") && resp.body.contains("active-2"),
+            "page must list both active tokens"
+        );
+        assert!(
+            !resp.body.contains(r#"name="expires_in_days""#),
+            "create form must be hidden when two active tokens reach the cap"
+        );
+        assert!(
+            resp.body.contains("Maximum of 2 API tokens reached"),
+            "max-reached banner must appear at the active cap"
+        );
+    }
+
+    #[tokio::test]
+    async fn post_create_keeps_form_visible_with_one_expired_row() {
+        // After creating the first active token in an org that already holds
+        // an expired row, the post-create render must keep the form visible
+        // (now 1 active + 1 expired) rather than hiding it on the total row
+        // count. Mirrors the behavioral change called out in the fix note.
+        let (app, state) = test_app().await;
+        let (admin, token) = create_test_org_admin(&state).await;
+        let org_id = admin.org_id.expect("fixture admin belongs to an org");
+        let cookie = format!("__Host-vouch_session={token}");
+
+        let past = jiff::Timestamp::now() - jiff::Span::new().hours(1);
+        seed_token(&state, &org_id, "expired-row", Some(past)).await;
+
+        let resp = http_post_form_full(
+            &app,
+            "/admin/scim-tokens",
+            "description=rotated&expires_in_days=30",
+            &[("Cookie", &cookie), ("Origin", ORIGIN)],
+        )
+        .await;
+
+        assert_eq!(resp.status, StatusCode::OK, "body: {}", resp.body);
+        assert!(
+            resp.body.contains("vouch_scim_"),
+            "the created token is shown once, on this response"
+        );
+        assert!(
+            resp.body.contains(r#"name="expires_in_days""#),
+            "form must remain visible after creating the first active token \
+             alongside an expired row"
+        );
+    }
+
+    // ── POST /admin/scim-tokens (form: flash + redirect on bad input) ──
+
+    #[tokio::test]
+    async fn create_form_renders_token_once() {
+        let (app, state) = test_app().await;
+        let (_admin, token) = create_test_org_admin(&state).await;
+        let cookie = format!("__Host-vouch_session={token}");
+
+        let resp = http_post_form_full(
+            &app,
+            "/admin/scim-tokens",
+            "description=CI+provisioning&expires_in_days=30",
+            &[("Cookie", &cookie), ("Origin", ORIGIN)],
+        )
+        .await;
+
+        assert_eq!(resp.status, StatusCode::OK, "body: {}", resp.body);
+        assert!(
+            resp.body.contains("vouch_scim_"),
+            "the created token is shown once, on this response"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_form_invalid_expiry_redirects_with_flash() {
+        // Input validation runs before auth, so no session is needed to
+        // observe the flash redirect.
         let (app, _state) = test_app().await;
 
-        let (status, _body) = http_get(&app, "/api/v1/org/scim-tokens", &[]).await;
-
-        assert_eq!(
-            status,
-            StatusCode::UNAUTHORIZED,
-            "missing auth must return 401"
-        );
-    }
-
-    // ================================================================
-    // Authenticated CRUD — Delete (positive)
-    // ================================================================
-
-    #[tokio::test]
-    async fn test_delete_scim_token_succeeds() {
-        let (app, state) = test_app().await;
-        let org = create_test_org(&state.store, "example.com").await;
-        let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
-        let auth_id = create_test_authenticator(&state.store, &admin.id).await;
-        let token = create_test_session(&state, &admin.id, &admin.email, &auth_id).await;
-        let auth_header = format!("Bearer {token}");
-
-        // Create a token to delete
-        let (status, create_body) = http_post_json(
+        let resp = http_post_form_full(
             &app,
-            "/api/v1/org/scim-tokens",
-            r#"{"description": "to delete", "expires_in_days": 30}"#,
-            &[("Authorization", &auth_header)],
-        )
-        .await;
-        assert_eq!(
-            status,
-            StatusCode::OK,
-            "create must succeed; body: {create_body}"
-        );
-        let resp: serde_json::Value = serde_json::from_str(&create_body).expect("valid JSON");
-        let token_id = resp["id"].as_str().expect("id present");
-
-        // Delete the token
-        let (status, _body) = http_delete(
-            &app,
-            &format!("/api/v1/org/scim-tokens/{token_id}"),
-            &[("Authorization", &auth_header)],
+            "/admin/scim-tokens",
+            "description=x&expires_in_days=0",
+            &[("Origin", ORIGIN)],
         )
         .await;
 
-        assert_eq!(status, StatusCode::NO_CONTENT, "delete must return 204");
-    }
-
-    // ================================================================
-    // Authenticated CRUD — Delete (negative)
-    // ================================================================
-
-    #[tokio::test]
-    async fn test_delete_scim_token_not_found() {
-        let (app, state) = test_app().await;
-        let org = create_test_org(&state.store, "example.com").await;
-        let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
-        let auth_id = create_test_authenticator(&state.store, &admin.id).await;
-        let token = create_test_session(&state, &admin.id, &admin.email, &auth_id).await;
-        let auth_header = format!("Bearer {token}");
-
-        let nonexistent_id = uuid::Uuid::now_v7();
-        let (status, _body) = http_delete(
-            &app,
-            &format!("/api/v1/org/scim-tokens/{nonexistent_id}"),
-            &[("Authorization", &auth_header)],
-        )
-        .await;
-
-        assert_eq!(
-            status,
-            StatusCode::NOT_FOUND,
-            "unknown token id must return 404"
-        );
+        assert!(resp.status.is_redirection(), "got {}", resp.status);
+        assert_eq!(location(&resp), "/admin/scim-tokens");
     }
 
     #[tokio::test]
-    async fn test_delete_scim_token_requires_auth() {
+    async fn create_form_long_description_redirects_with_flash() {
         let (app, _state) = test_app().await;
-        let token_id = uuid::Uuid::now_v7();
+        let long = "x".repeat(MAX_SCIM_TOKEN_DESCRIPTION_CHARS + 1);
 
-        let (status, _body) =
-            http_delete(&app, &format!("/api/v1/org/scim-tokens/{token_id}"), &[]).await;
+        let resp = http_post_form_full(
+            &app,
+            "/admin/scim-tokens",
+            &format!("description={long}&expires_in_days=30"),
+            &[("Origin", ORIGIN)],
+        )
+        .await;
 
-        assert_eq!(
-            status,
-            StatusCode::UNAUTHORIZED,
-            "missing auth must return 401"
-        );
+        assert!(resp.status.is_redirection(), "got {}", resp.status);
+        assert_eq!(location(&resp), "/admin/scim-tokens");
+    }
+
+    // ── POST /admin/scim-tokens/{id}/revoke ──
+
+    #[tokio::test]
+    async fn revoke_deletes_token_and_redirects() {
+        let (app, state) = test_app().await;
+        let (admin, token) = create_test_org_admin(&state).await;
+        let org_id = admin.org_id.expect("fixture admin belongs to an org");
+        create_test_scim_token(&state.store, "doomed", &org_id).await;
+        let scim_tokens = db::list_scim_tokens(&state.store, Some(&org_id))
+            .await
+            .expect("list tokens");
+        let token_id = &scim_tokens.first().expect("one seeded token").id;
+        let cookie = format!("__Host-vouch_session={token}");
+
+        let resp = http_post_form_full(
+            &app,
+            &format!("/admin/scim-tokens/{token_id}/revoke"),
+            "",
+            &[("Cookie", &cookie), ("Origin", ORIGIN)],
+        )
+        .await;
+
+        assert!(resp.status.is_redirection(), "body: {}", resp.body);
+        assert_eq!(location(&resp), "/admin/scim-tokens");
+        let remaining = db::list_scim_tokens(&state.store, Some(&org_id))
+            .await
+            .expect("list tokens");
+        assert!(remaining.is_empty(), "the token must be gone");
+    }
+
+    #[tokio::test]
+    async fn revoke_unknown_token_redirects_with_not_found_flash() {
+        let (app, state) = test_app().await;
+        let (_admin, token) = create_test_org_admin(&state).await;
+        let cookie = format!("__Host-vouch_session={token}");
+        let missing = uuid::Uuid::now_v7();
+
+        let resp = http_post_form_full(
+            &app,
+            &format!("/admin/scim-tokens/{missing}/revoke"),
+            "",
+            &[("Cookie", &cookie), ("Origin", ORIGIN)],
+        )
+        .await;
+
+        assert!(resp.status.is_redirection(), "body: {}", resp.body);
+        assert_eq!(location(&resp), "/admin/scim-tokens");
+    }
+
+    #[tokio::test]
+    async fn revoke_cannot_reach_another_orgs_token() {
+        // delete_scim_token filters by org, so a foreign token behaves
+        // exactly like a missing one and survives the attempt.
+        let (app, state) = test_app().await;
+        let (_admin, token) = create_test_org_admin(&state).await;
+        let other_org = create_test_org(&state.store, "rival.example").await;
+        create_test_scim_token(&state.store, "foreign", &other_org.id).await;
+        let foreign = db::list_scim_tokens(&state.store, Some(&other_org.id))
+            .await
+            .expect("list tokens");
+        let foreign_id = &foreign.first().expect("one seeded token").id;
+        let cookie = format!("__Host-vouch_session={token}");
+
+        let resp = http_post_form_full(
+            &app,
+            &format!("/admin/scim-tokens/{foreign_id}/revoke"),
+            "",
+            &[("Cookie", &cookie), ("Origin", ORIGIN)],
+        )
+        .await;
+
+        assert!(resp.status.is_redirection(), "body: {}", resp.body);
+        let survivors = db::list_scim_tokens(&state.store, Some(&other_org.id))
+            .await
+            .expect("list tokens");
+        assert_eq!(survivors.len(), 1, "the foreign token must survive");
     }
 }

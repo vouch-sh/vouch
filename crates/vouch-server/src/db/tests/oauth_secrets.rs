@@ -8,6 +8,9 @@
 )]
 
 use super::*;
+use crate::db::{FapiProfile, TokenEndpointAuthMethod};
+use crate::error::ServiceError;
+use crate::test_utils::TestJwks;
 
 // ============================================================================
 // OAuth secret cap (≤2) / floor (≥1) OCC invariant tests (#551)
@@ -54,9 +57,7 @@ async fn test_concurrent_secret_add_never_exceeds_two() {
     for h in handles {
         match h.await.expect("task must not panic") {
             Ok(_) => ok_count = ok_count.saturating_add(1),
-            Err(crate::error::ServiceError::Api { ref code, .. })
-                if code == "max_secrets_reached" =>
-            {
+            Err(ServiceError::Api { ref code, .. }) if code == "max_secrets_reached" => {
                 max_reached_count = max_reached_count.saturating_add(1);
             }
             Err(e) => panic!("unexpected error: {e}"),
@@ -121,9 +122,7 @@ async fn test_concurrent_scim_token_create_never_exceeds_two() {
     for h in handles {
         match h.await.expect("task must not panic") {
             Ok(_) => ok_count = ok_count.saturating_add(1),
-            Err(crate::error::ServiceError::Api { ref code, .. })
-                if code == "token_limit_reached" =>
-            {
+            Err(ServiceError::Api { ref code, .. }) if code == "token_limit_reached" => {
                 limit_count = limit_count.saturating_add(1);
             }
             Err(e) => panic!("unexpected error: {e}"),
@@ -187,9 +186,9 @@ async fn test_concurrent_secret_revoke_never_drops_below_one() {
         // ServiceError::Api { code: "not_found" }, so there is no Api "not_found" arm.
         match result {
             Ok(()) => {}
-            Err(crate::error::ServiceError::Api { ref code, .. })
+            Err(ServiceError::Api { ref code, .. })
                 if code == "last_secret" || code == "conflict" => {}
-            Err(crate::error::ServiceError::NotFound(_)) => {}
+            Err(ServiceError::NotFound(_)) => {}
             Err(e) => panic!("unexpected error from concurrent revoke: {e}"),
         }
     }
@@ -245,7 +244,7 @@ async fn test_revoke_then_add_back_to_two() {
     assert!(
         matches!(
             cap_result,
-            Err(crate::error::ServiceError::Api { ref code, .. }) if code == "max_secrets_reached"
+            Err(ServiceError::Api { ref code, .. }) if code == "max_secrets_reached"
         ),
         "third add must fail with max_secrets_reached; got: {cap_result:?}"
     );
@@ -290,10 +289,68 @@ async fn test_revoke_last_secret_rejected() {
     assert!(
         matches!(
             result,
-            Err(crate::error::ServiceError::Api { ref code, .. }) if code == "last_secret"
+            Err(ServiceError::Api { ref code, .. }) if code == "last_secret"
         ),
         "revoking the last secret must fail with last_secret; got: {result:?}"
     );
+}
+
+/// The floor exempts a client not registered for a `client_secret_*` method:
+/// `authenticate_client` never accepts its secret, so the row is removable.
+#[tokio::test]
+async fn test_revoke_last_secret_allowed_for_private_key_jwt_client() {
+    let (store, _audit) = test_db().await;
+    let app_id = create_test_client(
+        &store,
+        "occ-test-user",
+        TestClientSpec {
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
+            jwks: TestJwks::Shared,
+            with_secret: false,
+            ..Default::default()
+        },
+    )
+    .await
+    .app_id;
+
+    let secret = create_oauth_client_secret(&store, &app_id, "hash_stray", None, None)
+        .await
+        .expect("create stray secret");
+
+    revoke_oauth_client_secret(&store, &secret.id, &app_id)
+        .await
+        .expect("a private_key_jwt client's only secret is revocable");
+}
+
+/// The floor also exempts a FAPI client, whose secret `authenticate_client`
+/// refuses whatever method it registered. No registration path produces this
+/// pairing — `register_client` requires a FAPI-compatible auth method and the
+/// self-service upgrade switches the client to `private_key_jwt` — so the row
+/// can only predate those gates. The exemption is what keeps such a row
+/// removable rather than pinned by the floor.
+#[tokio::test]
+async fn test_revoke_last_secret_allowed_for_fapi_client() {
+    let (store, _audit) = test_db().await;
+    let app_id = create_test_client(
+        &store,
+        "occ-test-user",
+        TestClientSpec {
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::ClientSecretBasic),
+            fapi_profile: Some(FapiProfile::Fapi2Security),
+            with_secret: false,
+            ..Default::default()
+        },
+    )
+    .await
+    .app_id;
+
+    let secret = create_oauth_client_secret(&store, &app_id, "hash_legacy_fapi", None, None)
+        .await
+        .expect("create legacy secret");
+
+    revoke_oauth_client_secret(&store, &secret.id, &app_id)
+        .await
+        .expect("a FAPI client's only secret is revocable");
 }
 
 /// Revoking an expired-but-unrevoked secret must succeed while another valid
@@ -337,5 +394,60 @@ async fn test_revoke_expired_secret_allowed_when_valid_remains() {
     assert_eq!(
         active, 1,
         "the valid secret must remain active; got {active}"
+    );
+}
+
+/// Revoking the *sole* expired-but-unrevoked secret of a credential client must
+/// succeed: the target is already dead, so the revoke does not reduce the active
+/// count (it stays at zero) and the floor guard must not fire.  The client is
+/// left with zero usable credentials — bookkeeping hygiene, not an auth change
+/// (an expired secret is already non-authenticatable whether or not it is
+/// revoked).  Regression for the missing `target_active` condition in the floor
+/// guard of `revoke_oauth_client_secret`.
+#[tokio::test]
+async fn test_revoke_sole_expired_secret_allowed() {
+    let (store, _audit) = test_db().await;
+    let app_id = create_test_client(
+        &store,
+        "occ-test-user",
+        TestClientSpec {
+            with_secret: false,
+            ..Default::default()
+        },
+    )
+    .await
+    .app_id;
+
+    // The client's only secret, already expired (but not revoked).
+    let past: jiff::Timestamp = "2020-01-01T00:00:00Z".parse().unwrap();
+    let expired =
+        create_oauth_client_secret(&store, &app_id, "hash_sole_expired", None, Some(past))
+            .await
+            .expect("create sole expired secret");
+
+    // Before the fix this returned `Api(409 "last_secret")`; it must now succeed
+    // because revoking a dead row leaves the active count unchanged at zero.
+    revoke_oauth_client_secret(&store, &expired.id, &app_id)
+        .await
+        .expect("revoking the sole expired secret must succeed (it is already dead)");
+
+    // The row is soft-deleted (revoked_at stamped) and the client has zero
+    // active secrets — the same count it started with.
+    let now = jiff::Timestamp::now();
+    let secrets = get_oauth_client_secrets(&store, &app_id)
+        .await
+        .expect("list secrets");
+    let revoked = secrets
+        .iter()
+        .find(|s| s.id == expired.id)
+        .expect("the revoked row must still be present (soft-delete retains it)");
+    assert!(
+        revoked.revoked_at.is_some(),
+        "the target secret must be marked revoked; got {revoked:?}"
+    );
+    let active = secrets.iter().filter(|s| s.is_valid(&now)).count();
+    assert_eq!(
+        active, 0,
+        "the client must remain at zero active secrets; got {active}"
     );
 }

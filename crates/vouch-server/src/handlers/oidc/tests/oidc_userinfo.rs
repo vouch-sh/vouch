@@ -2,6 +2,8 @@
 //! OIDC Core 1.0 Section 5.3 — UserInfo + RFC 6750 WWW-Authenticate tests.
 
 use super::helpers::*;
+use crate::crypto::alg::JwsAlgorithm;
+use crate::db;
 
 // ========================================================================
 // UserInfo Endpoint Tests (OIDC Core 1.0 Section 5.3)
@@ -51,7 +53,16 @@ async fn test_userinfo_returns_sub_claim() {
     // Create a test user and OAuth access token session (includes email scope)
     let user = create_test_user(&state.store, "userinfo@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let (status, body) = http_get(
         &app,
@@ -80,9 +91,10 @@ async fn test_userinfo_no_email_when_scope_is_none() {
     // token exchange when the requested scope set has an empty intersection
     // with the available scopes) must not be interpreted by userinfo as
     // "full access" — it must return only `sub`, never the user's email.
+    use crate::assurance::HardwareVerification;
     use crate::services::auth::{
-        ClientAuthProof, CreateOAuthTokenParams, GrantProof, HardwareVerification, NoClientAuth,
-        SenderConstraintProof, TokenBinding, TokenIssuanceProof, create_oauth_access_token,
+        ClientAuthProof, CreateOAuthTokenParams, GrantProof, NoClientAuth, SenderConstraintProof,
+        TokenBinding, TokenIssuanceProof, create_oauth_access_token,
     };
     use secrecy::ExposeSecret;
 
@@ -102,18 +114,22 @@ async fn test_userinfo_no_email_when_scope_is_none() {
             binding: TokenBinding::Bearer,
             act: None,
             audience: None,
-            auth_time: Some(jiff::Timestamp::now().as_second()),
-            hardware_verification: HardwareVerification::Verified,
+            max_lifetime_secs: None,
+            hardware_verification: HardwareVerification::Verified {
+                auth_time: Some(jiff::Timestamp::now()),
+            },
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
             hardware_aaguid: None,
             org_domain: None,
+            source_code_hash: None,
         },
         TokenIssuanceProof {
             grant: GrantProof::TestingOnly,
             client_auth: ClientAuthProof::NoAuth(NoClientAuth::internal_endpoint()),
             sender_constraint: SenderConstraintProof::no_registered_client(),
         },
+        test_arrival(),
     )
     .await
     .expect("issue token");
@@ -259,7 +275,16 @@ async fn test_userinfo_post_body_access_token() {
 
     let user = create_test_user(&state.store, "postbody@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let (status, body) = http_post_form(
         &app,
@@ -325,7 +350,16 @@ async fn test_userinfo_post_body_with_auth_header() {
 
     let user = create_test_user(&state.store, "authheader@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Authorization header takes precedence; body token is ignored
     let (status, body) = http_post_form(
@@ -355,9 +389,17 @@ async fn test_userinfo_plain_json_when_no_signed_alg_configured() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
     // Token bound to this client (client has no userinfo_signed_response_alg)
-    let token =
-        create_test_session_for_client(&state, &user.id, &user.email, &auth_id, &client.client_id)
-            .await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            client_id: Some(&client.client_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let response = http_request_full(
         &app,
@@ -398,8 +440,8 @@ async fn test_userinfo_signed_jwt_when_es256_configured() {
         &user.id,
         TestClientSpec {
             name: "Signed UserInfo Test Client".to_string(),
-            id_token_signed_response_alg: crate::crypto::alg::JwsAlgorithm::Es256,
-            userinfo_signed_response_alg: Some(crate::crypto::alg::JwsAlgorithm::Es256),
+            id_token_signed_response_alg: JwsAlgorithm::Es256,
+            userinfo_signed_response_alg: Some(JwsAlgorithm::Es256),
             with_secret: false,
             ..Default::default()
         },
@@ -408,9 +450,17 @@ async fn test_userinfo_signed_jwt_when_es256_configured() {
     let client_id_str = client.client_id;
 
     // Token bound to this client so client_id is populated in the access token
-    let token =
-        create_test_session_for_client(&state, &user.id, &user.email, &auth_id, &client_id_str)
-            .await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            client_id: Some(&client_id_str),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let response = http_request_full(
         &app,
@@ -481,7 +531,7 @@ async fn test_userinfo_rs256_without_rsa_key_returns_500() {
         &user.id,
         TestClientSpec {
             name: "RS256 No Key Test Client".to_string(),
-            id_token_signed_response_alg: crate::crypto::alg::JwsAlgorithm::Es256,
+            id_token_signed_response_alg: JwsAlgorithm::Es256,
             with_secret: false,
             ..Default::default()
         },
@@ -490,17 +540,21 @@ async fn test_userinfo_rs256_without_rsa_key_returns_500() {
 
     // Override userinfo_signed_response_alg to RS256 directly — registration would
     // reject RS256 when no RSA key is available, but direct DB write is needed here.
-    db::set_oauth_client_userinfo_alg(
-        &state.store,
-        &client.app_id,
-        Some(crate::crypto::alg::JwsAlgorithm::Rs256),
-    )
-    .await
-    .expect("Failed to set RS256 alg");
+    db::set_oauth_client_userinfo_alg(&state.store, &client.app_id, Some(JwsAlgorithm::Rs256))
+        .await
+        .expect("Failed to set RS256 alg");
 
-    let token =
-        create_test_session_for_client(&state, &user.id, &user.email, &auth_id, &client.client_id)
-            .await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            client_id: Some(&client.client_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let response = http_request_full(
         &app,
@@ -542,7 +596,7 @@ async fn test_userinfo_unsupported_signing_algorithm_returns_500() {
         &user.id,
         TestClientSpec {
             name: "Unsupported Alg Test Client".to_string(),
-            id_token_signed_response_alg: crate::crypto::alg::JwsAlgorithm::Es256,
+            id_token_signed_response_alg: JwsAlgorithm::Es256,
             with_secret: false,
             ..Default::default()
         },
@@ -551,17 +605,21 @@ async fn test_userinfo_unsupported_signing_algorithm_returns_500() {
 
     // Inject PS256 directly — registration correctly rejects it, but a client
     // record could have it from a future schema change or manual edit.
-    db::set_oauth_client_userinfo_alg(
-        &state.store,
-        &client.app_id,
-        Some(crate::crypto::alg::JwsAlgorithm::Ps256),
-    )
-    .await
-    .expect("Failed to set PS256 alg");
+    db::set_oauth_client_userinfo_alg(&state.store, &client.app_id, Some(JwsAlgorithm::Ps256))
+        .await
+        .expect("Failed to set PS256 alg");
 
-    let token =
-        create_test_session_for_client(&state, &user.id, &user.email, &auth_id, &client.client_id)
-            .await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            client_id: Some(&client.client_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let response = http_request_full(
         &app,
@@ -622,9 +680,18 @@ async fn test_userinfo_rejects_deactivated_user_with_live_session() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "userinfo-deactivated@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
-    crate::db::update_user_active_status(&state.store, &user.id, false)
+    db::update_user_active_status(&state.store, &user.id, false)
         .await
         .expect("deactivate user");
 

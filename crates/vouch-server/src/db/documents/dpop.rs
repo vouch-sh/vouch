@@ -27,6 +27,30 @@ impl DocumentType for DpopNonceDoc {
     }
 }
 
+/// A nonce issued for an RFC 9421 signed request.
+///
+/// Separate from [`DpopNonceDoc`] because the two have different lifetimes: a
+/// signature carries no `jti`, so its nonce is the only replay defense and is
+/// consumed on use, while a DPoP nonce is accepted until it expires.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct SignatureNonceDoc {
+    pub nonce: String,
+    pub expires_at: Timestamp,
+}
+
+impl DocumentType for SignatureNonceDoc {
+    const DOC_TYPE: &'static str = "signature_nonce";
+
+    fn index_entries(&self) -> Vec<IndexEntry> {
+        // Consumption deletes by deterministic document ID.
+        Vec::new()
+    }
+
+    fn expires_at(&self) -> Option<Timestamp> {
+        Some(self.expires_at)
+    }
+}
+
 /// A DPoP JTI (replay prevention cache entry).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct DpopJtiDoc {

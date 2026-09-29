@@ -13,6 +13,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use vouch_cli::{tr, tr_args};
 use vouch_common::dns::{DohConfigSerde, NetworkConfig};
+use vouch_common::fs::atomic_write_secure;
+use vouch_common::paths;
 
 /// Minimal legacy SSO session record.
 ///
@@ -425,7 +427,7 @@ impl Config {
         let content = serde_json::to_string_pretty(&config_file)
             .context(tr!("err-failed-serialize-config"))?;
 
-        vouch_common::fs::atomic_write_secure(path, content.as_bytes()).with_context(|| {
+        atomic_write_secure(path, content.as_bytes()).with_context(|| {
             tr_args!(
                 "err-failed-write-config",
                 value = path.display().to_string()
@@ -682,7 +684,7 @@ impl Config {
     /// Get the path to the config file
     /// (`$XDG_CONFIG_HOME/vouch/config.json`).
     fn config_path() -> Result<PathBuf> {
-        vouch_common::paths::config_file().context(tr!("err-could-not-determine-config-directory"))
+        paths::config_file().context(tr!("err-could-not-determine-config-directory"))
     }
 }
 

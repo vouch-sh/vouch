@@ -29,6 +29,8 @@
 use http::{Request, StatusCode};
 use tower::ServiceExt;
 use vouch_httpsig::sfv::parse::parse_dictionary;
+use vouch_httpsig::sig_policy::PUBLIC_V1_PATHS;
+use vouch_server::test_utils;
 use vouch_tests::TestHarness;
 
 /// The generic error body emitted by the `require_signature` middleware.
@@ -326,7 +328,7 @@ async fn test_accept_signature_absent_on_success() {
     let auth = format!("Bearer {token2}");
 
     // Build a properly signed request using the test utils signature function.
-    let sig_headers = vouch_server::test_utils::test_signature_headers("GET", url, None);
+    let sig_headers = test_utils::test_signature_headers("GET", url, None);
     let mut req_builder = Request::builder()
         .method("GET")
         .uri(url)
@@ -618,7 +620,7 @@ async fn route_is_registered(harness: &TestHarness, path: &str) -> bool {
 async fn test_public_v1_paths_all_resolve_to_registered_routes() {
     let harness = TestHarness::new().await;
 
-    for template in vouch_httpsig::sig_policy::PUBLIC_V1_PATHS {
+    for template in PUBLIC_V1_PATHS {
         let path = concrete_path(template);
         assert!(
             route_is_registered(&harness, &path).await,

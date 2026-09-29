@@ -6,8 +6,10 @@
 //! `CustomPosturePolicyDoc` documents).
 
 use super::document_type::Document;
+use super::documents::organization::OrganizationDoc;
 use super::documents::posture_policy::{CustomPosturePolicyDoc, PostureConfigDoc};
 use super::store::DocumentStore;
+use crate::error::ServiceError;
 use anyhow::Result;
 use jiff::Timestamp;
 
@@ -61,9 +63,35 @@ pub(super) async fn get_posture_config(
     store.find_one::<PostureConfigDoc>("org_id", org_id).await
 }
 
+/// Document ID of an org's posture config, derived from the org ID.
+///
+/// `PostureConfigDoc` is "at most one per org", but `org_id` is an ordinary
+/// index rather than a unique one, so two concurrent first activations both
+/// read no config and both insert. Deriving the primary key from `org_id`
+/// makes that collide: exactly one insert commits and the other observes a
+/// unique violation, on every backend. Same construction as
+/// `deterministic_challenge_state_id` and `deterministic_domain_claim_id`.
+fn deterministic_posture_config_id(org_id: &str) -> String {
+    use aws_lc_rs::digest::{self, SHA256};
+
+    let mut ctx = digest::Context::new(&SHA256);
+    ctx.update(b"posture_config\0");
+    ctx.update(org_id.as_bytes());
+    hex::encode(ctx.finish().as_ref())
+}
+
 /// Set which preconfigured policy slugs are active for an org.
 ///
 /// Creates the config document if it doesn't exist, or updates it.
+///
+/// This is an unconditional full-replace: the caller is authoritative for the
+/// entire `active_slugs` list (it does *not* derive the list from a prior
+/// read). Use it for authoritative writes such as test setup. Callers that
+/// perform a read-modify-write — e.g. the toggle handler, which reads the
+/// current slugs, mutates one entry, and writes the list back — must use
+/// [`compare_and_set_preconfigured_active`] instead: this blind helper writes
+/// the full list with no version guard, so two concurrent toggles each derive
+/// from a stale read and the later write silently clobbers the earlier one.
 pub async fn set_preconfigured_active(
     store: &DocumentStore,
     org_id: &str,
@@ -84,11 +112,109 @@ pub async fn set_preconfigured_active(
                 org_id: org_id.to_string(),
                 active_slugs,
             };
-            store.insert(&doc).await?;
+            store
+                .insert_with_id(&deterministic_posture_config_id(org_id), &doc)
+                .await?;
         }
     }
 
     Ok(())
+}
+
+/// The identity, version, and active slugs of an org's posture config document.
+///
+/// Returned by [`get_preconfigured_active_with_version`] for callers that need
+/// to perform an optimistic-concurrency update (e.g. the admin toggle handler,
+/// which reads the slugs, mutates one, and writes the list back guarded by the
+/// version captured here).
+#[derive(Debug, Clone)]
+pub struct ActivePreconfiguredConfig {
+    /// UUID v7 of the `PostureConfigDoc` row — the CAS target.
+    pub doc_id: String,
+    /// Optimistic-concurrency version at the time of the read.
+    pub version: i32,
+    /// Active preconfigured slugs at the time of the read.
+    pub active_slugs: Vec<String>,
+}
+
+/// Read the posture config for an org, returning the document id and version
+/// alongside the active slugs so callers can issue an OCC-protected write.
+///
+/// Returns `None` if no config document exists yet (no preconfigured policy has
+/// ever been activated for the org).
+pub async fn get_preconfigured_active_with_version(
+    store: &DocumentStore,
+    org_id: &str,
+) -> Result<Option<ActivePreconfiguredConfig>> {
+    match get_posture_config(store, org_id).await? {
+        Some(doc) => Ok(Some(ActivePreconfiguredConfig {
+            doc_id: doc.id,
+            version: doc.version,
+            active_slugs: doc.data.active_slugs,
+        })),
+        None => Ok(None),
+    }
+}
+
+/// Conditionally replace the active preconfigured slugs for an org, guarded by
+/// optimistic concurrency.
+///
+/// Like [`set_preconfigured_active`], this is a full-replace: the caller is
+/// authoritative for the entire `active_slugs` list and the stored value is
+/// overwritten outright (no merge). Unlike the blind helper, the write only
+/// commits when the document's version still equals `expected_version`, so a
+/// concurrent toggle cannot silently overwrite this one — it surfaces as
+/// `Ok(false)` and the caller re-reads and recomputes.
+///
+/// Returns `Ok(true)` if the update was applied; `Ok(false)` if a concurrent
+/// modification bumped the version first (or, equivalently, the row was
+/// removed). The handler turns the `false` into a `409 Conflict` so the admin
+/// re-reads the page and re-issues the toggle against the current state.
+pub async fn compare_and_set_preconfigured_active(
+    store: &DocumentStore,
+    doc_id: &str,
+    expected_version: i32,
+    org_id: &str,
+    active_slugs: Vec<String>,
+) -> Result<bool> {
+    let updated = PostureConfigDoc {
+        org_id: org_id.to_string(),
+        active_slugs,
+    };
+    store
+        .compare_and_update(doc_id, expected_version, &updated)
+        .await
+}
+
+/// Create the posture config document for an org (first activation).
+///
+/// Inserts a new `PostureConfigDoc` with `active_slugs`. Use
+/// [`compare_and_set_preconfigured_active`] once a config already exists.
+///
+/// Returns `Ok(true)` when this call created the document, and `Ok(false)`
+/// when a concurrent first activation created it first. The ID is derived
+/// from `org_id`, so the loser collides on the primary key rather than
+/// inserting a second config for the same org — the version guard on the
+/// update path cannot help here, there being no version to read yet. The
+/// caller treats `false` exactly like a lost compare-and-update: re-read and
+/// re-issue against the config that now exists.
+pub async fn create_preconfigured_active(
+    store: &DocumentStore,
+    org_id: &str,
+    active_slugs: Vec<String>,
+) -> Result<bool> {
+    let doc = PostureConfigDoc {
+        org_id: org_id.to_string(),
+        active_slugs,
+    };
+    match store
+        .insert_with_id(&deterministic_posture_config_id(org_id), &doc)
+        .await
+    {
+        Ok(_) => Ok(true),
+        Err(e) if super::pool::is_unique_violation(&e) => Ok(false),
+        Err(e) => Err(e),
+    }
 }
 
 /// Get the list of active preconfigured slugs for an org.
@@ -115,11 +241,36 @@ pub struct CreateCustomPolicyParams<'a> {
     pub builder_spec: Option<&'a str>,
 }
 
-/// Create a new custom posture policy (defaults to inactive).
+/// Maximum number of custom policies per org (active + inactive).
+pub const MAX_CUSTOM_POLICIES: usize = 20;
+
+/// Why [`create_custom_policy`] created nothing.
+#[derive(Debug)]
+pub enum CreateCustomPolicyError {
+    /// The org already holds [`MAX_CUSTOM_POLICIES`] policies.
+    LimitReached,
+    Other(ServiceError),
+}
+
+/// Create a new custom posture policy (defaults to inactive), enforcing
+/// [`MAX_CUSTOM_POLICIES`] atomically.
+///
+/// Counting and then inserting in separate steps lets concurrent creators all
+/// observe a count under the cap and all insert. As in
+/// [`create_scim_token`](super::scim::create_scim_token), every creator
+/// version-bumps the organization document in the transaction that counts and
+/// inserts, so concurrent creators collide on that row and the loser re-runs
+/// with the winner's policy in its count.
+///
+/// # Errors
+///
+/// - [`CreateCustomPolicyError::LimitReached`] — the cap is reached.
+/// - [`CreateCustomPolicyError::Other`] — the organization does not exist,
+///   the OCC retry budget ran out, or a database operation failed.
 pub async fn create_custom_policy(
     store: &DocumentStore,
     params: CreateCustomPolicyParams<'_>,
-) -> Result<CustomPosturePolicy> {
+) -> std::result::Result<CustomPosturePolicy, CreateCustomPolicyError> {
     let doc = CustomPosturePolicyDoc {
         name: params.name.to_string(),
         description: params.description.map(String::from),
@@ -128,8 +279,53 @@ pub async fn create_custom_policy(
         org_id: params.org_id.to_string(),
         builder_spec: params.builder_spec.map(String::from),
     };
-    let result = store.insert(&doc).await?;
-    Ok(CustomPosturePolicy::from(result))
+    let org_id = params.org_id;
+
+    let created = crate::with_dsql_retry!(async {
+        let mut tx = store.begin().await.map_err(|e| {
+            ServiceError::from_db_contention(e, "Failed to begin custom policy create")
+        })?;
+
+        let org_doc = tx
+            .get::<OrganizationDoc>(org_id)
+            .await
+            .map_err(|e| {
+                ServiceError::from_db_contention(e, "Failed to load organization for policy create")
+            })?
+            .ok_or(ServiceError::NotFound("organization"))?;
+
+        let count = tx
+            .find_all::<CustomPosturePolicyDoc>("org_id", org_id)
+            .await
+            .map_err(|e| ServiceError::from_db_contention(e, "Failed to count custom policies"))?
+            .len();
+        if count >= MAX_CUSTOM_POLICIES {
+            return Ok(None);
+        }
+
+        let inserted = tx
+            .insert(&doc)
+            .await
+            .map_err(|e| ServiceError::from_db_contention(e, "Failed to insert custom policy"))?;
+
+        let won = tx
+            .compare_and_update::<OrganizationDoc>(org_id, org_doc.version, &org_doc.data)
+            .await
+            .map_err(|e| {
+                ServiceError::from_db_contention(e, "Failed to version-bump org for policy create")
+            })?;
+        if !won {
+            return Err(ServiceError::OccConflict);
+        }
+
+        tx.commit()
+            .await
+            .map_err(|e| ServiceError::from_db_contention(e, "Failed to commit policy create"))?;
+        Ok(Some(CustomPosturePolicy::from(inserted)))
+    })
+    .map_err(CreateCustomPolicyError::Other)?;
+
+    created.ok_or(CreateCustomPolicyError::LimitReached)
 }
 
 /// List all custom posture policies for an org.
@@ -267,18 +463,23 @@ pub async fn update_custom_policy(
 
 /// Delete a custom posture policy.
 ///
-/// Returns `true` if the policy was found and deleted, `false` if not found.
+/// Returns `true` only when this call removed the policy. `false` covers a
+/// policy that does not exist, belongs to another org, or was removed by a
+/// concurrent delete, so exactly one of several concurrent deletes reports
+/// success and gets audited.
 pub async fn delete_custom_policy(store: &DocumentStore, id: &str, org_id: &str) -> Result<bool> {
-    let doc = store.get::<CustomPosturePolicyDoc>(id).await?;
-    let Some(doc) = doc else {
-        return Ok(false);
-    };
+    crate::with_dsql_retry!(async {
+        let mut tx = store.begin().await?;
 
-    // Verify org ownership
-    if doc.data.org_id != org_id {
-        return Ok(false);
-    }
+        let Some(doc) = tx.get::<CustomPosturePolicyDoc>(id).await? else {
+            return Ok(false);
+        };
+        if doc.data.org_id != org_id {
+            return Ok(false);
+        }
 
-    store.delete(id).await?;
-    Ok(true)
+        let removed = tx.delete(id).await?;
+        tx.commit().await?;
+        Ok(removed)
+    })
 }

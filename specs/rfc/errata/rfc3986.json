@@ -253,5 +253,20 @@
     "verifier_id": "",
     "verifier_name": "Andy Newton",
     "update_date": "2025-06-03 12:18:34"
+  },
+  {
+    "errata_id": "9147",
+    "doc-id": "RFC3986",
+    "errata_status_code": "Reported",
+    "errata_type_code": "Technical",
+    "section": "2.3",
+    "orig_text": "Characters that are allowed in a URI but do not have a reserved purpose are called unreserved.  These include uppercase and lowercase letters, decimal digits, hyphen, period, underscore, and tilde.\r\n\r\n      unreserved  = ALPHA / DIGIT / \"-\" / \".\" / \"_\" / \"~\"",
+    "correct_text": "Characters that are allowed in a URI but do not have a reserved purpose are called unreserved.  These include uppercase and lowercase letters, decimal digits, hyphen, period, underscore, tilde, and backslash\r\n\r\n      unreserved  = ALPHA / DIGIT / \"-\" / \".\" / \"_\" / \"~\" | \"\\\"",
+    "notes": "The ASCII backslash character seems to have been left out of the set of unreserved characters.\r\n\r\nThe backslash character doesn't have any reserved use (per its not appearing in the reserved EBNF production and not being used anywhere else in URI-reference syntax).\r\n\r\nTherefore, backslash appears to be an unreserved character, per section 2.3's text \"Characters that are allowed in a URI but do not have a reserved purpose are called unreserved.\"\r\n\r\nHowever, backslash is not mentioned explicitly in section 2.3, neither in the the text referring to several individual characters by name nor in the grammar production specifying those characters.\r\n\r\nSo the current text is _unclear_ regarding whether backslashes are allowed in URLs (e.g., within a path segment (between segment-separating (forward) slashes)).\r\n\r\nSO ... that should be clarified. Either backslash should be added to the text (prose and EBNF) of section 2.3, or there should be a clear mention that backslash is not allowed.\r\n\r\nAlthough using backslashes in a URI reference might be unusual, it's not clear that there's any reason to exclude them. (If a server/URI authority wants to use backslashes in (non-reserved parts of) URLs, is there any reason that it should be blocked from doing so?)\r\n\r\nTherefore, it seems that the choice should be to specify backslashes as allowed.",
+    "submit_date": "2026-08-27",
+    "submitter_name": "Daniel Barclay",
+    "verifier_id": "",
+    "verifier_name": null,
+    "update_date": "2026-08-27 16:41:46"
   }
 ]

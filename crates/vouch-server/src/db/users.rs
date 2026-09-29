@@ -5,7 +5,8 @@ use std::collections::HashMap;
 
 use super::document_type::Document;
 use super::documents::user::UserDoc;
-use super::store::DocumentStore;
+use super::store::{DocumentStore, Transition};
+use crate::email::Email;
 use anyhow::Result;
 
 /// User record.
@@ -14,6 +15,9 @@ pub struct User {
     pub email: String,
     pub name: Option<String>,
     pub org_id: Option<String>,
+    /// The org's primary domain, copied from the org doc at creation.
+    /// `None` on docs created before this field existed.
+    pub org_domain: Option<String>,
     pub is_org_admin: bool,
     pub active: bool,
     pub external_id: Option<String>,
@@ -31,6 +35,7 @@ impl std::fmt::Debug for User {
             .field("email", &self.email)
             .field("name", &self.name)
             .field("org_id", &self.org_id)
+            .field("org_domain", &self.org_domain)
             .field("is_org_admin", &self.is_org_admin)
             .field("active", &self.active)
             .field("external_id", &self.external_id)
@@ -48,6 +53,7 @@ impl From<Document<UserDoc>> for User {
             email: doc.data.email.into_string(),
             name: doc.data.name,
             org_id: doc.data.org_id,
+            org_domain: doc.data.org_domain,
             is_org_admin: doc.data.is_org_admin,
             active: doc.data.active,
             external_id: doc.data.external_id,
@@ -72,7 +78,7 @@ pub async fn upsert_user(
     email: &str,
     name: Option<&str>,
 ) -> Result<(String, bool)> {
-    let email = crate::email::Email::new(email);
+    let email = Email::new(email);
     if let Some(doc) = store.find_one::<UserDoc>("email", email.as_str()).await? {
         return Ok((doc.id, false));
     }
@@ -80,6 +86,7 @@ pub async fn upsert_user(
         email,
         name: name.map(String::from),
         org_id: None,
+        org_domain: None,
         is_org_admin: false,
         active: true,
         external_id: None,
@@ -107,7 +114,7 @@ pub async fn upsert_user_with_org(
     org_id: Option<&str>,
     is_org_admin: bool,
 ) -> Result<(String, bool)> {
-    let email = crate::email::Email::new(email);
+    let email = Email::new(email);
     if let Some(doc) = store.find_one::<UserDoc>("email", email.as_str()).await? {
         return Ok((doc.id, false));
     }
@@ -115,6 +122,12 @@ pub async fn upsert_user_with_org(
         email,
         name: name.map(String::from),
         org_id: org_id.map(String::from),
+        // Test helper only: unlike the two production writers
+        // (`resolve_user`, `create_scim_user`), this bypasses org lookup
+        // entirely, so there's no domain in hand to stamp here. Callers that
+        // exercise `org_domain` land on the same fallback-and-backfill path
+        // as a pre-existing doc from before this field existed.
+        org_domain: None,
         is_org_admin,
         active: true,
         external_id: None,
@@ -133,15 +146,57 @@ pub async fn upsert_user_with_org(
 /// callers may pass any casing; user emails are stored lowercase by
 /// `enroll_user_with_org` and `create_scim_user`.
 pub async fn get_user_by_email(store: &DocumentStore, email: &str) -> Result<Option<User>> {
-    let email = crate::email::Email::new(email);
+    let email = Email::new(email);
     let doc = store.find_one::<UserDoc>("email", email.as_str()).await?;
     Ok(doc.map(User::from))
 }
 
 /// Get a user by ID.
 pub async fn get_user_by_id(store: &DocumentStore, user_id: &str) -> Result<Option<User>> {
+    // Test-only seam: deterministically simulate a user that vanished between
+    // two reads (a concurrent `delete_user` that committed in the window
+    // between the `SignedInSession` extractor's `load_active_user` read and a
+    // handler's second `get_user_by_id` read). The handlers' org-scoping fix
+    // treats `Ok(None)` here as a rejection — never a benign `None` that
+    // flows into a NULL `org_id`.
+    #[cfg(test)]
+    if store.run_get_user_by_id_test_hook(user_id) {
+        return Ok(None);
+    }
     let doc = store.get::<UserDoc>(user_id).await?;
     Ok(doc.map(User::from))
+}
+
+/// An org user's org domain: `cached` (the value from their doc) when
+/// present, otherwise a live lookup whose result is written back to the
+/// doc so later calls skip it.
+///
+/// A stored value is used as-is — the primary domain is write-once (see
+/// [`UserDoc::org_domain`]). The write-back is best-effort (`store.modify`,
+/// OCC): a failure is logged and the looked-up domain is returned anyway,
+/// so it can never fail the caller's grant.
+pub async fn get_user_org_domain(
+    store: &DocumentStore,
+    user_id: &str,
+    org_id: &str,
+    cached: Option<&str>,
+) -> Result<Option<String>> {
+    if let Some(domain) = cached {
+        return Ok(Some(domain.to_string()));
+    }
+    let domain = super::organizations::get_organization_domain(store, org_id).await?;
+    if let Some(domain) = &domain {
+        let backfill = domain.clone();
+        if let Err(e) = store
+            .modify::<UserDoc, _>(user_id, move |data| {
+                data.org_domain = Some(backfill.clone());
+            })
+            .await
+        {
+            tracing::warn!(user_id, error = %e, "failed to backfill user org_domain");
+        }
+    }
+    Ok(domain)
 }
 
 /// Get multiple users by ID in a single query.
@@ -166,6 +221,10 @@ pub async fn get_users_by_ids(
 /// Failure modes of [`delete_user`].
 #[derive(Debug, thiserror::Error)]
 pub enum DeleteUserError {
+    /// The delete would leave the organization with no active admin, and the
+    /// caller asked for [`LastAdminGuard::Enforce`].
+    #[error("organization would be left with no active admin")]
+    LastAdmin,
     /// Another transaction changed the organization row while this delete was
     /// choosing a successor for the user's org-scoped applications.
     #[error("organization changed during delete")]
@@ -178,9 +237,28 @@ impl super::pool::RetryableError for DeleteUserError {
     fn is_retryable(&self) -> bool {
         match self {
             Self::OccConflict => true,
+            Self::LastAdmin => false,
             Self::Other(e) => super::pool::is_retryable_db_error(e),
         }
     }
+}
+
+/// Whether [`delete_user`] honors "at least one active admin per organization".
+///
+/// There is no default. Every caller states its choice, because the bug this
+/// guards against is a floor that some paths take and others forget: demote
+/// and deactivate enforced it while both delete surfaces did not, and nothing
+/// in the signature made that visible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LastAdminGuard {
+    /// Refuse with [`DeleteUserError::LastAdmin`] when the target is the
+    /// organization's only active admin. Every request-serving path.
+    Enforce,
+    /// Delete regardless of the admin count. For paths with no organization
+    /// invariant to protect — chiefly tests exercising the org-scoped
+    /// application cascade's no-admin-remains branch, which `Enforce` makes
+    /// unreachable for an org's last admin.
+    Bypass,
 }
 
 /// Pick the org admin that inherits a departing user's org-scoped
@@ -203,11 +281,327 @@ async fn org_admin_successor(
     let members = tx.find_all::<UserDoc>("org_id", org_id).await?;
     let mut admin_ids: Vec<String> = members
         .into_iter()
-        .filter(|m| m.data.is_org_admin && m.data.active && m.id != departing_user_id)
+        .filter(|m| is_other_active_admin(m, departing_user_id))
         .map(|m| m.id)
         .collect();
     admin_ids.sort();
     Ok(admin_ids.into_iter().next())
+}
+
+/// Transfer `user_id`'s organization-scoped OAuth clients to the org's next
+/// active admin ([`org_admin_successor`]).
+///
+/// Application management is creator-only: every check compares the caller
+/// against `client.user_id`. An org-scoped application belongs to the
+/// organization, so when its creator leaves (deleted) or can no longer sign in
+/// (deactivated), it moves to an active admin who can still rotate its
+/// secrets, update its redirect URIs, or delete it. Personal and public
+/// clients are left to the caller. With no other active admin in the org,
+/// nothing moves.
+///
+/// Must run in a transaction that read the org row's version before calling
+/// this and bumps it afterwards (as [`delete_user`],
+/// [`demote_or_deactivate_member`], and `update_scim_user` do), so two
+/// concurrent departures cannot each hand their applications to the other.
+///
+/// Returns `false` when a client changed after it was read; the caller maps
+/// that to its retryable conflict.
+pub(super) async fn transfer_org_clients(
+    tx: &mut super::store::StoreTransaction<'_>,
+    org_id: Option<&str>,
+    user_id: &str,
+) -> Result<bool> {
+    use super::documents::oauth::{AccessScope, OAuthClientDoc};
+
+    let Some(successor) = org_admin_successor(tx, org_id, user_id).await? else {
+        return Ok(true);
+    };
+    let clients = tx.find_all::<OAuthClientDoc>("user_id", user_id).await?;
+    for client in clients {
+        if client.data.access_scope != AccessScope::Organization {
+            continue;
+        }
+        // The departing owner's RFC 7592 registration access token is revoked
+        // on the same write that hands the client to the successor, who never
+        // received it; see [`reassign_client_owner`].
+        if !reassign_client_owner(tx, client, Some(&successor)).await? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Change which user owns an OAuth client, revoking its RFC 7592
+/// registration access token on the same write.
+///
+/// The only function that should write `OAuthClientDoc.user_id` after the
+/// client is created. A registration access token is stored on the client
+/// document, not on the owner, so it survives any change of owner unless the
+/// write that changes the owner also clears it: a transfer would leave the
+/// previous owner managing a client now attributed to someone else, and an
+/// unlink (`None`) would leave a client with no owner whose token the RFC 7592
+/// endpoints used to accept as if it were open registration. Routing both through here means neither can forget.
+///
+/// The new owner obtains a fresh token by registering again; nothing restores
+/// the old one.
+///
+/// Returns `false` when the client changed after it was read; the caller maps
+/// that to its retryable conflict.
+pub(super) async fn reassign_client_owner(
+    tx: &mut super::store::StoreTransaction<'_>,
+    client: Document<super::documents::oauth::OAuthClientDoc>,
+    new_owner: Option<&str>,
+) -> Result<bool> {
+    let mut data = client.data;
+    data.user_id = new_owner.map(String::from);
+    data.registration_access_token_hash = None;
+    tx.compare_and_update(&client.id, client.version, &data)
+        .await
+}
+
+/// Revoke the RFC 7592 registration access token of every OAuth client
+/// `user_id` owns, whatever its access scope, inside the offboarding
+/// transaction.
+///
+/// Called by every write that ends a user's authority over their clients —
+/// [`delete_user`], [`demote_or_deactivate_member`] with
+/// [`MemberDowngrade::Deactivate`], and SCIM `active=false`
+/// (`update_scim_user`) — before any transfer or unlink.
+///
+/// Every scope, including `Organization`: a client registered dynamically is
+/// `Personal`, but its owner can switch it to `Organization` through the
+/// application API and it keeps its token.
+///
+/// Every owned client is written, not only those that currently hold a hash.
+/// The write bumps each client's version, and that is what closes two races:
+///
+/// - an RFC 7592 PUT or DELETE that verified the owner as active before this
+///   transaction commits writes through `store.transition` on the client
+///   document; the bumped version forces it to re-read, find no hash, and
+///   reject;
+/// - an RFC 7592 DELETE that already consumed the token (hash `None`) and then
+///   fails restores it only by compare-and-set on the version its consume
+///   committed ([`super::oauth::restore_registration_access_token`]); the
+///   bump makes that restore a no-op, so a failed delete cannot hand a
+///   deactivated or deleted owner their token back.
+///
+/// Reactivating the user does not restore any token; the owner registers
+/// again.
+///
+/// Returns `false` when a client changed after it was read; the caller maps
+/// that to its retryable conflict.
+pub(super) async fn revoke_owner_registration_tokens(
+    tx: &mut super::store::StoreTransaction<'_>,
+    user_id: &str,
+) -> Result<bool> {
+    use super::documents::oauth::OAuthClientDoc;
+
+    let clients = tx.find_all::<OAuthClientDoc>("user_id", user_id).await?;
+    for client in clients {
+        let mut data = client.data;
+        data.registration_access_token_hash = None;
+        if !tx
+            .compare_and_update(&client.id, client.version, &data)
+            .await?
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Whether `member` counts toward "at least one active admin per
+/// organization", ignoring the member the caller is about to change.
+///
+/// The single definition of what an admin *is* for this invariant. Choosing an
+/// application successor, the three writes that can breach the floor, and the
+/// advisory pre-check all read it here, so none of them can drift on, say,
+/// whether a deactivated admin still counts.
+fn is_other_active_admin(member: &Document<UserDoc>, excluding_user_id: &str) -> bool {
+    member.data.is_org_admin && member.data.active && member.id != excluding_user_id
+}
+
+/// How many *other* members of `org_id` are active admins.
+///
+/// The floor's predicate, shared by every write that can breach it —
+/// [`demote_or_deactivate_member`], [`delete_user`], and SCIM's `active=false`
+/// update. It takes the caller's transaction because the count is only
+/// meaningful alongside the organization-row version bump that serializes it.
+pub(super) async fn other_active_admins(
+    tx: &mut super::store::StoreTransaction<'_>,
+    org_id: &str,
+    excluding_user_id: &str,
+) -> Result<usize> {
+    let members = tx.find_all::<UserDoc>("org_id", org_id).await?;
+    Ok(members
+        .iter()
+        .filter(|m| is_other_active_admin(m, excluding_user_id))
+        .count())
+}
+
+/// Whether `user_id` is the only active admin their organization has.
+///
+/// `false` when the user does not exist, has no organization, is not an active
+/// admin, or other active admins remain — i.e. when no floor can be breached.
+///
+/// Advisory only, and read outside any transaction. Callers that must revoke
+/// credentials *before* persisting a deactivation use this to refuse up front,
+/// so the common case does not withdraw a session and then decline the write.
+/// The authoritative check is [`other_active_admins`] inside the writing
+/// transaction; this one can be stale by the time that runs.
+pub async fn is_last_active_org_admin(store: &DocumentStore, user_id: &str) -> Result<bool> {
+    let Some(doc) = store.get::<UserDoc>(user_id).await? else {
+        return Ok(false);
+    };
+    if !doc.data.is_org_admin || !doc.data.active {
+        return Ok(false);
+    }
+    let Some(org_id) = doc.data.org_id.as_deref() else {
+        return Ok(false);
+    };
+    let members = store.find_all::<UserDoc>("org_id", org_id).await?;
+    Ok(!members.iter().any(|m| is_other_active_admin(m, user_id)))
+}
+
+/// The member change being applied by [`demote_or_deactivate_member`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberDowngrade {
+    /// Clear `is_org_admin`, leaving the account active.
+    Demote,
+    /// Clear `active`, which also removes the account from the admin count.
+    Deactivate,
+}
+
+/// Failure modes of [`demote_or_deactivate_member`].
+#[derive(Debug, thiserror::Error)]
+pub enum MemberDowngradeError {
+    /// The change would leave the organization with no active admin.
+    #[error("organization would be left with no active admin")]
+    LastAdmin,
+    /// Another transaction changed the organization row while this change was
+    /// counting admins.
+    #[error("organization changed during member downgrade")]
+    OccConflict,
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+impl super::pool::RetryableError for MemberDowngradeError {
+    fn is_retryable(&self) -> bool {
+        match self {
+            Self::OccConflict => true,
+            Self::LastAdmin => false,
+            Self::Other(e) => super::pool::is_retryable_db_error(e),
+        }
+    }
+}
+
+/// Demote or deactivate an org member, refusing to remove the last admin.
+///
+/// Returns `Ok(false)` when the target no longer exists.
+///
+/// "At least one active admin per organization" is a cross-row invariant: it
+/// is a property of the member set, not of any single user document. The
+/// handlers' own "cannot demote yourself" check enforces it only by accident
+/// — it holds for one request at a time, and two admins who downgrade *each
+/// other* simultaneously both pass it, because neither request can see the
+/// other. Each write then lands on a different user document, so per-document
+/// optimistic concurrency never notices, and the organization is left with no
+/// admin and no way back in.
+///
+/// So the admin count and the write share one transaction, and the
+/// organization row is version-bumped to serialize them (CLAUDE.md rule 10).
+/// The org row is what concurrent downgrades collide on; DSQL is OCC-only and
+/// has no `SELECT … FOR UPDATE`, so forcing writers onto one row is what makes
+/// the guard atomic on every backend. The version is captured *before* the
+/// member scan for the reason spelled out in [`delete_user`]: read afterwards,
+/// it would already carry a sibling's bump and the compare-and-update would
+/// wrongly succeed.
+///
+/// # Errors
+///
+/// [`MemberDowngradeError::LastAdmin`] when the target is the organization's
+/// only remaining active admin, and [`MemberDowngradeError::OccConflict`] when
+/// a concurrent change to the organization won the race — retried by
+/// `with_dsql_retry!`, which re-runs the count against the committed state.
+pub async fn demote_or_deactivate_member(
+    store: &DocumentStore,
+    user_id: &str,
+    change: MemberDowngrade,
+) -> std::result::Result<bool, MemberDowngradeError> {
+    crate::with_dsql_retry!(async {
+        let mut tx = store.begin().await?;
+
+        // Test-only seam, before the first read so a write it commits is
+        // visible to the last-admin count below (mirrors `update_scim_user`).
+        // The admin `deactivate_member` handler revokes access before this
+        // write, so a concurrent demotion of the caller committed here makes
+        // the in-transaction floor refuse after revocation already committed.
+        #[cfg(test)]
+        store.run_last_admin_count_test_hook(user_id).await;
+
+        let Some(user_doc) = tx.get::<UserDoc>(user_id).await? else {
+            return Ok(false);
+        };
+        let org_id = user_doc.data.org_id.clone();
+
+        // Version first, then the predicate read it must guard.
+        let org_doc = match org_id.as_deref() {
+            Some(id) => {
+                tx.get::<super::documents::organization::OrganizationDoc>(id)
+                    .await?
+            }
+            None => None,
+        };
+
+        // Only a change that removes an *active admin* can breach the floor.
+        // Demoting a plain member, or deactivating one, cannot.
+        let removes_an_admin = user_doc.data.is_org_admin && user_doc.data.active;
+        if removes_an_admin
+            && let Some(id) = org_id.as_deref()
+            && other_active_admins(&mut tx, id, user_id).await? == 0
+        {
+            return Err(MemberDowngradeError::LastAdmin);
+        }
+
+        let mut updated = user_doc.data.clone();
+        match change {
+            MemberDowngrade::Demote => updated.is_org_admin = false,
+            MemberDowngrade::Deactivate => {
+                updated.active = false;
+                if user_doc.data.active {
+                    if !revoke_owner_registration_tokens(&mut tx, user_id).await? {
+                        return Err(MemberDowngradeError::OccConflict);
+                    }
+                    if !transfer_org_clients(&mut tx, org_id.as_deref(), user_id).await? {
+                        return Err(MemberDowngradeError::OccConflict);
+                    }
+                }
+            }
+        }
+        // Guard the user row on the version this transaction read, so a
+        // concurrent edit to the same member is not overwritten blindly.
+        if !tx
+            .compare_and_update(user_id, user_doc.version, &updated)
+            .await?
+        {
+            return Err(MemberDowngradeError::OccConflict);
+        }
+
+        if let Some(id) = org_id.as_deref()
+            && let Some(org_doc) = org_doc
+        {
+            let won = tx
+                .compare_and_update(id, org_doc.version, &org_doc.data)
+                .await?;
+            if !won {
+                return Err(MemberDowngradeError::OccConflict);
+            }
+        }
+
+        tx.commit().await?;
+        Ok(true)
+    })
 }
 
 /// Delete a user and all associated data atomically.
@@ -221,7 +615,9 @@ async fn org_admin_successor(
 /// 3. Delete authenticators (and their related device_auth refs)
 /// 4. Delete SSH issued certificate records
 /// 5. Delete token exchanges
-/// 6. Transfer org-scoped OAuth clients to an org admin; unlink the rest
+/// 6. Revoke the RFC 7592 registration access token of every OAuth client the
+///    user owns, then transfer org-scoped clients to an org admin and unlink
+///    the rest
 /// 7. Delete the user
 ///
 /// Note: SSH revocation records (`SshRevokedCertDoc`) are intentionally
@@ -233,7 +629,19 @@ async fn org_admin_successor(
 /// `Ok(true)` when the user existed and was deleted, `Ok(false)` when no
 /// user with `user_id` was found — callers surface the latter as a 404 and
 /// must not record a deletion audit event.
-pub async fn delete_user(store: &DocumentStore, user_id: &str) -> Result<bool, DeleteUserError> {
+///
+/// # Errors
+///
+/// [`DeleteUserError::LastAdmin`] when `floor` is [`LastAdminGuard::Enforce`] and
+/// the target is the organization's only active admin. The count shares this
+/// transaction and the organization row's version bump, so it is atomic
+/// against a concurrent delete, demote, or deactivation of a sibling admin —
+/// the same serialization [`demote_or_deactivate_member`] relies on.
+pub async fn delete_user(
+    store: &DocumentStore,
+    user_id: &str,
+    floor: LastAdminGuard,
+) -> Result<bool, DeleteUserError> {
     use super::documents::authenticator::AuthenticatorDoc;
     use super::documents::credential::{EnrollmentSessionDoc, SshIssuedCertDoc};
     use super::documents::oauth::OAuthClientDoc;
@@ -251,10 +659,8 @@ pub async fn delete_user(store: &DocumentStore, user_id: &str) -> Result<bool, D
         store.run_delete_test_hook(user_id).await;
 
         // Return `false` when the user document is missing so callers can
-        // surface a 404 and skip the audit event. `tx.delete` returns
-        // `Ok(())` regardless of whether anything was removed, so this
-        // existence check is the only signal that the user was already
-        // gone. Mirrors `delete_scim_group` / `delete_custom_policy`.
+        // surface a 404 and skip the audit event. A concurrent delete that
+        // commits after this read is caught by `tx.delete`'s row count below.
         let Some(user_doc) = tx.get::<UserDoc>(user_id).await? else {
             return Ok(false);
         };
@@ -274,7 +680,7 @@ pub async fn delete_user(store: &DocumentStore, user_id: &str) -> Result<bool, D
         //    no-op delete is cheap and keeps the cascade logic in one place.
         let authenticators = tx.find_all::<AuthenticatorDoc>("user_id", user_id).await?;
         for auth in &authenticators {
-            super::authenticators::delete_authenticator_in_tx(&mut tx, &auth.id).await?;
+            super::authenticators::delete_authenticator(&mut tx, &auth.id).await?;
         }
 
         // 4. Delete SSH issued certificate records
@@ -296,16 +702,66 @@ pub async fn delete_user(store: &DocumentStore, user_id: &str) -> Result<bool, D
         // both manageable and discoverable in that admin's normal list.
         // Personal and public applications have no other legitimate owner
         // and are unlinked.
-        let successor = org_admin_successor(&mut tx, org_id.as_deref(), user_id).await?;
-        tx.update_by_index::<OAuthClientDoc, _>("user_id", user_id, |d| {
-            d.user_id = match (d.access_scope, successor.as_deref()) {
-                (super::documents::oauth::AccessScope::Organization, Some(admin_id)) => {
-                    Some(admin_id.to_string())
-                }
-                _ => None,
-            };
-        })
-        .await?;
+        // The client doc's version is the serialization point for all
+        // secret-set mutations (`update_oauth_client`,
+        // `update_oauth_client_registration` write via `compare_and_update`).
+        // `update_by_index` guards each write with the version it read, so a
+        // client update committed between this read and the write is never
+        // overwritten with the stale doc: the cascade fails with a retryable
+        // `VersionConflict` and the entry-point `with_dsql_retry!` re-runs
+        // it from a fresh read.
+        // Capture the org row's version *before* the member scan that chooses
+        // the successor. The scan is the predicate read this guard exists to
+        // serialize, so the version has to be the one the scan saw. Reading it
+        // afterwards defeats the guard: under PostgreSQL READ COMMITTED every
+        // statement takes a fresh snapshot, so a sibling delete that committed
+        // between the scan and the version read yields the already-bumped
+        // version here, the compare-and-update below matches, and both
+        // transactions commit having each chosen the other as successor.
+        let org_doc = match org_id.as_deref() {
+            Some(id) => {
+                tx.get::<super::documents::organization::OrganizationDoc>(id)
+                    .await?
+            }
+            None => None,
+        };
+
+        // "At least one active admin per organization" — the same cross-row
+        // invariant `demote_or_deactivate_member` guards, checked here because
+        // deleting an admin removes them from the count just as demoting one
+        // does. It rides the org-row version captured above, so two admins
+        // deleting each other collide on that row and the loser retries
+        // against committed state instead of both succeeding.
+        //
+        // Only removing an *active admin* can breach the floor; deleting a
+        // plain member, or an already-deactivated admin, cannot.
+        if floor == LastAdminGuard::Enforce
+            && user_doc.data.is_org_admin
+            && user_doc.data.active
+            && let Some(id) = org_id.as_deref()
+            && other_active_admins(&mut tx, id, user_id).await? == 0
+        {
+            return Err(DeleteUserError::LastAdmin);
+        }
+
+        // Revoke the deleted owner's RFC 7592 registration access tokens on
+        // every client they own before any of them moves.
+        if !revoke_owner_registration_tokens(&mut tx, user_id).await? {
+            return Err(DeleteUserError::OccConflict);
+        }
+        if !transfer_org_clients(&mut tx, org_id.as_deref(), user_id).await? {
+            return Err(DeleteUserError::OccConflict);
+        }
+        // Whatever the user still owns (personal and public clients, and
+        // org-scoped ones when no other admin exists) has no other legitimate
+        // owner and is unlinked. `reassign_client_owner` clears the
+        // registration access token hash on the same write, so an unlinked
+        // client can never be managed with the deleted owner's token.
+        for client in tx.find_all::<OAuthClientDoc>("user_id", user_id).await? {
+            if !reassign_client_owner(&mut tx, client, None).await? {
+                return Err(DeleteUserError::OccConflict);
+            }
+        }
 
         // Serialize deletions within an organization on the org row.
         //
@@ -325,9 +781,7 @@ pub async fn delete_user(store: &DocumentStore, user_id: &str) -> Result<bool, D
         // administrative action, so serializing per organization costs
         // little.
         if let Some(ref org_id) = org_id
-            && let Some(org_doc) = tx
-                .get::<super::documents::organization::OrganizationDoc>(org_id)
-                .await?
+            && let Some(org_doc) = org_doc
         {
             let won = tx
                 .compare_and_update(org_id, org_doc.version, &org_doc.data)
@@ -338,10 +792,10 @@ pub async fn delete_user(store: &DocumentStore, user_id: &str) -> Result<bool, D
         }
 
         // 7. Delete the user
-        tx.delete(user_id).await?;
+        let removed = tx.delete(user_id).await?;
 
         tx.commit().await?;
-        Ok(true)
+        Ok(removed)
     })
 }
 
@@ -402,9 +856,16 @@ pub async fn update_user_active_status(
 ///
 /// A `None` refresh token means the response carried none, not that the stored
 /// one should be discarded — GitHub omits `refresh_token` when the app has
-/// expiring tokens disabled, so a re-link would otherwise erase a working
-/// token and silently break background refresh. Clearing is done explicitly,
-/// through [`super::credentials::revoke_user_credentials`].
+/// expiring tokens disabled, so a same-account re-link would otherwise erase a
+/// working token and silently break background refresh.
+///
+/// A re-link to a *different* `github_id` is the exception. The stored token
+/// belongs to the previous account, so keeping it would leave the doc holding
+/// one account's identity and another's credential — the same mismatch
+/// [`update_user_github_refresh_token`]'s conditional write refuses to create
+/// from the refresh side. That case clears the token instead. Clearing on an
+/// unlink is separate, through
+/// [`super::credentials::revoke_user_credentials`].
 pub async fn update_user_github_identity(
     store: &DocumentStore,
     user_id: &str,
@@ -414,10 +875,16 @@ pub async fn update_user_github_identity(
 ) -> Result<()> {
     let found = store
         .modify::<UserDoc, _>(user_id, |data| {
+            // Read the stored identity before overwriting it. Under OCC the
+            // closure reruns against the newest doc, so this compares against
+            // whatever a concurrent write left behind, not a stale capture.
+            let same_account = data.github_id == Some(github_id);
             data.github_id = Some(github_id);
             data.github_login = Some(github_login.to_string());
             if let Some(token) = github_refresh_token {
                 data.github_refresh_token = Some(secrecy::SecretString::from(token));
+            } else if !same_account {
+                data.github_refresh_token = None;
             }
         })
         .await?;
@@ -428,13 +895,111 @@ pub async fn update_user_github_identity(
     }
 }
 
-/// Get a user's GitHub refresh token.
-pub async fn get_user_github_refresh_token(
+/// Outcome of [`update_user_github_refresh_token`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefreshOutcome {
+    /// The rotated refresh token was persisted.
+    Written,
+    /// The write was skipped because the stored link no longer matches
+    /// the [`GitHubLink`] the caller read before the refresh round-trip.
+    /// A re-link, a revocation that cleared the token, or a concurrent
+    /// refresh committed during that window, so the rotated token must
+    /// not land: it would replace the re-link's token, restore a revoked
+    /// credential, or overwrite a newer rotation.
+    SkippedLinkChanged,
+}
+
+/// A user's stored GitHub link state, captured from a single doc snapshot.
+///
+/// `github_id` and `github_refresh_token` are read together — not via
+/// two separate queries — so they describe the same account at the same
+/// moment. The access-token refresh path passes this snapshot to
+/// [`update_user_github_refresh_token`], whose conditional write lands only
+/// while the stored link still matches it.
+///
+/// `None` is returned when the user document does not exist. The inner
+/// `Option`s cover users with no GitHub link at all, and — for
+/// `github_id` — legacy docs that predate the identity field.
+#[derive(Clone)]
+pub struct GitHubLink {
+    pub github_id: Option<i64>,
+    pub github_refresh_token: Option<secrecy::SecretString>,
+}
+
+// Custom Debug that redacts `github_refresh_token` to prevent accidental
+// log exposure of a credential that mints new GitHub access tokens.
+impl std::fmt::Debug for GitHubLink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GitHubLink")
+            .field("github_id", &self.github_id)
+            .field("github_refresh_token", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Get a user's GitHub link state from a single doc snapshot.
+///
+/// See [`GitHubLink`] for why `github_id` and `github_refresh_token` are
+/// read together rather than via two separate queries.
+pub async fn get_user_github_link(
     store: &DocumentStore,
     user_id: &str,
-) -> Result<Option<secrecy::SecretString>> {
+) -> Result<Option<GitHubLink>> {
     let doc = store.get::<UserDoc>(user_id).await?;
-    Ok(doc.and_then(|d| d.data.github_refresh_token))
+    Ok(doc.map(|d| GitHubLink {
+        github_id: d.data.github_id,
+        github_refresh_token: d.data.github_refresh_token,
+    }))
+}
+
+/// Update only a user's GitHub refresh token, conditioned on the stored link
+/// being the one the caller refreshed.
+///
+/// `read` is the [`GitHubLink`] the caller took from [`get_user_github_link`]
+/// before the `refresh_oauth_token` round-trip. The closure rotates the stored
+/// token only when the doc still holds the same `github_id` and the same
+/// refresh token. Anything that committed during the round-trip changes one of
+/// them: a re-link replaces both, revocation clears the token (and keeps
+/// `github_id`), and a concurrent refresh rotates the token. Each ends as
+/// [`RefreshOutcome::SkippedLinkChanged`] without committing.
+///
+/// Only `github_refresh_token` is written, so a concurrent re-link's
+/// `github_id`/`github_login` survive the OCC retry.
+///
+/// A missing user is reported as an error (the refresh path had a stored
+/// token to rotate, so the user must exist).
+pub async fn update_user_github_refresh_token(
+    store: &DocumentStore,
+    user_id: &str,
+    new_refresh_token: &str,
+    read: &GitHubLink,
+) -> Result<RefreshOutcome> {
+    use secrecy::ExposeSecret;
+    use subtle::ConstantTimeEq;
+
+    let outcome = store
+        .transition::<UserDoc, RefreshOutcome, RefreshOutcome, _>(user_id, |data| {
+            let same_token = match (&data.github_refresh_token, &read.github_refresh_token) {
+                (Some(stored), Some(refreshed)) => bool::from(
+                    stored
+                        .expose_secret()
+                        .as_bytes()
+                        .ct_eq(refreshed.expose_secret().as_bytes()),
+                ),
+                (Some(_) | None, None) | (None, Some(_)) => false,
+            };
+            if same_token && data.github_id == read.github_id {
+                data.github_refresh_token = Some(secrecy::SecretString::from(new_refresh_token));
+                Ok(RefreshOutcome::Written)
+            } else {
+                Err(RefreshOutcome::SkippedLinkChanged)
+            }
+        })
+        .await?;
+    match outcome {
+        Transition::Applied(o) | Transition::Rejected(o) => Ok(o),
+        Transition::NotFound => Err(anyhow::anyhow!("user not found: {user_id}")),
+    }
 }
 
 /// Clear a user's GitHub refresh token.

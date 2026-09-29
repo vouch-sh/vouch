@@ -8,6 +8,8 @@ use super::claim::ClaimError;
 use super::document_type::{Document, DocumentType};
 use super::documents::par::PushedAuthorizationRequestDoc;
 use super::store::DocumentStore;
+use crate::crypto;
+use crate::services::auth::ParCreationProof;
 use anyhow::Result;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -116,7 +118,7 @@ pub struct CreateParParams<'a> {
 ///
 /// Returns an error if the CSPRNG fails.
 fn generate_request_uri() -> Result<String> {
-    let encoded = URL_SAFE_NO_PAD.encode(crate::crypto::generate_random_bytes(32)?);
+    let encoded = URL_SAFE_NO_PAD.encode(crypto::generate_random_bytes(32)?);
     Ok(format!("{REQUEST_URI_URN_PREFIX}{encoded}"))
 }
 
@@ -135,12 +137,13 @@ pub(crate) const REQUEST_URI_URN_PREFIX: &str = "urn:ietf:params:oauth:request_u
 /// (typically a JWT assertion JTI) before persisting the PAR record.
 /// It is dropped immediately on entry — its only purpose is to make this
 /// PAR storage chokepoint unforgeable from outside the crate.
+#[expect(clippy::disallowed_methods, reason = "stamps the PAR row's expires_at")]
 pub(crate) async fn create_pushed_authorization_request(
     store: &DocumentStore,
     params: CreateParParams<'_>,
-    proof: crate::services::auth::ParCreationProof,
+    proof: ParCreationProof,
 ) -> Result<(String, String)> {
-    let crate::services::auth::ParCreationProof { client_auth } = proof;
+    let ParCreationProof { client_auth } = proof;
     tracing::debug!(?client_auth, "PAR creation proof consumed");
 
     let request_uri = generate_request_uri()?;
@@ -271,9 +274,8 @@ impl ParConsumptionProof {
     pub async fn consume(
         store: &DocumentStore,
         par: ParRef<'_>,
+        now: Timestamp,
     ) -> std::result::Result<Self, ClaimError> {
-        let now = Timestamp::now();
-
         let doc = store
             .find_one::<PushedAuthorizationRequestDoc>("request_uri", par.request_uri)
             .await
@@ -327,13 +329,17 @@ impl ParConsumptionProof {
 ///
 /// FAPI 2.0 Section 5.3.2.2 Note 3: request_uri values should be reusable
 /// until the authorization request has been completed (code issued).
+///
+/// `now` decides the expiry comparison, so request-path callers pass the
+/// request's [`crate::arrival::ArrivalTime`] instant. A clock stamped here
+/// would be ≥ arrival and could retire a `request_uri` that was still live
+/// when the authorization request arrived.
 pub async fn get_pushed_authorization_request(
     store: &DocumentStore,
     request_uri: &str,
     client_id: &str,
+    now: Timestamp,
 ) -> Result<Option<PushedAuthorizationRequest>> {
-    let now = Timestamp::now();
-
     let doc = store
         .find_one::<PushedAuthorizationRequestDoc>("request_uri", request_uri)
         .await?;
@@ -360,6 +366,7 @@ pub async fn get_pushed_authorization_request(
 ///
 /// Uses optimistic concurrency: if the PAR was consumed or modified concurrently
 /// the extension is silently skipped (the flow will fail at consume time).
+#[expect(clippy::disallowed_methods, reason = "stamps the row's new expires_at")]
 pub async fn extend_par_expiration(
     store: &DocumentStore,
     request_uri: &str,

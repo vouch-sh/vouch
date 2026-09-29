@@ -4,7 +4,7 @@
 use crate::error::{AgentError, Result};
 use crate::protocol::{
     CACHE_MISS, CacheCredentialParams, GetCachedCredentialParams, JSONRPC_VERSION, Method,
-    NOT_AUTHENTICATED, Request, Response, SESSION_EXPIRED, StoreSessionParams,
+    NOT_AUTHENTICATED, Request, Response, RpcError, SESSION_EXPIRED, StoreSessionParams,
     StoreSshCredentialsParams,
 };
 use crate::socket::socket_path;
@@ -16,7 +16,7 @@ use secrecy::SecretString;
 use tokio::net::UnixStream;
 
 /// Map a JSON-RPC auth-related error code to the appropriate `AgentError`.
-fn check_auth_error(error: &crate::protocol::RpcError) -> AgentError {
+fn check_auth_error(error: &RpcError) -> AgentError {
     match error.code {
         NOT_AUTHENTICATED => AgentError::NotAuthenticated,
         SESSION_EXPIRED => AgentError::SessionExpired,

@@ -20,26 +20,38 @@
 //! - Session binding to authenticator
 
 use crate::AppState;
+use crate::arrival::ArrivalTime;
+use crate::assurance::HardwareVerification;
+use crate::config::NonEmptySecret;
 use crate::crypto::generate_challenge;
 use crate::crypto::hash_token;
+use crate::crypto::jwt::{JwtType, StateTokenError, StateTokenSigner};
+use crate::crypto::webauthn_verify::AuthTime;
 use crate::db::ClientInfo;
 use crate::db::{self, AuthEventParams, AuthEventType};
 use crate::error::ServiceError;
 use crate::handlers::extractors::ValidJson;
-use crate::handlers::session::{create_session_cookie, get_auth_context};
+use crate::handlers::session::{
+    AuthContext, create_session_cookie, get_auth_context, session_cookie_max_age,
+};
 use crate::handlers::{ClientDataError, ClientDataProof};
 use crate::impl_template_response;
+use crate::infra::i18n::Tr;
+use crate::infra::metrics;
 use crate::redact_email;
 use crate::services::auth::{
-    ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenBinding,
-    TokenIssuanceProof, create_oauth_access_token,
+    self, ClientAuthProof, CreateOAuthTokenParams, GrantProof, LookupError, NoClientAuth,
+    SenderConstraintProof, TokenBinding, TokenIssuanceProof, create_oauth_access_token,
 };
 use crate::services::oidc::ScopeSet;
+use crate::services::oidc::authorization::{
+    AuthorizationSessionState, Prompt, PromptSet, check_session_for_authorization,
+};
 use askama::Template;
 use axum::{
     Json,
     extract::State,
-    http::{HeaderMap, StatusCode, header},
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
@@ -60,9 +72,12 @@ use vouch_common::{
 /// Compute an HMAC-SHA256 tag over `message` using `secret`, returning the
 /// result base64url-encoded (no padding). Used by the certification test-mode
 /// login link to bind the link to a specific pending authorization ID.
-pub(crate) fn hmac_sha256_base64url(secret: &str, message: &str) -> String {
+///
+/// Takes a [`NonEmptySecret`] so the tag can never be keyed by the empty
+/// string, which anyone could reproduce.
+pub(crate) fn hmac_sha256_base64url(secret: &NonEmptySecret, message: &str) -> String {
     use aws_lc_rs::hmac;
-    let key = hmac::Key::new(hmac::HMAC_SHA256, secret.as_bytes());
+    let key = hmac::Key::new(hmac::HMAC_SHA256, secret.expose_secret().as_bytes());
     let tag = hmac::sign(&key, message.as_bytes());
     URL_SAFE_NO_PAD.encode(tag.as_ref())
 }
@@ -83,7 +98,7 @@ pub(crate) struct LoginTemplate {
     /// Relying Party ID for WebAuthn.
     pub rp_id: String,
     /// Authentication context for header.
-    pub auth: crate::handlers::session::AuthContext,
+    pub auth: AuthContext,
     /// URL for the certification test-mode login link.
     /// `Some` only when `VOUCH_CERTIFICATION_TEST_TOKEN` is set and there is a pending auth.
     pub cert_login_url: Option<String>,
@@ -119,26 +134,22 @@ struct BrowserAuthenticationState {
 }
 
 impl BrowserAuthenticationState {
-    async fn encode(
-        &self,
-        signer: &crate::crypto::jwt::StateTokenSigner,
-    ) -> Result<String, crate::crypto::jwt::StateTokenError> {
+    async fn encode(&self, signer: &StateTokenSigner) -> Result<String, StateTokenError> {
         signer
-            .encode_state_token(
-                self,
-                crate::crypto::jwt::JwtType::BrowserAuthenticationState,
-            )
+            .encode_state_token(self, JwtType::BrowserAuthenticationState)
             .await
     }
 
     async fn decode(
         token: &str,
-        signer: &crate::crypto::jwt::StateTokenSigner,
-    ) -> Result<Self, crate::crypto::jwt::StateTokenError> {
+        signer: &StateTokenSigner,
+        arrival: ArrivalTime,
+    ) -> Result<Self, StateTokenError> {
         signer
             .decode_state_token(
                 token,
-                crate::crypto::jwt::JwtType::BrowserAuthenticationState,
+                JwtType::BrowserAuthenticationState,
+                arrival.as_second(),
             )
             .await
     }
@@ -197,6 +208,7 @@ impl LoginCompletion {
     async fn validate(
         req: BrowserLoginCompleteRequest,
         state: &AppState,
+        arrival: ArrivalTime,
     ) -> Result<Self, ServiceError> {
         let client_data = ClientDataProof::verify(
             &req.client_data_json,
@@ -220,28 +232,28 @@ impl LoginCompletion {
             ServiceError::api(
                 StatusCode::BAD_REQUEST,
                 "invalid_user_handle",
-                "Invalid user handle format",
+                Tr::new("login-error-invalid-user-handle").to_string(),
             )
         })?;
 
         let auth_state =
-            BrowserAuthenticationState::decode(req.state.as_str(), &state.state_signer)
+            BrowserAuthenticationState::decode(req.state.as_str(), &state.state_signer, arrival)
                 .await
                 .map_err(|e| {
                     ServiceError::api(StatusCode::BAD_REQUEST, "invalid_state", e.to_string())
                 })?;
 
-        let now = Timestamp::now().as_second();
+        let now = arrival.as_second();
         if now > auth_state.exp {
             return Err(ServiceError::api(
                 StatusCode::BAD_REQUEST,
                 "expired",
-                "Authentication session expired",
+                Tr::new("login-error-session-expired").to_string(),
             ));
         }
 
         let expires_at =
-            Timestamp::from_second(auth_state.exp).unwrap_or_else(|_| Timestamp::now());
+            Timestamp::from_second(auth_state.exp).unwrap_or_else(|_| arrival.timestamp());
 
         Ok(Self {
             req,
@@ -295,12 +307,11 @@ async fn pending_device_auth(
 }
 
 pub(crate) async fn login_page(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(query): axum::extract::Query<LoginQuery>,
     jar: CookieJar,
 ) -> Response {
-    let auth = get_auth_context(&state, &jar).await;
-
     // Validate pending_auth is a UUID before DB lookup.
     if let Some(ref pending_id) = query.pending_auth
         && uuid::Uuid::try_parse(pending_id).is_err()
@@ -310,7 +321,7 @@ pub(crate) async fn login_page(
 
     // Look up pending auth to check prompt and get client name.
     let pending = if let Some(ref pending_id) = query.pending_auth {
-        db::get_pending_oauth_authorization(&state.store, pending_id)
+        db::get_pending_oauth_authorization(&state.store, pending_id, arrival.timestamp())
             .await
             .ok()
             .flatten()
@@ -336,20 +347,57 @@ pub(crate) async fn login_page(
         }
     };
 
-    let requires_reauth = pending
-        .as_ref()
-        .is_some_and(|p| p.prompt.as_deref() == Some("login") || p.max_age.is_some())
-        || device_auth_pending;
+    // `prompt` is a space-delimited set (OIDC Core 3.1.2.1), so `login` can
+    // arrive alongside other values (e.g. `login consent`). Parse it with the
+    // same `PromptSet` the authorize handler uses rather than matching the
+    // whole string, so any set containing `login` forces the assertion form.
+    let requires_reauth = pending.as_ref().is_some_and(|p| {
+        let prompt_requests_login = p
+            .prompt
+            .as_deref()
+            .and_then(|raw| PromptSet::parse(raw).ok())
+            .is_some_and(|set| set.contains(Prompt::Login));
+        prompt_requests_login || p.max_age.is_some()
+    }) || device_auth_pending;
 
-    if auth.authenticated && !requires_reauth {
+    if !requires_reauth {
         if let Some(ref pending_id) = query.pending_auth {
-            return axum::response::Redirect::to(&format!(
-                "/oauth/authorize?pending_auth={}",
-                urlencoding::encode(pending_id)
-            ))
-            .into_response();
+            // Bounce back to /oauth/authorize only when the gate that endpoint
+            // applies would accept the session. `auth.authenticated` is the
+            // wrong question here: an enrollment bootstrap session (upstream
+            // IdP sign-in, no FIDO2) holds a valid cookie but is not
+            // hardware-verified, so deciding from it bounced the user to an
+            // endpoint that refuses the session — consuming the single-use
+            // pending id on the way (#1168). Asking the same predicate keeps
+            // the two endpoints from disagreeing. NeedsAuth falls through to
+            // the assertion form; so does a store failure, where rendering the
+            // form needlessly costs one touch but redirecting could strand
+            // the flow.
+            let session_token = jar
+                .get(vouch_common::SESSION_COOKIE_NAME)
+                .map(|c| c.value());
+            let authorized =
+                match check_session_for_authorization(&state, session_token, arrival).await {
+                    Ok(AuthorizationSessionState::Authenticated { .. }) => true,
+                    Ok(AuthorizationSessionState::NeedsAuth) => false,
+                    Err(e) => {
+                        tracing::error!("Session check failed at /login; rendering the form: {e}");
+                        false
+                    }
+                };
+            if authorized {
+                return axum::response::Redirect::to(&format!(
+                    "/oauth/authorize?pending_auth={}",
+                    urlencoding::encode(pending_id)
+                ))
+                .into_response();
+            }
+        } else if get_auth_context(&state, &jar, arrival).await.authenticated {
+            // Without a pending authorization a signed-in user has nothing to
+            // do here — IdP sign-in is the whole bar for the browser UI, so a
+            // bootstrap session goes home like any other.
+            return axum::response::Redirect::to("/").into_response();
         }
-        return axum::response::Redirect::to("/").into_response();
     }
 
     let (client_name, logo_uri, policy_uri, tos_uri) = match &pending {
@@ -383,7 +431,7 @@ pub(crate) async fn login_page(
         &query.pending_auth,
     ) {
         (Some(secret), Some(pending_id)) => {
-            let token = hmac_sha256_base64url(secret.expose_secret(), pending_id);
+            let token = hmac_sha256_base64url(secret, pending_id);
             let encoded_pending_id = urlencoding::encode(pending_id);
             let encoded_token = urlencoding::encode(&token);
             Some(format!(
@@ -398,7 +446,7 @@ pub(crate) async fn login_page(
         &query.pending_auth,
     ) {
         (Some(secret), Some(pending_id)) => {
-            let token = hmac_sha256_base64url(secret.expose_secret(), pending_id);
+            let token = hmac_sha256_base64url(secret, pending_id);
             let encoded_pending_id = urlencoding::encode(pending_id);
             let encoded_token = urlencoding::encode(&token);
             Some(format!(
@@ -407,6 +455,11 @@ pub(crate) async fn login_page(
         }
         _ => None,
     };
+
+    // Only the rendered form needs the header context, and building it costs
+    // a session and a user lookup that the session gate above already did.
+    // Reaching this point means the form is being shown.
+    let auth = get_auth_context(&state, &jar, arrival).await;
 
     LoginTemplate {
         pending_auth: query.pending_auth,
@@ -426,14 +479,15 @@ pub(crate) async fn login_page(
 ///
 /// Generate a WebAuthn authentication challenge.
 /// Uses discoverable credentials (passkeys) so the authenticator identifies the user.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "mints a challenge state token's expiry"
+)]
 pub(crate) async fn browser_login_start(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Json(req): Json<BrowserLoginStartRequest>,
 ) -> Result<Json<BrowserLoginStartResponse>, ServiceError> {
     // Validate Origin header for CSRF protection (RFC 9700)
-    validate_origin(&headers, &state.config().base_url)?;
-
     tracing::info!("Browser login start (discoverable credential flow)");
 
     // Generate challenge
@@ -441,7 +495,7 @@ pub(crate) async fn browser_login_start(
         ServiceError::api(
             StatusCode::INTERNAL_SERVER_ERROR,
             "rng_error",
-            "Failed to generate challenge",
+            Tr::new("login-error-challenge-failed").to_string(),
         )
     })?;
     let now = Timestamp::now();
@@ -451,7 +505,7 @@ pub(crate) async fn browser_login_start(
             ServiceError::api(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "time_error",
-                "Time calculation overflow",
+                Tr::new("login-error-time-overflow").to_string(),
             )
         })?
         .as_second();
@@ -482,6 +536,33 @@ pub(crate) async fn browser_login_start(
     }))
 }
 
+/// Record a failed browser-login attempt. The email feeds the audit row's
+/// `email_domain`/`email_hmac` columns (never stored raw); without it the
+/// event is invisible to org-scoped audit queries, which filter on domain.
+///
+/// `principal` decides whether the row counts toward per-user temporal
+/// policies; see [`db::Principal`].
+async fn log_login_failure(
+    audit: &db::audit::AuditStore,
+    client: ClientInfo,
+    principal: db::Principal,
+    email: Option<&str>,
+    authenticator_id: Option<&str>,
+    reason: &str,
+) {
+    let params = AuthEventParams {
+        user_id: principal,
+        event_type: AuthEventType::LoginFailed,
+        authenticator_id: authenticator_id.map(String::from),
+        success: false,
+        failure_reason: Some(reason.to_string()),
+        client,
+        client_id: None,
+        idp_issuer: None,
+    };
+    db::record_auth_event(audit, params, email.map(String::from)).await;
+}
+
 /// POST /login/webauthn/complete
 ///
 /// Verify WebAuthn assertion and create session.
@@ -491,22 +572,16 @@ pub(crate) async fn browser_login_start(
 /// request body. Consuming the single-use challenge state needs the checked
 /// request as an argument, so a malformed request cannot invalidate the state
 /// token it carries and lock the user out of the flow.
-#[expect(
-    clippy::too_many_lines,
-    reason = "FAPI 2.0 browser login orchestrates assertion verification and session issuance"
-)]
 pub(crate) async fn browser_login_complete(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     client_info: ClientInfo,
-    headers: HeaderMap,
     jar: CookieJar,
     ValidJson(req): ValidJson<BrowserLoginCompleteRequest>,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-
     tracing::info!("Browser login complete (discoverable credential flow)");
 
-    let checked = LoginCompletion::validate(req, &state).await?;
+    let checked = LoginCompletion::validate(req, &state, arrival).await?;
 
     // Mark the authentication state JWT consumed before any side effects.
     // The returned `ChallengeStateClaim` witness is the structural proof
@@ -519,7 +594,7 @@ pub(crate) async fn browser_login_complete(
             return Err(ServiceError::api(
                 StatusCode::BAD_REQUEST,
                 "state_already_used",
-                "Authentication state has already been used",
+                Tr::new("login-error-state-already-used").to_string(),
             ));
         }
         Err(e) => {
@@ -538,26 +613,9 @@ pub(crate) async fn browser_login_complete(
         expires_at: _,
     } = checked;
 
-    // Helper to log failed login attempts. The email feeds the audit row's
-    // `email_domain`/`email_hmac` columns (never stored raw); without it the
-    // event is invisible to org-scoped audit queries, which filter on domain.
-    let log_failure =
-        |user_id: &str, email: Option<&str>, authenticator_id: Option<&str>, reason: &str| {
-            let params = AuthEventParams {
-                user_id: user_id.to_string(),
-                event_type: AuthEventType::LoginFailed,
-                authenticator_id: authenticator_id.map(String::from),
-                success: false,
-                failure_reason: Some(reason.to_string()),
-                client: client_info.clone(),
-                ..AuthEventParams::default()
-            };
-            db::spawn_audit_event(&state.audit, params, email.map(String::from));
-        };
-
     // Look up authenticator and verify ownership (single JOIN query)
     use crate::services::auth::{AuthenticatorLookupParams, lookup_and_verify_authenticator};
-    let lookup_result = lookup_and_verify_authenticator(
+    let lookup_result = match lookup_and_verify_authenticator(
         &state,
         AuthenticatorLookupParams {
             credential_id: req.credential_id.as_bytes(),
@@ -565,33 +623,36 @@ pub(crate) async fn browser_login_complete(
         },
     )
     .await
-    .map_err(|e| {
-        let reason = match &e {
-            crate::error::ServiceError::NotFound(entity) => {
-                format!("{entity}_not_found")
-            }
-            crate::error::ServiceError::Forbidden(_) => "user_mismatch".to_string(),
-            _ => "lookup_error".to_string(),
-        };
-        // Credential lookup failed — no user row was loaded, so no email.
-        log_failure(&user_id.to_string(), None, None, &reason);
-        // Return generic error to prevent credential enumeration
-        ServiceError::api(
-            StatusCode::UNAUTHORIZED,
-            "auth_failed",
-            "Authentication failed",
-        )
-    })?;
+    {
+        Ok(result) => result,
+        Err(e) => {
+            auth::record_lookup_failure(&state.audit, client_info.clone(), user_id, &e).await;
+            return Err(match e {
+                // Return generic error to prevent credential enumeration
+                LookupError::NotFound(_)
+                | LookupError::UserMismatch { .. }
+                | LookupError::Deactivated { .. } => ServiceError::api(
+                    StatusCode::UNAUTHORIZED,
+                    "auth_failed",
+                    Tr::new("login-error-auth-failed").to_string(),
+                ),
+                LookupError::Service(e) => {
+                    tracing::error!("Browser login authenticator lookup failed: {e}");
+                    e
+                }
+            });
+        }
+    };
 
     let authenticator = lookup_result.authenticator;
     let user = lookup_result.user;
 
     // Server-side WebAuthn signature verification (offloaded to a blocking
     // thread — see verify_login_assertion for rationale).
-    let stored_counter = u32::try_from(authenticator.counter).unwrap_or(0);
+    let stored_counter = authenticator.counter.cast_unsigned();
 
     use crate::services::auth::{LoginAssertionParams, verify_login_assertion};
-    let verification_result = verify_login_assertion(LoginAssertionParams {
+    let verification_result = match verify_login_assertion(LoginAssertionParams {
         authenticator_data: req.authenticator_data.into_bytes(),
         client_data_json: req.client_data_json.into_bytes(),
         signature: req.signature.into_bytes(),
@@ -606,19 +667,38 @@ pub(crate) async fn browser_login_complete(
         origin_policy: state.config().as_ref().into(),
     })
     .await
-    .map_err(|e| {
-        log_failure(
-            &user.id,
-            Some(&user.email),
-            Some(&authenticator.id),
-            &e.to_string(),
-        );
-        ServiceError::api(
-            StatusCode::UNAUTHORIZED,
-            "auth_failed",
-            "Authentication failed",
-        )
-    })?;
+    {
+        Ok(result) => result,
+        Err(e) => {
+            // A verification task that did not complete is a server fault,
+            // not a failed login: no audit row, and a 500, as for a storage
+            // fault during the credential lookup.
+            let Some(principal) = e.principal(&user.id) else {
+                tracing::error!("Browser WebAuthn login: {e}");
+                return Err(ServiceError::Internal(
+                    "WebAuthn verification failed".to_string(),
+                ));
+            };
+            // A counter regression is reported only once the signature
+            // verified, so it counts against the credential's owner. For every
+            // other failure the `user_handle` and credential ID are still only
+            // request-supplied: the row must not count against the owner.
+            log_login_failure(
+                &state.audit,
+                client_info.clone(),
+                principal,
+                Some(&user.email),
+                Some(&authenticator.id),
+                &e.to_string(),
+            )
+            .await;
+            return Err(ServiceError::api(
+                StatusCode::UNAUTHORIZED,
+                "auth_failed",
+                Tr::new("login-error-auth-failed").to_string(),
+            ));
+        }
+    };
 
     tracing::info!(
         "Browser WebAuthn assertion verified for user {}: counter={}, uv={}",
@@ -627,15 +707,112 @@ pub(crate) async fn browser_login_complete(
         verification_result.user_verified
     );
 
+    // The assertion has verified; every remaining step (counter commit,
+    // device-auth release, session creation) is fallible. If any of them
+    // errors, record a `LoginFailed` audit row so the verified hardware
+    // ceremony never vanishes from AuthEvents — the same audit-ordering
+    // guarantee `browser_register_complete` provides for `Enrollment`.
+    finalize_login_session(
+        &state,
+        LoginSessionParams {
+            jar: &jar,
+            user: &user,
+            authenticator: &authenticator,
+            new_counter: verification_result.new_counter,
+            auth_now: verification_result.verified_at,
+            challenge_claim,
+            pending_auth: auth_state.pending_auth,
+            client_info,
+        },
+        arrival,
+    )
+    .await
+}
+
+/// Parameters for [`finalize_login_session`].
+struct LoginSessionParams<'a> {
+    jar: &'a CookieJar,
+    user: &'a db::User,
+    authenticator: &'a db::Authenticator,
+    /// Verifier-reported WebAuthn counter (u32); stored bit-identical as i32.
+    new_counter: u32,
+    /// The instant the assertion verified, stamped by the verifier itself.
+    /// It backs both the browser session and the device approval, so the
+    /// token the device-code grant later mints reports the ceremony instant
+    /// rather than the CLI's poll instant.
+    auth_now: AuthTime,
+    challenge_claim: db::ChallengeStateClaim,
+    pending_auth: Option<String>,
+    client_info: ClientInfo,
+}
+
+/// Run every fallible step that follows a verified login assertion: commit
+/// the authenticator counter, release a waiting CLI device authorization,
+/// create the OAuth session, and record the `LoginSuccess` audit event.
+///
+/// The caller records a `LoginFailed` audit row when this returns `Err`, so
+/// a verified hardware ceremony (and any state it already committed, such as
+/// the counter update) always leaves an AuthEvents trace even when a
+/// post-verification step fails — the same audit-ordering guarantee
+/// `browser_register_complete` provides for `Enrollment`.
+async fn finalize_login_session(
+    state: &AppState,
+    params: LoginSessionParams<'_>,
+    arrival: ArrivalTime,
+) -> Result<Response, ServiceError> {
+    let user_id = params.user.id.clone();
+    let user_email = params.user.email.clone();
+    let authenticator_id = params.authenticator.id.clone();
+    let client_info = params.client_info.clone();
+
+    let result = finalize_login_session_inner(state, params, arrival).await;
+
+    if let Err(ref e) = result {
+        // The assertion verified and the counter update may already have
+        // committed, but a later step failed: leave a `LoginFailed` trace
+        // so the ceremony never vanishes from AuthEvents. The failure is the
+        // server's, not the user's, so the row is not attributed to them and
+        // cannot feed `failed_login_burst`.
+        log_login_failure(
+            &state.audit,
+            client_info,
+            db::Principal::ServerFault { verified: user_id },
+            Some(&user_email),
+            Some(&authenticator_id),
+            &format!("post_verification: {e}"),
+        )
+        .await;
+    }
+
+    result
+}
+
+/// The fallible tail of [`finalize_login_session`]; see its doc comment.
+async fn finalize_login_session_inner(
+    state: &AppState,
+    params: LoginSessionParams<'_>,
+    arrival: ArrivalTime,
+) -> Result<Response, ServiceError> {
+    let LoginSessionParams {
+        jar,
+        user,
+        authenticator,
+        new_counter,
+        auth_now,
+        challenge_claim,
+        pending_auth,
+        client_info,
+    } = params;
+
     // WebAuthn counter is u32; stored bit-identical as i32. Real authenticators never
     // approach 2^31 uses, and bitwise reinterpret preserves DB monotonicity comparisons.
-    let new_counter = verification_result.new_counter.cast_signed();
+    let new_counter = new_counter.cast_signed();
     db::update_authenticator_counter(&state.store, &authenticator.id, new_counter).await?;
 
     // Release a CLI waiting on `vouch enroll`: the assertion just verified is
     // the possession proof the upstream IdP sign-in cannot provide, so the
     // device authorization is authorized from here.
-    if let Some(enrollment) = pending_device_auth(&state, &jar).await?
+    if let Some(enrollment) = pending_device_auth(state, jar).await?
         && let Some(ref device_auth_id) = enrollment.device_auth_id
     {
         // The enrollment session must belong to whoever just asserted;
@@ -649,7 +826,7 @@ pub(crate) async fn browser_login_complete(
                     user_id: &user.id,
                     user_email: &user.email,
                     authenticator_id: &authenticator.id,
-                    hardware_verified: true,
+                    verification: db::DeviceApproval::Observed(auth_now),
                 },
             )
             .await
@@ -658,22 +835,25 @@ pub(crate) async fn browser_login_complete(
                 ServiceError::api(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "device_auth_failed",
-                    "Failed to complete CLI authorization",
+                    Tr::new("login-error-device-auth-failed").to_string(),
                 )
             })?;
 
-            db::spawn_audit_event(
+            db::record_auth_event(
                 &state.audit,
                 AuthEventParams {
-                    user_id: user.id.clone(),
+                    user_id: db::Principal::Verified(user.id.clone()),
                     event_type: AuthEventType::DeviceAuthApproved,
                     authenticator_id: Some(authenticator.id.clone()),
                     success: true,
                     client: client_info.clone(),
-                    ..AuthEventParams::default()
+                    failure_reason: None,
+                    client_id: None,
+                    idp_issuer: None,
                 },
                 Some(user.email.clone()),
-            );
+            )
+            .await;
         } else {
             tracing::warn!(
                 target: "security",
@@ -685,29 +865,28 @@ pub(crate) async fn browser_login_complete(
 
     // Issue an OAuth access token (RFC 9068) — the server acts as both issuer and audience
     let client_id = state.config().base_url.to_string();
-    let auth_now = Timestamp::now();
 
-    // Snapshot org domain at session creation so the federation claims are a
-    // session-time snapshot rather than current-state lookups. Fail closed:
-    // the snapshot is captured exactly once, so silently dropping a transient
-    // DB error here would permanently degrade the session's `hd` claim.
-    let org_domain = if let Some(ref org_id) = user.org_id {
-        db::get_organization_domain(&state.store, org_id)
-            .await
-            .map_err(|e| {
-                tracing::error!("Failed to snapshot org domain: {e}");
-                ServiceError::api(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "db_error",
-                    "Failed to create session",
-                )
-            })?
-    } else {
-        None
+    // Org domain, read once at session creation for the federation claims.
+    // Fail closed: silently dropping a transient DB error here would
+    // permanently degrade the session's `hd` claim.
+    let org_domain = match user.org_id.as_deref() {
+        Some(org_id) => {
+            db::get_user_org_domain(&state.store, &user.id, org_id, user.org_domain.as_deref())
+                .await
+                .map_err(|e| {
+                    tracing::error!("Failed to snapshot org domain: {e}");
+                    ServiceError::api(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "db_error",
+                        Tr::new("login-error-session-create-failed").to_string(),
+                    )
+                })?
+        }
+        None => None,
     };
 
     let session_result = create_oauth_access_token(
-        &state,
+        state,
         CreateOAuthTokenParams {
             user_id: &user.id,
             email: &user.email,
@@ -717,20 +896,22 @@ pub(crate) async fn browser_login_complete(
             binding: TokenBinding::Bearer,
             act: None,
             audience: None,
-            auth_time: Some(auth_now.as_second()),
-            hardware_verification: crate::services::auth::HardwareVerification::Verified,
+            max_lifetime_secs: None,
+            hardware_verification: HardwareVerification::Verified {
+                auth_time: Some(auth_now.instant()),
+            },
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
             hardware_aaguid: authenticator.aaguid.as_deref(),
             org_domain: org_domain.as_deref(),
+            source_code_hash: None,
         },
         TokenIssuanceProof {
             grant: GrantProof::BrowserLogin(challenge_claim),
-            client_auth: ClientAuthProof::NoAuth(
-                crate::services::auth::NoClientAuth::internal_endpoint(),
-            ),
+            client_auth: ClientAuthProof::NoAuth(NoClientAuth::internal_endpoint()),
             sender_constraint: SenderConstraintProof::no_registered_client(),
         },
+        arrival,
     )
     .await
     .map_err(|e| {
@@ -742,18 +923,20 @@ pub(crate) async fn browser_login_complete(
     })?;
     let token = session_result.token;
 
-    // Log successful login event (fire-and-forget, consistent with failure path)
+    // Log successful login event (consistent with failure path)
     let auth_event_params = AuthEventParams {
-        user_id: user.id.clone(),
+        user_id: db::Principal::Verified(user.id.clone()),
         event_type: AuthEventType::LoginSuccess,
         authenticator_id: Some(authenticator.id.clone()),
         success: true,
         client: client_info,
-        ..AuthEventParams::default()
+        failure_reason: None,
+        client_id: None,
+        idp_issuer: None,
     };
-    db::spawn_audit_event(&state.audit, auth_event_params, Some(user.email.clone()));
+    db::record_auth_event(&state.audit, auth_event_params, Some(user.email.clone())).await;
 
-    crate::infra::metrics::record_auth_event("browser_login_success");
+    metrics::record_auth_event("browser_login_success");
 
     tracing::info!(
         "Browser login successful for user: {}",
@@ -761,11 +944,13 @@ pub(crate) async fn browser_login_complete(
     );
 
     // Create session cookie
-    let session_hours = i64::try_from(state.config().session_hours).unwrap_or(8);
-    let cookie = create_session_cookie(token.expose_secret(), session_hours.saturating_mul(3600));
+    let cookie = create_session_cookie(
+        token.expose_secret(),
+        session_cookie_max_age(session_result.expires_in),
+    );
 
     // Determine redirect URL
-    let redirect_url = if let Some(pending_id) = auth_state.pending_auth {
+    let redirect_url = if let Some(pending_id) = pending_auth {
         format!(
             "/oauth/authorize?pending_auth={}",
             urlencoding::encode(&pending_id)
@@ -780,45 +965,12 @@ pub(crate) async fn browser_login_complete(
         redirect_url: Some(redirect_url),
         error: None,
     };
-
     Ok(([(header::SET_COOKIE, cookie.to_string())], Json(response)).into_response())
 }
 
 // ============================================================================
 // Helper Functions
 // ============================================================================
-
-/// Validate Origin header for CSRF protection (RFC 9700).
-pub(crate) fn validate_origin(
-    headers: &HeaderMap,
-    expected_origin: &str,
-) -> Result<(), ServiceError> {
-    let origin = headers
-        .get("Origin")
-        .and_then(|h| h.to_str().ok())
-        .ok_or_else(|| {
-            ServiceError::api(
-                StatusCode::FORBIDDEN,
-                "missing_origin",
-                "Origin header required",
-            )
-        })?;
-
-    if origin != expected_origin {
-        tracing::warn!(
-            "Origin mismatch: got '{}', expected '{}'",
-            origin,
-            expected_origin
-        );
-        return Err(ServiceError::api(
-            StatusCode::FORBIDDEN,
-            "invalid_origin",
-            "Request origin mismatch",
-        ));
-    }
-
-    Ok(())
-}
 
 // ============================================================================
 // Tests
@@ -831,10 +983,17 @@ mod tests {
         reason = "test code: panic on assertion failure is acceptable"
     )]
     use super::*;
+    use crate::crypto;
+    use crate::crypto::jwt::StateTokenSigner;
+    use crate::crypto::webauthn_verify::AuthTime;
+    use crate::db::{self, AuditEventFilter, CreatePendingOAuthParams};
+    use crate::test_utils::{
+        self, TestPendingAuthSpec, TestSessionSpec, TestVerification, test_arrival,
+    };
 
     #[tokio::test]
     async fn test_browser_auth_state_encode_decode() {
-        let signer = crate::crypto::jwt::StateTokenSigner::local(b"test-secret".to_vec());
+        let signer = StateTokenSigner::local(b"test-secret".to_vec());
         let now = jiff::Timestamp::now().as_second();
         let state = BrowserAuthenticationState {
             challenge: vec![1, 2, 3, 4],
@@ -845,7 +1004,7 @@ mod tests {
         };
 
         let encoded = state.encode(&signer).await.expect("Failed to encode state");
-        let decoded = BrowserAuthenticationState::decode(&encoded, &signer)
+        let decoded = BrowserAuthenticationState::decode(&encoded, &signer, test_arrival())
             .await
             .expect("Failed to decode state");
 
@@ -861,10 +1020,9 @@ mod tests {
     #[tokio::test]
     async fn test_login_page_rejects_non_uuid_pending_auth() {
         // Non-UUID pending_auth should redirect to /login (stripping the bad param)
-        let (app, _state) = crate::test_utils::test_app().await;
+        let (app, _state) = test_utils::test_app().await;
 
-        let resp =
-            crate::test_utils::http_get_full(&app, "/login?pending_auth=not-a-uuid", &[]).await;
+        let resp = test_utils::http_get_full(&app, "/login?pending_auth=not-a-uuid", &[]).await;
 
         assert_eq!(resp.status, axum::http::StatusCode::SEE_OTHER);
         let location = resp
@@ -879,9 +1037,9 @@ mod tests {
     #[tokio::test]
     async fn test_login_page_accepts_valid_uuid_pending_auth() {
         // Valid UUID pending_auth should not redirect to /login
-        let (app, _state) = crate::test_utils::test_app().await;
+        let (app, _state) = test_utils::test_app().await;
 
-        let resp = crate::test_utils::http_get_full(
+        let resp = test_utils::http_get_full(
             &app,
             "/login?pending_auth=aaaaaaaa-bbbb-7ccc-dddd-eeeeeeeeeeee",
             &[],
@@ -895,9 +1053,9 @@ mod tests {
     #[tokio::test]
     async fn test_login_page_no_pending_auth_renders_ok() {
         // No pending_auth at all should render the login page
-        let (app, _state) = crate::test_utils::test_app().await;
+        let (app, _state) = test_utils::test_app().await;
 
-        let resp = crate::test_utils::http_get_full(&app, "/login", &[]).await;
+        let resp = test_utils::http_get_full(&app, "/login", &[]).await;
 
         assert_eq!(resp.status, axum::http::StatusCode::OK);
     }
@@ -910,18 +1068,26 @@ mod tests {
     async fn test_login_page_prompt_login_forces_reauth() {
         // OIDC Core Section 3.1.2.1: prompt=login must show the login page
         // even when the user already has a valid session.
-        let (app, state) = crate::test_utils::test_app().await;
+        let (app, state) = test_utils::test_app().await;
 
-        let user = crate::test_utils::create_test_user(&state.store, "reauth@example.com").await;
-        let auth_id = crate::test_utils::create_test_authenticator(&state.store, &user.id).await;
-        let client = crate::test_utils::create_test_oauth_client(&state.store, &user.id).await;
-        let session_token =
-            crate::test_utils::create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let user = test_utils::create_test_user(&state.store, "reauth@example.com").await;
+        let auth_id = test_utils::create_test_authenticator(&state.store, &user.id).await;
+        let client = test_utils::create_test_oauth_client(&state.store, &user.id).await;
+        let session_token = test_utils::create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         // Create a pending auth with prompt=login
-        let pending_id = crate::db::create_pending_oauth_authorization(
+        let pending_id = db::create_pending_oauth_authorization(
             &state.store,
-            crate::db::CreatePendingOAuthParams {
+            CreatePendingOAuthParams {
                 client_id: &client.client_id,
                 redirect_uri: "https://example.com/callback",
                 response_type: "code",
@@ -944,7 +1110,7 @@ mod tests {
         .expect("Failed to create pending auth");
 
         // Visit /login with session cookie and prompt=login pending auth
-        let resp = crate::test_utils::http_get_full(
+        let resp = test_utils::http_get_full(
             &app,
             &format!("/login?pending_auth={pending_id}"),
             &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
@@ -960,21 +1126,233 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_login_page_prompt_login_consent_forces_reauth_with_idp_session() {
+        // OIDC Core 3.1.2.1: `prompt` is a space-delimited set, so `login`
+        // within `login consent` requests re-auth exactly as a bare `login`
+        // does. With an IdP-only (not hardware-verified) session the authorize
+        // endpoint stores the combined prompt verbatim; /login must recognise
+        // `login` inside the set and show the assertion form.
+        let (app, state) = test_utils::test_app().await;
+
+        let user = test_utils::create_test_user(&state.store, "idp-reauth@example.com").await;
+        let auth_id = test_utils::create_test_authenticator(&state.store, &user.id).await;
+        let client = test_utils::create_test_oauth_client(&state.store, &user.id).await;
+        let session_token = test_utils::create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                verification: TestVerification::NotVerified,
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let pending_id = db::create_pending_oauth_authorization(
+            &state.store,
+            CreatePendingOAuthParams {
+                client_id: &client.client_id,
+                redirect_uri: "https://example.com/callback",
+                response_type: "code",
+                state: None,
+                scope: Some("openid"),
+                nonce: None,
+                code_challenge: None,
+                code_challenge_method: None,
+                resource: None,
+                acr_values: None,
+                max_age: None,
+                prompt: Some("login consent"),
+                dpop_jkt: None,
+                authorization_details: None,
+                response_mode: Default::default(),
+                par_request_uri: None,
+            },
+        )
+        .await
+        .expect("Failed to create pending auth");
+
+        let resp = test_utils::http_get_full(
+            &app,
+            &format!("/login?pending_auth={pending_id}"),
+            &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+        )
+        .await;
+
+        assert_eq!(
+            resp.status,
+            axum::http::StatusCode::OK,
+            "prompt=login within `login consent` must show the login form; \
+             got {} with location {:?}",
+            resp.status,
+            resp.headers.get("location")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_login_page_shows_form_for_bootstrap_session_without_prompt() {
+        // Issue #1168: an enrollment bootstrap session (upstream IdP sign-in,
+        // no FIDO2) holds a valid cookie but is not hardware-verified, and
+        // /oauth/authorize refuses it. With a default (no prompt, no max_age)
+        // pending auth, /login must render the assertion form rather than
+        // bounce the user to an endpoint that will turn them away — and it
+        // must leave the single-use pending id unspent for the round trip.
+        let (app, state) = test_utils::test_app().await;
+
+        let user = test_utils::create_test_user(&state.store, "bootstrap-form@example.com").await;
+        let auth_id = test_utils::create_test_authenticator(&state.store, &user.id).await;
+        let client = test_utils::create_test_oauth_client(&state.store, &user.id).await;
+        let session_token = test_utils::create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                verification: TestVerification::NotVerified,
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let pending_id = test_utils::create_test_pending_auth(
+            &state.store,
+            TestPendingAuthSpec {
+                client_id: &client.client_id,
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let resp = test_utils::http_get_full(
+            &app,
+            &format!("/login?pending_auth={pending_id}"),
+            &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+        )
+        .await;
+
+        assert_eq!(
+            resp.status,
+            axum::http::StatusCode::OK,
+            "a session /oauth/authorize would refuse must get the assertion \
+             form, not a redirect; got {} with location {:?}",
+            resp.status,
+            resp.headers.get("location")
+        );
+        assert!(
+            db::get_pending_oauth_authorization(&state.store, &pending_id, jiff::Timestamp::now(),)
+                .await
+                .expect("pending lookup")
+                .is_some(),
+            "rendering the form must not spend the single-use pending id"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_login_page_redirects_bootstrap_session_home_no_pending() {
+        // Without a pending authorization a signed-in user has nothing to do
+        // at /login: IdP sign-in is the whole bar for the browser UI, so a
+        // bootstrap (NotVerified) session goes home like a verified one.
+        let (app, state) = test_utils::test_app().await;
+
+        let user = test_utils::create_test_user(&state.store, "bootstrap-home@example.com").await;
+        let auth_id = test_utils::create_test_authenticator(&state.store, &user.id).await;
+        let session_token = test_utils::create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                verification: TestVerification::NotVerified,
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let resp = test_utils::http_get_full(
+            &app,
+            "/login",
+            &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+        )
+        .await;
+
+        assert!(
+            resp.status.is_redirection(),
+            "a signed-in session skips the form, got {}",
+            resp.status
+        );
+        let location = resp
+            .headers
+            .get("location")
+            .expect("redirect location")
+            .to_str()
+            .expect("ascii location");
+        assert_eq!(location, "/");
+    }
+
+    #[tokio::test]
+    async fn test_login_page_redirects_verified_session_home() {
+        // A hardware-verified session has nothing left to prove at /login.
+        let (app, state) = test_utils::test_app().await;
+
+        let user = test_utils::create_test_user(&state.store, "verified-home@example.com").await;
+        let auth_id = test_utils::create_test_authenticator(&state.store, &user.id).await;
+        let session_token = test_utils::create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let resp = test_utils::http_get_full(
+            &app,
+            "/login",
+            &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+        )
+        .await;
+
+        assert!(
+            resp.status.is_redirection(),
+            "a verified session skips the form, got {}",
+            resp.status
+        );
+        let location = resp
+            .headers
+            .get("location")
+            .expect("redirect location")
+            .to_str()
+            .expect("ascii location");
+        assert_eq!(location, "/");
+    }
+
+    #[tokio::test]
     async fn test_login_page_no_prompt_redirects_with_session() {
         // Without prompt=login, an authenticated user with pending_auth
         // should be redirected back to /oauth/authorize.
-        let (app, state) = crate::test_utils::test_app().await;
+        let (app, state) = test_utils::test_app().await;
 
-        let user = crate::test_utils::create_test_user(&state.store, "no-reauth@example.com").await;
-        let auth_id = crate::test_utils::create_test_authenticator(&state.store, &user.id).await;
-        let client = crate::test_utils::create_test_oauth_client(&state.store, &user.id).await;
-        let session_token =
-            crate::test_utils::create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let user = test_utils::create_test_user(&state.store, "no-reauth@example.com").await;
+        let auth_id = test_utils::create_test_authenticator(&state.store, &user.id).await;
+        let client = test_utils::create_test_oauth_client(&state.store, &user.id).await;
+        let session_token = test_utils::create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         // Create a pending auth WITHOUT prompt=login
-        let pending_id = crate::db::create_pending_oauth_authorization(
+        let pending_id = db::create_pending_oauth_authorization(
             &state.store,
-            crate::db::CreatePendingOAuthParams {
+            CreatePendingOAuthParams {
                 client_id: &client.client_id,
                 redirect_uri: "https://example.com/callback",
                 response_type: "code",
@@ -996,7 +1374,7 @@ mod tests {
         .await
         .expect("Failed to create pending auth");
 
-        let resp = crate::test_utils::http_get_full(
+        let resp = test_utils::http_get_full(
             &app,
             &format!("/login?pending_auth={pending_id}"),
             &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
@@ -1028,38 +1406,45 @@ mod tests {
         // carrying a session cookie. Redirecting them away because they look
         // authenticated would leave the CLI polling until it times out — the
         // assertion is what authorizes the waiting device request.
-        let (app, state) = crate::test_utils::test_app().await;
+        let (app, state) = test_utils::test_app().await;
 
-        let user =
-            crate::test_utils::create_test_user(&state.store, "cli-assert@example.com").await;
-        let auth_id = crate::test_utils::create_test_authenticator(&state.store, &user.id).await;
-        let session_token =
-            crate::test_utils::create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let user = test_utils::create_test_user(&state.store, "cli-assert@example.com").await;
+        let auth_id = test_utils::create_test_authenticator(&state.store, &user.id).await;
+        let session_token = test_utils::create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let expires: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().expect("valid timestamp");
-        let device_auth_id = crate::db::create_device_auth_request(
+        let device_auth_id = db::create_device_auth_request(
             &state.store,
             "login-page-device-hash",
             "LGPG-CODE",
-            None,
+            "test-client",
             expires,
             0,
         )
         .await
         .expect("create device auth");
 
-        crate::db::create_enrollment_session(
+        db::create_enrollment_session(
             &state.store,
             &user.id,
             &user.email,
-            &crate::crypto::hash_token(&session_token),
+            &crypto::hash_token(&session_token),
             Some(&device_auth_id),
             expires,
         )
         .await
         .expect("create enrollment session");
 
-        let resp = crate::test_utils::http_get_full(
+        let resp = test_utils::http_get_full(
             &app,
             "/login",
             &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
@@ -1083,7 +1468,7 @@ mod tests {
     /// envelope `login.js` reads out of `errResp.message`.
     #[tokio::test]
     async fn test_browser_login_complete_rejects_malformed_base64url() {
-        let (app, state) = crate::test_utils::test_app().await;
+        let (app, state) = test_utils::test_app().await;
 
         let dummy = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(vec![0u8; 32]);
         let body = serde_json::json!({
@@ -1096,7 +1481,7 @@ mod tests {
         })
         .to_string();
 
-        let (status, resp_body) = crate::test_utils::http_post_json(
+        let (status, resp_body) = test_utils::http_post_json(
             &app,
             "/login/webauthn/complete",
             &body,
@@ -1119,12 +1504,12 @@ mod tests {
     /// shows `errResp.message`. Axum's own rejection answers `text/plain`.
     #[tokio::test]
     async fn test_browser_login_complete_rejection_is_json() {
-        let (app, state) = crate::test_utils::test_app().await;
+        let (app, state) = test_utils::test_app().await;
 
         // Omit every field but `state`.
         let body = serde_json::json!({ "state": "state-token" }).to_string();
 
-        let (status, resp_body) = crate::test_utils::http_post_json(
+        let (status, resp_body) = test_utils::http_post_json(
             &app,
             "/login/webauthn/complete",
             &body,
@@ -1150,8 +1535,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_browser_auth_state_decode_wrong_secret() {
-        let signer = crate::crypto::jwt::StateTokenSigner::local(b"correct-secret".to_vec());
-        let wrong_signer = crate::crypto::jwt::StateTokenSigner::local(b"wrong-secret".to_vec());
+        let signer = StateTokenSigner::local(b"correct-secret".to_vec());
+        let wrong_signer = StateTokenSigner::local(b"wrong-secret".to_vec());
         let now = jiff::Timestamp::now().as_second();
         let state = BrowserAuthenticationState {
             challenge: vec![1, 2, 3, 4],
@@ -1162,7 +1547,8 @@ mod tests {
         };
 
         let encoded = state.encode(&signer).await.expect("Failed to encode state");
-        let result = BrowserAuthenticationState::decode(&encoded, &wrong_signer).await;
+        let result =
+            BrowserAuthenticationState::decode(&encoded, &wrong_signer, test_arrival()).await;
 
         assert!(result.is_err());
     }
@@ -1175,7 +1561,7 @@ mod tests {
         // any base64 decoding, DB lookup, or WebAuthn verification work
         // happens. This guards against a regression where the consume
         // call is reordered or removed.
-        let (app, state) = crate::test_utils::test_app().await;
+        let (app, state) = test_utils::test_app().await;
 
         // Build a valid BrowserAuthenticationState JWT signed by the test
         // signer, with a far-future expiry.
@@ -1195,10 +1581,9 @@ mod tests {
 
         // Pre-consume the state JWT to simulate a prior successful login.
         let expires_at = jiff::Timestamp::from_second(exp).expect("valid exp");
-        let _claim =
-            crate::db::consume_challenge_state_for_test(&state.store, &state_jwt, expires_at)
-                .await
-                .expect("pre-consume must succeed");
+        let _claim = db::consume_challenge_state_for_test(&state.store, &state_jwt, expires_at)
+            .await
+            .expect("pre-consume must succeed");
 
         // POST to `/login/webauthn/complete` with the already-consumed state.
         // The body checks in Phases 2 and 3 precede the replay check, so the
@@ -1214,7 +1599,7 @@ mod tests {
         })
         .to_string();
 
-        let (status, resp_body) = crate::test_utils::http_post_json(
+        let (status, resp_body) = test_utils::http_post_json(
             &app,
             "/login/webauthn/complete",
             &body,
@@ -1248,7 +1633,7 @@ mod tests {
         client_data_json: &str,
         expected_code: &str,
     ) {
-        let (app, state) = crate::test_utils::test_app().await;
+        let (app, state) = test_utils::test_app().await;
 
         let now = jiff::Timestamp::now();
         let exp = now.as_second().saturating_add(300);
@@ -1275,7 +1660,7 @@ mod tests {
         })
         .to_string();
 
-        let (status, resp_body) = crate::test_utils::http_post_json(
+        let (status, resp_body) = test_utils::http_post_json(
             &app,
             "/login/webauthn/complete",
             &body,
@@ -1291,7 +1676,7 @@ mod tests {
 
         let expires_at = jiff::Timestamp::from_second(exp).expect("valid exp");
         let consume =
-            crate::db::consume_challenge_state_for_test(&state.store, &state_jwt, expires_at).await;
+            db::consume_challenge_state_for_test(&state.store, &state_jwt, expires_at).await;
         assert!(
             consume.is_ok(),
             "a rejected request consumed the challenge state: {consume:?}"
@@ -1338,35 +1723,25 @@ mod tests {
         assert_rejected_with_state_intact(&credential_id, &foreign, "invalid_input").await;
     }
 
-    #[tokio::test]
-    async fn test_login_failed_audit_event_is_org_visible() {
-        // Browser login audit events were inserted with a `None` email,
-        // leaving `email_domain`/`email_hmac` NULL — invisible to org-scoped
-        // audit queries, whose domain `IN` filter never matches NULL. Drive a
-        // real signature-verification failure through the endpoint and assert
-        // the resulting login_failed row is found by a domain-scoped query.
-        let (app, state) = crate::test_utils::test_app().await;
+    /// Register an authenticator for `user_id` and return its credential ID.
+    async fn register_credential(state: &crate::AppState, user_id: &str) -> Vec<u8> {
+        let auth_id = test_utils::create_test_authenticator(&state.store, user_id).await;
+        db::get_authenticator_by_id(&state.store, &auth_id)
+            .await
+            .expect("load authenticator")
+            .expect("authenticator exists")
+            .credential_id
+    }
 
-        let user =
-            crate::test_utils::create_test_user(&state.store, "audit-event@example.com").await;
-        let credential_id: Vec<u8> = b"browser-login-audit-cred".to_vec();
-        crate::db::create_authenticator(
-            &state.store,
-            &crate::db::CreateAuthenticatorParams {
-                user_id: &user.id,
-                user_email: &user.email,
-                name: "Test Key",
-                credential_id: &credential_id,
-                public_key: &[0u8; 32],
-                aaguid: None,
-                user_handle: Some(user.id.as_bytes()),
-                attestation_verified: false,
-            },
-        )
-        .await
-        .expect("create authenticator");
-
-        // Fresh (unconsumed) state JWT.
+    /// POST `/login/webauthn/complete` for `credential_id` with a fresh state
+    /// token and `user_id` as the user handle. The signature is zeros, so a
+    /// request that reaches verification fails it.
+    async fn post_complete(
+        app: &axum::Router,
+        state: &crate::AppState,
+        user_id: &str,
+        credential_id: &[u8],
+    ) -> (StatusCode, String) {
         let now = jiff::Timestamp::now();
         let auth_state = BrowserAuthenticationState {
             challenge: vec![0u8; 32],
@@ -1380,17 +1755,17 @@ mod tests {
             .await
             .expect("encode auth state");
 
-        let user_uuid = Uuid::parse_str(&user.id).expect("user id is a uuid");
+        let user_uuid = Uuid::parse_str(user_id).expect("user id is a uuid");
         let client_data = serde_json::json!({
             "origin": state.config().base_url,
             "type": "webauthn.get",
         })
         .to_string();
 
-        let enc = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
+        let enc = |b: &[u8]| URL_SAFE_NO_PAD.encode(b);
         let body = serde_json::json!({
             "state": state_jwt,
-            "credential_id": enc(&credential_id),
+            "credential_id": enc(credential_id),
             "authenticator_data": enc(&[0u8; 37]),
             "client_data_json": enc(client_data.as_bytes()),
             "signature": enc(&[0u8; 64]),
@@ -1398,38 +1773,107 @@ mod tests {
         })
         .to_string();
 
-        let (status, resp_body) = crate::test_utils::http_post_json(
-            &app,
+        test_utils::http_post_json(
+            app,
             "/login/webauthn/complete",
             &body,
             &[("Origin", state.config().base_url.as_str())],
         )
-        .await;
+        .await
+    }
+
+    /// The `failure_reason` of each `login_failed` audit event for `user_id`.
+    async fn login_failure_reasons(state: &crate::AppState, user_id: &str) -> Vec<String> {
+        let events = state
+            .audit
+            .query_events(&AuditEventFilter {
+                event_types: Some(vec!["login_failed".to_string()]),
+                user_id: Some(user_id.to_string()),
+                ..AuditEventFilter::default()
+            })
+            .await
+            .expect("query audit events");
+        let mut reasons = Vec::new();
+        for event in events {
+            let data: serde_json::Value =
+                serde_json::from_str(&event.data).expect("event data JSON");
+            let reason = data
+                .get("failure_reason")
+                .and_then(serde_json::Value::as_str)
+                .expect("failure_reason is a string");
+            reasons.push(reason.to_string());
+        }
+        reasons
+    }
+
+    /// A `login_failed` row with no attributed user, as
+    /// (`failure_reason`, `asserted_user_id`, `email_domain`).
+    type Unattributed = (String, Option<String>, Option<String>);
+
+    /// Every `login_failed` row whose `user_id` column is NULL — rows that
+    /// per-user temporal policies such as `failed_login_burst` never count.
+    /// Asserts none of them carries a payload `user_id`.
+    async fn unattributed_failures(state: &crate::AppState) -> Vec<Unattributed> {
+        let events = state
+            .audit
+            .query_events(&AuditEventFilter {
+                event_types: Some(vec!["login_failed".to_string()]),
+                ..AuditEventFilter::default()
+            })
+            .await
+            .expect("query audit events");
+        events
+            .into_iter()
+            .filter(|e| e.user_id.is_none())
+            .map(|e| {
+                let data: serde_json::Value =
+                    serde_json::from_str(&e.data).expect("event data JSON");
+                assert!(data.get("user_id").is_none(), "{data}");
+                let text = |k: &str| {
+                    data.get(k)
+                        .and_then(serde_json::Value::as_str)
+                        .map(String::from)
+                };
+                (
+                    text("failure_reason").unwrap_or_default(),
+                    text("asserted_user_id"),
+                    e.email_domain,
+                )
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn test_login_failed_audit_event_is_org_visible() {
+        // Browser login audit events were inserted with a `None` email,
+        // leaving `email_domain`/`email_hmac` NULL — invisible to org-scoped
+        // audit queries, whose domain `IN` filter never matches NULL. Drive a
+        // real signature-verification failure through the endpoint and assert
+        // the resulting login_failed row is found by a domain-scoped query.
+        let (app, state) = test_utils::test_app().await;
+
+        let user = test_utils::create_test_user(&state.store, "audit-event@example.com").await;
+        let credential_id = register_credential(&state, &user.id).await;
+
+        let (status, resp_body) = post_complete(&app, &state, &user.id, &credential_id).await;
         assert_eq!(
             status,
             StatusCode::UNAUTHORIZED,
             "invalid signature must fail authentication: {resp_body}"
         );
 
-        // The audit event is spawned fire-and-forget; poll briefly.
-        let filter = crate::db::AuditEventFilter {
+        // The audit event is awaited before the response, so it is
+        // visible immediately.
+        let filter = AuditEventFilter {
             event_types: Some(vec!["login_failed".to_string()]),
             email_domains: Some(vec!["example.com".to_string()]),
-            user_id: Some(user.id.clone()),
-            ..crate::db::AuditEventFilter::default()
+            ..AuditEventFilter::default()
         };
-        let mut events = Vec::new();
-        for _ in 0..100 {
-            events = state
-                .audit
-                .query_events(&filter)
-                .await
-                .expect("query audit events");
-            if !events.is_empty() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
+        let events = state
+            .audit
+            .query_events(&filter)
+            .await
+            .expect("query audit events");
         assert_eq!(
             events.len(),
             1,
@@ -1437,5 +1881,329 @@ mod tests {
         );
         let event = events.first().expect("one event");
         assert_eq!(event.email_domain.as_deref(), Some("example.com"));
+
+        // No signature verified, so the row must not count against the
+        // credential's owner: its `user_id` column (what `failed_login_burst`
+        // replays) stays NULL, and the `user_handle` is kept as asserted.
+        assert!(login_failure_reasons(&state, &user.id).await.is_empty());
+        let unattributed = unattributed_failures(&state).await;
+        let (_, asserted, _) = unattributed.first().expect("one unattributed row");
+        assert_eq!(asserted.as_deref(), Some(user.id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn test_browser_login_lookup_storage_fault_is_server_error() {
+        let (app, state) = test_utils::test_app().await;
+        let user = test_utils::create_test_user(&state.store, "lookup-fault@example.com").await;
+        let credential_id = register_credential(&state, &user.id).await;
+        test_utils::corrupt_document(&state.store, &user.id).await;
+
+        let (status, resp_body) = post_complete(&app, &state, &user.id, &credential_id).await;
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{resp_body}");
+
+        // A storage fault is an operational incident, not a refusal: it
+        // writes no `login_failed` row, so it cannot feed `failed_login_burst`.
+        let rows = state
+            .audit
+            .query_events(&AuditEventFilter {
+                event_types: Some(vec!["login_failed".to_string()]),
+                ..AuditEventFilter::default()
+            })
+            .await
+            .expect("query audit events");
+        assert!(
+            rows.is_empty(),
+            "a 5xx must not be a login failure: {rows:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_browser_login_deactivated_user_is_audited_as_deactivated() {
+        use crate::db::documents::user::UserDoc;
+
+        let (app, state) = test_utils::test_app().await;
+        let user = test_utils::create_test_user(&state.store, "lookup-inactive@example.com").await;
+        let credential_id = register_credential(&state, &user.id).await;
+        state
+            .store
+            .modify::<UserDoc, _>(&user.id, |d| d.active = false)
+            .await
+            .expect("deactivate user");
+
+        let (status, resp_body) = post_complete(&app, &state, &user.id, &credential_id).await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{resp_body}");
+        assert!(resp_body.contains("auth_failed"), "{resp_body}");
+        // The lookup runs before the signature check, so the refusal is
+        // recorded without attributing it to the owner.
+        assert!(login_failure_reasons(&state, &user.id).await.is_empty());
+        let unattributed = unattributed_failures(&state).await;
+        let reasons: Vec<&str> = unattributed.iter().map(|(r, _, _)| r.as_str()).collect();
+        assert_eq!(reasons, ["user_deactivated"]);
+    }
+
+    #[tokio::test]
+    async fn test_deactivated_user_browser_login_failed_is_org_visible() {
+        // A deactivated owner is the one lookup refusal that carries the
+        // owner's email, so its row lands in the org feed and an org-scoped
+        // query finds it. It is still not attributed to the owner.
+        use crate::db::documents::user::UserDoc;
+
+        let (app, state) = test_utils::test_app().await;
+        let user = test_utils::create_test_user(&state.store, "deact-org@example.com").await;
+        let credential_id = register_credential(&state, &user.id).await;
+        state
+            .store
+            .modify::<UserDoc, _>(&user.id, |d| d.active = false)
+            .await
+            .expect("deactivate user");
+
+        let (status, resp_body) = post_complete(&app, &state, &user.id, &credential_id).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{resp_body}");
+        assert!(login_failure_reasons(&state, &user.id).await.is_empty());
+
+        // The org-scoped query that `/api/v1/org/audit-events` and `/admin/audit` run.
+        let by_domain = state
+            .audit
+            .query_events(&AuditEventFilter {
+                event_types: Some(vec!["login_failed".to_string()]),
+                email_domains: Some(vec!["example.com".to_string()]),
+                ..AuditEventFilter::default()
+            })
+            .await
+            .expect("query audit events");
+        assert!(
+            by_domain.iter().any(|r| {
+                let data: serde_json::Value =
+                    serde_json::from_str(&r.data).expect("event data JSON");
+                data.get("failure_reason")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("user_deactivated")
+            }),
+            "deactivated-user login_failed row must be visible to org-scoped \
+             (email_domains) audit queries; got {by_domain:?}"
+        );
+
+        let unattributed = unattributed_failures(&state).await;
+        let (_, _, email_domain) = unattributed.first().expect("one login_failed row");
+        assert_eq!(
+            email_domain.as_deref(),
+            Some("example.com"),
+            "deactivated-user login_failed row must carry the credential owner's domain"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_browser_login_user_mismatch_failure_keeps_email_domain_null() {
+        // The asserted `user_handle` is not the credential's owner and no
+        // signature has been checked. A credential ID is not a secret, so
+        // presenting one proves nothing about its owner: the row is
+        // attributed to neither account and names no email, so it stays out
+        // of the owner's org-scoped audit feed.
+        let (app, state) = test_utils::test_app().await;
+        let owner = test_utils::create_test_user(&state.store, "owner@example.com").await;
+        let attacker = test_utils::create_test_user(&state.store, "attacker@example.com").await;
+        let credential_id = register_credential(&state, &owner.id).await;
+
+        // Attacker asserts the owner's credential with the attacker's own
+        // user_handle, so the authenticator's owner (owner) differs from the
+        // asserted user_handle (attacker) -> user_mismatch.
+        let (status, resp_body) = post_complete(&app, &state, &attacker.id, &credential_id).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{resp_body}");
+
+        assert!(login_failure_reasons(&state, &attacker.id).await.is_empty());
+        assert!(login_failure_reasons(&state, &owner.id).await.is_empty());
+        assert_eq!(
+            unattributed_failures(&state).await,
+            [("user_mismatch".to_string(), Some(attacker.id.clone()), None)],
+            "user_mismatch must be recorded unattributed, with no email domain"
+        );
+    }
+
+    // ── finalize_login_session audit ordering ──────────────────────────────
+    //
+    // After the WebAuthn assertion verifies, every remaining step is
+    // fallible. `finalize_login_session` guarantees an AuthEvents row either
+    // way: `LoginSuccess` when the session is created, `LoginFailed` with a
+    // `post_verification` reason when a later step errors — so a verified
+    // hardware ceremony (whose counter update may already have committed)
+    // never vanishes from the audit log. The failure row is a server fault,
+    // so it is not attributed to the user. The full handler path needs a real
+    // signed assertion, so these tests exercise the extracted tail directly.
+
+    #[tokio::test]
+    async fn finalize_login_session_records_login_success_on_happy_path() {
+        // Positive: the tail succeeds — LoginSuccess is recorded, LoginFailed
+        // is not, and a session cookie is issued.
+        let state = test_utils::test_app_state().await;
+        let user = test_utils::create_test_user(&state.store, "finalize-ok@example.com").await;
+        let auth_id = test_utils::create_test_authenticator(&state.store, &user.id).await;
+        let authenticator = db::get_authenticator_by_id(&state.store, &auth_id)
+            .await
+            .expect("read authenticator")
+            .expect("authenticator present");
+        let expires_at = Timestamp::now()
+            .checked_add(Span::new().minutes(5))
+            .expect("valid expiry");
+        let claim = db::consume_challenge_state_for_test(
+            &state.store,
+            "test-state-jwt-finalize-ok@example.com",
+            expires_at,
+        )
+        .await
+        .expect("consume challenge state");
+
+        let response = finalize_login_session(
+            &state,
+            LoginSessionParams {
+                jar: &CookieJar::new(),
+                user: &user,
+                authenticator: &authenticator,
+                new_counter: 7,
+                auth_now: AuthTime::for_test(Timestamp::now().as_second()),
+                challenge_claim: claim,
+                pending_auth: None,
+                client_info: ClientInfo::default(),
+            },
+            test_arrival(),
+        )
+        .await
+        .expect("happy path must succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let successes = state
+            .audit
+            .query_events(&AuditEventFilter {
+                event_types: Some(vec!["login_success".to_string()]),
+                user_id: Some(user.id.clone()),
+                ..Default::default()
+            })
+            .await
+            .expect("query audit events");
+        assert_eq!(successes.len(), 1, "LoginSuccess must be recorded");
+        let failures = state
+            .audit
+            .query_events(&AuditEventFilter {
+                event_types: Some(vec!["login_failed".to_string()]),
+                user_id: Some(user.id.clone()),
+                ..Default::default()
+            })
+            .await
+            .expect("query audit events");
+        assert!(failures.is_empty(), "no LoginFailed on the happy path");
+    }
+
+    #[tokio::test]
+    async fn finalize_login_session_records_login_failed_when_post_verification_step_fails() {
+        // Regression (sibling of the Enrollment audit-ordering fix): before
+        // the fix, a post-verification failure returned 500 with NO
+        // AuthEvents row at all for the verified assertion. Trigger: the
+        // enrollment session in the jar carries a device_auth_id whose row
+        // does not exist, so `authorize_device_auth` fails after the counter
+        // commit — the cleanup-swept-row trigger from production.
+        let state = test_utils::test_app_state().await;
+        let user = test_utils::create_test_user(&state.store, "finalize-fail@example.com").await;
+        let auth_id = test_utils::create_test_authenticator(&state.store, &user.id).await;
+        let authenticator = db::get_authenticator_by_id(&state.store, &auth_id)
+            .await
+            .expect("read authenticator")
+            .expect("authenticator present");
+        let expires_at = Timestamp::now()
+            .checked_add(Span::new().minutes(5))
+            .expect("valid expiry");
+        let claim = db::consume_challenge_state_for_test(
+            &state.store,
+            "test-state-jwt-finalize-fail@example.com",
+            expires_at,
+        )
+        .await
+        .expect("consume challenge state");
+
+        let session_token = "finalize-fail-session-token";
+        let expires_at = Timestamp::now()
+            .checked_add(Span::new().minutes(10))
+            .expect("valid expiry");
+        db::create_enrollment_session(
+            &state.store,
+            &user.id,
+            &user.email,
+            &hash_token(session_token),
+            Some("missing-device-auth-row"),
+            expires_at,
+        )
+        .await
+        .expect("seed enrollment session");
+        let jar = CookieJar::new().add(axum_extra::extract::cookie::Cookie::new(
+            vouch_common::SESSION_COOKIE_NAME,
+            session_token,
+        ));
+
+        let result = finalize_login_session(
+            &state,
+            LoginSessionParams {
+                jar: &jar,
+                user: &user,
+                authenticator: &authenticator,
+                new_counter: 9,
+                auth_now: AuthTime::for_test(Timestamp::now().as_second()),
+                challenge_claim: claim,
+                pending_auth: None,
+                client_info: ClientInfo::default(),
+            },
+            test_arrival(),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "device-auth release must fail when the row is missing"
+        );
+
+        // The failure leaves a LoginFailed audit trace instead of no
+        // AuthEvents row at all.
+        let failures = state
+            .audit
+            .query_events(&AuditEventFilter {
+                event_types: Some(vec!["login_failed".to_string()]),
+                email_domains: Some(vec!["example.com".to_string()]),
+                ..Default::default()
+            })
+            .await
+            .expect("query audit events");
+        assert_eq!(
+            failures.len(),
+            1,
+            "LoginFailed must be recorded when a post-verification step fails"
+        );
+        let event = failures.first().expect("login_failed event");
+        let data: serde_json::Value = serde_json::from_str(&event.data).expect("event data JSON");
+        assert!(
+            data.get("failure_reason")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|r| r.starts_with("post_verification")),
+            "failure_reason must identify the post-verification stage"
+        );
+        // The fault is the server's, not the user's: the row must not feed
+        // `failed_login_burst`, but the payload still names who it happened to.
+        assert_eq!(event.user_id, None, "a server fault must not be attributed");
+        assert!(data.get("user_id").is_none(), "{data}");
+        assert_eq!(
+            data.get("fault_user_id")
+                .and_then(serde_json::Value::as_str),
+            Some(user.id.as_str())
+        );
+        let successes = state
+            .audit
+            .query_events(&AuditEventFilter {
+                event_types: Some(vec!["login_success".to_string()]),
+                user_id: Some(user.id.clone()),
+                ..Default::default()
+            })
+            .await
+            .expect("query audit events");
+        assert!(
+            successes.is_empty(),
+            "no LoginSuccess may be recorded when session creation did not complete"
+        );
     }
 }

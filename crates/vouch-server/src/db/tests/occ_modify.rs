@@ -6,6 +6,8 @@
 )]
 
 use super::*;
+use crate::crypto::alg::JwsAlgorithm;
+use crate::db::documents::github::GitHubInstallationDoc;
 
 // ========================================================================
 // OCC read-modify-write conversions: blind get+update → store.modify()
@@ -30,13 +32,13 @@ async fn test_update_authenticator_name_only_name_changes() {
         &store,
         &CreateAuthenticatorParams {
             user_id: &user_id,
-            user_email: "rename@example.com",
             name: "OldName",
             credential_id: b"cred-rename",
             public_key: &[1u8; 32],
             aaguid: Some("aaguid-rename"),
             user_handle: None,
             attestation_verified: true,
+            counter: 0,
         },
     )
     .await
@@ -394,7 +396,7 @@ async fn test_github_installation_deleted_between_resolve_and_modify() {
 
     // Step 1: resolve the doc_id (simulates what suspend_github_installation does).
     let doc = store
-        .find_one::<crate::db::documents::github::GitHubInstallationDoc>("installation_id", "30001")
+        .find_one::<GitHubInstallationDoc>("installation_id", "30001")
         .await
         .expect("find_one")
         .expect("must exist after create");
@@ -407,12 +409,131 @@ async fn test_github_installation_deleted_between_resolve_and_modify() {
 
     // Step 3: call modify directly on the now-deleted id — must return Ok(false).
     let found = store
-        .modify::<crate::db::documents::github::GitHubInstallationDoc, _>(&doc_id, |data| {
+        .modify::<GitHubInstallationDoc, _>(&doc_id, |data| {
             data.suspended_at = Some(jiff::Timestamp::now());
         })
         .await
         .expect("modify must not error");
     assert!(!found, "modify on deleted doc must return Ok(false)");
+}
+
+/// Insert an installation row under a random document ID, the shape rows had
+/// before `create_github_installation` derived the ID from `installation_id`,
+/// so two can exist for one installation.
+async fn insert_random_id_github_installation(
+    store: &DocumentStore,
+    installation_id: i64,
+    org_id: &str,
+) -> String {
+    let doc = GitHubInstallationDoc {
+        org_id: org_id.to_owned(),
+        installation_id,
+        github_account_login: "acme".to_owned(),
+        github_account_type: "Organization".to_owned(),
+        permissions: std::collections::HashMap::new(),
+        repository_selection: "all".to_owned(),
+        installed_at: "2026-01-01T00:00:00Z".parse().expect("timestamp"),
+        installed_by_user_id: None,
+        suspended_at: None,
+        repositories: None,
+    };
+    store.insert(&doc).await.expect("insert").id
+}
+
+/// Every installation webhook reaches every row for the installation, not
+/// only the newest: a row left behind would stay connected, unsuspended, or
+/// on stale repositories for its organization.
+#[tokio::test]
+async fn test_github_installation_webhooks_reach_every_row() {
+    use crate::db::documents::github::GitHubInstallationDoc;
+
+    let (store, _audit) = test_db().await;
+    let rows = [
+        insert_random_id_github_installation(&store, 40_001, "org-a").await,
+        insert_random_id_github_installation(&store, 40_001, "org-b").await,
+    ];
+    let control = create_test_github_installation(&store, 40_002, "org-c").await;
+    let docs = || async {
+        let mut docs = Vec::new();
+        for id in &rows {
+            docs.push(
+                store
+                    .get::<GitHubInstallationDoc>(id)
+                    .await
+                    .expect("get")
+                    .map(|d| d.data),
+            );
+        }
+        docs
+    };
+
+    assert!(
+        suspend_github_installation(&store, 40_001)
+            .await
+            .expect("webhook helper")
+    );
+    for doc in docs().await {
+        assert!(
+            doc.expect("webhook helper").suspended_at.is_some(),
+            "every row is suspended"
+        );
+    }
+
+    assert!(
+        update_github_installation_repos(&store, 40_001, &["r1".to_owned()])
+            .await
+            .expect("webhook helper")
+    );
+    assert!(
+        update_github_installation_repos_delta(
+            &store,
+            40_001,
+            &["r2".to_owned()],
+            &["r1".to_owned()]
+        )
+        .await
+        .expect("webhook helper")
+    );
+    for doc in docs().await {
+        assert_eq!(
+            doc.expect("webhook helper").repositories,
+            Some(vec!["r2".to_owned()])
+        );
+    }
+
+    assert!(
+        unsuspend_github_installation(&store, 40_001)
+            .await
+            .expect("webhook helper")
+    );
+    for doc in docs().await {
+        assert!(
+            doc.expect("webhook helper").suspended_at.is_none(),
+            "every row is unsuspended"
+        );
+    }
+
+    assert!(
+        delete_github_installation_by_installation_id(&store, 40_001)
+            .await
+            .expect("webhook helper")
+    );
+    for doc in docs().await {
+        assert!(doc.is_none(), "every row is deleted by one webhook");
+    }
+    assert!(
+        !delete_github_installation_by_installation_id(&store, 40_001)
+            .await
+            .expect("webhook helper"),
+        "a redelivered delete finds nothing left"
+    );
+
+    let other = store
+        .get::<GitHubInstallationDoc>(&control)
+        .await
+        .expect("get")
+        .expect("another installation is untouched");
+    assert!(other.data.suspended_at.is_none());
 }
 
 // ---- update_scim_group ----
@@ -424,7 +545,7 @@ async fn test_update_scim_group_only_intended_fields_change() {
 
     let (store, _audit) = test_db().await;
 
-    let group = create_scim_group(&store, TEST_ORG_ID, "OriginalName", Some("ext-123"))
+    let group = create_scim_group(&store, TEST_ORG_ID, "OriginalName", Some("ext-123"), &[])
         .await
         .expect("create_scim_group");
 
@@ -439,8 +560,7 @@ async fn test_update_scim_group_only_intended_fields_change() {
         &store,
         &group.id,
         TEST_ORG_ID,
-        "UpdatedName",
-        Some("ext-456"),
+        set_group_attributes("UpdatedName", Some("ext-456")),
     )
     .await
     .expect("update_scim_group");
@@ -472,13 +592,18 @@ async fn test_update_scim_group_only_intended_fields_change() {
 async fn test_update_scim_group_wrong_org_returns_false() {
     let (store, _audit) = test_db().await;
 
-    let group = create_scim_group(&store, TEST_ORG_ID, "GroupToProtect", None)
+    let group = create_scim_group(&store, TEST_ORG_ID, "GroupToProtect", None, &[])
         .await
         .expect("create_scim_group");
 
-    let found = update_scim_group(&store, &group.id, "wrong-org", "HackedName", None)
-        .await
-        .expect("update_scim_group query must not error");
+    let found = update_scim_group(
+        &store,
+        &group.id,
+        "wrong-org",
+        set_group_attributes("HackedName", None),
+    )
+    .await
+    .expect("update_scim_group query must not error");
     assert!(!found, "cross-org update must return false");
 
     // Original name must be unchanged.
@@ -494,6 +619,14 @@ async fn test_update_scim_group_wrong_org_returns_false() {
 
 // ---- update_custom_policy ----
 
+/// Seed the organization row `create_custom_policy` counts against.
+async fn seed_org(store: &DocumentStore, org_id: &str) {
+    store
+        .insert_with_id(org_id, &test_org_doc(&format!("{org_id}.example")))
+        .await
+        .expect("seed org");
+}
+
 /// After `update_custom_policy`, only the updated fields change and version increments.
 #[tokio::test]
 async fn test_update_custom_policy_only_intended_fields_change() {
@@ -501,6 +634,7 @@ async fn test_update_custom_policy_only_intended_fields_change() {
 
     let (store, _audit) = test_db().await;
 
+    seed_org(&store, "org-policy-test").await;
     let policy = create_custom_policy(
         &store,
         CreateCustomPolicyParams {
@@ -566,6 +700,7 @@ async fn test_update_custom_policy_only_intended_fields_change() {
 async fn test_update_custom_policy_field_update_keep() {
     let (store, _audit) = test_db().await;
 
+    seed_org(&store, "org-keep-test").await;
     let policy = create_custom_policy(
         &store,
         CreateCustomPolicyParams {
@@ -607,6 +742,7 @@ async fn test_update_custom_policy_field_update_keep() {
 async fn test_update_custom_policy_field_update_clear() {
     let (store, _audit) = test_db().await;
 
+    seed_org(&store, "org-clear-test").await;
     let policy = create_custom_policy(
         &store,
         CreateCustomPolicyParams {
@@ -647,6 +783,7 @@ async fn test_update_custom_policy_field_update_clear() {
 async fn test_update_custom_policy_wrong_org_returns_none() {
     let (store, _audit) = test_db().await;
 
+    seed_org(&store, "real-org").await;
     let policy = create_custom_policy(
         &store,
         CreateCustomPolicyParams {
@@ -714,12 +851,24 @@ async fn test_update_custom_policy_not_found_returns_none() {
 
 // ---- OCC applied-flag reset (uses the `modify` test seam) ----
 
-/// Regression: a concurrent org-ownership change landing between `modify`'s
-/// internal read and its compare-and-update must be reported as not-applied.
-/// Without the applied-flag reset at the top of each attempt, the stale
-/// `applied = true` from the failed first attempt leaks a false success.
+/// A SCIM update must never apply a cross-org write: if the target user does
+/// not belong to the caller's organization, nothing is mutated and the call
+/// reports not-applied.
+///
+/// The mechanism moved when the admin-count floor was added. `update_scim_user`
+/// now enforces "at least one active admin per organization" — a cross-row
+/// invariant — so it runs as one transaction that version-bumps the org row
+/// rather than as a `store.modify` loop, and the org check lives inside that
+/// transaction.
+///
+/// The mid-flight variant reduces to this one rather than needing its own
+/// case: moving the user to another org bumps their row's version, so the
+/// guarded `compare_and_update` loses, `with_dsql_retry!` re-runs the closure,
+/// and the re-read hits exactly the org mismatch asserted below. It is not
+/// driven here with a hook because a concurrent writer firing mid-transaction
+/// deadlocks against the open transaction on SQLite.
 #[tokio::test]
-async fn test_update_scim_user_concurrent_org_change_reports_not_applied() {
+async fn test_update_scim_user_cross_org_write_is_never_applied() {
     use crate::db::documents::user::UserDoc;
 
     let (store, _audit) = test_db().await;
@@ -735,37 +884,23 @@ async fn test_update_scim_user_concurrent_org_change_reports_not_applied() {
     .await
     .expect("create_scim_user");
 
-    // Hookless clone for the concurrent write: the hook must not re-enter
-    // itself when it writes through the store.
-    let writer = store.clone();
-    let mut hooked = store.clone();
-    hooked.set_modify_test_hook(Arc::new(move |doc_id: &str, attempt: u32| {
-        let writer = writer.clone();
-        let doc_id = doc_id.to_string();
-        Box::pin(async move {
-            if attempt != 0 {
-                return;
-            }
-            // Concurrent writer: move the user to another org after modify's
-            // read (stale version captured) but before its CAS, so the first
-            // attempt loses the version race and the loop retries.
-            let doc = writer
-                .get::<UserDoc>(&doc_id)
-                .await
-                .expect("hook get")
-                .expect("hook doc must exist");
-            let mut data = doc.data;
-            data.org_id = Some("other-org".to_string());
-            writer.update(&doc_id, &data).await.expect("hook update");
-        })
-    }));
+    // The state a lost CAS leaves behind for the retry to observe: the user
+    // has moved to another org since the caller's request was authorized.
+    let doc = store
+        .get::<UserDoc>(&user.id)
+        .await
+        .expect("get")
+        .expect("must exist");
+    let mut moved = doc.data;
+    moved.org_id = Some("other-org".to_string());
+    store.update(&user.id, &moved).await.expect("move org");
 
-    let applied = update_scim_user(&hooked, &user.id, TEST_ORG_ID, Some("Hacked"), None, false)
+    let applied = update_scim_user(&store, &user.id, TEST_ORG_ID, Some("Hacked"), None, false)
         .await
         .expect("update_scim_user must not error");
     assert!(
         !applied,
-        "org changed mid-flight: update must report not-applied"
+        "user belongs to another org: update must report not-applied"
     );
 
     let after = store
@@ -776,7 +911,7 @@ async fn test_update_scim_user_concurrent_org_change_reports_not_applied() {
     assert_eq!(
         after.data.org_id.as_deref(),
         Some("other-org"),
-        "the concurrent org change must not be clobbered"
+        "the org change must not be clobbered"
     );
     assert_eq!(
         after.data.name.as_deref(),
@@ -788,67 +923,13 @@ async fn test_update_scim_user_concurrent_org_change_reports_not_applied() {
 
 /// Regression: same race as
 /// [`test_update_scim_user_concurrent_org_change_reports_not_applied`],
-/// for `update_scim_group`.
-#[tokio::test]
-async fn test_update_scim_group_concurrent_org_change_reports_not_applied() {
-    use crate::db::documents::scim::ScimGroupDoc;
-
-    let (store, _audit) = test_db().await;
-    let group = create_scim_group(&store, TEST_ORG_ID, "GroupBefore", None)
-        .await
-        .expect("create_scim_group");
-
-    let writer = store.clone();
-    let mut hooked = store.clone();
-    hooked.set_modify_test_hook(Arc::new(move |doc_id: &str, attempt: u32| {
-        let writer = writer.clone();
-        let doc_id = doc_id.to_string();
-        Box::pin(async move {
-            if attempt != 0 {
-                return;
-            }
-            let doc = writer
-                .get::<ScimGroupDoc>(&doc_id)
-                .await
-                .expect("hook get")
-                .expect("hook doc must exist");
-            let mut data = doc.data;
-            data.org_id = "other-org".to_string();
-            writer.update(&doc_id, &data).await.expect("hook update");
-        })
-    }));
-
-    let applied = update_scim_group(&hooked, &group.id, TEST_ORG_ID, "Hacked", None)
-        .await
-        .expect("update_scim_group must not error");
-    assert!(
-        !applied,
-        "org changed mid-flight: update must report not-applied"
-    );
-
-    let after = store
-        .get::<ScimGroupDoc>(&group.id)
-        .await
-        .expect("get after")
-        .expect("must exist");
-    assert_eq!(
-        after.data.org_id, "other-org",
-        "the concurrent org change must not be clobbered"
-    );
-    assert_eq!(
-        after.data.display_name, "GroupBefore",
-        "the cross-org name mutation must not land"
-    );
-}
-
-/// Regression: same race as
-/// [`test_update_scim_user_concurrent_org_change_reports_not_applied`],
 /// for `update_custom_policy` (which reports not-applied as `None`).
 #[tokio::test]
 async fn test_update_custom_policy_concurrent_org_change_returns_none() {
     use crate::db::documents::posture_policy::CustomPosturePolicyDoc;
 
     let (store, _audit) = test_db().await;
+    seed_org(&store, "org-occ-race").await;
     let policy = create_custom_policy(
         &store,
         CreateCustomPolicyParams {
@@ -958,5 +1039,272 @@ async fn test_update_github_installation_repos_not_found_returns_false() {
     assert!(
         !found,
         "missing installation must return false from update_repos"
+    );
+}
+
+// ---- revoke_registration_access_token (RFC 7592 §2.1/2.2/2.3) ----
+
+/// Create a minimal dynamically-registered web client holding the given
+/// registration access token hash. Returns `(OAuthClient, client_id)`. The
+/// helper centralizes the `CreateOAuthClientParams` literal so the three
+/// revoke tests below share one fixture with no secrets, keys, or org.
+pub(super) async fn seed_dynamic_client_with_reg_token(
+    store: &DocumentStore,
+    reg_token_hash: &str,
+) -> (OAuthClient, String) {
+    use crate::crypto::alg::JwsAlgorithm;
+
+    let redirect_uris = vec!["https://example.com/callback".to_string()];
+    create_oauth_client(
+        store,
+        &CreateOAuthClientParams {
+            user_id: None,
+            name: "Dynamic Reg Test",
+            description: None,
+            application_type: OAuthClientType::Web,
+            redirect_uris: &redirect_uris,
+            access_scope: AccessScope::default(),
+            org_id: None,
+            resource_uris: &[],
+            token_endpoint_auth_method: TokenEndpointAuthMethod::ClientSecretBasic,
+            keys: None,
+            fapi_profile: None,
+            dpop_bound_access_tokens: None,
+            grant_types: None,
+            response_types: None,
+            software_id: None,
+            software_version: None,
+            registration_source: RegistrationSource::Dynamic,
+            registration_access_token_hash: Some(reg_token_hash),
+            registration_metadata: None,
+            id_token_signed_response_alg: JwsAlgorithm::Rs256,
+            tls_client_auth_subject_dn: None,
+            tls_client_auth_san_dns: None,
+            tls_client_auth_san_uri: None,
+            tls_client_auth_san_ip: None,
+            tls_client_auth_san_email: None,
+            tls_client_certificate_bound_access_tokens: None,
+            authorization_signed_response_alg: None,
+            introspection_signed_response_alg: None,
+            request_object_signing_alg: None,
+            require_signed_request_object: None,
+            userinfo_signed_response_alg: None,
+            request_uris: None,
+            post_logout_redirect_uris: None,
+        },
+    )
+    .await
+    .expect("create dynamic client")
+}
+
+/// `revoke_registration_access_token` sequentially clears the stored hash of
+/// the client whose registration access token hashes to `token_hash` — the
+/// core RFC 7592 §2.1 "misdirected token SHOULD be revoked" behavior. This
+/// anchors the helper's intended effect so the concurrent regression below
+/// is contrasted against a known-good baseline (the fix does not weaken the
+/// revocation the `SHOULD` requires).
+#[tokio::test]
+async fn test_revoke_registration_access_token_revokes_presented_hash() {
+    use crate::crypto::hash_token;
+    use crate::db::documents::oauth::OAuthClientDoc;
+
+    let (store, _audit) = test_db().await;
+
+    let t_old = "vouch_reg_OLD_TOKEN".to_string();
+    let old_hash = hash_token(&t_old);
+    let (client, client_id) = seed_dynamic_client_with_reg_token(&store, &old_hash).await;
+    let victim_id = client.id.clone();
+
+    let revoked_owner = revoke_registration_access_token(&store, &old_hash)
+        .await
+        .expect("revoke must not error");
+    assert_eq!(
+        revoked_owner.as_deref(),
+        Some(victim_id.as_str()),
+        "the owning client's doc id must be returned"
+    );
+
+    let after = store
+        .get::<OAuthClientDoc>(&victim_id)
+        .await
+        .expect("get after")
+        .expect("victim must still exist");
+    assert_eq!(
+        after.data.registration_access_token_hash, None,
+        "the presented token's hash must be cleared"
+    );
+
+    let looked_up = get_oauth_client_by_client_id(&store, &client_id)
+        .await
+        .expect("lookup")
+        .expect("client must exist");
+    assert_eq!(
+        looked_up.registration_access_token_hash, None,
+        "the client_id lookup must observe the revoked token"
+    );
+}
+
+/// `revoke_registration_access_token` with a hash no client holds returns
+/// `Ok(None)` and disturbs nothing — the overwhelmingly common path, since
+/// the caller only reaches it after a `client_id` miss.
+#[tokio::test]
+async fn test_revoke_registration_access_token_unknown_hash_returns_none() {
+    use crate::crypto::hash_token;
+    use crate::db::documents::oauth::OAuthClientDoc;
+
+    let (store, _audit) = test_db().await;
+
+    let keeper_hash = hash_token("vouch_reg_KEEPER");
+    let (keeper, _) = seed_dynamic_client_with_reg_token(&store, &keeper_hash).await;
+
+    let unknown = hash_token("vouch_reg_NO_SUCH_TOKEN");
+    let revoked_owner = revoke_registration_access_token(&store, &unknown)
+        .await
+        .expect("revoke must not error");
+    assert!(revoked_owner.is_none(), "unknown hash must return None");
+
+    let keeper_after = store
+        .get::<OAuthClientDoc>(&keeper.id)
+        .await
+        .expect("get keeper")
+        .expect("keeper must exist");
+    assert_eq!(
+        keeper_after.data.registration_access_token_hash.as_deref(),
+        Some(keeper_hash.as_str()),
+        "an unrelated client's token must be untouched"
+    );
+}
+
+/// Regression: a racing RFC 7592 PUT that rotates a client's registration
+/// access token while an attacker's misdirected-token revoke is in flight must
+/// NOT clear the freshly rotated token. The revoke's `find_one` only resolves
+/// the presented (pre-rotation) hash to an owner id; the actual clear happens
+/// inside `store.modify`, which re-reads the latest document on every OCC
+/// attempt — either because the PUT committed between `find_one` and
+/// `modify`'s internal read, or because it committed between that read and
+/// `modify`'s compare-and-update (forcing an OCC retry). Clearing
+/// unconditionally on retry wipes the rotated hash the owner just received and
+/// locks them out of all RFC 7592 operations until an administrator reissues a
+/// token. The fix conditions the clear on the stored hash still equaling the
+/// presented hash, making a rotate-then-racing-revoke a no-op.
+///
+/// This test forces the OCC-retry interleaving deterministically using the
+/// `set_modify_test_hook` seam: the victim's `update_oauth_client_registration`
+/// PUT runs inside the attacker's `modify`'s first attempt, bumping the
+/// document version so the attacker's first compare-and-update loses the
+/// version race and the loop retries against the freshly rotated document.
+#[tokio::test]
+async fn test_revoke_registration_access_token_does_not_clobber_concurrently_rotated_token() {
+    use crate::crypto::hash_token;
+    use crate::db::documents::oauth::OAuthClientDoc;
+
+    let (store, _audit) = test_db().await;
+
+    // The victim holds the about-to-be-leaked T_old. The attacker has captured
+    // T_old and replays it against a non-existent client_id while the victim
+    // rotates to T_new via a legitimate PUT.
+    let t_old = "vouch_reg_OLD_TOKEN_leaked".to_string();
+    let t_new = "vouch_reg_NEW_TOKEN_rotated".to_string();
+    let old_hash = hash_token(&t_old);
+    let new_hash = hash_token(&t_new);
+
+    let redirect_uris = vec!["https://example.com/callback".to_string()];
+    let (client, client_id) = seed_dynamic_client_with_reg_token(&store, &old_hash).await;
+    let victim_id = client.id.clone();
+
+    // Hookless writer clone for the victim's PUT — must not re-enter the hook
+    // when it writes through the store.
+    let writer = store.clone();
+    let mut hooked = store.clone();
+    let new_hash_for_hook = new_hash.clone();
+    let old_hash_for_hook = old_hash.clone();
+    let redirect_uris_for_hook = redirect_uris.clone();
+    let victim_id_for_hook = victim_id.clone();
+    hooked.set_modify_test_hook(Arc::new(move |_doc_id: &str, attempt: u32| {
+        let writer = writer.clone();
+        let new_hash = new_hash_for_hook.clone();
+        let old_hash = old_hash_for_hook.clone();
+        let redirect_uris = redirect_uris_for_hook.clone();
+        let victim_id = victim_id_for_hook.clone();
+        Box::pin(async move {
+            // Run the victim's RFC 7592 PUT (rotating to T_new) exactly once,
+            // inside the attacker's first modify attempt — after it read the
+            // pre-rotation doc but before its compare-and-update. The PUT
+            // commits version V+1 (hash T_new), so the attacker's first CAS
+            // loses the version race and the modify loop retries against the
+            // freshly rotated document.
+            if attempt != 0 {
+                return;
+            }
+            update_oauth_client_registration(
+                &writer,
+                &victim_id,
+                &old_hash,
+                &UpdateClientRegistrationParams {
+                    redirect_uris: &redirect_uris,
+                    grant_types: None,
+                    response_types: None,
+                    keys: None,
+                    registration_access_token_hash: &new_hash,
+                    registration_metadata: None,
+                    userinfo_signed_response_alg: None,
+                    request_uris: None,
+                    post_logout_redirect_uris: None,
+                    client_name: None,
+                    software_id: None,
+                    software_version: None,
+                    id_token_signed_response_alg: JwsAlgorithm::Es256,
+                    authorization_signed_response_alg: None,
+                    introspection_signed_response_alg: None,
+                    request_object_signing_alg: None,
+                    require_signed_request_object: None,
+                    tls_client_auth_subject_dn: None,
+                    tls_client_auth_san_dns: None,
+                    tls_client_auth_san_uri: None,
+                    tls_client_auth_san_ip: None,
+                    tls_client_auth_san_email: None,
+                },
+            )
+            .await
+            .expect("victim PUT must not error")
+            .expect("victim PUT must rotate the token");
+        })
+    }));
+
+    // The attacker replays the leaked T_old against a non-existent client_id;
+    // the misdirected-token path revokes whichever client holds hash(T_old).
+    let revoked_owner = revoke_registration_access_token(&hooked, &old_hash)
+        .await
+        .expect("revoke must not error");
+    assert_eq!(
+        revoked_owner.as_deref(),
+        Some(victim_id.as_str()),
+        "the revocation still names the owner it found by hash, even if the \
+         clear turns out to be a no-op against a rotated token"
+    );
+
+    // The rotated token T_new — which only the legitimate owner holds — must
+    // survive, so the owner can still authenticate against their real client.
+    let after = store
+        .get::<OAuthClientDoc>(&victim_id)
+        .await
+        .expect("get after")
+        .expect("victim must still exist");
+    assert_eq!(
+        after.data.registration_access_token_hash.as_deref(),
+        Some(new_hash.as_str()),
+        "the concurrently rotated token must not be wiped by the racing revoke; \
+         otherwise the legitimate owner is locked out of all RFC 7592 operations"
+    );
+
+    // Cross-check via the client_id lookup that the live state reflects T_new.
+    let looked_up = get_oauth_client_by_client_id(&store, &client_id)
+        .await
+        .expect("lookup")
+        .expect("client must exist");
+    assert_eq!(
+        looked_up.registration_access_token_hash.as_deref(),
+        Some(new_hash.as_str()),
+        "client_id lookup must observe the rotated token"
     );
 }

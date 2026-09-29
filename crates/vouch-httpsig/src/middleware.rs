@@ -37,9 +37,11 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
-use crate::algorithm::VerifyingAlgorithm;
+use crate::algorithm::{SignatureAlgorithm, VerifyingAlgorithm};
 use crate::component::ComponentIdentifier;
 use crate::error::HttpSigError;
+use crate::sfv::parse;
+use crate::sfv::types::SfvDictMember;
 use crate::sig_policy::requires_signature;
 use crate::signature_params::SignatureParams;
 use crate::verify::{DigestEnforced, extract_signature_labels, verify_request_signature};
@@ -96,11 +98,7 @@ fn build_accept_signature(has_body: bool) -> Option<http::HeaderValue> {
     // Components-only params: no created/keyid so serialize() emits no trailing `;`.
     let params = SignatureParams {
         components,
-        alg: Some(
-            crate::algorithm::SignatureAlgorithm::EcdsaP256Sha256
-                .as_str()
-                .to_string(),
-        ),
+        alg: Some(SignatureAlgorithm::EcdsaP256Sha256.as_str().to_string()),
         keyid: None,
         created: None,
         expires: None,
@@ -487,11 +485,11 @@ pub async fn require_signature<R: KeyResolver>(
 
 /// Extract the `keyid` parameter from a Signature-Input header value for a given label.
 fn extract_keyid_from_header(header_value: &str, label: &str) -> Option<String> {
-    let dict = crate::sfv::parse::parse_dictionary(header_value).ok()?;
+    let dict = parse::parse_dictionary(header_value).ok()?;
     let member = dict.get(label)?;
     match member {
-        crate::sfv::types::SfvDictMember::InnerList(list) => {
-            let params = crate::SignatureParams::from_inner_list(list).ok()?;
+        SfvDictMember::InnerList(list) => {
+            let params = SignatureParams::from_inner_list(list).ok()?;
             params.keyid
         }
         _ => None,
@@ -506,6 +504,7 @@ fn extract_keyid_from_header(header_value: &str, label: &str) -> Option<String> 
 mod tests {
     use super::*;
     use crate::algorithm::ecdsa_p256::EcdsaP256Signer;
+    use crate::digest::{self, DigestAlgorithm};
     use crate::sign::SignatureBuilder;
     use axum::{Router, routing::get};
 
@@ -747,12 +746,7 @@ mod tests {
             .uri("http://example.com/v1/test")
             .body(axum::body::Body::from(body.clone()))
             .unwrap();
-        crate::digest::set_content_digest(
-            req.headers_mut(),
-            &body,
-            crate::digest::DigestAlgorithm::Sha256,
-        )
-        .unwrap();
+        digest::set_content_digest(req.headers_mut(), &body, DigestAlgorithm::Sha256).unwrap();
 
         SignatureBuilder::new("sig1")
             .method()
@@ -834,12 +828,7 @@ mod tests {
             .body(axum::body::Body::from(original.clone()))
             .unwrap();
         // Digest + signature both bind the ORIGINAL body.
-        crate::digest::set_content_digest(
-            req.headers_mut(),
-            &original,
-            crate::digest::DigestAlgorithm::Sha256,
-        )
-        .unwrap();
+        digest::set_content_digest(req.headers_mut(), &original, DigestAlgorithm::Sha256).unwrap();
         SignatureBuilder::new("sig1")
             .method()
             .path()

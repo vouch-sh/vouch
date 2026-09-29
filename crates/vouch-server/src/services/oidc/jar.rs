@@ -13,17 +13,20 @@
 //! - FAPI 2.0 parameter consistency: query params must match JWT values
 
 use crate::AppState;
+use crate::arrival::ArrivalTime;
 use crate::crypto::jwt::{Jws, JwsError};
-use crate::db::OAuthClient;
+use crate::db::{self, ClientKeys, OAuthClient};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
-use crate::services::oidc::authorization::{AuthorizeRequestParams, Prompt};
+use crate::infra::egress::{BodyError, read_capped_text};
+use crate::infra::ssrf;
+use crate::services::oidc::authorization::AuthorizeRequestParams;
+use crate::services::oidc::fapi;
 use crate::services::oidc::jwt_bearer::validate::{
     JwtAssertionHeader, JwtAudience, assertion_header_from, map_algorithm,
 };
 use crate::services::oidc::jwt_bearer::{
     find_matching_key_with_refresh_client, resolve_client_jwks,
 };
-use jiff::Timestamp;
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -95,6 +98,40 @@ struct RequestObjectClaims {
     request_uri: Option<serde_json::Value>,
 }
 
+/// Claims of the JWT itself, exempt from the empty-value rule that applies to
+/// the authorization request parameters around them.
+///
+/// `iss`, `aud`, and `jti` are JWT claims rather than request parameters, so
+/// an empty one is malformed rather than absent and has to survive to reach
+/// the check that says so. `request` and `request_uri` are prohibited
+/// parameters whose mere presence is the violation (RFC 9101 Section 4),
+/// which an empty value would otherwise hide.
+const NON_PARAMETER_CLAIMS: &[&str] = &["iss", "aud", "jti", "request", "request_uri"];
+
+/// Drop the Request Object's empty-valued authorization request parameters.
+///
+/// RFC 6749 Section 3.1: "Parameters sent without a value MUST be treated as
+/// if they were omitted from the request." RFC 9101 Section 6.3 makes the
+/// Request Object's claims the request's parameters — "The authorization
+/// server MUST extract the set of authorization request parameters from the
+/// Request Object value" — so the same sentence governs them.
+///
+/// Without this, a signed request would read `"scope": ""` as a present-but-
+/// empty scope while a plain `scope=` arrives as no scope at all, because
+/// `handlers::extractors::deserialize_present_params` drops the empty pairs
+/// out of a form body before deserializing it. Stripping here is the same
+/// operation one layer over, so the two request formats agree on what an
+/// empty parameter means.
+fn strip_empty_request_parameters(payload: &mut serde_json::Value) {
+    let Some(object) = payload.as_object_mut() else {
+        return;
+    };
+    object.retain(|name, value| {
+        NON_PARAMETER_CLAIMS.contains(&name.as_str())
+            || value.as_str().is_none_or(|text| !text.is_empty())
+    });
+}
+
 /// Hints from query parameters for FAPI 2.0 consistency validation.
 pub struct QueryParamHints<'a> {
     /// `client_id` from the query string.
@@ -161,12 +198,7 @@ pub async fn fetch_request_object(
     // private/link-local address. Loopback is permitted only in local
     // development (`allow_loopback`). Complements the HTTPS check, structural
     // validation, and any caller-side allowlist.
-    crate::infra::ssrf::assert_public_destination(
-        uri,
-        allow_loopback,
-        OAuthErrorCode::InvalidRequestUri,
-    )
-    .await?;
+    ssrf::assert_public_destination(uri, allow_loopback, OAuthErrorCode::InvalidRequestUri).await?;
 
     let response = http_client.get(uri).send().await.map_err(|e| {
         tracing::debug!("Failed to fetch Request Object from {uri}: {e}");
@@ -204,37 +236,28 @@ pub async fn fetch_request_object(
         }
     }
 
-    // Check Content-Length before reading to avoid streaming large responses.
-    if let Some(len) = response.content_length()
-        && len > MAX_REQUEST_OBJECT_SIZE as u64
-    {
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidRequestUri,
-            "Request Object response exceeds maximum size (64 KB)",
-        ));
-    }
-
-    let bytes = response.bytes().await.map_err(|e| {
-        tracing::debug!("Failed to read Request Object body from {uri}: {e}");
-        ServiceError::oauth(
-            OAuthErrorCode::InvalidRequestUri,
-            "Failed to read Request Object response body",
-        )
-    })?;
-
-    if bytes.len() > MAX_REQUEST_OBJECT_SIZE {
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidRequestUri,
-            "Request Object response exceeds maximum size (64 KB)",
-        ));
-    }
-
-    String::from_utf8(bytes.to_vec()).map_err(|_| {
-        ServiceError::oauth(
-            OAuthErrorCode::InvalidRequestUri,
-            "Request Object response is not valid UTF-8",
-        )
-    })
+    // Enforce the size cap while streaming. A `Content-Length` check plus
+    // `response.bytes().await` would not bound memory: `content_length()` is
+    // `None` for a `Transfer-Encoding: chunked` response, so the pre-read check
+    // is skipped and the whole body lands in memory before any size check can
+    // reject it. `request_uri` is attacker-supplied on the authorization and
+    // PAR endpoints, so that is the same memory-exhaustion vector as the JWKS
+    // fetch in issue #1105.
+    read_capped_text(response, MAX_REQUEST_OBJECT_SIZE)
+        .await
+        .map_err(|e| {
+            let description = match &e {
+                BodyError::TooLarge { .. } => {
+                    "Request Object response exceeds maximum size (64 KB)"
+                }
+                BodyError::NotUtf8 => "Request Object response is not valid UTF-8",
+                BodyError::Transport { .. } | BodyError::Json { .. } => {
+                    tracing::debug!("Failed to read Request Object body from {uri}: {e}");
+                    "Failed to read Request Object response body"
+                }
+            };
+            ServiceError::oauth(OAuthErrorCode::InvalidRequestUri, description)
+        })
 }
 
 /// Validate a Request Object JWT header algorithm and `typ` only.
@@ -305,6 +328,7 @@ pub async fn validate_request_object(
     request_jwt: &str,
     client: &OAuthClient,
     query_params: Option<&QueryParamHints<'_>>,
+    arrival: ArrivalTime,
 ) -> ServiceResult<AuthorizeRequestParams> {
     // 1. Parse and validate the header (algorithm + typ)
     let (_typ, assertion_header) = parse_request_object_header(request_jwt)?;
@@ -324,9 +348,7 @@ pub async fn validate_request_object(
 
     // 2b. FAPI 2.0: Validate algorithm is in the FAPI allowlist.
     // RS256 is excluded per FAPI 2.0 Section 5.4.1 — use PS256, ES256, or EdDSA.
-    if let Err(e) =
-        crate::services::oidc::fapi::validate_fapi_algorithm(client, assertion_header.alg)
-    {
+    if let Err(e) = fapi::validate_fapi_algorithm(client, assertion_header.alg) {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidRequestObject,
             e.oauth_description(),
@@ -342,15 +364,10 @@ pub async fn validate_request_object(
     // Gate on the URI, not on inline JWKS: a client configured with both still
     // reaches the kid-miss refresh path, where a `None` cache disables the
     // 10-second refresh interval.
-    let jwks_cache = if client
-        .keys
-        .as_ref()
-        .and_then(crate::db::ClientKeys::uri)
-        .is_none()
-    {
+    let jwks_cache = if client.keys.as_ref().and_then(ClientKeys::uri).is_none() {
         None
     } else {
-        crate::db::get_jwks_cache(&state.store, &client.id)
+        db::get_jwks_cache(&state.store, &client.id)
             .await
             .map_err(|e| {
                 tracing::debug!("JWKS cache lookup failed for Request Object: {e}");
@@ -364,11 +381,11 @@ pub async fn validate_request_object(
     // relaxation; private/link-local targets stay blocked.
     let allow_loopback = !state.config().tls_configured();
 
-    let jwks = resolve_client_jwks(
+    let (jwks, origin) = resolve_client_jwks(
         &state.store,
         &client.id,
-        client.keys.as_ref().and_then(crate::db::ClientKeys::inline),
-        client.keys.as_ref().and_then(crate::db::ClientKeys::uri),
+        client.keys.as_ref().and_then(ClientKeys::inline),
+        client.keys.as_ref().and_then(ClientKeys::uri),
         jwks_cache.as_ref(),
         allow_loopback,
         &state.http_client,
@@ -383,15 +400,23 @@ pub async fn validate_request_object(
         )
     })?;
 
+    // `origin` threads `resolve_client_jwks`'s fetch report into the kid-miss
+    // gate, bounding this path to at most one network fetch per request — the
+    // same bound the RFC 7523 and mTLS paths keep via their `JwksOrigin` gates.
+    // The `/oauth/authorize` and `/oauth/par` endpoints that run Request Object
+    // verification sit under the same 10s `REQUEST_TIMEOUT` as the token
+    // endpoint, so the two-fetch race that gates prevents here would otherwise
+    // surface as a bare 408 instead of an `invalid_request_object` error.
     let decoding_key = find_matching_key_with_refresh_client(
         &state.store,
         &client.id,
-        client.keys.as_ref().and_then(crate::db::ClientKeys::uri),
+        client.keys.as_ref().and_then(ClientKeys::uri),
         jwks_cache.as_ref(),
         allow_loopback,
         &state.http_client,
         &jwks,
         &assertion_header,
+        origin,
     )
     .await
     .map_err(|e| {
@@ -410,8 +435,13 @@ pub async fn validate_request_object(
     validation.validate_exp = false;
     validation.validate_aud = false;
 
+    // Decoding into a `Value` keeps signature verification and claim
+    // deserialization as two failures a client can tell apart: a Request
+    // Object whose `max_age` arrived as a string is malformed, not badly
+    // signed, and reporting it as a signature failure sends the client to
+    // look at its key.
     let token_data =
-        jsonwebtoken::decode::<RequestObjectClaims>(request_jwt, &decoding_key, &validation)
+        jsonwebtoken::decode::<serde_json::Value>(request_jwt, &decoding_key, &validation)
             .map_err(|e| {
                 tracing::debug!("Request Object signature verification failed: {e}");
                 ServiceError::oauth(
@@ -420,17 +450,21 @@ pub async fn validate_request_object(
                 )
             })?;
 
-    let claims = token_data.claims;
+    let mut payload = token_data.claims;
+    strip_empty_request_parameters(&mut payload);
+
+    let claims: RequestObjectClaims = serde_json::from_value(payload).map_err(|e| {
+        tracing::debug!("Request Object claims are malformed: {e}");
+        ServiceError::oauth(
+            OAuthErrorCode::InvalidRequestObject,
+            format!("Request Object claims are malformed: {e}"),
+        )
+    })?;
 
     // 5. Validate temporal claims
     // FAPI 2.0 clients use a tighter 10-second clock skew tolerance.
     let clock_skew = super::fapi::clock_skew_seconds(client);
-    validate_temporal_claims(
-        &claims,
-        clock_skew,
-        client.is_fapi(),
-        Timestamp::now().as_second(),
-    )?;
+    validate_temporal_claims(&claims, clock_skew, client.is_fapi(), arrival.as_second())?;
 
     // 6. Validate issuer — must match client_id
     if let Some(ref iss) = claims.iss
@@ -557,13 +591,7 @@ pub async fn validate_request_object(
         }
     }
 
-    // 11. Parse prompt value
-    let parsed_prompt = match claims.prompt.as_deref() {
-        Some(p) => Prompt::parse(p),
-        None => None,
-    };
-
-    // 12. RFC 9396: Parse authorization_details from Request Object if present
+    // 11. RFC 9396: Parse authorization_details from Request Object if present
     let authorization_details_str = if let Some(ref ad_value) = claims.authorization_details {
         let raw = serde_json::to_string(ad_value).map_err(|e| {
             ServiceError::oauth(
@@ -578,7 +606,12 @@ pub async fn validate_request_object(
         None
     };
 
-    // 13. Build the authorization request parameters
+    // 12. Build the authorization request parameters.
+    //
+    // The values themselves are not checked here. RFC 9101 Section 6.3 has
+    // the authorization server "validate the request, as specified in OAuth
+    // 2.0", so they go to `validate_authorize_request` — the same check a
+    // plain request gets, reached with the same error codes.
     Ok(AuthorizeRequestParams {
         response_type,
         client_id: claims.client_id.unwrap_or_else(|| client.client_id.clone()),
@@ -591,7 +624,7 @@ pub async fn validate_request_object(
         resource: claims.resource,
         acr_values: claims.acr_values,
         max_age: claims.max_age,
-        prompt: parsed_prompt,
+        prompt: claims.prompt,
         dpop_jkt: claims.dpop_jkt,
         authorization_details: authorization_details_str,
         response_mode: claims.response_mode,
@@ -661,8 +694,11 @@ fn validate_temporal_claims(
 mod tests {
     use super::*;
     use crate::crypto::alg::JwsAlgorithm;
+    use crate::services::oidc::fapi::STANDARD_CLOCK_SKEW_SECONDS;
+    use crate::test_utils::{self, test_arrival};
     use base64::Engine as _;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use jiff::Timestamp;
 
     // ========================================================================
     // Helper: Build a minimal JWT string from a raw header JSON object.
@@ -1015,41 +1051,8 @@ mod tests {
         // Manually check expiration (as validate_request_object would)
         let exp = token_data.claims.exp.unwrap();
         assert!(
-            exp < now - crate::services::oidc::fapi::STANDARD_CLOCK_SKEW_SECONDS,
+            exp < now - STANDARD_CLOCK_SKEW_SECONDS,
             "Expired token should be detected"
-        );
-    }
-
-    // FAPI 2.0 Message Signing §5.3.1: a bounded clock skew allowance is applied.
-    #[test]
-    fn test_jar_validate_future_iat_within_skew_accepted() {
-        let now = Timestamp::now().as_second();
-        let iat = now + 5; // 5s in future, within 10s skew
-        assert!(
-            iat <= now + crate::services::oidc::fapi::STANDARD_CLOCK_SKEW_SECONDS,
-            "iat 5s in future should be within 10s clock skew"
-        );
-    }
-
-    // FAPI 2.0 Message Signing §5.3.1: an issue time beyond the skew allowance is rejected.
-    #[test]
-    fn test_jar_validate_future_iat_beyond_skew_rejected() {
-        let now = Timestamp::now().as_second();
-        let iat = now + 60; // 60s in future, beyond 10s skew
-        assert!(
-            iat > now + crate::services::oidc::fapi::STANDARD_CLOCK_SKEW_SECONDS,
-            "iat 60s in future should be beyond 10s clock skew"
-        );
-    }
-
-    // FAPI 2.0 Message Signing §5.3.1: the nbf claim bounds when the request object becomes usable.
-    #[test]
-    fn test_jar_validate_nbf_future_rejected() {
-        let now = Timestamp::now().as_second();
-        let nbf = now + 3600; // 1 hour in future
-        assert!(
-            nbf > now + crate::services::oidc::fapi::STANDARD_CLOCK_SKEW_SECONDS,
-            "nbf 1 hour in future should be rejected"
         );
     }
 
@@ -1152,43 +1155,6 @@ mod tests {
             token_data.claims.redirect_uri.is_none(),
             "Missing redirect_uri should be detected"
         );
-    }
-
-    // ========================================================================
-    // FAPI 2.0 parameter matching tests
-    // ========================================================================
-
-    // RFC 9101 §6.3: the authorization server uses the request object's parameters, not the
-    // query's.
-    #[test]
-    fn test_jar_query_response_type_mismatch_detected() {
-        // Simulate: query has response_type=token but JWT has response_type=code
-        let query_rt = "token";
-        let jwt_rt = "code";
-        assert_ne!(query_rt, jwt_rt, "Mismatch should be detectable");
-    }
-
-    // RFC 9101 §6.3: the authorization server uses the request object's parameters, not the
-    // query's.
-    #[test]
-    fn test_jar_query_scope_mismatch_detected() {
-        let query_scope = "openid profile";
-        let jwt_scope = "openid";
-        assert_ne!(
-            query_scope, jwt_scope,
-            "Scope mismatch should be detectable"
-        );
-    }
-
-    // RFC 9101 §6.3: a query that agrees with the request object is unremarkable.
-    #[test]
-    fn test_jar_query_params_match_accepted() {
-        let query_rt = "code";
-        let jwt_rt = "code";
-        let query_scope = "openid";
-        let jwt_scope = "openid";
-        assert_eq!(query_rt, jwt_rt);
-        assert_eq!(query_scope, jwt_scope);
     }
 
     // ========================================================================
@@ -1328,7 +1294,7 @@ mod tests {
         use crate::db::{self, get_oauth_client_by_id};
         use crate::test_utils::{TestClientSpec, TestJwks, create_test_client, create_test_user};
 
-        let state = crate::test_utils::test_app_state().await;
+        let state = test_utils::test_app_state().await;
 
         let (encoding_key, jwks, kid) = test_es256_key_with_jwks();
 
@@ -1374,13 +1340,12 @@ mod tests {
 
         // Sanity: the cache read now errors.
         assert!(
-            crate::db::get_jwks_cache(&state.store, &client.id)
-                .await
-                .is_err(),
+            db::get_jwks_cache(&state.store, &client.id).await.is_err(),
             "sanity: get_jwks_cache must error after dropping the documents table"
         );
 
-        let result = validate_request_object(&state, &request_jwt, &client, None).await;
+        let result =
+            validate_request_object(&state, &request_jwt, &client, None, test_arrival()).await;
         assert!(
             result.is_ok(),
             "inline-JWKS client must validate Request Object despite cache DB error: {result:?}"

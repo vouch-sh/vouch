@@ -2,6 +2,7 @@
 //! Key management handlers for listing, renaming, removing, and registering security keys.
 
 use crate::AppState;
+use crate::arrival::ArrivalTime;
 use crate::db::{self};
 use crate::error::ServiceError;
 use crate::redact_email;
@@ -19,13 +20,16 @@ use uuid::Uuid;
 use vouch_common::{
     DeleteKeyResponse, ListKeysResponse, Raw, RegisterCompleteRequest, RegisterCompleteResponse,
     RegisterStartRequest, RegisterStartResponse, RenameKeyRequest, RenameKeyResponse,
-    fido2_types::Challenge,
+    ResourceLabel, fido2_types::Challenge,
 };
 
 use super::extractors::ValidJson;
-use super::session::AuthenticatedToken;
+use super::session::{AuthenticatedToken, SteppedUpToken};
 use super::{generate_challenge, validate_registration_attestation};
+use crate::crypto::jwt::{JwtType, StateTokenError, StateTokenSigner};
 use crate::crypto::webauthn_verify;
+use crate::db::documents::audit::RegistrationReplayData;
+use vouch_common::fido2_types::{CoseKey, CredentialId};
 
 // ============================================================================
 // Registration State (stored temporarily between start and complete)
@@ -36,31 +40,31 @@ use crate::crypto::webauthn_verify;
 struct RegistrationState {
     user_id: Uuid,
     user_name: String,
-    device_name: String,
+    device_name: ResourceLabel,
     challenge: Challenge<Raw>,
     rp_id: String,
-    /// RFC 8725 §3.11: Issued at time for expiration enforcement.
+    /// RFC 7519 §4.1.6: Issued at time. Not validated on decode — the token
+    /// is minted and consumed by this server on one clock, so `exp` alone
+    /// bounds its lifetime.
     iat: i64,
-    /// RFC 8725 §3.11: Expiration time (5 minutes).
+    /// RFC 7519 §4.1.4: Expiration time (5 minutes), enforced on decode.
     exp: i64,
 }
 
 impl RegistrationState {
-    async fn encode(
-        &self,
-        signer: &crate::crypto::jwt::StateTokenSigner,
-    ) -> Result<String, crate::crypto::jwt::StateTokenError> {
+    async fn encode(&self, signer: &StateTokenSigner) -> Result<String, StateTokenError> {
         signer
-            .encode_state_token(self, crate::crypto::jwt::JwtType::RegistrationState)
+            .encode_state_token(self, JwtType::RegistrationState)
             .await
     }
 
     async fn decode(
         token: &str,
-        signer: &crate::crypto::jwt::StateTokenSigner,
-    ) -> Result<Self, crate::crypto::jwt::StateTokenError> {
+        signer: &StateTokenSigner,
+        arrival: ArrivalTime,
+    ) -> Result<Self, StateTokenError> {
         signer
-            .decode_state_token(token, crate::crypto::jwt::JwtType::RegistrationState)
+            .decode_state_token(token, JwtType::RegistrationState, arrival.as_second())
             .await
     }
 }
@@ -102,14 +106,16 @@ impl RegistrationCompletion {
     async fn validate(
         req: RegisterCompleteRequest,
         state: &AppState,
+        arrival: ArrivalTime,
     ) -> Result<Self, ServiceError> {
-        let reg_state = RegistrationState::decode(req.state.as_str(), &state.state_signer)
+        let reg_state = RegistrationState::decode(req.state.as_str(), &state.state_signer, arrival)
             .await
             .map_err(|e| {
                 ServiceError::api(StatusCode::BAD_REQUEST, "invalid_state", e.to_string())
             })?;
 
-        let expires_at = Timestamp::from_second(reg_state.exp).unwrap_or_else(|_| Timestamp::now());
+        let expires_at =
+            Timestamp::from_second(reg_state.exp).unwrap_or_else(|_| arrival.timestamp());
 
         Ok(Self {
             req,
@@ -126,9 +132,19 @@ impl RegistrationCompletion {
 /// Start registration - generate challenge and return to client
 /// (WebAuthn Level 2 Section 7.1, Step 1-3).
 ///
-/// Requires an OAuth access token (FAPI 2.0). Users must first enroll via OIDC
-/// (`vouch enroll`) to register their first key. After that, they can add
-/// additional keys via this endpoint after logging in with an existing key.
+/// Requires an OAuth access token (FAPI 2.0), but deliberately *not* a
+/// hardware-verified one. Registering a key is the recovery path: a user whose
+/// security key is lost or broken signs in through the upstream IdP and enrolls
+/// a replacement, so requiring possession of an existing key here would lock
+/// out exactly the people who need it. The compensating control is the
+/// `KeyRegistered` audit event, not a gate.
+///
+/// Key *deletion* is gated, because it is destructive and has no recovery
+/// argument — see `SteppedUpToken`.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "mints a registration state token's expiry"
+)]
 pub(crate) async fn register_start(
     State(state): State<Arc<AppState>>,
     AuthenticatedToken(token): AuthenticatedToken,
@@ -173,10 +189,20 @@ pub(crate) async fn register_start(
     let exp = now
         .checked_add(jiff::Span::new().minutes(5))
         .map_or(now.as_second().saturating_add(300), |t| t.as_second());
+    // Validate the user-supplied key name at the entry point. Storing it into
+    // a `ResourceLabel` field is what forces this parse; the rename path and
+    // the enrollment form apply the same 1..=100-character contract.
+    let device_name = ResourceLabel::parse(&req.name).map_err(|_| {
+        ServiceError::api(
+            StatusCode::BAD_REQUEST,
+            "invalid_name",
+            "Key name must be between 1 and 100 characters",
+        )
+    })?;
     let reg_state = RegistrationState {
         user_id,
         user_name: user.email.clone(),
-        device_name: req.name,
+        device_name,
         challenge: challenge.clone(),
         rp_id: state.config().rp_id.clone(),
         iat: now.as_second(),
@@ -205,28 +231,53 @@ pub(crate) async fn register_start(
 
 /// Complete registration - verify attestation and store credential
 /// (WebAuthn Level 2 Section 7.1, Step 4-22).
+///
+/// The caller is re-bound to the registration state here, mirroring
+/// `register_start`'s `AuthenticatedToken(token)`. A captured state JWT is
+/// server-signed but not encrypted; `try_consume_challenge_state` only
+/// prevents replay by a *second* caller, not the first. Without this check a
+/// holder of a leaked-but-still-valid state JWT could complete enrollment
+/// with an attacker-controlled YubiKey and enroll a credential on a victim
+/// account by satisfying only the open RFC 7591 client-level signature gate.
 pub(crate) async fn register_complete(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
+    AuthenticatedToken(token): AuthenticatedToken,
     client_info: db::ClientInfo,
     ValidJson(req): ValidJson<RegisterCompleteRequest>,
 ) -> Result<Json<RegisterCompleteResponse>, ServiceError> {
     tracing::info!("Registration complete");
 
-    let checked = RegistrationCompletion::validate(req, &state).await?;
+    let checked = RegistrationCompletion::validate(req, &state, arrival).await?;
 
-    // Account must be active. A user deactivated after obtaining the
-    // registration state (valid for five minutes) must not register a new
-    // hardware key (issue #846). Mirrors `browser_register_complete`.
-    let account = db::get_user_by_id(&state.store, &checked.reg_state.user_id.to_string())
-        .await
-        .map_err(|e| {
-            ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
-        })?;
-    if let Some(account) = account
-        && !account.active
-    {
-        return Err(ServiceError::Forbidden("user_deactivated"));
+    // Bind the caller to the state JWT's user_id. `register_start` minted
+    // the state from `token.sub`; completion must assert the same principal
+    // before consuming the state or storing a credential. A mismatched
+    // caller is rejected here, *before* the single-use consume, so the
+    // legitimate holder can still complete the enrollment with the same
+    // state token.
+    if token.sub != checked.reg_state.user_id.to_string() {
+        tracing::warn!(
+            caller_sub = %token.sub,
+            state_user_id = %checked.reg_state.user_id,
+            "register_complete caller does not match state JWT user_id"
+        );
+        return Err(ServiceError::Forbidden("state_user_mismatch"));
     }
+
+    // Account must be active. A user deactivated — or hard-deleted — in the
+    // window between `register_start` (which issued the state, valid for five
+    // minutes) and this completion must not register a new hardware key
+    // (issue #846, plus the in-flight `delete_user` race that leaves
+    // `db::get_user_by_id` returning `Ok(None)`). Routing through
+    // `load_active_user` rejects both `Ok(None)` (deleted) and `active=false`
+    // (deactivated) and keeps this completion consistent with `register_start`,
+    // `rename_key`, and `delete_key`, all of which enforce the invariant the
+    // same way. The previous inline `if let Some(account) = account` guard only
+    // caught `Some(active=false)` and silently let `Ok(None)` through to the
+    // single-use consume and WebAuthn verification, which (with a valid
+    // attestation) committed an orphan `AuthenticatorDoc` for a deleted user.
+    super::session::load_active_user(&state, &checked.reg_state.user_id.to_string()).await?;
 
     // Single-use enforcement: consume the state token before any WebAuthn work.
     // A captured state JWT cannot be replayed within the 5-minute validity window.
@@ -240,23 +291,20 @@ pub(crate) async fn register_complete(
                 user_id = %checked.reg_state.user_id,
                 "CLI registration state replay rejected"
             );
-            let audit_data = crate::db::documents::audit::RegistrationReplayData {
+            let audit_data = RegistrationReplayData {
                 flow: "cli_register",
                 success: false,
                 error_code: "state_already_used",
             };
-            if let Err(e) = state
+            state
                 .audit
-                .insert_event(
+                .record_event(
                     db::AuditEventKind::KeyRegistrationReplay,
                     Some(&checked.reg_state.user_id.to_string()),
                     Some(&checked.reg_state.user_name),
                     &audit_data,
                 )
-                .await
-            {
-                tracing::warn!(error = %e, "failed to write key_registration_replay audit event");
-            }
+                .await;
             return Err(ServiceError::api(
                 StatusCode::BAD_REQUEST,
                 "state_already_used",
@@ -297,8 +345,7 @@ pub(crate) async fn register_complete(
     })?;
 
     // Use server-verified credential_id from authData (not from request body)
-    let verified_cred_id: vouch_common::fido2_types::CredentialId<Raw> =
-        verified.credential_id.into();
+    let verified_cred_id: CredentialId<Raw> = verified.credential_id.into();
 
     // Check for duplicate credential registration
     if let Some(_existing) =
@@ -315,24 +362,18 @@ pub(crate) async fn register_complete(
         ));
     }
 
-    // Validate attestation (hardware-only, AAGUID policy, extract device info)
-    let mut validated = validate_registration_attestation(
-        &req.attestation_object,
-        &config.allowed_aaguids,
-        config.require_attestation_cert,
-    )?;
+    // Registration policy: hardware-only, x5c chain, AAGUID policy, device
+    // name. Identical call to the browser path in `enroll.rs`, so the two
+    // agree by construction.
+    let validated =
+        validate_registration_attestation(&req.attestation_object, &config.allowed_aaguids)?;
 
-    // Propagate x5c chain results from webauthn_verify into validated
-    if verified.attestation.is_some() {
-        validated.attestation = verified.attestation;
-    }
-
-    // Use server-verified AAGUID if available, fall back to client-provided
-    let aaguid = verified.aaguid.or(validated.aaguid);
+    // The AAGUID comes from the attestation certificate, never from the
+    // client-supplied authData that `verified.aaguid` reports.
+    let aaguid = validated.aaguid;
 
     // Use server-verified public key from authData
-    let verified_public_key: vouch_common::fido2_types::CoseKey<Raw> =
-        verified.public_key_cose.into();
+    let verified_public_key: CoseKey<Raw> = verified.public_key_cose.into();
 
     // Store the authenticator
     // user_handle is the user_id as bytes (for discoverable credentials)
@@ -341,13 +382,18 @@ pub(crate) async fn register_complete(
         &state.store,
         &db::CreateAuthenticatorParams {
             user_id: &reg_state.user_id.to_string(),
-            user_email: &reg_state.user_name,
-            name: &reg_state.device_name,
+            name: reg_state.device_name.as_str(),
             credential_id: &verified_cred_id,
             public_key: &verified_public_key,
             aaguid: aaguid.as_deref(),
             user_handle: Some(&user_handle),
-            attestation_verified: validated.attestation.is_some(),
+            attestation_verified: true,
+            // Initialize the stored signature counter to the registration
+            // `authData.signCount` (WebAuthn L2 §7.1 step 23). `verified.counter`
+            // is the server-side parse of the same `authData` bytes
+            // `verify_registration` already verified above, so it is the
+            // trusted initial value — not the request body's counter field.
+            counter: verified.counter,
         },
     )
     .await?;
@@ -355,14 +401,16 @@ pub(crate) async fn register_complete(
     tracing::info!("Registered new authenticator: {}", device_id);
 
     let event = db::AuthEventParams {
-        user_id: reg_state.user_id.to_string(),
+        user_id: db::Principal::Verified(reg_state.user_id.to_string()),
         event_type: db::AuthEventType::KeyRegistered,
         authenticator_id: Some(device_id.clone()),
         success: true,
         client: client_info,
-        ..Default::default()
+        failure_reason: None,
+        client_id: None,
+        idp_issuer: None,
     };
-    db::spawn_audit_event(&state.audit, event, Some(reg_state.user_name.clone()));
+    db::record_auth_event(&state.audit, event, Some(reg_state.user_name.clone())).await;
 
     Ok(Json(RegisterCompleteResponse {
         device_id: Uuid::parse_str(&device_id).map_err(|e| {
@@ -396,6 +444,7 @@ pub(crate) async fn list_keys(
 pub(crate) async fn rename_key(
     State(state): State<Arc<AppState>>,
     AuthenticatedToken(token): AuthenticatedToken,
+    client_info: db::ClientInfo,
     Path(key_id): Path<String>,
     Json(req): Json<RenameKeyRequest>,
 ) -> Result<Json<RenameKeyResponse>, ServiceError> {
@@ -407,16 +456,34 @@ pub(crate) async fn rename_key(
             "Key ID must be a valid UUID",
         ));
     }
-    let name = req.name.trim();
-    if name.is_empty() || name.len() > 256 {
-        return Err(ServiceError::api(
+    let name = ResourceLabel::parse(&req.name).map_err(|_| {
+        ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_name",
-            "Key name must be between 1 and 256 characters",
-        ));
-    }
+            "Key name must be between 1 and 100 characters",
+        )
+    })?;
 
-    let message = key_svc::rename_key(&state.store, &token.sub, &key_id, name).await?;
+    // Defense-in-depth active-user gate. `AuthenticatedToken` establishes
+    // token validity only — it does not load the user record — so a
+    // deactivated user holding a live session would otherwise reach the
+    // state-changing rename below. Mirrors `delete_key` and `register_start`
+    // in this file; see `session::load_active_user`.
+    let user = super::session::load_active_user(&state, &token.sub).await?;
+
+    let message = key_svc::rename_key(&state.store, &token.sub, &key_id, &name).await?;
+
+    let event = db::AuthEventParams {
+        user_id: db::Principal::Verified(token.sub.clone()),
+        event_type: db::AuthEventType::KeyRenamed,
+        authenticator_id: Some(key_id.clone()),
+        success: true,
+        client: client_info,
+        failure_reason: None,
+        client_id: None,
+        idp_issuer: None,
+    };
+    db::record_auth_event(&state.audit, event, Some(user.email)).await;
 
     Ok(Json(RenameKeyResponse { message }))
 }
@@ -424,7 +491,7 @@ pub(crate) async fn rename_key(
 /// Delete a registered key.
 pub(crate) async fn delete_key(
     State(state): State<Arc<AppState>>,
-    AuthenticatedToken(token): AuthenticatedToken,
+    SteppedUpToken(token): SteppedUpToken,
     client_info: db::ClientInfo,
     Path(key_id): Path<String>,
 ) -> Result<Json<DeleteKeyResponse>, ServiceError> {
@@ -437,11 +504,13 @@ pub(crate) async fn delete_key(
         ));
     }
 
-    // Use auth_time as the freshness anchor; default to epoch (always stale) if absent
-    key_svc::require_fresh_timestamp(
-        token.auth_time.unwrap_or(0),
-        key_svc::KEY_DELETE_MAX_AGE_SECS,
-    )?;
+    // Defense-in-depth active-user gate. `SteppedUpToken` establishes token
+    // validity and recent hardware verification but does not load the user
+    // record, so a deactivated user holding a live session (e.g. one produced
+    // by a writer that bypasses `services::auth::revoke_then_persist`) would
+    // otherwise reach the destructive delete below. Mirrors `register_start`
+    // and the credentials/device handlers; see `session::load_active_user`.
+    let user = super::session::load_active_user(&state, &token.sub).await?;
 
     // Whether the deleted key is the authenticator the current session is
     // bound to (browser uses this to decide whether to re-authenticate).
@@ -454,14 +523,16 @@ pub(crate) async fn delete_key(
     state.session_cache.invalidate_for_user(&token.sub);
 
     let event = db::AuthEventParams {
-        user_id: token.sub.clone(),
+        user_id: db::Principal::Verified(token.sub.clone()),
         event_type: db::AuthEventType::KeyRemoved,
         authenticator_id: Some(key_id.clone()),
         success: true,
         client: client_info,
-        ..Default::default()
+        failure_reason: None,
+        client_id: None,
+        idp_issuer: None,
     };
-    db::spawn_audit_event(&state.audit, event, token.email.clone());
+    db::record_auth_event(&state.audit, event, Some(user.email)).await;
 
     Ok(Json(DeleteKeyResponse {
         message: format!("Key '{}' has been deleted", key_name),
@@ -479,9 +550,14 @@ pub(crate) async fn delete_key(
 mod tests {
     use super::*;
     use crate::crypto::jwt::{JwtType, StateTokenSigner};
+    use crate::db::store::GetUserByIdTestHook;
+    use crate::db::{self, User};
+    use crate::services::oidc::ScopeSet;
     use crate::test_utils::TEST_JWT_SECRET;
     use crate::test_utils::*;
     use axum::http::StatusCode;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::{Arc, Mutex};
     use vouch_common::fido2_types::Challenge;
 
     #[tokio::test]
@@ -491,7 +567,7 @@ mod tests {
         let state = RegistrationState {
             user_id: Uuid::nil(),
             user_name: "test-user".to_string(),
-            device_name: "test-device".to_string(),
+            device_name: ResourceLabel::parse("test-device").expect("valid label"),
             challenge,
             rp_id: "test.example.com".to_string(),
             iat: 1_000_000_000,
@@ -499,13 +575,13 @@ mod tests {
         };
 
         let token = state.encode(&signer).await.expect("encode");
-        let decoded = RegistrationState::decode(&token, &signer)
+        let decoded = RegistrationState::decode(&token, &signer, test_arrival())
             .await
             .expect("decode");
 
         assert_eq!(decoded.user_id, Uuid::nil());
         assert_eq!(decoded.user_name, "test-user");
-        assert_eq!(decoded.device_name, "test-device");
+        assert_eq!(decoded.device_name.as_str(), "test-device");
         assert_eq!(decoded.rp_id, "test.example.com");
     }
 
@@ -517,7 +593,7 @@ mod tests {
         let state = RegistrationState {
             user_id: Uuid::nil(),
             user_name: "test".to_string(),
-            device_name: "dev".to_string(),
+            device_name: ResourceLabel::parse("dev").expect("valid label"),
             challenge: Challenge::from(vec![1u8; 32]),
             rp_id: "test.example.com".to_string(),
             iat: 1_000_000_000,
@@ -525,7 +601,7 @@ mod tests {
         };
 
         let token = state.encode(&signer_a).await.expect("encode");
-        let result = RegistrationState::decode(&token, &signer_b).await;
+        let result = RegistrationState::decode(&token, &signer_b, test_arrival()).await;
         assert!(result.is_err(), "Wrong secret should be rejected");
     }
 
@@ -535,7 +611,7 @@ mod tests {
         let state = RegistrationState {
             user_id: Uuid::nil(),
             user_name: "test".to_string(),
-            device_name: "dev".to_string(),
+            device_name: ResourceLabel::parse("dev").expect("valid label"),
             challenge: Challenge::from(vec![1u8; 32]),
             rp_id: "test.example.com".to_string(),
             iat: 1_000_000_000,
@@ -546,7 +622,11 @@ mod tests {
 
         // Try decoding with a different JwtType via the raw signer
         let result: Result<RegistrationState, _> = signer
-            .decode_state_token(&token, JwtType::BrowserRegistrationState)
+            .decode_state_token(
+                &token,
+                JwtType::BrowserRegistrationState,
+                test_arrival().as_second(),
+            )
             .await;
         assert!(result.is_err(), "Wrong JWT type should be rejected");
     }
@@ -560,7 +640,16 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "list@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let (status, body) = http_get(
             &app,
@@ -579,7 +668,16 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "listkey@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let (status, body) = http_get(
             &app,
@@ -633,7 +731,16 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "start@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let (status, body) = http_post_json(
             &app,
@@ -674,9 +781,18 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "deactivated-register@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
-        crate::db::update_user_active_status(&state.store, &user.id, false)
+        db::update_user_active_status(&state.store, &user.id, false)
             .await
             .expect("deactivate user");
 
@@ -694,13 +810,52 @@ mod tests {
         assert_eq!(error["message"], "User account is deactivated");
     }
 
+    #[tokio::test]
+    async fn test_register_start_rejects_invalid_name() {
+        // #1133: the CLI register path must enforce the same 1..=100-character
+        // key-name contract as rename; empty, whitespace-only, and over-long
+        // names are rejected before any state token is minted.
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "register-name@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let over_long = "x".repeat(101);
+        for bad in ["", "   ", over_long.as_str()] {
+            let body = serde_json::json!({ "name": bad }).to_string();
+            let (status, resp) = http_post_json(
+                &app,
+                "/v1/keys/register/start",
+                &body,
+                &[("Authorization", &format!("Bearer {token}"))],
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "name {bad:?} must be rejected"
+            );
+            let error: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+            assert_eq!(error["code"], "invalid_name", "name {bad:?}");
+        }
+    }
+
     // ========================================================================
     // Register Complete — Negative
     // ========================================================================
 
     /// Mint a valid `RegistrationState` JWT for `user`, returning it with its
     /// expiry so a caller can check afterwards whether it was consumed.
-    async fn make_reg_state(state: &AppState, user: &crate::db::User) -> (String, i64) {
+    async fn make_reg_state(state: &AppState, user: &User) -> (String, i64) {
         let now = jiff::Timestamp::now();
         let exp = now
             .checked_add(jiff::Span::new().minutes(5))
@@ -708,7 +863,7 @@ mod tests {
         let reg_state = RegistrationState {
             user_id: Uuid::parse_str(&user.id).expect("user id is a uuid"),
             user_name: user.email.clone(),
-            device_name: "Test Device".to_string(),
+            device_name: ResourceLabel::parse("Test Device").expect("valid label"),
             challenge: Challenge::from(vec![7u8; 32]),
             rp_id: "localhost".to_string(),
             iat: now.as_second(),
@@ -731,7 +886,16 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, email).await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let (state_jwt, exp) = make_reg_state(&state, &user).await;
 
         let body = serde_json::json!({
@@ -756,7 +920,7 @@ mod tests {
     async fn assert_state_unconsumed(state: &AppState, state_jwt: &str, exp: i64) {
         let expires_at = jiff::Timestamp::from_second(exp).expect("valid exp");
         let consume =
-            crate::db::consume_challenge_state_for_test(&state.store, state_jwt, expires_at).await;
+            db::consume_challenge_state_for_test(&state.store, state_jwt, expires_at).await;
         assert!(
             consume.is_ok(),
             "a rejected request consumed the registration state: {consume:?}"
@@ -827,7 +991,16 @@ mod tests {
         // request must be signed (RFC 9421); the harness signs it transparently.
         let user = create_test_user(&state.store, "invalid-state@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         // All Raw fields deserialize as Vec<u8> (JSON arrays), and their length
         // bounds are applied there, so the binary fields must be in range for
@@ -866,9 +1039,23 @@ mod tests {
         // request must be signed (RFC 9421); the harness signs it transparently.
         let user = create_test_user(&state.store, "replay-session@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
-        // Build a valid RegistrationState JWT with a far-future expiry.
+        // Build a valid RegistrationState JWT bound to the authenticated
+        // caller's user id (the fix requires `token.sub == reg_state.user_id`
+        // before any other check runs). The pre-consume below still
+        // exercises the replay path: the bearer matches the state, the
+        // mismatch check passes, and the consume returns Replay.
+        let user_uuid = Uuid::parse_str(&user.id).expect("user id is a uuid");
         let signer = &state.state_signer;
         let challenge = Challenge::from(vec![2u8; 32]);
         let now = jiff::Timestamp::now();
@@ -876,9 +1063,9 @@ mod tests {
             .checked_add(jiff::Span::new().minutes(5))
             .map_or(now.as_second().saturating_add(300), |t| t.as_second());
         let reg_state = RegistrationState {
-            user_id: Uuid::new_v4(),
-            user_name: "replay-test@example.com".to_string(),
-            device_name: "Test Device".to_string(),
+            user_id: user_uuid,
+            user_name: user.email.clone(),
+            device_name: ResourceLabel::parse("Test Device").expect("valid label"),
             challenge,
             rp_id: "localhost".to_string(),
             iat: now.as_second(),
@@ -888,10 +1075,9 @@ mod tests {
 
         // Pre-consume the state token to simulate prior use.
         let expires_at = jiff::Timestamp::from_second(exp).expect("valid exp");
-        let _claim =
-            crate::db::consume_challenge_state_for_test(&state.store, &state_jwt, expires_at)
-                .await
-                .expect("pre-consume must succeed");
+        let _claim = db::consume_challenge_state_for_test(&state.store, &state_jwt, expires_at)
+            .await
+            .expect("pre-consume must succeed");
 
         // POST to register/complete with the already-consumed state. The field
         // bounds precede the replay check, so the binary fields must be
@@ -931,7 +1117,16 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "deactivated-complete@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let user_uuid = Uuid::parse_str(&user.id).expect("user id is a uuid");
 
         // Build a valid RegistrationState JWT for an (initially) active user.
@@ -944,7 +1139,7 @@ mod tests {
         let reg_state = RegistrationState {
             user_id: user_uuid,
             user_name: user.email.clone(),
-            device_name: "Test Device".to_string(),
+            device_name: ResourceLabel::parse("Test Device").expect("valid label"),
             challenge,
             rp_id: "localhost".to_string(),
             iat: now.as_second(),
@@ -953,7 +1148,7 @@ mod tests {
         let state_jwt = reg_state.encode(signer).await.expect("encode state");
 
         // Admin deactivates the user after the state token was issued.
-        crate::db::update_user_active_status(&state.store, &user.id, false)
+        db::update_user_active_status(&state.store, &user.id, false)
             .await
             .expect("deactivate user");
 
@@ -975,14 +1170,18 @@ mod tests {
         )
         .await;
 
+        // After the `load_active_user` fix, a deactivated user is rejected
+        // with the same shape `register_start` returns for the same fixture
+        // (see `test_register_start_rejects_deactivated_user`): 401
+        // "User account is deactivated", not the legacy 403 "user_deactivated".
         assert_eq!(
             status,
-            StatusCode::FORBIDDEN,
+            StatusCode::UNAUTHORIZED,
             "deactivated user must not complete key registration: {resp_body}"
         );
         let json: serde_json::Value = serde_json::from_str(&resp_body).expect("valid JSON");
-        assert_eq!(json["code"], "forbidden");
-        assert_eq!(json["message"], "user_deactivated");
+        assert_eq!(json["code"], "unauthorized");
+        assert_eq!(json["message"], "User account is deactivated");
     }
 
     #[tokio::test]
@@ -993,7 +1192,16 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "active-complete@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let user_uuid = Uuid::parse_str(&user.id).expect("user id is a uuid");
 
         let signer = &state.state_signer;
@@ -1005,7 +1213,7 @@ mod tests {
         let reg_state = RegistrationState {
             user_id: user_uuid,
             user_name: user.email.clone(),
-            device_name: "Test Device".to_string(),
+            device_name: ResourceLabel::parse("Test Device").expect("valid label"),
             challenge,
             rp_id: "localhost".to_string(),
             iat: now.as_second(),
@@ -1030,16 +1238,356 @@ mod tests {
 
         // The active-user check must NOT fire for an active user. Dummy
         // attestation bytes cause WebAuthn verification to fail with a 400
-        // invalid_attestation — never a 403 user_deactivated.
+        // invalid_attestation — never the active-user rejection that
+        // `load_active_user` returns for deactivated users (401 "User
+        // account is deactivated").
         assert_ne!(
             status,
-            StatusCode::FORBIDDEN,
-            "active user must not be rejected as deactivated: {resp_body}"
+            StatusCode::UNAUTHORIZED,
+            "active user must not be rejected by the active-user guard: {resp_body}"
         );
         let json: serde_json::Value = serde_json::from_str(&resp_body).expect("valid JSON");
         assert_ne!(
-            json["message"], "user_deactivated",
-            "active user must not receive user_deactivated: {json}"
+            json["message"], "User account is deactivated",
+            "active user must not receive the deactivated rejection: {json}"
+        );
+    }
+
+    // ========================================================================
+    // Register Complete — Deleted User (in-flight `delete_user` race)
+    // ========================================================================
+    //
+    // A user hard-deleted in the window between `register_start` (which
+    // issued the state, valid for five minutes) and this completion must be
+    // rejected — not proceed to the single-use consume and WebAuthn
+    // verification. The `AuthenticatedToken` extractor validates the session
+    // via `session_cache.get_session_by_token_hash` and does NOT call
+    // `get_user_by_id`; the handler's `load_active_user` read is the ONLY
+    // `get_user_by_id` on this path (mirrors the org-scoped OAuth app race in
+    // `handlers/applications/web.rs`, fixed via the same
+    // `get_user_by_id_test_hook` seam). Before the `load_active_user` fix the
+    // inline `if let Some(account) = account` guard admitted `Ok(None)` and
+    // the request reached WebAuthn, returning 400 invalid_attestation — the
+    // smoking gun that a deleted user was being treated like an active user.
+
+    /// Install a `get_user_by_id_test_hook` that forces `Ok(None)` (the
+    /// "user vanished mid-request" outcome) for `target` once it has been
+    /// set. While `target` is `None` (during test setup) every read runs for
+    /// real, so `create_test_user` / `create_test_session_with` work normally.
+    /// Returns a counter that is bumped on each forced read so the test can
+    /// assert the forced `Ok(None)` landed on the handler's read (the
+    /// extractor makes no `get_user_by_id` call on this path, so the count
+    /// must be exactly one).
+    fn install_user_vanish_hook(
+        target: Arc<Mutex<Option<String>>>,
+    ) -> (Arc<AtomicU32>, GetUserByIdTestHook) {
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_for_hook = calls.clone();
+        let hook: GetUserByIdTestHook = Arc::new(move |uid: &str| {
+            let active = target.lock().expect("hook target lock poisoned").as_deref() == Some(uid);
+            if !active {
+                return false;
+            }
+            calls_for_hook.fetch_add(1, Ordering::SeqCst);
+            // Every handler-path read for the target user is forced to
+            // `Ok(None)`. The CLI completion path's `load_active_user` makes
+            // exactly one `get_user_by_id` read, so this forces it on the
+            // first (and only) call.
+            true
+        });
+        (calls, hook)
+    }
+
+    #[tokio::test]
+    async fn test_register_complete_refuses_vanished_user() {
+        let target: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let target_for_hook = target.clone();
+        let (calls, hook) = install_user_vanish_hook(target_for_hook);
+        let (app, state) = test_app_with_modify_hook(|store| {
+            store.set_get_user_by_id_test_hook(hook);
+        })
+        .await;
+
+        let user = create_test_user(&state.store, "vanished-complete@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let user_uuid = Uuid::parse_str(&user.id).expect("user id is a uuid");
+
+        // Build a valid RegistrationState JWT the way `register_start` would
+        // have minted while the user was still alive.
+        let signer = &state.state_signer;
+        let challenge = Challenge::from(vec![5u8; 32]);
+        let now = jiff::Timestamp::now();
+        let exp = now
+            .checked_add(jiff::Span::new().minutes(5))
+            .map_or(now.as_second().saturating_add(300), |t| t.as_second());
+        let reg_state = RegistrationState {
+            user_id: user_uuid,
+            user_name: user.email.clone(),
+            device_name: ResourceLabel::parse("Test Device").expect("valid label"),
+            challenge,
+            rp_id: "localhost".to_string(),
+            iat: now.as_second(),
+            exp,
+        };
+        let state_jwt = reg_state.encode(signer).await.expect("encode state");
+
+        // Activate the hook only now — every `get_user_by_id` during setup
+        // ran with the target unset and so was a no-op.
+        *target.lock().expect("activate hook") = Some(user.id.clone());
+
+        // The field bounds precede the active-user check, so the binary
+        // fields must be well-formed; the deleted user is rejected before
+        // WebAuthn runs, so dummy attestation bytes suffice.
+        let body = serde_json::json!({
+            "state": state_jwt,
+            "credential_id": vec![9u8; 16],
+            "public_key": vec![9u8; 77],
+            "attestation_object": [1, 2, 3],
+            "client_data_json": [4, 5, 6],
+        });
+        let (status, resp_body) = http_post_json(
+            &app,
+            "/v1/keys/register/complete",
+            &body.to_string(),
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        // The deleted user must be rejected — reaching WebAuthn (400
+        // invalid_attestation) is the bug, not the fix.
+        assert_ne!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "deleted user must NOT reach the WebAuthn-verification / \
+             state-consume stage; the active-user guard must reject `Ok(None)` \
+             the way it rejects `active=false`. Got {status} {resp_body}"
+        );
+        let json: serde_json::Value = serde_json::from_str(&resp_body).expect("valid JSON");
+        assert_ne!(
+            json["code"], "invalid_attestation",
+            "deleted user must not reach WebAuthn verification: {json}"
+        );
+        // `load_active_user` rejects `Ok(None)` with 401 "User not found".
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "deleted user rejected: {resp_body}"
+        );
+        assert_eq!(json["code"], "unauthorized");
+        assert_eq!(json["message"], "User not found");
+
+        // The handler's `load_active_user` read is the ONLY `get_user_by_id`
+        // on this path, so the forced `Ok(None)` must have landed exactly
+        // there — proving the rejection came from the handler's guard, not a
+        // too-early fire that some other layer caught.
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "expected exactly one get_user_by_id call (the handler's load_active_user read)"
+        );
+    }
+
+    // ========================================================================
+    // Register Complete — Caller Binding (state JWT must match caller)
+    // ========================================================================
+    //
+    // A captured register_start state JWT must not let an attacker enroll a
+    // genuine YubiKey against the victim's account by satisfying only the
+    // client-level RFC 9421 signature. The completion handler asserts that
+    // the bearer's `sub` equals the state JWT's `user_id` before any
+    // account-active or single-use work.
+
+    /// Build a bearer-token session for `user` exactly the way `register_start`
+    /// expects (so the test reflects the legitimate CLI flow), plus a
+    /// `RegistrationState` JWT bound to a caller-chosen user id.
+    async fn register_complete_session(state: &AppState, email: &str) -> (User, String) {
+        let user = create_test_user(&state.store, email).await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        (user, token)
+    }
+
+    /// Mint a valid `RegistrationState` JWT bound to `user_id`.
+    async fn register_state_for(state: &AppState, user: &User) -> (String, i64) {
+        let now = jiff::Timestamp::now();
+        let exp = now
+            .checked_add(jiff::Span::new().minutes(5))
+            .map_or(now.as_second().saturating_add(300), |t| t.as_second());
+        let reg_state = RegistrationState {
+            user_id: Uuid::parse_str(&user.id).expect("user id is a uuid"),
+            user_name: user.email.clone(),
+            device_name: ResourceLabel::parse("Test Device").expect("valid label"),
+            challenge: Challenge::from(vec![7u8; 32]),
+            rp_id: "localhost".to_string(),
+            iat: now.as_second(),
+            exp,
+        };
+        let jwt = reg_state
+            .encode(&state.state_signer)
+            .await
+            .expect("encode state");
+        (jwt, exp)
+    }
+
+    #[tokio::test]
+    async fn test_register_complete_rejects_state_user_mismatch() {
+        // Attacker captures the victim's state JWT and submits completion
+        // under their own bearer token. The mismatch must be rejected with
+        // 403 forbidden / state_user_mismatch *before* the single-use
+        // consume, so the victim can still spend the state later.
+        let (app, state) = test_app().await;
+        let (victim, victim_token) =
+            register_complete_session(&state, "victim-mismatch@example.com").await;
+        let (attacker, attacker_token) =
+            register_complete_session(&state, "attacker-mismatch@example.com").await;
+        assert_ne!(attacker.id, victim.id, "test setup must distinct users");
+
+        // A fresh state JWT bound to the victim's user id (what the
+        // victim's `register_start` would have minted).
+        let (state_jwt, exp) = register_state_for(&state, &victim).await;
+
+        // Binary fields are well-formed so the body parses and the state
+        // decodes; their contents are never consumed because the mismatch
+        // check fires first.
+        let body = serde_json::json!({
+            "state": state_jwt,
+            "credential_id": vec![9u8; 16],
+            "public_key": vec![9u8; 77],
+            "attestation_object": [1, 2, 3],
+            "client_data_json": [4, 5, 6],
+        });
+        let (status, resp_body) = http_post_json(
+            &app,
+            "/v1/keys/register/complete",
+            &body.to_string(),
+            &[("Authorization", &format!("Bearer {attacker_token}"))],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "mismatch must 403: {resp_body}"
+        );
+        let json: serde_json::Value = serde_json::from_str(&resp_body).expect("valid JSON");
+        assert_eq!(json["code"], "forbidden");
+        assert_eq!(json["message"], "state_user_mismatch");
+
+        // The rejected mismatch must NOT have consumed the victim's state
+        // token. `consume_challenge_state_for_test` is the only way to splice
+        // into the single-use store, so this assertion consumes the token as
+        // a side-effect — that's why the legitimate retry below uses a
+        // *fresh* state JWT.
+        let expires_at = jiff::Timestamp::from_second(exp).expect("valid exp");
+        let consume =
+            db::consume_challenge_state_for_test(&state.store, &state_jwt, expires_at).await;
+        assert!(
+            consume.is_ok(),
+            "a rejected mismatch consumed the victim's registration state: {consume:?}"
+        );
+
+        // The legitimate retry: the victim spends a fresh state JWT with
+        // a matching bearer. The caller-binding check passes, the
+        // active-user check passes (victim is active), the consume
+        // succeeds, and the request lands in WebAuthn verification —
+        // never at the 403 caller-binding guard.
+        let (state_jwt, _exp) = register_state_for(&state, &victim).await;
+        let body = serde_json::json!({
+            "state": state_jwt,
+            "credential_id": vec![9u8; 16],
+            "public_key": vec![9u8; 77],
+            "attestation_object": [],
+            "client_data_json": [],
+        });
+        let (status, resp_body) = http_post_json(
+            &app,
+            "/v1/keys/register/complete",
+            &body.to_string(),
+            &[("Authorization", &format!("Bearer {victim_token}"))],
+        )
+        .await;
+        assert_ne!(
+            status,
+            StatusCode::FORBIDDEN,
+            "victim with matching bearer must not get forbidden: {resp_body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_register_complete_requires_authentication() {
+        // A request that satisfies the client-level RFC 9421 signature
+        // (the harness signs it transparently using the test client
+        // registered for the deployment's `base_url`) but carries a Bearer
+        // token that is NOT a deployment-issued OAuth access token must be
+        // rejected at the `AuthenticatedToken` extractor. The bug being
+        // fixed: `register_complete` previously had no `AuthenticatedToken`
+        // extractor at all, so such a request reached the handler.
+        use base64::Engine;
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "no-auth-complete@example.com").await;
+        let (state_jwt, _exp) = register_state_for(&state, &user).await;
+
+        // Forge a JWT whose `client_id` claim is the deployment's own
+        // `base_url` (so the RFC 9421 `extract_client_id` resolver hits
+        // the registered test client and the signature middleware passes)
+        // but whose signature is bogus — the `AuthenticatedToken`
+        // extractor decodes the token against the deployment's OIDC key
+        // and must reject it with `invalid_token`.
+        let header = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(r#"{"alg":"ES256"}"#);
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            serde_json::json!({
+                "client_id": state.config().base_url.as_str(),
+                // No `sub`, no `iss`, no `exp` — `decode_token` fails the
+                // signature check long before these claims are read.
+            })
+            .to_string(),
+        );
+        let bogus_sig = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0u8; 64]);
+        let forged_jwt = format!("{header}.{payload}.{bogus_sig}");
+
+        let body = serde_json::json!({
+            "state": state_jwt,
+            "credential_id": vec![9u8; 16],
+            "public_key": vec![9u8; 77],
+            "attestation_object": [1, 2, 3],
+            "client_data_json": [4, 5, 6],
+        });
+        let (status, resp_body) = http_post_json(
+            &app,
+            "/v1/keys/register/complete",
+            &body.to_string(),
+            &[("Authorization", &format!("Bearer {forged_jwt}"))],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "missing user bearer must 401: {resp_body}"
+        );
+        let json: serde_json::Value = serde_json::from_str(&resp_body).expect("valid JSON");
+        assert_eq!(
+            json["code"], "invalid_token",
+            "expected the AuthenticatedToken extractor to reject the forged token, got: {json}"
         );
     }
 
@@ -1052,7 +1600,16 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "rename@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let (status, _body) = http_request(
             &app,
@@ -1067,6 +1624,251 @@ mod tests {
         .await;
 
         assert_eq!(status, StatusCode::OK);
+    }
+
+    /// Renaming a key must record a `key_renamed` audit event carrying the
+    /// caller's user id, the renamed authenticator's id, `success: true`,
+    /// and the captured client metadata — the audit-store record the
+    /// sibling `delete_key`/`register_complete` paths already write, and
+    /// which every mutation of an `AuthenticatorDoc` is expected to emit.
+    #[tokio::test]
+    async fn test_rename_key_records_audit_event() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "rename-audit@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let (status, _body) = http_request(
+            &app,
+            "PATCH",
+            &format!("/v1/keys/{auth_id}"),
+            Some(r#"{"name":"Audit Name"}"#.to_string()),
+            &[
+                ("Content-Type", "application/json"),
+                ("Authorization", &format!("Bearer {token}")),
+            ],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // Exactly one key_renamed event, attributed to the caller and the
+        // renamed authenticator, marked successful.
+        let events = state
+            .audit
+            .query_events(&db::AuditEventFilter {
+                event_types: Some(vec!["key_renamed".to_string()]),
+                ..db::AuditEventFilter::default()
+            })
+            .await
+            .expect("query audit events");
+        assert_eq!(
+            events.len(),
+            1,
+            "rename must write exactly one key_renamed audit event, got {events:?}"
+        );
+        let event = &events[0];
+        assert_eq!(event.event_type, "key_renamed");
+        assert_eq!(event.user_id.as_deref(), Some(user.id.as_str()));
+        let data: serde_json::Value =
+            serde_json::from_str(&event.data).expect("audit data is valid JSON");
+        assert_eq!(data["authenticator_id"], auth_id);
+        assert_eq!(data["success"], true);
+    }
+
+    /// Key rename and removal audit rows take the email from the loaded user,
+    /// not the token. A token minted without the `email` scope has no email
+    /// claim, and a row without an email domain drops out of org-scoped audit
+    /// queries. Covers both the `/v1/keys` and `/enroll/keys` handlers.
+    #[tokio::test]
+    async fn test_key_audit_events_are_org_visible_without_email_scope() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "no-email-scope@example.com").await;
+        let session_key = create_test_authenticator(&state.store, &user.id).await;
+        let v1_key = create_test_authenticator(&state.store, &user.id).await;
+        let enroll_key = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&session_key),
+                scope: Some(ScopeSet::parse("openid")),
+                ..Default::default()
+            },
+        )
+        .await;
+        let bearer = format!("Bearer {token}");
+        let cookie = format!("{}={token}", vouch_common::SESSION_COOKIE_NAME);
+
+        let (status, body) = http_request(
+            &app,
+            "PATCH",
+            &format!("/v1/keys/{v1_key}"),
+            Some(r#"{"name":"Renamed"}"#.to_string()),
+            &[
+                ("Content-Type", "application/json"),
+                ("Authorization", &bearer),
+            ],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (status, body) = http_delete(
+            &app,
+            &format!("/v1/keys/{v1_key}"),
+            &[("Authorization", &bearer)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (status, body) = http_post_form(
+            &app,
+            &format!("/enroll/keys/{enroll_key}/rename"),
+            "name=Renamed",
+            &[
+                ("Cookie", &cookie),
+                ("Origin", state.config().base_url.as_str()),
+            ],
+        )
+        .await;
+        assert_eq!(status, StatusCode::SEE_OTHER, "{body}");
+        let (status, body) = http_delete(
+            &app,
+            &format!("/enroll/keys/{enroll_key}"),
+            &[
+                ("Authorization", &bearer),
+                ("Origin", state.config().base_url.as_str()),
+            ],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let events = state
+            .audit
+            .query_events(&db::AuditEventFilter {
+                event_types: Some(vec!["key_renamed".to_string(), "key_removed".to_string()]),
+                email_domains: Some(vec!["example.com".to_string()]),
+                ..db::AuditEventFilter::default()
+            })
+            .await
+            .expect("query audit events");
+        let mut seen = Vec::new();
+        for event in &events {
+            let data: serde_json::Value =
+                serde_json::from_str(&event.data).expect("audit data is valid JSON");
+            let authenticator_id = data["authenticator_id"].as_str().expect("authenticator_id");
+            seen.push((event.event_type.clone(), authenticator_id.to_string()));
+        }
+        seen.sort();
+        let mut expected = vec![
+            ("key_removed".to_string(), enroll_key.clone()),
+            ("key_removed".to_string(), v1_key.clone()),
+            ("key_renamed".to_string(), enroll_key.clone()),
+            ("key_renamed".to_string(), v1_key.clone()),
+        ];
+        expected.sort();
+        assert_eq!(seen, expected, "every key event is org-visible: {events:?}");
+    }
+
+    /// A rejected rename (invalid name) must not write a `key_renamed`
+    /// audit event — the audit record is evidence the mutation succeeded,
+    /// so a validation failure must leave the audit store untouched.
+    #[tokio::test]
+    async fn test_rename_key_rejected_name_writes_no_audit_event() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "rename-noaudit@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let (status, _body) = http_request(
+            &app,
+            "PATCH",
+            &format!("/v1/keys/{auth_id}"),
+            Some(r#"{"name":""}"#.to_string()),
+            &[
+                ("Content-Type", "application/json"),
+                ("Authorization", &format!("Bearer {token}")),
+            ],
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let events = state
+            .audit
+            .query_events(&db::AuditEventFilter {
+                event_types: Some(vec!["key_renamed".to_string()]),
+                ..db::AuditEventFilter::default()
+            })
+            .await
+            .expect("query audit events");
+        assert!(
+            events.is_empty(),
+            "a rejected rename must not write a key_renamed audit event, got {events:?}"
+        );
+    }
+
+    /// A deactivated user holding a live session must not rename a security
+    /// key. `AuthenticatedToken` validates the token only, so the handler
+    /// must reject deactivated accounts itself — same fixture and expected
+    /// response as `test_delete_key_rejects_deactivated_user` below.
+    #[tokio::test]
+    async fn test_rename_key_rejects_deactivated_user() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "deactivated-rename@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        // Deactivate WITHOUT deleting the session — the
+        // deactivated-with-live-session fixture the sibling tests use.
+        db::update_user_active_status(&state.store, &user.id, false)
+            .await
+            .expect("deactivate user");
+
+        let (status, body) = http_request(
+            &app,
+            "PATCH",
+            &format!("/v1/keys/{auth_id}"),
+            Some(r#"{"name":"Hijacked Name"}"#.to_string()),
+            &[
+                ("Content-Type", "application/json"),
+                ("Authorization", &format!("Bearer {token}")),
+            ],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "deactivated user must not rename a key; got body: {body}"
+        );
+        let error: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+        assert_eq!(error["code"], "unauthorized");
+        assert_eq!(error["message"], "User account is deactivated");
     }
 
     // ========================================================================
@@ -1095,7 +1897,16 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "renamebaduuid@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let (status, body) = http_request(
             &app,
@@ -1119,7 +1930,16 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "renameempty@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let (status, body) = http_request(
             &app,
@@ -1143,7 +1963,16 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "renametoolong@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let long_name = "a".repeat(257);
         let body_str = format!(r#"{{"name":"{long_name}"}}"#);
@@ -1162,6 +1991,134 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
         assert_eq!(json["code"], "invalid_name");
+    }
+
+    // The guard measures Unicode characters, not UTF-8 bytes, so a multibyte
+    // name is bounded by the same number the error message names.
+    #[tokio::test]
+    async fn test_rename_key_accepts_multibyte_name_within_char_limit() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "renamecjk@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        // 90 CJK characters = 270 UTF-8 bytes: within the 100-character limit
+        // the handler and service share, so the rename succeeds end to end.
+        let name = "名".repeat(90);
+        assert_eq!(name.chars().count(), 90);
+        assert!(name.len() > 256);
+        let body = serde_json::json!({ "name": name }).to_string();
+        let (status, resp_body) = http_request(
+            &app,
+            "PATCH",
+            &format!("/v1/keys/{auth_id}"),
+            Some(body),
+            &[
+                ("Content-Type", "application/json"),
+                ("Authorization", &format!("Bearer {token}")),
+            ],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "multibyte name within limits must be accepted: {resp_body}"
+        );
+    }
+
+    // The character-based guard still bounds multibyte names: a 101-character
+    // CJK name is rejected by the handler, before the service sees it.
+    #[tokio::test]
+    async fn test_rename_key_rejects_multibyte_name_exceeding_char_limit() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "renamecjklong@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        // 101 CJK characters = 303 bytes: one character over the cap.
+        let name = "名".repeat(101);
+        assert_eq!(name.chars().count(), 101);
+        let body = serde_json::json!({ "name": name }).to_string();
+        let (status, resp_body) = http_request(
+            &app,
+            "PATCH",
+            &format!("/v1/keys/{auth_id}"),
+            Some(body),
+            &[
+                ("Content-Type", "application/json"),
+                ("Authorization", &format!("Bearer {token}")),
+            ],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let json: serde_json::Value = serde_json::from_str(&resp_body).expect("valid JSON");
+        assert_eq!(json["code"], "invalid_name");
+        assert_eq!(
+            json["message"],
+            "Key name must be between 1 and 100 characters"
+        );
+    }
+
+    // The handler guard and the service limit are the same number, so no name
+    // clears the handler only to be rejected by the service under a different
+    // message. The range the error names is the range the endpoint accepts.
+    #[tokio::test]
+    async fn test_rename_key_rejects_name_over_shared_limit() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "renamemidrange@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let name = "a".repeat(150);
+        let body = serde_json::json!({ "name": name }).to_string();
+        let (status, resp_body) = http_request(
+            &app,
+            "PATCH",
+            &format!("/v1/keys/{auth_id}"),
+            Some(body),
+            &[
+                ("Content-Type", "application/json"),
+                ("Authorization", &format!("Bearer {token}")),
+            ],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let json: serde_json::Value = serde_json::from_str(&resp_body).expect("valid JSON");
+        assert_eq!(json["code"], "invalid_name");
+        assert_eq!(
+            json["message"],
+            "Key name must be between 1 and 100 characters"
+        );
     }
 
     // ========================================================================
@@ -1183,7 +2140,16 @@ mod tests {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, "deletebaduuid@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let (status, body) = http_delete(
             &app,
@@ -1195,5 +2161,285 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
         assert_eq!(json["code"], "invalid_key_id");
+    }
+
+    // ========================================================================
+    // Step-up on key deletion (issue #1114)
+    //
+    // The cookie route is covered by the enroll_keys_api integration tests;
+    // these pin the Bearer route, which reaches the same `SteppedUpToken`
+    // extractor over the Authorization header.
+    // ========================================================================
+
+    /// RFC 9470 Section 3: the challenge names what was missing so the client
+    /// can re-authenticate and retry, which is what the keys page does.
+    fn assert_step_up_challenge(resp: &HttpResponse) {
+        assert_eq!(resp.status, StatusCode::UNAUTHORIZED, "body: {}", resp.body);
+        let challenge = resp
+            .headers
+            .get(axum::http::header::WWW_AUTHENTICATE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        assert!(
+            challenge.contains("insufficient_user_authentication"),
+            "expected an RFC 9470 challenge, got: {challenge}"
+        );
+    }
+
+    async fn surviving_keys(state: &AppState, user_id: &str) -> usize {
+        db::get_authenticators_for_user(&state.store, user_id)
+            .await
+            .expect("list keys")
+            .len()
+    }
+
+    #[tokio::test]
+    async fn test_delete_key_rejects_bootstrap_session_over_bearer() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "bootstrap-delete@example.com").await;
+        let key_a = create_test_authenticator(&state.store, &user.id).await;
+        let _key_b = create_test_authenticator(&state.store, &user.id).await;
+        // The browser's cookie is a bearer token; presenting it over the
+        // Authorization header must not buy more than presenting it as a cookie.
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&key_a),
+                verification: TestVerification::NotVerified,
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let resp = http_delete_full(
+            &app,
+            &format!("/v1/keys/{key_a}"),
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        assert_step_up_challenge(&resp);
+        assert_eq!(
+            surviving_keys(&state, &user.id).await,
+            2,
+            "no key may be deleted without a recent assertion"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_delete_key_rejects_stale_hardware_verified_session() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "stale-delete@example.com").await;
+        let key_a = create_test_authenticator(&state.store, &user.id).await;
+        let _key_b = create_test_authenticator(&state.store, &user.id).await;
+        // Asserted with a key, but long ago: possession is proven, recency is
+        // not, and deleting a key demands both.
+        let stale = jiff::Timestamp::now()
+            .as_second()
+            .saturating_sub(key_svc::KEY_DELETE_MAX_AGE_SECS.saturating_mul(10));
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&key_a),
+                verification: TestVerification::Verified {
+                    auth_time: jiff::Timestamp::from_second(stale).ok(),
+                },
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let resp = http_delete_full(
+            &app,
+            &format!("/v1/keys/{key_a}"),
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        assert_step_up_challenge(&resp);
+        assert_eq!(surviving_keys(&state, &user.id).await, 2);
+    }
+
+    /// Mirror of the stale-session rejection for the other impossible-timestamp
+    /// direction: a hardware-verified session whose `auth_time` is in the
+    /// future relative to the server clock (e.g. after an NTP step-back). The
+    /// freshness gate must reject an impossibly-timed ceremony just as it
+    /// rejects a stale one, instead of admitting the negative `session_age`
+    /// as "age 0" fresh — otherwise an older (but unexpired) verified token
+    /// could delete keys without a fresh FIDO2 touch.
+    #[tokio::test]
+    async fn test_delete_key_rejects_future_dated_hardware_verified_session() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "future-delete@example.com").await;
+        let key_a = create_test_authenticator(&state.store, &user.id).await;
+        let _key_b = create_test_authenticator(&state.store, &user.id).await;
+        // auth_time one hour *ahead* of the server clock: an impossible
+        // ceremony the gate must not treat as fresh.
+        let future_iat = jiff::Timestamp::now().as_second().saturating_add(3600);
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&key_a),
+                verification: TestVerification::Verified {
+                    auth_time: jiff::Timestamp::from_second(future_iat).ok(),
+                },
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let resp = http_delete_full(
+            &app,
+            &format!("/v1/keys/{key_a}"),
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        assert_step_up_challenge(&resp);
+        assert_eq!(
+            surviving_keys(&state, &user.id).await,
+            2,
+            "a future-dated ceremony must not authorise key deletion"
+        );
+    }
+
+    /// The gate must ask whether a ceremony happened rather than infer it from
+    /// a timestamp. `HardwareVerification` makes a fresh `auth_time` on an
+    /// unverified session unconstructible, so this signs one directly: if that
+    /// invariant ever breaks, or an older server's token arrives during a
+    /// rolling deploy, deletion must still refuse it.
+    #[tokio::test]
+    async fn test_delete_key_rejects_fresh_auth_time_without_hardware_verification() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "unverified-fresh@example.com").await;
+        let key_a = create_test_authenticator(&state.store, &user.id).await;
+        let _key_b = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&key_a),
+                verification: TestVerification::NotVerifiedForgedAuthTime {
+                    auth_time: jiff::Timestamp::now().as_second(),
+                },
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let resp = http_delete_full(
+            &app,
+            &format!("/v1/keys/{key_a}"),
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        assert_step_up_challenge(&resp);
+        assert_eq!(
+            surviving_keys(&state, &user.id).await,
+            2,
+            "a fresh timestamp is not evidence a ceremony occurred"
+        );
+    }
+
+    /// The companion success case: a session that did assert, recently, still
+    /// deletes. Without this the three rejections above would pass even if the
+    /// extractor refused everything.
+    #[tokio::test]
+    async fn test_delete_key_allows_recent_hardware_verified_session() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "fresh-delete@example.com").await;
+        let key_a = create_test_authenticator(&state.store, &user.id).await;
+        let key_b = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&key_a),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let (status, body) = http_delete(
+            &app,
+            &format!("/v1/keys/{key_b}"),
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        assert_eq!(surviving_keys(&state, &user.id).await, 1);
+    }
+
+    /// A deactivated user holding a live stepped-up session must not delete a
+    /// security key. `SteppedUpToken` enforces token validity and recent
+    /// hardware verification but does not load the user record, so the
+    /// handler must reject deactivated accounts itself before reaching the
+    /// destructive `key_svc::delete_key`. Production deactivation flows revoke
+    /// sessions before persisting `active=false` (#1151), but the
+    /// deactivated-with-live-session state is still defended per-handler by
+    /// every sibling in this file (`register_start`, `register_complete`).
+    /// This fixture is the exact one those siblings test against:
+    /// `update_user_active_status(false)` with the session row left intact.
+    #[tokio::test]
+    async fn test_delete_key_rejects_deactivated_user() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "deactivated-delete@example.com").await;
+        let key_a = create_test_authenticator(&state.store, &user.id).await;
+        let key_b = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&key_a),
+                ..Default::default() // auth_time = now, satisfies SteppedUpToken's 60s gate
+            },
+        )
+        .await;
+
+        // Deactivate WITHOUT deleting the session — the exact fixture
+        // `test_register_start_rejects_deactivated_user` (above) uses to
+        // exercise the deactivated-with-live-session state that #1151 closed
+        // on the production path but the codebase still defends per-handler.
+        db::update_user_active_status(&state.store, &user.id, false)
+            .await
+            .expect("deactivate user");
+
+        let before = surviving_keys(&state, &user.id).await;
+        assert_eq!(before, 2, "fixture: both keys present before deletion");
+
+        let (status, body) = http_delete(
+            &app,
+            &format!("/v1/keys/{key_b}"),
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        // Mirrors the response `register_start` returns for the same fixture
+        // (see `test_register_start_rejects_deactivated_user` above): 401
+        // "User account is deactivated".
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "deactivated user must not delete a key; got body: {body}"
+        );
+        let error: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+        assert_eq!(error["code"], "unauthorized");
+        assert_eq!(error["message"], "User account is deactivated");
+        assert_eq!(
+            surviving_keys(&state, &user.id).await,
+            2,
+            "deactivated user must not have destroyed their key"
+        );
     }
 }

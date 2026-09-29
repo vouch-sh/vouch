@@ -18,6 +18,7 @@ use vouch_common::aws::Partition;
 
 use super::sigv4::sign_and_send_json_post;
 use super::sts::StsCredentials;
+use crate::exit_code;
 
 /// The Identity Center principal an entitlement query is filtered by.
 ///
@@ -146,9 +147,7 @@ impl AccountAccessClient<'_> {
             .await;
             match result {
                 Ok(response_body) => return Ok(response_body),
-                Err(err)
-                    if crate::exit_code::aws_error_code_matches(&err, "ThrottlingException") =>
-                {
+                Err(err) if exit_code::aws_error_code_matches(&err, "ThrottlingException") => {
                     let Some(delay_ms) = backoff.next() else {
                         return Err(err);
                     };

@@ -11,6 +11,7 @@
 //! so an event without a principal can never match. This also means
 //! machine-only issuances (client-credentials tokens) are not counted.
 
+use crate::arrival::ArrivalTime;
 use crate::db::audit::{AuditEvent as AuditRow, AuditEventFilter, AuditEventKind, AuditStore};
 use dogwood_language::{Event, Value};
 
@@ -46,8 +47,9 @@ const FETCH_LIMIT: u64 = 10_000;
 pub(crate) async fn fetch_user_history(
     audit: &AuditStore,
     user_id: &str,
+    arrival: ArrivalTime,
 ) -> Result<Vec<AuditRow>, String> {
-    let now = jiff::Timestamp::now();
+    let now = arrival.timestamp();
     let floor = now
         .checked_sub(jiff::Span::new().hours(REPLAY_WINDOW_HOURS))
         .map_err(|e| format!("cannot compute replay window floor: {e}"))?;
@@ -59,7 +61,7 @@ pub(crate) async fn fetch_user_history(
                 .collect(),
         ),
         user_id: Some(user_id.to_string()),
-        since: Some(floor.to_string()),
+        since: Some(floor),
         limit: Some(FETCH_LIMIT),
         ..AuditEventFilter::default()
     };
@@ -136,8 +138,9 @@ pub(crate) fn history_event(row: &AuditRow, org_id: &str, min_ts: i64) -> Option
             ],
         ),
         AuditEventKind::OauthTokenRevoked => ("Vouch::Action::RevokeToken", Vec::new()),
-        // Payload is `TokenExchangeDetails`: `client_id` / `audience`, and
-        // no client address (the exchange audit record carries none).
+        // Payload is the credential envelope (`client_ip`, recorded from the
+        // exchange request's `ClientInfo`) flattened with
+        // `TokenExchangeDetails` (`client_id` / `audience`).
         AuditEventKind::TokenExchange => (
             "Vouch::Action::ExchangeToken",
             vec![

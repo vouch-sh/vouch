@@ -7,6 +7,7 @@
 use crate::algorithm::SigningAlgorithm;
 use crate::component::ComponentIdentifier;
 use crate::error::HttpSigError;
+use crate::sfv::serialize;
 use crate::sfv::types::{SfvBareItem, SfvDictMember, SfvDictionary, SfvItem, SfvParams};
 use crate::signature_base::{
     build_request_base_with_params_str, build_response_base_with_params_str,
@@ -237,7 +238,7 @@ fn build_signature_dict(label: &str, signature: &[u8]) -> String {
             }),
         )],
     };
-    crate::sfv::serialize::serialize_dictionary(&dict)
+    serialize::serialize_dictionary(&dict)
 }
 
 #[cfg(test)]

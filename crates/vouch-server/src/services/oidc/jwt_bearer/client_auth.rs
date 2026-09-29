@@ -6,33 +6,48 @@
 
 use super::jwks::{find_matching_key_with_refresh_client, resolve_client_jwks};
 use super::validate::{
-    JwtAssertionClaims, JwtAssertionHeader, decode_claims_unverified, map_algorithm,
-    parse_assertion_header, validate_client_assertion_algorithm, validate_jwt_assertion,
+    CLOCK_SKEW_SECONDS, JwtAssertionClaims, JwtAssertionHeader, decode_claims_unverified,
+    map_algorithm, parse_assertion_header, validate_client_assertion_algorithm,
+    validate_jwt_assertion,
 };
 use crate::AppState;
+use crate::arrival::ArrivalTime;
 use crate::db::claim::ClaimError;
-use crate::db::{self, JwtAssertionJtiClaim, OAuthClient, TokenEndpointAuthMethod};
-use crate::services::oidc::token::{AuthenticatedClient, ClientAuthError};
+use crate::db::{self, ClientKeys, JwtAssertionJtiClaim, OAuthClient, TokenEndpointAuthMethod};
+use crate::services::oidc::token::ClientAuthError;
 use jiff::{Timestamp, ToSpan};
 use std::sync::Arc;
 
-/// A JTI that has been validated but not yet committed to the database.
+/// A JTI from a validated assertion, about to be committed to the database.
 ///
-/// Call [`PendingJti::commit`] immediately before any grant-state
-/// persistence (`exchange_*` / `store_par_request`) so concurrent replays
-/// serialize on the JTI uniqueness constraint. The commit MUST run after
-/// any validator that returns a retryable error (in particular DPoP
-/// `use_dpop_nonce`, RFC 9449 §4.3) so that those failures leave the JTI
-/// unconsumed and the client can retry with the same assertion.
+/// [`authenticate_client_jwt`] commits it before returning, so an assertion
+/// that authenticates is spent whatever the request's outcome, and
+/// concurrent replays serialize on the JTI uniqueness constraint. RFC 7523
+/// §3 item 7 (a MAY): "The authorization server MAY ensure that JWTs are
+/// not replayed by maintaining the set of used "jti" values for the length
+/// of time for which the JWT would be considered valid based on the
+/// applicable "exp" instant." The assertion audience is the issuer, shared
+/// by every endpoint that accepts one, so a JTI left uncommitted by a
+/// rejected request would stay valid at the others.
 ///
-/// `PendingJti` is not `Clone` and `commit` takes `self` by value, so the
-/// type system prevents double-commit and ensures the value is either
-/// committed or dropped — dropping without committing is the correct
-/// behavior for retryable error paths.
-pub struct PendingJti {
+/// The replay-prevention record's retention horizon is derived from the
+/// validated assertion's own `exp` claim (see [`PendingJti::commit`]),
+/// satisfying RFC 7523 §3 item 7: the used `jti` is retained *"for the
+/// length of time for which the JWT would be considered valid based on the
+/// applicable `exp` instant"* — which, with the validator's clock-skew
+/// tolerance, is `exp + CLOCK_SKEW_SECONDS`. Retaining for `now +
+/// max_lifetime` instead would let the record become cleanup-eligible
+/// while the validator still accepts the assertion, opening a replay
+/// window (see `commit` for the arithmetic).
+struct PendingJti {
     jti: Option<String>,
     client_id: String,
-    max_lifetime: i64,
+    /// The validated assertion's `exp` claim (seconds since the Unix
+    /// epoch). Only the *validated* `exp` is safe to retain against: it
+    /// has already cleared the `exp - iat ≤ max_lifetime` bound in the
+    /// validator, so deriving `expires_at` from it cannot extend the
+    /// record beyond what the assertion's own validity permits.
+    assertion_exp: i64,
 }
 
 /// Witness that a JWT client assertion passed RFC 7523 §3 validation
@@ -57,19 +72,35 @@ impl PendingJti {
     ///
     /// On success returns a [`JwtAssertionJtiClaim`] witness — proof that
     /// the atomic INSERT serialized this caller as the first to claim the
-    /// JTI. The witness is `#[must_use]` so callers must bind it (typically
-    /// to thread it to a downstream consumer like token issuance).
-    ///
-    /// Consumes `self` by value — a `PendingJti` can be committed at most
-    /// once, and dropping it without committing is the intended behavior
-    /// for retryable error paths.
+    /// JTI.
     ///
     /// Returns `Ok(Some(claim))` when the assertion carried a `jti` and
     /// the atomic insert succeeded, `Ok(None)` when the assertion omitted
     /// `jti` (non-FAPI clients — the commit is a no-op), and
     /// `Err(InvalidCredentials)` when a concurrent caller already claimed
     /// the same JTI.
-    pub async fn commit(
+    ///
+    /// # Replay-window invariant (RFC 7523 §3 item 7)
+    ///
+    /// The record's `expires_at` is set to `assertion_exp +
+    /// CLOCK_SKEW_SECONDS`, not `now + max_lifetime`. `assertion_exp` is
+    /// the validated `exp` of the assertion that produced this `PendingJti`
+    /// — it has already cleared the validator's `exp - iat ≤ max_lifetime`
+    /// bound, so this cannot retain the row beyond what the assertion's
+    /// own validity permits. The periodic cleanup task deletes rows as
+    /// soon as `expires_at < now`, while the validator
+    /// ([`validate_jwt_assertion`]) accepts an assertion until `now ≤ exp +
+    /// CLOCK_SKEW_SECONDS`. Deriving `expires_at` from `exp` (rather than
+    /// from `now + max_lifetime`) keeps the record alive until *at least*
+    /// the moment the validator stops accepting the assertion, so a
+    /// cleanup tick can never open a window in which a verbatim replay
+    /// would re-issue a token. The two `CLOCK_SKEW_SECONDS` terms that
+    /// compose the replay-acceptance interval — `exp`-skew at replay time
+    /// (the `+ CLOCK_SKEW_SECONDS` below) and `iat`-skew at mint time
+    /// (already folded into `exp = iat + lifetime`) — are both covered,
+    /// because `exp` is the assertion's actual expiry, not a server-now
+    /// proxy that diverges from it.
+    async fn commit(
         self,
         state: &Arc<AppState>,
     ) -> Result<Option<JwtAssertionJtiClaim>, ClientAuthError> {
@@ -78,8 +109,12 @@ impl PendingJti {
         };
         // Not a database call: a timestamp overflow here is an internal
         // fault, and `DatabaseError` is the variant that renders it as a 500.
-        let expires_at = Timestamp::now()
-            .checked_add(self.max_lifetime.seconds())
+        // `assertion_exp` is the validated `exp` (seconds since epoch);
+        // `CLOCK_SKEW_SECONDS` is the same constant the validator applies
+        // to `exp`, so the record outlives the validator's acceptance
+        // window exactly.
+        let expires_at = Timestamp::from_second(self.assertion_exp)
+            .and_then(|t| t.checked_add(CLOCK_SKEW_SECONDS.seconds()))
             .map_err(|e| ClientAuthError::DatabaseError(e.to_string()))?;
 
         db::store_jwt_assertion_jti(&state.store, &jti, &self.client_id, expires_at)
@@ -120,12 +155,11 @@ impl PendingJti {
 ///
 /// # Returns
 /// On success, returns:
-/// - `AuthenticatedClient` — the resolved OAuth client record;
-/// - `PendingJti` — caller MUST `.commit()` it immediately before grant-state
-///   persistence (`exchange_*` / `store_par_request`). If a later validator
-///   returns a retryable error (notably DPoP `use_dpop_nonce`, RFC 9449 §4.3),
-///   drop the [`PendingJti`] without committing so the client can retry with
-///   the same assertion;
+/// - `OAuthClient` — the resolved OAuth client record;
+/// - the committed [`JwtAssertionJtiClaim`], or `None` when the assertion
+///   carried no `jti`. The JTI is spent by the time this returns, so a
+///   caller that wants a retryable error to leave the assertion reusable
+///   (DPoP `use_dpop_nonce`, RFC 9449 §8) must raise it before calling;
 /// - [`JwtAuthSucceeded`] — the structural witness that RFC 7523 §3 validation
 ///   passed. Thread it forward to construct
 ///   [`crate::services::auth::ClientAuthProof::PrivateKeyJwt`] regardless of
@@ -134,7 +168,8 @@ pub async fn authenticate_client_jwt(
     state: &Arc<AppState>,
     client_assertion: &str,
     client_id_hint: Option<&str>,
-) -> Result<(AuthenticatedClient, PendingJti, JwtAuthSucceeded), ClientAuthError> {
+    arrival: ArrivalTime,
+) -> Result<(OAuthClient, Option<JwtAssertionJtiClaim>, JwtAuthSucceeded), ClientAuthError> {
     // 1. Parse JWT header to get algorithm and kid
     let header = parse_assertion_header(client_assertion).map_err(|e| {
         tracing::debug!("JWT assertion header parse failed: {e}");
@@ -191,13 +226,16 @@ pub async fn authenticate_client_jwt(
     let max_lifetime = state.config().jwt_assertion_max_lifetime_seconds;
 
     // FAPI 2.0 Section 5.3.2.1-8: aud MUST be the issuer URL only.
-    // RFC 7523 Section 3: aud SHOULD be the token endpoint URL.
-    // We accept both issuer and endpoint URLs for non-FAPI clients,
-    // but restrict to issuer-only for FAPI clients.
+    // RFC 7523 Section 3: "The token endpoint URL of the authorization server
+    // MAY be used as a value for an "aud" element". Non-FAPI clients may name
+    // the issuer or any endpoint that authenticates them; FAPI clients the
+    // issuer only.
     let token_endpoint_url = format!("{base_url}/oauth/token");
     let revoke_endpoint_url = format!("{base_url}/oauth/revoke");
     let par_endpoint_url = format!("{base_url}/oauth/par");
     let introspect_endpoint_url = format!("{base_url}/oauth/introspect");
+    let device_endpoint_url = format!("{base_url}/oauth/device");
+    let fido2_challenge_endpoint_url = format!("{base_url}/oauth/fido2/challenge");
 
     let allowed_audiences: Vec<&str> = if client.is_fapi() {
         vec![base_url]
@@ -207,6 +245,8 @@ pub async fn authenticate_client_jwt(
             &revoke_endpoint_url,
             &par_endpoint_url,
             &introspect_endpoint_url,
+            &device_endpoint_url,
+            &fido2_challenge_endpoint_url,
             base_url,
         ]
     };
@@ -218,6 +258,7 @@ pub async fn authenticate_client_jwt(
         algorithm,
         &allowed_audiences,
         max_lifetime,
+        arrival.as_second(),
     )
     .map_err(|e| {
         tracing::debug!(
@@ -245,14 +286,18 @@ pub async fn authenticate_client_jwt(
         return Err(ClientAuthError::InvalidCredentials);
     }
 
-    // 8. Build a PendingJti for the caller to commit after the full
-    //    request succeeds. This avoids consuming the JTI on retryable
-    //    errors like `use_dpop_nonce`.
-    let pending_jti = PendingJti {
+    // 8. Spend the JTI. The record's retention horizon is derived from the
+    //    validated `exp` (see `PendingJti::commit`), not from
+    //    `now + max_lifetime`, so the record outlives the validator's
+    //    `exp + CLOCK_SKEW_SECONDS` acceptance window and a cleanup tick can
+    //    never open a replay window (RFC 7523 §3 item 7).
+    let jti_claim = PendingJti {
         jti: validated.claims.jti.clone(),
         client_id: client.client_id.clone(),
-        max_lifetime,
-    };
+        assertion_exp: validated.claims.exp,
+    }
+    .commit(state)
+    .await?;
 
     // Update last used timestamp
     if let Err(e) = db::update_oauth_client_last_used(&state.store, &client.id).await {
@@ -264,14 +309,7 @@ pub async fn authenticate_client_jwt(
         client.client_id
     );
 
-    Ok((
-        AuthenticatedClient {
-            client,
-            is_public: false,
-        },
-        pending_jti,
-        JwtAuthSucceeded { _private: () },
-    ))
+    Ok((client, jti_claim, JwtAuthSucceeded { _private: () }))
 }
 
 /// RFC 7523 Section 3: For client authentication, `iss` and `sub` MUST both
@@ -328,15 +366,10 @@ async fn resolve_client_decoding_key(
     // to an uncached fetch rather than failing authentication. Reporting a
     // transient DB fault as `invalid_client` tells a client its credentials
     // are wrong and stops it retrying.
-    let jwks_cache = if client
-        .keys
-        .as_ref()
-        .and_then(crate::db::ClientKeys::uri)
-        .is_none()
-    {
+    let jwks_cache = if client.keys.as_ref().and_then(ClientKeys::uri).is_none() {
         None
     } else {
-        crate::db::get_jwks_cache(&state.store, &client.id)
+        db::get_jwks_cache(&state.store, &client.id)
             .await
             .map_err(|e| {
                 tracing::debug!(
@@ -353,11 +386,11 @@ async fn resolve_client_decoding_key(
     // relaxation; private/link-local targets stay blocked.
     let allow_loopback = !state.config().tls_configured();
 
-    let jwks = resolve_client_jwks(
+    let (jwks, origin) = resolve_client_jwks(
         &state.store,
         &client.id,
-        client.keys.as_ref().and_then(crate::db::ClientKeys::inline),
-        client.keys.as_ref().and_then(crate::db::ClientKeys::uri),
+        client.keys.as_ref().and_then(ClientKeys::inline),
+        client.keys.as_ref().and_then(ClientKeys::uri),
         jwks_cache.as_ref(),
         allow_loopback,
         &state.http_client,
@@ -371,16 +404,23 @@ async fn resolve_client_decoding_key(
         ClientAuthError::InvalidCredentials
     })?;
 
-    // Find matching key, with force-refresh on kid-miss for jwks_uri clients
+    // Find matching key, with force-refresh on kid-miss for jwks_uri clients.
+    // `origin` threads `resolve_client_jwks`'s fetch report into the kid-miss
+    // gate, bounding this path to at most one network fetch per request — the
+    // same bound the mTLS self-signed path keeps via its `JwksOrigin::Fetched`
+    // gate. Without it, two sequential 5s JWKS fetches can consume the 10s
+    // `REQUEST_TIMEOUT` and surface as a bare 408 instead of this function's
+    // structured 401 `invalid_client`.
     find_matching_key_with_refresh_client(
         &state.store,
         &client.id,
-        client.keys.as_ref().and_then(crate::db::ClientKeys::uri),
+        client.keys.as_ref().and_then(ClientKeys::uri),
         jwks_cache.as_ref(),
         allow_loopback,
         &state.http_client,
         &jwks,
         header,
+        origin,
     )
     .await
     .map_err(|e| {
@@ -397,19 +437,27 @@ async fn resolve_client_decoding_key(
 )]
 mod tests {
     use super::*;
-    use crate::config::ServerConfig;
+    use crate::config::{BaseUrl, LogFormat, ServerConfig};
     use crate::crypto;
     use crate::crypto::alg::JwsAlgorithm;
+    use crate::crypto::document_crypto::{DocumentCrypto, PlaintextDocumentCrypto};
     use crate::crypto::keys::OidcSigningKey;
-    use crate::db::{self, Pool};
+    use crate::db::documents::jwks_cache::JwksCacheDoc;
+    use crate::db::store::DocumentStore;
+    use crate::db::{self, ClientKeys, Pool};
+    use crate::infra::conn_caps::ConnCapConfig;
+    use crate::services::oidc::jwt_bearer::validate::JwtAudience;
+    use crate::test_utils::{build_test_app_state_with_http_client, test_tls_acceptor};
     use arc_swap::ArcSwap;
     use secrecy::SecretString;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use vouch_common::AaguidPolicy;
 
     /// Build a minimal `Arc<AppState>` backed by an in-memory SQLite database
     /// with migrations applied.
     ///
-    /// Only `state.store` (used by `commit_jti`) is exercised by these tests.
+    /// Only `state.store` (used by `PendingJti::commit`) is exercised by these tests.
     async fn make_state() -> Arc<crate::AppState> {
         let pool = Pool::connect("sqlite::memory:", &db::pool::PoolConfig::default())
             .await
@@ -425,8 +473,7 @@ mod tests {
                 .expect("migrations"),
         }
 
-        let crypto_impl: Arc<dyn crate::crypto::document_crypto::DocumentCrypto> =
-            Arc::new(crate::crypto::document_crypto::PlaintextDocumentCrypto);
+        let crypto_impl: Arc<dyn DocumentCrypto> = Arc::new(PlaintextDocumentCrypto);
         let store = db::store::DocumentStore::new(pool.clone(), crypto_impl.clone());
         let audit = db::audit::AuditStore::new(pool.clone(), crypto_impl.clone());
 
@@ -438,7 +485,7 @@ mod tests {
             jwt_secret: SecretString::from("test_jwt_secret_must_be_at_least_32_characters_long"),
             session_hours: 8,
             idps: Vec::new(),
-            base_url: crate::config::BaseUrl::new("https://test.example.com"),
+            base_url: BaseUrl::new("https://test.example.com"),
             device_code_expires_seconds: 600,
             device_poll_interval_seconds: 5,
             allowed_domains: None,
@@ -483,13 +530,15 @@ mod tests {
             aws_partition: None,
             aws_use_fips_endpoint: None,
             jwt_assertion_max_lifetime_seconds: 300,
-            allowed_aaguids: vouch_common::AaguidPolicy::Any,
-            require_attestation_cert: false,
-            log_format: crate::config::LogFormat::Text,
+            allowed_aaguids: AaguidPolicy::Any,
+            log_format: LogFormat::Text,
             trusted_proxies: Vec::new(),
+            proxy_protocol: false,
+            connection_caps: ConnCapConfig::DEFAULT,
             metrics_bearer_token: None,
             certification_test_token: None,
             extra_ca_certs: None,
+            mtls_client_ca_certs: None,
             pool_config: db::pool::PoolConfig::default(),
             session_cache_max_capacity: 10_000,
             session_cache_ttl_secs: 30,
@@ -521,15 +570,12 @@ mod tests {
             org_keys_cache: Default::default(),
             policy: Default::default(),
             idps: Vec::new(),
+            client_cert_trust: None,
         })
     }
 
     // ========================================================================
-    // PendingJti — commit_jti replay prevention
-    //
-    // The PendingJti pattern delays JTI commitment until after the full
-    // request succeeds, so that retryable errors (e.g. use_dpop_nonce) do
-    // not consume the JTI and prevent the client from retrying.
+    // PendingJti — replay prevention
     // ========================================================================
 
     #[tokio::test]
@@ -538,7 +584,7 @@ mod tests {
         let pending = PendingJti {
             jti: Some("unique-jti-abc".to_string()),
             client_id: "client-1".to_string(),
-            max_lifetime: 300,
+            assertion_exp: Timestamp::now().as_second().saturating_add(300),
         };
 
         let result = pending.commit(&state).await;
@@ -555,7 +601,7 @@ mod tests {
         let first = PendingJti {
             jti: Some("replay-jti-xyz".to_string()),
             client_id: "client-replay".to_string(),
-            max_lifetime: 300,
+            assertion_exp: Timestamp::now().as_second().saturating_add(300),
         };
 
         // First commit succeeds.
@@ -569,7 +615,7 @@ mod tests {
         let second = PendingJti {
             jti: Some("replay-jti-xyz".to_string()),
             client_id: "client-replay".to_string(),
-            max_lifetime: 300,
+            assertion_exp: Timestamp::now().as_second().saturating_add(300),
         };
         let result = second.commit(&state).await;
 
@@ -587,7 +633,7 @@ mod tests {
         let pending = PendingJti {
             jti: None,
             client_id: "client-no-jti".to_string(),
-            max_lifetime: 300,
+            assertion_exp: Timestamp::now().as_second().saturating_add(300),
         };
 
         let result = pending.commit(&state).await;
@@ -598,38 +644,83 @@ mod tests {
         );
     }
 
+    // ========================================================================
+    // Regression: PendingJti::commit MUST derive `expires_at` from the
+    // validated assertion's `exp` (specifically `exp + CLOCK_SKEW_SECONDS`),
+    // NOT from `now + max_lifetime`. If it used `now + max_lifetime`, a row
+    // committed for an assertion minted near `max_lifetime` could become
+    // cleanup-eligible while the validator still accepts the assertion
+    // (until `exp + CLOCK_SKEW_SECONDS`), opening a replay window once a
+    // cleanup tick lands in that interval (RFC 7523 §3 item 7).
+    //
+    // This test is deterministic and needs no real-time advance: under the
+    // fix, `commit` computes `expires_at` purely from `assertion_exp`, so a
+    // commit with a past `exp` yields a past `expires_at` (cleanup-eligible
+    // immediately) and a commit with a future `exp` yields a future
+    // `expires_at` (not cleanup-eligible).
+    // ========================================================================
     #[tokio::test]
-    async fn test_uncommitted_pending_jti_does_not_prevent_later_commit() {
-        // Simulates the use_dpop_nonce retry scenario:
-        // 1. authenticate_client_jwt returns a PendingJti.
-        // 2. The handler returns use_dpop_nonce WITHOUT calling commit.
-        // 3. The client retries with the same assertion.
-        // 4. commit on the retry must succeed because the JTI was never stored.
+    async fn test_commit_expires_at_binds_to_assertion_exp_plus_clock_skew() {
         let state = make_state().await;
+        let now = Timestamp::now().as_second();
 
-        let jti = "retry-jti-001".to_string();
-
-        // First attempt: PendingJti is built but NOT committed (dropped here).
-        let first_pending = PendingJti {
-            jti: Some(jti.clone()),
-            client_id: "client-retry".to_string(),
-            max_lifetime: 300,
+        // (a) Commit a JTI whose `exp` is far in the past. Under the fix the
+        // row's `expires_at = exp + CLOCK_SKEW_SECONDS` is also in the past,
+        // so cleanup must delete it. Under the bug (`now + max_lifetime`),
+        // the row would be `now + 300` seconds in the future and would NOT
+        // be deleted — this assertion is the one that inverts under the bug.
+        let past = PendingJti {
+            jti: Some("exp-bound-jti-past".to_string()),
+            client_id: "client-exp-bind".to_string(),
+            assertion_exp: now.saturating_sub(3600),
         };
-        // Intentionally do NOT call commit — simulates a retryable error path.
-        drop(first_pending);
+        let _claim = past.commit(&state).await.expect("past-exp commit succeeds");
+        let deleted_past = db::delete_expired_jwt_assertion_jtis(&state.store)
+            .await
+            .expect("cleanup must not error");
+        assert_eq!(
+            deleted_past, 1,
+            "JTI committed with a past exp MUST be cleanup-eligible — \
+             this fails if `expires_at` is computed from `now + max_lifetime` \
+             instead of `exp + CLOCK_SKEW_SECONDS` (RFC 7523 §3 item 7)"
+        );
 
-        // Second attempt (retry): commit is called with the same JTI.
-        // Because the first PendingJti was never committed, this must succeed.
-        let second_pending = PendingJti {
-            jti: Some(jti),
-            client_id: "client-retry".to_string(),
-            max_lifetime: 300,
+        // (b) Commit a JTI whose `exp` is in the future. Under the fix the
+        // row's `expires_at = exp + CLOCK_SKEW_SECONDS` is in the future, so
+        // cleanup must NOT delete it, and a verbatim replay must still
+        // collide on the `(jti, client_id)` PRIMARY KEY.
+        let future_exp = now.saturating_add(3600);
+        let future = PendingJti {
+            jti: Some("exp-bound-jti-future".to_string()),
+            client_id: "client-exp-bind".to_string(),
+            assertion_exp: future_exp,
         };
-        let result = second_pending.commit(&state).await;
+        let _claim = future
+            .commit(&state)
+            .await
+            .expect("future-exp commit succeeds");
+        let deleted_future = db::delete_expired_jwt_assertion_jtis(&state.store)
+            .await
+            .expect("cleanup must not error");
+        assert_eq!(
+            deleted_future, 0,
+            "JTI committed with a future exp MUST NOT be cleanup-eligible — \
+             this fails if `expires_at` is computed from `now + max_lifetime` \
+             (the row would be retained but for the wrong reason, and the \
+             replay-window arithmetic would still diverge from `exp`)"
+        );
 
+        // The future-exp row is still present, so a verbatim replay must
+        // collide.
+        let replay = PendingJti {
+            jti: Some("exp-bound-jti-future".to_string()),
+            client_id: "client-exp-bind".to_string(),
+            assertion_exp: future_exp,
+        };
+        let replayed = replay.commit(&state).await;
         assert!(
-            matches!(result, Ok(Some(_))),
-            "commit on retry must succeed when the first PendingJti was not committed: {result:?}"
+            matches!(replayed, Err(ClientAuthError::InvalidCredentials)),
+            "Replay of a still-retained JTI must be rejected: {replayed:?}"
         );
     }
 
@@ -637,9 +728,7 @@ mod tests {
         JwtAssertionClaims {
             iss: iss.to_string(),
             sub: sub.to_string(),
-            aud: super::super::validate::JwtAudience::Single(
-                "https://test.example.com".to_string(),
-            ),
+            aud: JwtAudience::Single("https://test.example.com".to_string()),
             exp: i64::MAX,
             iat: None,
             nbf: None,
@@ -692,7 +781,7 @@ mod tests {
         let kid = client
             .keys
             .as_ref()
-            .and_then(crate::db::ClientKeys::inline)
+            .and_then(ClientKeys::inline)
             .and_then(|set| set.keys.first())
             .and_then(|key| key.kid.as_deref())
             .expect("shared test JWKS has a kid")
@@ -752,7 +841,7 @@ mod tests {
     async fn dual_config_client_still_loads_the_jwks_cache() {
         let state = make_state().await;
         let (mut client, _kid) = make_client_with_jwks(&state).await;
-        client.keys = Some(crate::db::ClientKeys::Uri(
+        client.keys = Some(ClientKeys::Uri(
             "https://client.example/jwks.json".to_string(),
         ));
 
@@ -818,9 +907,7 @@ mod tests {
 
         // Sanity: the cache read now errors.
         assert!(
-            crate::db::get_jwks_cache(&state.store, &client.id)
-                .await
-                .is_err(),
+            db::get_jwks_cache(&state.store, &client.id).await.is_err(),
             "sanity: get_jwks_cache must error after dropping the documents table"
         );
 
@@ -832,6 +919,264 @@ mod tests {
         assert!(
             result.is_ok(),
             "inline-JWKS client must resolve key despite cache DB error: {result:?}"
+        );
+    }
+
+    // ========================================================================
+    // Regression: the RFC 7523 path must perform at most ONE JWKS fetch per
+    // request — the within-request `JwksOrigin::Fetched` gate.
+    //
+    // Before the fix, a `jwks_uri` client whose cache was past the 1h TTL
+    // fetched once in `resolve_client_jwks`, then — on a `kid` miss —
+    // force-refreshed AGAIN unconditionally, so two sequential 5s fetches
+    // could consume the whole 10s `REQUEST_TIMEOUT` and surface a bare 408
+    // instead of the structured 401 `invalid_client` the handler returns.
+    //
+    // `fetch_jwks` requires `https://`, so a plaintext wiremock server cannot
+    // drive this path. These helpers stand up a `tokio-rustls` server on the
+    // loopback address (the SSRF guard permits loopback in the test default
+    // where TLS is not configured) and count how many connections it accepts
+    // — the mutation-killing signal the mTLS sibling test
+    // (`test_authenticate_client_mtls_self_signed_skips_retry_when_resolution_already_fetched`)
+    // could not assert without a counting harness. Mirrors the TLS pattern in
+    // `infra::jwks::tests` and `handlers::oidc::tests::rfc9101`.
+    // ========================================================================
+
+    /// P-256 EC key x/y coordinates (base64url, RFC 7517 test vectors) for the
+    /// counting test's kid-present JWKS — a parseable, buildable EC key the
+    /// kid-miss force-refresh successfully verifies against.
+    const EC_X: &str = "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU";
+    const EC_Y: &str = "x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0";
+
+    /// A `reqwest` client that performs a real TLS handshake but does not
+    /// verify the server certificate, so the loopback mock's self-signed cert
+    /// is accepted. Kept off the shared `AppState::http_client` to avoid
+    /// weakening any other test's trust store.
+    fn https_client_trusting_any_cert() -> reqwest::Client {
+        reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("build test https client")
+    }
+
+    /// Directly seed a `JwksCacheDoc` at a given age — `db::upsert_jwks_cache`
+    /// always stamps `cached_at: now`, so a TTL-boundary test needs this
+    /// instead. Mirrors `services::oidc::token::tests::seed_jwks_cache`.
+    async fn seed_jwks_cache(
+        store: &DocumentStore,
+        parent_id: &str,
+        value: serde_json::Value,
+        age_seconds: i64,
+    ) {
+        let doc = JwksCacheDoc {
+            value,
+            cached_at: jiff::Timestamp::now()
+                .checked_sub(jiff::SignedDuration::from_secs(age_seconds))
+                .expect("cache age must be representable"),
+        };
+        store
+            .upsert(&format!("jwks_cache:{parent_id}"), &doc)
+            .await
+            .expect("seed jwks cache");
+    }
+
+    /// Spawn a loopback HTTPS server that serves `body` on every connection
+    /// and counts how many TCP connections it accepts, returning the URL.
+    /// Each accepted connection is one JWKS fetch initiated by the handler,
+    /// so the counter is the mutation-killing signal: it must read `1` after
+    /// a request that, before the fix, performed two sequential fetches.
+    async fn spawn_counting_jwks_server(body: String, accepted: Arc<AtomicU64>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let acceptor = test_tls_acceptor();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let port = listener.local_addr().expect("local_addr").port();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\
+             \r\n\
+             {body}",
+            body.len()
+        );
+        tokio::spawn(async move {
+            loop {
+                let (stream, _peer) = match listener.accept().await {
+                    Ok(s) => s,
+                    Err(_) => return,
+                };
+                accepted.fetch_add(1, Ordering::SeqCst);
+                let acceptor = acceptor.clone();
+                let response = response.clone();
+                tokio::spawn(async move {
+                    let mut tls = match acceptor.accept(stream).await {
+                        Ok(t) => t,
+                        Err(_) => return,
+                    };
+                    // Drain the (small, body-less) GET so the kernel does not
+                    // RST before reqwest reads the response. Bounded so a
+                    // misbehaving peer cannot wedge the server task. Named
+                    // bindings (not `let _ =`) keep `#[must_use]` results
+                    // acknowledged without triggering `let_underscore_must_use`.
+                    let mut buf = [0u8; 1024];
+                    let _read =
+                        tokio::time::timeout(std::time::Duration::from_secs(1), tls.read(&mut buf))
+                            .await;
+                    let _write = tls.write_all(response.as_bytes()).await;
+                    let _shutdown = tls.shutdown().await;
+                });
+            }
+        });
+        format!("https://127.0.0.1:{port}/jwks")
+    }
+
+    /// Helper: build a `jwks_uri` client pointing at `server_url`, registered
+    /// for `private_key_jwt`, with no inline JWKS and no secret.
+    async fn make_uri_client(
+        state: &Arc<crate::AppState>,
+        server_url: String,
+        email: &str,
+    ) -> OAuthClient {
+        use crate::test_utils::{TestClientSpec, create_test_client, create_test_user};
+        let user = create_test_user(&state.store, email).await;
+        let created = create_test_client(
+            &state.store,
+            &user.id,
+            TestClientSpec {
+                token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
+                jwks_uri: Some(server_url),
+                with_secret: false,
+                ..Default::default()
+            },
+        )
+        .await;
+        db::get_oauth_client_by_id(&state.store, &created.app_id)
+            .await
+            .expect("db lookup")
+            .expect("client exists")
+    }
+
+    /// Regression for the RFC 7523 two-fetch race: a `jwks_uri` client whose
+    /// cache is past the 1h TTL (so `resolve_client_jwks` fetches — fetch #1)
+    /// and whose served JWKS lacks the assertion's `kid` (so `find_matching_key`
+    /// misses) must NOT perform a second force-refresh fetch in the same request.
+    ///
+    /// Before the fix, the kid-miss path unconditionally called `fetch_and_cache`
+    /// again, so a host that dribbled both 5s fetches could consume the whole
+    /// 10s `REQUEST_TIMEOUT` and surface a bare 408 in place of this function's
+    /// structured 401 `invalid_client`. The within-request `JwksOrigin::Fetched`
+    /// gate bounds the path to one fetch; this test counts the fetches.
+    #[tokio::test]
+    async fn resolve_client_decoding_key_bounded_to_one_jwks_fetch() {
+        let accepted = Arc::new(AtomicU64::new(0));
+        // Kid-less but valid JWKS: fetch #1 succeeds, `find_matching_key`
+        // misses, and the gate must skip fetch #2.
+        let server_url = spawn_counting_jwks_server(
+            serde_json::json!({"keys":[]}).to_string(),
+            accepted.clone(),
+        )
+        .await;
+
+        let http_client = https_client_trusting_any_cert();
+        let state = build_test_app_state_with_http_client(Vec::new(), |_| {}, http_client).await;
+        let client = make_uri_client(&state, server_url, "counting@example.com").await;
+
+        // Seed a STALE cache (2h old: past the 1h TTL so fetch #1 runs, within
+        // the 24h stale window so a failed fetch would still fall back). The
+        // seeded value lacks the kid, matching what the server serves. The
+        // snapshot `resolve_client_decoding_key` loads HERE is the pre-fetch
+        // one, so the 10s rate-limit gate (which reads `cached_at`) does not
+        // suppress fetch #2 either — the within-request `JwksOrigin` gate is
+        // the only bound, which is exactly the bug scenario.
+        seed_jwks_cache(
+            &state.store,
+            &client.id,
+            serde_json::json!({"keys":[]}),
+            7200,
+        )
+        .await;
+
+        let header = JwtAssertionHeader {
+            alg: JwsAlgorithm::Es256,
+            kid: Some("missing-kid".to_string()),
+        };
+        let result = resolve_client_decoding_key(&state, &client, &header).await;
+
+        // The kid is absent from every JWKS the path sees, so the terminal
+        // result is the structured 401 `invalid_client` — never a 408 (which
+        // a dropped handler future would produce).
+        assert!(
+            matches!(result, Err(ClientAuthError::InvalidCredentials)),
+            "a kid-miss must resolve to InvalidCredentials (401), not a transport \
+             timeout or other error: {result:?}"
+        );
+        // The fix's mechanism: exactly one network fetch (fetch #1). Without
+        // the gate, the kid-miss force-refresh would issue fetch #2 against
+        // the same server, so this counter would read 2.
+        let fetches = accepted.load(Ordering::SeqCst);
+        assert_eq!(
+            fetches, 1,
+            "the RFC 7523 path must perform exactly one JWKS fetch per request \
+             (got {fetches}); a second fetch can race the 10s REQUEST_TIMEOUT and \
+             surface a 408 instead of the structured 401 invalid_client"
+        );
+    }
+
+    /// Control for the gate above: when `resolve_client_jwks` served the JWKS
+    /// from a FRESH cache (`JwksOrigin::NoFetch` — no fetch happened), the
+    /// kid-miss force-refresh must STILL proceed, fetching the rotated key
+    /// exactly once. This proves the gate only suppresses a redundant SECOND
+    /// fetch within a request, not the legitimate single refresh the path
+    /// exists for (RFC 7523 key rotation: client signs with a new `kid` before
+    /// the server's 1h cache has expired).
+    #[tokio::test]
+    async fn resolve_client_decoding_key_refreshes_once_when_origin_is_no_fetch() {
+        let accepted = Arc::new(AtomicU64::new(0));
+        // The server serves the kid the assertion uses; the FRESH cache lacks
+        // it, so resolution serves a kid-less set from cache (`NoFetch`), the
+        // kid-miss force-refresh fetches the rotated set, and `find_matching_key`
+        // finds the key — the happy key-rotation path.
+        let server_url = spawn_counting_jwks_server(
+            serde_json::json!({
+                "keys": [{
+                    "kty": "EC",
+                    "crv": "P-256",
+                    "kid": "missing-kid",
+                    "x": EC_X,
+                    "y": EC_Y
+                }]
+            })
+            .to_string(),
+            accepted.clone(),
+        )
+        .await;
+
+        let http_client = https_client_trusting_any_cert();
+        let state = build_test_app_state_with_http_client(Vec::new(), |_| {}, http_client).await;
+        let client = make_uri_client(&state, server_url, "rotating@example.com").await;
+
+        // FRESH cache (60s old: within the 1h TTL) holding a kid-less set —
+        // `resolve_client_jwks` serves it from cache (`NoFetch`), so the gate
+        // does NOT fire and the force-refresh proceeds.
+        seed_jwks_cache(&state.store, &client.id, serde_json::json!({"keys":[]}), 60).await;
+
+        let header = JwtAssertionHeader {
+            alg: JwsAlgorithm::Es256,
+            kid: Some("missing-kid".to_string()),
+        };
+        let result = resolve_client_decoding_key(&state, &client, &header).await;
+
+        assert!(
+            result.is_ok(),
+            "the rotated key must verify after a single force-refresh: {result:?}"
+        );
+        let fetches = accepted.load(Ordering::SeqCst);
+        assert_eq!(
+            fetches, 1,
+            "the legitimate key-rotation refresh fetches exactly once (got {fetches})"
         );
     }
 }

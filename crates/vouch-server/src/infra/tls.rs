@@ -15,6 +15,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::config::ServerConfig;
+use crate::crypto::pem;
 
 /// Build TLS configuration from ServerConfig.
 pub fn build_tls_config(config: &ServerConfig) -> Result<RustlsConfig> {
@@ -29,12 +30,12 @@ pub fn build_tls_config(config: &ServerConfig) -> Result<RustlsConfig> {
         .ok_or_else(|| anyhow::anyhow!("TLS private key not configured"))?;
 
     let cert_was_base64 = !cert_pem.trim().starts_with("-----BEGIN");
-    let cert_bytes = crate::crypto::pem::decode_base64_pem(cert_pem)
+    let cert_bytes = pem::decode_base64_pem(cert_pem)
         .context("Failed to decode TLS certificate")?
         .into_bytes();
 
     let key_was_base64 = !key_secret.expose_secret().trim().starts_with("-----BEGIN");
-    let key_bytes = crate::crypto::pem::decode_base64_pem(key_secret.expose_secret())
+    let key_bytes = pem::decode_base64_pem(key_secret.expose_secret())
         .context("Failed to decode TLS private key")?
         .into_bytes();
 
@@ -71,10 +72,10 @@ pub fn reload_tls_from_config(
     cert: &str,
     key: &SecretString,
 ) -> Result<()> {
-    let cert_bytes = crate::crypto::pem::decode_base64_pem(cert)
+    let cert_bytes = pem::decode_base64_pem(cert)
         .context("Failed to decode TLS certificate")?
         .into_bytes();
-    let key_bytes = crate::crypto::pem::decode_base64_pem(key.expose_secret())
+    let key_bytes = pem::decode_base64_pem(key.expose_secret())
         .context("Failed to decode TLS private key")?
         .into_bytes();
 
@@ -183,10 +184,10 @@ pub(crate) fn parse_cert_and_key_pem(
     Vec<rustls::pki_types::CertificateDer<'static>>,
     rustls::pki_types::PrivateKeyDer<'static>,
 )> {
-    let cert_bytes = crate::crypto::pem::decode_base64_pem(cert_pem)
+    let cert_bytes = pem::decode_base64_pem(cert_pem)
         .context("Failed to decode TLS certificate")?
         .into_bytes();
-    let key_bytes = crate::crypto::pem::decode_base64_pem(key_secret.expose_secret())
+    let key_bytes = pem::decode_base64_pem(key_secret.expose_secret())
         .context("Failed to decode TLS private key")?
         .into_bytes();
 
@@ -247,24 +248,7 @@ mod tests {
         assert!(validate_pem(pem, "PRIVATE KEY").is_ok());
     }
 
-    // Throwaway self-signed P-256 cert + PKCS#8 key, generated for tests only.
-    const TEST_CERT_PEM: &str = "-----BEGIN CERTIFICATE-----\n\
-MIIBiDCCAS2gAwIBAgIUAzsi4KkqvGaw6UTFs4DrQEe2KWwwCgYIKoZIzj0EAwIw\n\
-GTEXMBUGA1UEAwwOdm91Y2gtdGxzLXRlc3QwHhcNMjYwNjEwMTYxMjM3WhcNMzYw\n\
-NjA3MTYxMjM3WjAZMRcwFQYDVQQDDA52b3VjaC10bHMtdGVzdDBZMBMGByqGSM49\n\
-AgEGCCqGSM49AwEHA0IABAOqxc9YgMgXu2BGQ3KOgFNtVxG7pdencd5TOnjrr6zJ\n\
-nPi66MVoVlQ9bi3ydlRJ1ce7HHOEui/G0U0aoDJtgVmjUzBRMB0GA1UdDgQWBBQW\n\
-yEA6dBvaxTzloNCzXuJLG5z9/DAfBgNVHSMEGDAWgBQWyEA6dBvaxTzloNCzXuJL\n\
-G5z9/DAPBgNVHRMBAf8EBTADAQH/MAoGCCqGSM49BAMCA0kAMEYCIQC9cwWPeNND\n\
-WFbJkO8dqEVE69Xzdj+NMgenQFOJsOW2yAIhAISz7zP/KDBC6jVhH7qJTR9E7Rnr\n\
-3wT8S2AL3BFHW6+2\n\
------END CERTIFICATE-----\n";
-
-    const TEST_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
-MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQghUolejGt3e2SfwZJ\n\
-BRRya1VbXh8fYhiJfLvrVBbs/lqhRANCAAQDqsXPWIDIF7tgRkNyjoBTbVcRu6XX\n\
-p3HeUzp466+syZz4uujFaFZUPW4t8nZUSdXHuxxzhLovxtFNGqAybYFZ\n\
------END PRIVATE KEY-----\n";
+    use crate::test_utils::{TEST_TLS_CERT_PEM as TEST_CERT_PEM, TEST_TLS_KEY_PEM as TEST_KEY_PEM};
 
     #[test]
     fn test_build_server_config_parses_real_pem() {
@@ -276,6 +260,52 @@ p3HeUzp466+syZz4uujFaFZUPW4t8nZUSdXHuxxzhLovxtFNGqAybYFZ\n\
             "valid PEM cert/key must build a ServerConfig, got: {:?}",
             config.err()
         );
+    }
+
+    /// RFC 7592 §5: "The server MUST support TLS 1.2 [RFC5246] and MAY support
+    /// additional transport-layer security mechanisms meeting its security
+    /// requirements."
+    ///
+    /// The listener negotiates TLS 1.3 and TLS 1.2 only. TLS 1.2 support is
+    /// carried by the BCP 195 provider's ECDHE+AEAD suites — drop those and
+    /// TLS 1.2 stops being negotiable even though the version is still listed.
+    #[test]
+    fn test_tls_provider_supports_tls12_per_rfc7592() {
+        let provider = bcp195_crypto_provider();
+
+        let tls12_suites: Vec<_> = provider
+            .cipher_suites
+            .iter()
+            .filter(|cs| cs.version().version == rustls::ProtocolVersion::TLSv1_2)
+            .collect();
+        assert!(
+            !tls12_suites.is_empty(),
+            "RFC 7592 §5 requires TLS 1.2 support, but no TLS 1.2 cipher suite is offered"
+        );
+
+        let tls13_suites: Vec<_> = provider
+            .cipher_suites
+            .iter()
+            .filter(|cs| cs.version().version == rustls::ProtocolVersion::TLSv1_3)
+            .collect();
+        assert!(
+            !tls13_suites.is_empty(),
+            "TLS 1.3 is the preferred version and must remain available"
+        );
+
+        // MAY support additional mechanisms — but nothing below TLS 1.2, which
+        // BCP 195 forbids.
+        for suite in &provider.cipher_suites {
+            let version = suite.version().version;
+            assert!(
+                matches!(
+                    version,
+                    rustls::ProtocolVersion::TLSv1_2 | rustls::ProtocolVersion::TLSv1_3
+                ),
+                "no suite may predate TLS 1.2, found {version:?} for {:?}",
+                suite.suite()
+            );
+        }
     }
 
     #[test]

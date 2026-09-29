@@ -8,8 +8,10 @@ use vouch_cli::{tr, tr_println};
 use vouch_common::GitHubStatusResponse;
 
 use crate::commands::credential::github::check_status;
-use crate::config::Config;
+use crate::exit_code::CliError;
 use crate::install_path::resolve_install_path;
+use crate::server_url::ServerUrl;
+use crate::{git_config, utils};
 
 /// Run the GitHub setup command.
 ///
@@ -20,13 +22,7 @@ use crate::install_path::resolve_install_path;
 /// # Arguments
 /// * `host` - The GitHub host to configure (default: "github.com")
 /// * `configure` - If true, automatically configure git; if false, just show instructions
-pub(crate) async fn run(host: &str, configure: bool) -> Result<()> {
-    // Load config to get server URL
-    let config = Config::load().with_context(|| tr!("setup-err-load-config"))?;
-    let server = config
-        .server_url()
-        .with_context(|| tr!("setup-err-not-configured"))?;
-
+pub(crate) async fn run(server: &ServerUrl, host: &str, configure: bool) -> Result<()> {
     tr_println!("setup-github-header");
     println!();
 
@@ -43,7 +39,10 @@ pub(crate) async fn run(host: &str, configure: bool) -> Result<()> {
 
             if !status.connected {
                 println!();
-                tr_println!("setup-github-org-not-connected-block", server = server);
+                tr_println!(
+                    "setup-github-org-not-connected-block",
+                    server = server.as_str()
+                );
                 return Ok(());
             }
 
@@ -57,7 +56,19 @@ pub(crate) async fn run(host: &str, configure: bool) -> Result<()> {
             }
         }
         Err(e) => {
-            if e.to_string().contains("not authenticated") {
+            // Match the typed error, not a stale substring: `check_status`
+            // returns `anyhow::Error` whose `Display` is whatever `reason`
+            // string `CliError::NotAuthenticated` carried (e.g.
+            // "no session token — run 'vouch login' to authenticate" from
+            // `session::resolve_token`, or any server 401 reason), which the
+            // old `contains("not authenticated")` guard missed for every
+            // realistic logged-out path. Matching the type is robust to
+            // translation and future rewording, like `register.rs` already
+            // does. Other typed errors (`PermissionDenied`, `NetworkError`)
+            // fall through to the "Could not check" branch.
+            if e.downcast_ref::<CliError>()
+                .is_some_and(|cli| matches!(cli, CliError::NotAuthenticated { .. }))
+            {
                 tr_println!("setup-github-not-logged-in-block");
                 return Ok(());
             }
@@ -93,12 +104,10 @@ pub(crate) async fn run(host: &str, configure: bool) -> Result<()> {
         }
 
         // Configure git
-        if !crate::git_config::set_global(&config_key, &helper_command)
+        if !git_config::set_global(&config_key, &helper_command)
             .with_context(|| tr!("setup-github-err-run-config"))?
         {
-            return Err(
-                crate::exit_code::CliError::ConfigError(tr!("setup-github-err-helper")).into(),
-            );
+            return Err(CliError::ConfigError(tr!("setup-github-err-helper")).into());
         }
 
         tr_println!(
@@ -129,7 +138,7 @@ pub(crate) async fn run(host: &str, configure: bool) -> Result<()> {
 /// (`/Users/John Smith/.cargo/bin/vouch`), and single quotes make every other
 /// character literal to the shell.
 fn credential_helper_command(vouch_path: &std::path::Path) -> String {
-    let quoted_path = crate::utils::shell_single_quote(&vouch_path.display().to_string());
+    let quoted_path = utils::shell_single_quote(&vouch_path.display().to_string());
     format!("!{quoted_path} credential github")
 }
 
@@ -166,7 +175,7 @@ fn print_status(status: &GitHubStatusResponse) {
 /// warn before overwriting it.
 fn detect_existing_helper(host: &str) -> Option<String> {
     let config_key = format!("credential.https://{}.helper", host);
-    crate::git_config::get_global(&config_key).filter(|helper| !helper.contains("vouch"))
+    git_config::get_global(&config_key).filter(|helper| !helper.contains("vouch"))
 }
 
 #[cfg(test)]

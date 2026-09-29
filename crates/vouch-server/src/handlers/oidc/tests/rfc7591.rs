@@ -8,6 +8,10 @@
 //! Reference: <https://www.rfc-editor.org/rfc/rfc7591>
 
 use super::helpers::*;
+use crate::crypto;
+use crate::db::{self, RegistrationSource};
+use crate::services::auth::NoClientAuth;
+use crate::test_utils::{TEST_JWK_EC_X, TEST_JWK_EC_Y, TEST_JWK_RSA_N};
 
 // ========================================================================
 // Helper
@@ -17,7 +21,16 @@ use super::helpers::*;
 async fn bearer_token(app_state: &std::sync::Arc<crate::AppState>) -> String {
     let user = create_test_user(&app_state.store, "rfc7591-test@example.com").await;
     let auth_id = create_test_authenticator(&app_state.store, &user.id).await;
-    let token = create_test_session(app_state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        app_state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     format!("Bearer {token}")
 }
 
@@ -26,13 +39,81 @@ async fn bearer_token_unique(app_state: &std::sync::Arc<crate::AppState>, suffix
     let email = format!("rfc7591-{suffix}@example.com");
     let user = create_test_user(&app_state.store, &email).await;
     let auth_id = create_test_authenticator(&app_state.store, &user.id).await;
-    let token = create_test_session(app_state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        app_state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     format!("Bearer {token}")
 }
 
 // ========================================================================
 // Authentication
 // ========================================================================
+
+// A deactivated account's still-live access token cannot register a client
+// it would own. RFC 6750 §3.1 `invalid_token`: "The access token provided is
+// expired, revoked, malformed, or invalid for other reasons. The resource
+// SHOULD respond with the HTTP 401 (Unauthorized) status code."
+#[tokio::test]
+async fn test_rfc7591_deactivated_user_token_cannot_register() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "rfc7591-deactivated@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert!(
+        db::update_user_active_status(&state.store, &user.id, false)
+            .await
+            .expect("deactivate")
+    );
+
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "Deactivated Owner",
+    });
+    let resp = http_request_full(
+        &app,
+        "POST",
+        "/oauth/register",
+        Some(body.to_string()),
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", &format!("Bearer {token}")),
+        ],
+    )
+    .await;
+
+    assert_eq!(resp.status, StatusCode::UNAUTHORIZED, "{}", resp.body);
+    let error: serde_json::Value = serde_json::from_str(&resp.body).expect("JSON");
+    assert_eq!(error["error"], "invalid_token", "{}", resp.body);
+    let challenge = resp
+        .headers
+        .get("www-authenticate")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    assert!(challenge.contains("invalid_token"), "{challenge}");
+    let owned = db::get_oauth_clients_for_user(&state.store, &user.id)
+        .await
+        .expect("list clients");
+    assert!(
+        owned.is_empty(),
+        "no client is created for a deactivated owner"
+    );
+}
 
 #[tokio::test]
 async fn test_rfc7591_open_registration_succeeds_without_bearer() {
@@ -98,11 +179,20 @@ async fn test_rfc7591_register_rejects_expired_token() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "rfc7591-expired@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Delete the session to simulate revocation/expiry
-    let token_hash = crate::crypto::hash_token(&token);
-    crate::db::delete_session_by_token_hash(&state.store, &token_hash)
+    let token_hash = crypto::hash_token(&token);
+    db::delete_session_by_token_hash(&state.store, &token_hash)
         .await
         .expect("Failed to delete session");
 
@@ -276,6 +366,7 @@ async fn test_rfc7591_register_service_account() {
 
     let body = serde_json::json!({
         "grant_types": ["client_credentials"],
+        "response_types": [],
         "client_name": "CI Pipeline"
     });
 
@@ -291,6 +382,38 @@ async fn test_rfc7591_register_service_account() {
     let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
     let grant_types = json["grant_types"].as_array().unwrap();
     assert!(grant_types.iter().any(|g| g == "client_credentials"));
+}
+
+/// RFC 7591 §2: a server supporting `grant_types`/`response_types` "SHOULD take
+/// steps to ensure that a client cannot register itself into an inconsistent
+/// state". Declaring `response_types: ["code"]` with no grant that can redeem
+/// a code is the state the reverse half of the consistency check (added by
+/// a8bae30a) refuses at registration. This guards that the fix's update-path
+/// legacy tolerance does NOT relax the registration direction.
+#[tokio::test]
+async fn test_rfc7591_rejects_code_response_without_authorization_code_grant() {
+    let (app, _state) = test_app().await;
+
+    let body = serde_json::json!({
+        "grant_types": ["client_credentials"],
+        "response_types": ["code"],
+    });
+    let (status, body) = http_post_json(&app, "/oauth/register", &body.to_string(), &[]).await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a new `client_credentials` + `response_types: [\"code\"]` registration \
+         must be rejected by the reverse consistency check: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_client_metadata");
+    assert!(
+        json["error_description"]
+            .as_str()
+            .is_some_and(|d| d.contains("response_types includes 'code'")),
+        "the rejection must come from the reverse consistency check: {body}"
+    );
 }
 
 #[tokio::test]
@@ -336,6 +459,7 @@ async fn test_rfc7591_response_cache_headers() {
 
     let body = serde_json::json!({
         "grant_types": ["client_credentials"],
+        "response_types": [],
         "client_name": "Cache Test"
     });
 
@@ -373,6 +497,7 @@ async fn test_rfc7591_response_content_type() {
 
     let body = serde_json::json!({
         "grant_types": ["client_credentials"],
+        "response_types": [],
         "client_name": "Content Type Test"
     });
 
@@ -668,6 +793,7 @@ async fn test_rfc7591_response_includes_issued_at_and_client_uri() {
 
     let body = serde_json::json!({
         "grant_types": ["client_credentials"],
+        "response_types": [],
         "client_name": "Issued At Test"
     });
 
@@ -741,7 +867,7 @@ async fn test_rfc7591_registered_client_persisted_in_db() {
     assert_eq!(db_client.name, "Persisted App");
     assert_eq!(
         db_client.registration_source,
-        Some(crate::db::RegistrationSource::Dynamic)
+        Some(RegistrationSource::Dynamic)
     );
     assert_eq!(db_client.software_id.as_deref(), Some("persist-test-sw"));
     assert_eq!(db_client.software_version.as_deref(), Some("2.0.0"));
@@ -900,6 +1026,7 @@ async fn test_rfc7591_rejects_both_jwks_and_jwks_uri() {
 
     let body = serde_json::json!({
         "grant_types": ["client_credentials"],
+        "response_types": [],
         "jwks": {"keys": [{"kty": "RSA", "n": "abc", "e": "AQAB"}]},
         "jwks_uri": "https://example.com/.well-known/jwks.json"
     });
@@ -947,6 +1074,7 @@ async fn test_rfc7591_rejects_private_key_jwt_without_jwks() {
 
     let body = serde_json::json!({
         "grant_types": ["client_credentials"],
+        "response_types": [],
         "token_endpoint_auth_method": "private_key_jwt"
     });
 
@@ -970,6 +1098,7 @@ async fn test_rfc7591_rejects_invalid_contact_email() {
 
     let body = serde_json::json!({
         "grant_types": ["client_credentials"],
+        "response_types": [],
         "contacts": ["not-an-email"]
     });
 
@@ -993,6 +1122,7 @@ async fn test_rfc7591_rejects_http_client_uri() {
 
     let body = serde_json::json!({
         "grant_types": ["client_credentials"],
+        "response_types": [],
         "client_uri": "http://example.com"
     });
 
@@ -1016,6 +1146,7 @@ async fn test_rfc7591_rejects_fapi_without_private_key_jwt() {
 
     let body = serde_json::json!({
         "grant_types": ["client_credentials"],
+        "response_types": [],
         "dpop_bound_access_tokens": true,
         "token_endpoint_auth_method": "client_secret_basic"
     });
@@ -1037,7 +1168,7 @@ async fn test_rfc7591_rejects_fapi_without_private_key_jwt() {
 // FAPI 2.0 JWKS algorithm usability — a client that registers as FAPI 2.0
 // with a JWKS containing no key usable under ES256/PS256/EdDSA would be
 // unable to authenticate at the token endpoint from the moment it's created.
-// See JwkSet::has_fapi_allowed_key.
+// See JwkSet::has_client_assertion_key.
 // ========================================================================
 
 #[tokio::test]
@@ -1050,7 +1181,7 @@ async fn test_rfc7591_rejects_fapi_registration_with_rs256_only_jwks() {
         "dpop_bound_access_tokens": true,
         "token_endpoint_auth_method": "private_key_jwt",
         "jwks": {
-            "keys": [{"kty": "RSA", "alg": "RS256", "n": "n", "e": "AQAB"}]
+            "keys": [{"kty": "RSA", "alg": "RS256", "n": TEST_JWK_RSA_N, "e": "AQAB"}]
         }
     });
 
@@ -1083,7 +1214,7 @@ async fn test_rfc7591_accepts_fapi_registration_with_unpinned_rsa_jwks() {
         "dpop_bound_access_tokens": true,
         "token_endpoint_auth_method": "private_key_jwt",
         "jwks": {
-            "keys": [{"kty": "RSA", "n": "n", "e": "AQAB"}]
+            "keys": [{"kty": "RSA", "n": TEST_JWK_RSA_N, "e": "AQAB"}]
         }
     });
 
@@ -1138,6 +1269,102 @@ async fn test_rfc7591_accepts_fapi_mtls_registration_with_rs256_alg_pinned_x5c_j
     );
 }
 
+/// RFC 7591 §3.2.1: "the authorization server MUST return all registered
+/// metadata about this client." A `tls_client_auth` registration carrying a
+/// certificate-subject DN must echo that DN in the 201 response, and the four
+/// unused RFC 8705 §2.1.2 parameters plus the cert-bound flag must be omitted.
+#[tokio::test]
+async fn test_rfc7591_registration_response_echoes_tls_client_auth_identity() {
+    let (app, _state) = test_app().await;
+
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "mTLS Identity Echo Client",
+        "token_endpoint_auth_method": "tls_client_auth",
+        "tls_client_auth_subject_dn": "CN=mtls-echo.example.com"
+    });
+
+    let (status, body) = http_post_json(&app, "/oauth/register", &body.to_string(), &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "tls_client_auth registration must succeed: {body}"
+    );
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    // RFC 8705 §2.1.2: the registered subject DN is echoed verbatim.
+    assert_eq!(
+        json["tls_client_auth_subject_dn"].as_str(),
+        Some("CN=mtls-echo.example.com"),
+        "the registered subject DN must be echoed: {json}"
+    );
+    // The four unused RFC 8705 §2.1.2 parameters and the cert-bound flag are
+    // absent (None → omitted), and so is the unrelated DPoP flag.
+    for field in [
+        "tls_client_auth_san_dns",
+        "tls_client_auth_san_uri",
+        "tls_client_auth_san_ip",
+        "tls_client_auth_san_email",
+        "tls_client_certificate_bound_access_tokens",
+        "dpop_bound_access_tokens",
+    ] {
+        assert!(
+            json.get(field).is_none_or(serde_json::Value::is_null),
+            "{field} must be absent when not registered, got: {json}"
+        );
+    }
+}
+
+/// RFC 7591 §3.2.1 must-echo applies to `tls_client_certificate_bound_access_tokens`
+/// (RFC 8705 §3) too: a cert-bound `self_signed_tls_client_auth` registration
+/// must echo `tls_client_certificate_bound_access_tokens: true`, and the five
+/// unused RFC 8705 §2.1.2 parameters must be omitted.
+#[tokio::test]
+async fn test_rfc7591_registration_response_echoes_tls_certificate_bound_flag() {
+    let (app, _state) = test_app().await;
+
+    let cert_der = make_test_cert_der("rfc7591-cert-bound-echo");
+    let x5c_b64 = base64::engine::general_purpose::STANDARD.encode(&cert_der);
+
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "Cert-Bound Echo Client",
+        "token_endpoint_auth_method": "self_signed_tls_client_auth",
+        "tls_client_certificate_bound_access_tokens": true,
+        "jwks": {
+            "keys": [{"kty": "RSA", "alg": "RS256", "x5c": [x5c_b64]}]
+        }
+    });
+
+    let (status, body) = http_post_json(&app, "/oauth/register", &body.to_string(), &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "cert-bound mTLS registration must succeed: {body}"
+    );
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    // RFC 8705 §3: the certificate-bound flag is echoed as a JSON boolean.
+    assert_eq!(
+        json["tls_client_certificate_bound_access_tokens"], true,
+        "tls_client_certificate_bound_access_tokens must be echoed when set: {json}"
+    );
+    // The five RFC 8705 §2.1.2 parameters and the DPoP flag are absent.
+    for field in [
+        "tls_client_auth_subject_dn",
+        "tls_client_auth_san_dns",
+        "tls_client_auth_san_uri",
+        "tls_client_auth_san_ip",
+        "tls_client_auth_san_email",
+        "dpop_bound_access_tokens",
+    ] {
+        assert!(
+            json.get(field).is_none_or(serde_json::Value::is_null),
+            "{field} must be absent when not registered, got: {json}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn test_rfc7591_accepts_non_fapi_registration_with_rs256_only_jwks() {
     // RFC 7523 does not restrict client-assertion algorithms; non-FAPI
@@ -1150,7 +1377,7 @@ async fn test_rfc7591_accepts_non_fapi_registration_with_rs256_only_jwks() {
         "redirect_uris": ["https://example.com/callback"],
         "token_endpoint_auth_method": "private_key_jwt",
         "jwks": {
-            "keys": [{"kty": "RSA", "alg": "RS256", "n": "n", "e": "AQAB"}]
+            "keys": [{"kty": "RSA", "alg": "RS256", "n": TEST_JWK_RSA_N, "e": "AQAB"}]
         }
     });
 
@@ -1167,6 +1394,83 @@ async fn test_rfc7591_accepts_non_fapi_registration_with_rs256_only_jwks() {
         StatusCode::CREATED,
         "RS256 must remain unrestricted for a non-FAPI registration: {body}"
     );
+}
+
+// RFC 7591 §3.2.2: "invalid_client_metadata  The value of one of the client
+// metadata fields is invalid and the server has rejected this request."
+// A standard-profile private_key_jwt client whose only key is an encryption
+// key can never sign a client assertion, so registration refuses it just as
+// the RFC 7592 PUT does (test_rfc7592_put_rejects_unusable_jwks_for_non_fapi_private_key_jwt_client).
+#[tokio::test]
+async fn test_rfc7591_rejects_non_fapi_registration_with_enc_only_jwks() {
+    let (app, state) = test_app().await;
+    let auth = bearer_token_unique(&state, "nonfapi-enc-only").await;
+
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "token_endpoint_auth_method": "private_key_jwt",
+        "jwks": {
+            "keys": [{"kty": "EC", "x": TEST_JWK_EC_X, "y": TEST_JWK_EC_Y, "crv": "P-256", "use": "enc"}]
+        }
+    });
+
+    let (status, body) = http_post_json(
+        &app,
+        "/oauth/register",
+        &body.to_string(),
+        &[("Authorization", &auth)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an encryption-only JWKS cannot authenticate a private_key_jwt client: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_client_metadata");
+}
+
+// RFC 7518 §6.2.1.2 and §6.3.1: an EC key's coordinates "MUST be the full
+// size of a coordinate for the curve", and "The following members MUST be
+// present for RSA public keys". A key failing either can never verify a
+// client assertion, so registration refuses it with invalid_client_metadata
+// (RFC 7591 §3.2.2) instead of accepting a client the token endpoint rejects.
+#[tokio::test]
+async fn test_rfc7591_rejects_jwks_whose_only_key_cannot_be_built() {
+    let (app, state) = test_app().await;
+    let short_x = "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRV";
+    let off_curve_y = TEST_JWK_EC_X;
+    let malformed = [
+        serde_json::json!({"kty": "EC", "alg": "ES256", "crv": "P-256"}),
+        serde_json::json!({"kty": "EC", "crv": "P-256", "x": short_x, "y": TEST_JWK_EC_Y}),
+        serde_json::json!({"kty": "EC", "crv": "P-256", "x": TEST_JWK_EC_X, "y": off_curve_y}),
+        serde_json::json!({"kty": "RSA", "alg": "PS256"}),
+        serde_json::json!({"kty": "RSA", "n": "n", "e": "AQAB"}),
+        serde_json::json!({"kty": "OKP", "crv": "Ed25519", "x": "AAAA"}),
+    ];
+    for (i, key) in malformed.iter().enumerate() {
+        let auth = bearer_token_unique(&state, &format!("unbuildable-{i}")).await;
+        let body = serde_json::json!({
+            "redirect_uris": ["https://example.com/callback"],
+            "token_endpoint_auth_method": "private_key_jwt",
+            "jwks": {"keys": [key]}
+        });
+        let (status, body) = http_post_json(
+            &app,
+            "/oauth/register",
+            &body.to_string(),
+            &[("Authorization", &auth)],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{key} cannot verify a client assertion, so registration refuses it: {body}"
+        );
+        let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(json["error"], "invalid_client_metadata");
+    }
 }
 
 #[tokio::test]
@@ -1270,7 +1574,7 @@ async fn test_rfc7591_rejects_self_signed_registration_with_certificate_less_jwk
     let body = serde_json::json!({
         "redirect_uris": ["https://example.com/callback"],
         "token_endpoint_auth_method": "self_signed_tls_client_auth",
-        "jwks": {"keys": [{"kty": "RSA", "n": "n", "e": "AQAB"}]}
+        "jwks": {"keys": [{"kty": "RSA", "n": TEST_JWK_RSA_N, "e": "AQAB"}]}
     });
 
     let (status, body) = http_post_json(
@@ -1346,6 +1650,373 @@ async fn test_rfc7591_accepts_tls_client_auth_registration_without_jwks() {
     );
 }
 
+// RFC 7591 §2: "The authorization server MAY reject any requested client
+// metadata values ... by returning an error response as described in Section
+// 3.2.2." Without client CAs a tls_client_auth client could never
+// authenticate (RFC 8705 §2.1 needs a validated chain), so it is refused.
+#[tokio::test]
+async fn test_rfc7591_refuses_tls_client_auth_without_client_ca() {
+    let (app, state) = test_app_without_client_ca().await;
+    let auth = bearer_token_unique(&state, "tls-client-auth-no-ca").await;
+
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "token_endpoint_auth_method": "tls_client_auth",
+        "tls_client_auth_subject_dn": "CN=test-client"
+    });
+
+    let (status, body) = http_post_json(
+        &app,
+        "/oauth/register",
+        &body.to_string(),
+        &[("Authorization", &auth)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).expect("JSON");
+    assert_eq!(error["error"], "invalid_client_metadata", "{body}");
+}
+
+#[tokio::test]
+async fn test_rfc7591_empty_optional_strings_are_not_stored() {
+    // An empty string is a third state next to "absent" and "set" that means
+    // nothing the two do not, so it is not persisted. These four fields have no
+    // validator to reject one, unlike logo_uri or application_type.
+    let (app, state) = test_app().await;
+    let auth = bearer_token_unique(&state, "empty-optional-strings").await;
+
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "",
+        "scope": "",
+        "software_id": "",
+        "software_version": ""
+    });
+
+    let (status, resp) = http_post_json(
+        &app,
+        "/oauth/register",
+        &body.to_string(),
+        &[("Authorization", &auth)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "Registration failed: {resp}");
+
+    let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+    let client_id = json["client_id"].as_str().expect("client_id");
+
+    let stored = db::get_oauth_client_by_client_id(&state.store, client_id)
+        .await
+        .expect("lookup ok")
+        .expect("client exists");
+
+    // The name column is non-nullable, so an emptied client_name takes the same
+    // fallback an omitted one does.
+    assert_eq!(stored.name, "Unnamed Client");
+    assert_eq!(stored.software_id, None, "software_id is indexed");
+    assert_eq!(stored.software_version, None);
+
+    // `scope` lives in the cosmetic-metadata blob, where absent means no key.
+    let metadata = stored
+        .registration_metadata
+        .unwrap_or(serde_json::Value::Null);
+    assert!(
+        metadata.get("scope").is_none(),
+        "an empty scope must not be stored: {metadata}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7591_empty_arrays_are_not_stored() {
+    // Same reasoning as the empty strings: an empty list is not a different
+    // state from an absent one. `post_logout_redirect_uris` already did this.
+    let (app, state) = test_app().await;
+    let auth = bearer_token_unique(&state, "empty-arrays").await;
+
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "contacts": [],
+        "request_uris": [],
+        "post_logout_redirect_uris": []
+    });
+
+    let (status, resp) = http_post_json(
+        &app,
+        "/oauth/register",
+        &body.to_string(),
+        &[("Authorization", &auth)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "Registration failed: {resp}");
+
+    let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+    let client_id = json["client_id"].as_str().expect("client_id");
+
+    let stored = db::get_oauth_client_by_client_id(&state.store, client_id)
+        .await
+        .expect("lookup ok")
+        .expect("client exists");
+
+    assert_eq!(stored.request_uris, None);
+    assert_eq!(stored.post_logout_redirect_uris, None);
+    let metadata = stored
+        .registration_metadata
+        .unwrap_or(serde_json::Value::Null);
+    assert!(
+        metadata.get("contacts").is_none(),
+        "an empty contacts list must not be stored: {metadata}"
+    );
+}
+
+/// An empty-string member of an array is refused outright rather than dropped,
+/// because each of these fields has a validator that an empty value fails.
+#[tokio::test]
+async fn test_rfc7591_rejects_empty_array_members() {
+    for (field, value) in [
+        ("contacts", serde_json::json!(["", "", ""])),
+        ("contacts", serde_json::json!(["", "ok@example.com"])),
+        ("request_uris", serde_json::json!([""])),
+        ("grant_types", serde_json::json!([""])),
+    ] {
+        let (app, state) = test_app().await;
+        let auth = bearer_token_unique(&state, &format!("empty-member-{field}")).await;
+        let mut body = serde_json::json!({"redirect_uris": ["https://example.com/callback"]});
+        body[field] = value.clone();
+
+        let (status, resp) = http_post_json(
+            &app,
+            "/oauth/register",
+            &body.to_string(),
+            &[("Authorization", &auth)],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{field}={value} must be refused, got: {resp}"
+        );
+        let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+        assert_eq!(json["error"], "invalid_client_metadata");
+    }
+}
+
+/// The five RFC 8705 §2.1.2 certificate-subject parameters, each of which must
+/// carry the empty-is-absent rule.
+const IDENTITY_FIELDS: [&str; 5] = [
+    "tls_client_auth_subject_dn",
+    "tls_client_auth_san_dns",
+    "tls_client_auth_san_email",
+    "tls_client_auth_san_uri",
+    "tls_client_auth_san_ip",
+];
+
+/// A legal value for each parameter, so a single-field registration is accepted.
+const IDENTITY_VALUES: [&str; 5] = [
+    "CN=test-client",
+    "client.example.com",
+    "client@example.com",
+    "https://client.example.com/",
+    "198.51.100.7",
+];
+
+/// Every one of the five parameters carries the empty-is-absent rule, not just
+/// the first. A missing `deserialize_with` on any of them would leave that
+/// field satisfying the one-field rule with an unmatchable empty subject.
+#[tokio::test]
+async fn test_rfc7591_empty_is_absent_for_every_identity_field() {
+    for field in IDENTITY_FIELDS {
+        let (app, state) = test_app().await;
+        let auth = bearer_token_unique(&state, &format!("empty-{field}")).await;
+        let mut body = serde_json::json!({
+            "redirect_uris": ["https://example.com/callback"],
+            "token_endpoint_auth_method": "tls_client_auth"
+        });
+        body[field] = serde_json::json!("");
+
+        let (status, resp) = http_post_json(
+            &app,
+            "/oauth/register",
+            &body.to_string(),
+            &[("Authorization", &auth)],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "an empty {field} must not count as present, got: {resp}"
+        );
+    }
+}
+
+/// The converse: each parameter on its own is a complete registration, so the
+/// empty-is-absent rule has not started swallowing legitimate values.
+#[tokio::test]
+async fn test_rfc7591_each_identity_field_suffices_alone() {
+    for (field, value) in IDENTITY_FIELDS.iter().zip(IDENTITY_VALUES) {
+        let (app, state) = test_app().await;
+        let auth = bearer_token_unique(&state, &format!("single-{field}")).await;
+        let mut body = serde_json::json!({
+            "redirect_uris": ["https://example.com/callback"],
+            "token_endpoint_auth_method": "tls_client_auth"
+        });
+        body[*field] = serde_json::json!(value);
+
+        let (status, resp) = http_post_json(
+            &app,
+            "/oauth/register",
+            &body.to_string(),
+            &[("Authorization", &auth)],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "{field}={value} alone must be accepted, got: {resp}"
+        );
+    }
+}
+
+/// A `tls_client_auth` registration naming no certificate subject at all is
+/// refused end-to-end, not just by the validator in isolation.
+#[tokio::test]
+async fn test_rfc7591_rejects_tls_client_auth_with_no_identity_field() {
+    let (app, state) = test_app().await;
+    let auth = bearer_token_unique(&state, "tls-client-auth-no-identity").await;
+
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "token_endpoint_auth_method": "tls_client_auth"
+    });
+
+    let (status, resp) = http_post_json(
+        &app,
+        "/oauth/register",
+        &body.to_string(),
+        &[("Authorization", &auth)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "tls_client_auth without a certificate subject must be refused: {resp}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_client_metadata");
+}
+
+/// The fields that deliberately do NOT read an empty value as absent, because
+/// each already has a validator that an empty value fails. Turning these into
+/// silent defaults would hide a client bug that is currently reported as
+/// `invalid_client_metadata`.
+#[tokio::test]
+async fn test_rfc7591_validated_fields_still_reject_empty_string() {
+    for field in [
+        "application_type",
+        "token_endpoint_auth_method",
+        "client_uri",
+        "logo_uri",
+        "tos_uri",
+        "policy_uri",
+        "jwks_uri",
+        "id_token_signed_response_alg",
+        "authorization_signed_response_alg",
+        "introspection_signed_response_alg",
+        "request_object_signing_alg",
+        "userinfo_signed_response_alg",
+    ] {
+        let (app, state) = test_app().await;
+        let auth = bearer_token_unique(&state, &format!("reject-empty-{field}")).await;
+        let mut body = serde_json::json!({"redirect_uris": ["https://example.com/callback"]});
+        body[field] = serde_json::json!("");
+
+        let (status, resp) = http_post_json(
+            &app,
+            "/oauth/register",
+            &body.to_string(),
+            &[("Authorization", &auth)],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "an empty {field} must be reported, not defaulted, got: {resp}"
+        );
+        let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+        assert_eq!(json["error"], "invalid_client_metadata", "field: {field}");
+    }
+}
+
+#[tokio::test]
+async fn test_rfc7591_rejects_tls_client_auth_with_two_identity_fields() {
+    // RFC 8705 §2.1.2: "A client using the "tls_client_auth" authentication
+    // method MUST use exactly one of the below metadata parameters to indicate
+    // the certificate subject value that the authorization server is to expect
+    // when authenticating the respective client."
+    let (app, state) = test_app().await;
+    let auth = bearer_token_unique(&state, "tls-client-auth-two-identities").await;
+
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "token_endpoint_auth_method": "tls_client_auth",
+        "tls_client_auth_subject_dn": "CN=test-client",
+        "tls_client_auth_san_dns": "client.example.com"
+    });
+
+    let (status, body) = http_post_json(
+        &app,
+        "/oauth/register",
+        &body.to_string(),
+        &[("Authorization", &auth)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "two certificate-subject parameters must be rejected: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_client_metadata");
+}
+
+#[tokio::test]
+async fn test_rfc7591_rejects_tls_client_auth_with_empty_identity_field() {
+    // RFC 7591 says nothing about empty JSON string values, so this follows the
+    // RFC 6749 §3.1/§3.2 rule the form-encoded endpoints apply: an empty value
+    // reads as omitted. An empty subject would match no certificate, leaving a
+    // client that RFC 8705 §2.1.2's one-field rule exists to prevent.
+    let (app, state) = test_app().await;
+    let auth = bearer_token_unique(&state, "tls-client-auth-empty-identity").await;
+
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "token_endpoint_auth_method": "tls_client_auth",
+        "tls_client_auth_subject_dn": ""
+    });
+
+    let (status, body) = http_post_json(
+        &app,
+        "/oauth/register",
+        &body.to_string(),
+        &[("Authorization", &auth)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an empty certificate-subject parameter must not count as present: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_client_metadata");
+}
+
 // ========================================================================
 // JWKS write-path shape validation — a type-invalid member (e.g. a boolean
 // "alg") must be rejected at registration through the same typed
@@ -1362,7 +2033,7 @@ async fn test_rfc7591_rejects_jwks_with_type_invalid_key_member() {
         "redirect_uris": ["https://example.com/callback"],
         "token_endpoint_auth_method": "private_key_jwt",
         "jwks": {
-            "keys": [{"kty": "EC", "alg": true}]
+            "keys": [{"kty": "EC", "x": TEST_JWK_EC_X, "y": TEST_JWK_EC_Y, "alg": true}]
         }
     });
 
@@ -1394,6 +2065,7 @@ async fn test_rfc7591_ignores_unknown_fields() {
 
     let body = serde_json::json!({
         "grant_types": ["client_credentials"],
+        "response_types": [],
         "client_name": "Unknown Fields Test",
         "future_extension_field": "should be ignored",
         "another_unknown_123": {"nested": true},
@@ -1507,31 +2179,7 @@ async fn test_rfc7591_e2e_registered_client_auth_code_flow() {
     let user = create_test_user(&state.store, "e2e-dynamic-user@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
 
-    let scope_set = ScopeSet::parse("openid email");
-    let code_params = AuthorizationCodeParams {
-        client_id,
-        redirect_uri: "https://example.com/callback",
-        user_id: &user.id,
-        email: &user.email,
-        authenticator_id: &auth_id,
-        aaguid: None,
-        scope: &scope_set,
-        nonce: None,
-        code_challenge: None,
-        code_challenge_method: None,
-        resource: None,
-        acr_values: None,
-        dpop_jkt: None,
-        auth_code_lifetime_seconds:
-            crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-        authorization_details: None,
-        auth_time: None,
-        par: crate::db::ParConsumptionProof::not_pushed(),
-    };
-
-    let code = issue_authorization_code(&state, code_params)
-        .await
-        .expect("Failed to issue authorization code");
+    let code = issue_code(&state, &user, &auth_id, client_id, TestCodeSpec::default()).await;
 
     // Step 3: Exchange the code for tokens using the dynamic client's credentials
     let auth_header = dynamic_client.basic_auth_header();
@@ -1702,8 +2350,17 @@ async fn test_rfc7591_mtls_bound_token_with_matching_cert_authenticates() {
 
     let cert_der = make_test_cert_der("rfc7591-mtls-match");
     let thumbprint = cert_thumbprint(&cert_der);
-    let token =
-        create_test_session_with_mtls(&state, &user.id, &user.email, &auth_id, &thumbprint).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Mtls(&thumbprint),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let body = serde_json::json!({
         "redirect_uris": ["https://example.com/callback"],
@@ -1748,8 +2405,17 @@ async fn test_rfc7591_mtls_bound_token_with_wrong_cert_rejected() {
 
     let cert_a_der = make_test_cert_der("rfc7591-bound-a");
     let thumbprint_a = cert_thumbprint(&cert_a_der);
-    let token =
-        create_test_session_with_mtls(&state, &user.id, &user.email, &auth_id, &thumbprint_a).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Mtls(&thumbprint_a),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Present a different certificate than the one the token is bound to.
     let cert_b_der = make_test_cert_der("rfc7591-presented-b");
@@ -1790,8 +2456,17 @@ async fn test_rfc7591_mtls_bound_token_without_cert_rejected() {
 
     let cert_der = make_test_cert_der("rfc7591-nocert");
     let thumbprint = cert_thumbprint(&cert_der);
-    let token =
-        create_test_session_with_mtls(&state, &user.id, &user.email, &auth_id, &thumbprint).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Mtls(&thumbprint),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let body = serde_json::json!({
         "redirect_uris": ["https://example.com/callback"],
@@ -1831,7 +2506,16 @@ async fn test_rfc7591_plain_token_with_cert_presented_still_works() {
 
     let user = create_test_user(&state.store, "rfc7591-plain-cert@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let cert_der = make_test_cert_der("rfc7591-plain");
     let body = serde_json::json!({
@@ -1863,7 +2547,7 @@ async fn test_rfc7591_plain_token_with_cert_presented_still_works() {
 // ========================================================================
 // RFC 9449 §7.2 — DPoP nonce refresh at the registration endpoint
 //
-// A DPoP-bound token (cnf.jkt) presented with a replayed nonce at
+// A DPoP-bound token (cnf.jkt) presented with a nonce the server no longer holds at
 // POST /oauth/register MUST get a 401 `use_dpop_nonce` response carrying a
 // fresh `DPoP-Nonce` header so the client can retry. Before the fix,
 // `ServiceError::ApiWithHeaders` (returned by `extract_resource_token`) fell
@@ -1882,15 +2566,25 @@ async fn test_rfc7591_dpop_bound_token_with_replayed_nonce() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let (key, jwk) = generate_dpop_key_pair();
     let jkt = dpop_jkt(&jwk);
-    let token = create_test_session_with_dpop(&state, &user.id, &user.email, &auth_id, &jkt).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Dpop(&jkt),
+            ..Default::default()
+        },
+    )
+    .await;
 
-    // Generate and consume a nonce to simulate replay.
-    let nonce = crate::db::generate_dpop_nonce(&state.store, 300)
+    // Delete the nonce so the request presents one the server does not hold.
+    let nonce = db::generate_dpop_nonce(&state.store, 300)
         .await
         .expect("generate nonce");
-    crate::db::validate_and_consume_dpop_nonce(&state.store, &nonce)
+    db::delete_dpop_nonce(&state.store, &nonce)
         .await
-        .expect("consume nonce");
+        .expect("delete nonce");
 
     // DPoP proof reuses the consumed nonce.
     let register_uri = format!("{}/oauth/register", state.config().base_url);
@@ -1962,18 +2656,28 @@ async fn test_rfc7591_dpop_bound_token_with_replayed_nonce() {
     );
 }
 
-/// RFC 9449 retry flow at the registration endpoint: a valid request
-/// consumes the nonce; replaying the nonce yields `401 use_dpop_nonce` + a
-/// fresh nonce; retrying with the fresh nonce succeeds with 201 Created.
+/// RFC 9449 retry flow at the registration endpoint: a nonce the server does
+/// not know yields `401 use_dpop_nonce` and a fresh nonce, and retrying with
+/// that nonce succeeds with 201 Created.
 #[tokio::test]
-async fn test_rfc7591_dpop_nonce_replay_retry_flow_succeeds() {
+async fn test_rfc7591_dpop_unknown_nonce_retry_flow_succeeds() {
     let (app, state) = test_app().await;
 
     let user = create_test_user(&state.store, "rfc7591-dpop-retry@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let (key, jwk) = generate_dpop_key_pair();
     let jkt = dpop_jkt(&jwk);
-    let token = create_test_session_with_dpop(&state, &user.id, &user.email, &auth_id, &jkt).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Dpop(&jkt),
+            ..Default::default()
+        },
+    )
+    .await;
     let register_uri = format!("{}/oauth/register", state.config().base_url);
     let auth = format!("DPoP {token}");
 
@@ -1983,7 +2687,7 @@ async fn test_rfc7591_dpop_nonce_replay_retry_flow_succeeds() {
     });
 
     // 1. Valid request with a fresh nonce → 201 Created (consumes the nonce).
-    let nonce = crate::db::generate_dpop_nonce(&state.store, 300)
+    let nonce = db::generate_dpop_nonce(&state.store, 300)
         .await
         .expect("generate nonce");
     let proof1 = create_dpop_proof(
@@ -2013,7 +2717,7 @@ async fn test_rfc7591_dpop_nonce_replay_retry_flow_succeeds() {
         resp1.body
     );
 
-    // 2. Replay the same nonce (fresh jti) → 401 use_dpop_nonce + fresh nonce.
+    // 2. An unknown nonce → use_dpop_nonce + a fresh nonce.
     let body2 = serde_json::json!({
         "redirect_uris": ["https://example.com/callback"],
         "client_name": "DPoP Retry 2"
@@ -2023,7 +2727,7 @@ async fn test_rfc7591_dpop_nonce_replay_retry_flow_succeeds() {
         &jwk,
         "POST",
         &register_uri,
-        Some(&nonce),
+        Some("unknown-nonce"),
         Some(&token),
     );
     let resp2 = http_request_full(
@@ -2041,7 +2745,7 @@ async fn test_rfc7591_dpop_nonce_replay_retry_flow_succeeds() {
     assert_eq!(
         resp2.status,
         StatusCode::UNAUTHORIZED,
-        "replayed nonce must be rejected with 401: {}",
+        "an unknown nonce must be rejected: {}",
         resp2.body
     );
     let fresh_nonce = resp2
@@ -2051,7 +2755,7 @@ async fn test_rfc7591_dpop_nonce_replay_retry_flow_succeeds() {
         .expect("DPoP-Nonce header on use_dpop_nonce");
     assert_ne!(
         fresh_nonce, nonce,
-        "fresh nonce must differ from replayed one"
+        "fresh nonce must differ from the one held"
     );
 
     // 3. Retry with the fresh nonce (fresh jti) → 201 Created.
@@ -2084,5 +2788,88 @@ async fn test_rfc7591_dpop_nonce_replay_retry_flow_succeeds() {
         StatusCode::CREATED,
         "retry with fresh nonce should succeed: {}",
         resp3.body
+    );
+}
+
+// RFC 7591 §2 maps the OAuth client type onto registration: `"none": The
+// client is a public client as defined in OAuth 2.0, Section 2.1, and does
+// not have a client secret`. RFC 8252 §8.4: "Except when using a mechanism
+// like Dynamic Client Registration [RFC7591] to provision per-instance
+// secrets, native apps are classified as public clients", and servers "MUST
+// record the client type in the client registration details". So the method
+// a client registers is the method it is held to, whatever
+// `application_type` it declared: it is stored as requested, and a no-auth
+// proof exists only for `none`.
+#[tokio::test]
+async fn test_rfc7591_registered_auth_method_is_stored_and_enforced_as_requested() {
+    let (app, state) = test_app().await;
+    let jwks = serde_json::json!({ "keys": [{
+        "kty": "EC", "crv": "P-256",
+        "x": "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU",
+        "y": "x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0",
+        "use": "sig", "alg": "ES256"
+    }]});
+    let mut registered = 0;
+    for declared in [None, Some("native"), Some("web")] {
+        for method in [
+            "none",
+            "client_secret_basic",
+            "client_secret_post",
+            "private_key_jwt",
+        ] {
+            let auth = bearer_token_unique(&state, &format!("{declared:?}-{method}")).await;
+            let mut body = serde_json::json!({
+                "redirect_uris": ["https://example.com/callback"],
+                "token_endpoint_auth_method": method,
+                "client_name": "Auth method probe",
+            });
+            if let Some(t) = declared {
+                body["application_type"] = serde_json::json!(t);
+            }
+            if method == "private_key_jwt" {
+                body["jwks"] = jwks.clone();
+            }
+            let (status, resp) = http_post_json(
+                &app,
+                "/oauth/register",
+                &body.to_string(),
+                &[("Authorization", &auth)],
+            )
+            .await;
+            if status != StatusCode::CREATED {
+                continue;
+            }
+            registered += 1;
+            let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+            let client_id = json["client_id"].as_str().expect("client_id");
+            let stored = db::get_oauth_client_by_client_id(&state.store, client_id)
+                .await
+                .expect("lookup")
+                .expect("stored");
+            let expected: db::TokenEndpointAuthMethod = method.parse().expect("known method");
+            assert_eq!(
+                stored.token_endpoint_auth_method, expected,
+                "declared={declared:?}: the registered method must be stored as requested"
+            );
+            assert_eq!(
+                json.get("client_secret").is_some(),
+                matches!(
+                    expected,
+                    db::TokenEndpointAuthMethod::ClientSecretBasic
+                        | db::TokenEndpointAuthMethod::ClientSecretPost
+                ),
+                "declared={declared:?} method={method}: a secret is issued exactly for the \
+                 secret methods"
+            );
+            assert_eq!(
+                NoClientAuth::for_public_client(&stored).is_ok(),
+                expected == db::TokenEndpointAuthMethod::None,
+                "declared={declared:?} method={method}: a no-auth proof exists only for none"
+            );
+        }
+    }
+    assert!(
+        registered >= 8,
+        "expected most combinations to register, got {registered}"
     );
 }

@@ -2,13 +2,14 @@
 //! Database module tests, one file per domain.
 //!
 //! Shared fixtures (`test_db`, `seed_test_org`, `test_org_doc`, the
-//! `TEST_ORG_*` constants) live here in the module root. New tests go in
+//! `update_scim_group` edits, the `TEST_ORG_*` constants) live here in the module root. New tests go in
 //! the file whose scope matches; add a new file (and list it here) when
 //! none does:
 //!
+//! - [`arrival_anchored_expiry`] — Request-deciding expiry comparisons read the caller's instant, not an ambient clock.
 //! - [`audit_events`] — Auth/key/device audit event logging and expiry.
 //! - [`authenticators`] — Authenticator (security key) CRUD and counting.
-//! - [`cascade_delete`] — Cascade deletion of users and OAuth clients with their dependent rows.
+//! - [`cascade_delete`] — Cascade deletion of users and OAuth clients with their dependent rows, and the transfer of org-scoped applications when their creator is deleted or deactivated.
 //! - [`challenge_states`] — FIDO2 challenge state single-use enforcement.
 //! - [`concurrency`] — Concurrent-replay and CAS regressions for single-use primitives and state-transition helpers.
 //! - [`device_auth`] — Device authorization grant (RFC 8628): request lifecycle, polling, atomic consumption, single-use semantics.
@@ -20,7 +21,8 @@
 //! - [`oauth_secrets`] — OAuth client secret cap/floor OCC invariants.
 //! - [`occ_modify`] — OCC read-modify-write conversions: every mutation path uses `store.modify`, not blind get+update.
 //! - [`oidc_state`] — Upstream OIDC login state: lifecycle plus atomic consume / concurrent-replay coverage.
-//! - [`scim_filters`] — SCIM filter parsing and application-side co/sw matching, including multibyte input.
+//! - [`org_domain`] — `UserDoc.org_domain`: populated by both production writers, resolved and lazily backfilled by `get_user_org_domain`.
+//! - [`scim_filters`] — SCIM list filter types (which attributes and operators are evaluated) and application-side co/sw matching.
 //! - [`scim_groups`] — SCIM group lifecycle and membership.
 //! - [`scim_provisioning`] — SCIM user creation: duplicate/uniqueness handling, in-transaction domain-ownership validation, deterministic IDs, cross-backend races.
 //! - [`scim_tokens`] — Org API (SCIM) tokens: cap enforcement, expiry, scopes.
@@ -36,9 +38,12 @@
 use std::sync::Arc;
 
 use super::*;
-use crate::crypto::document_crypto::PlaintextDocumentCrypto;
+use crate::crypto::document_crypto::{DocumentCrypto, PlaintextDocumentCrypto};
 use crate::db::audit::AuditStore;
+use crate::db::documents::organization::OrganizationDoc;
 use crate::db::store::DocumentStore;
+use crate::db::{GroupListFilter, UserListFilter};
+use crate::scim_filter;
 use crate::test_utils::{TestClientSpec, create_test_client};
 
 /// Create an in-memory SQLite database for testing.
@@ -62,11 +67,62 @@ async fn test_db() -> (DocumentStore, AuditStore) {
             .expect("Failed to run migrations"),
     }
 
-    let crypto: Arc<dyn crate::crypto::document_crypto::DocumentCrypto> =
-        Arc::new(PlaintextDocumentCrypto);
+    let crypto: Arc<dyn DocumentCrypto> = Arc::new(PlaintextDocumentCrypto);
     let store = DocumentStore::new(pool.clone(), crypto.clone());
     let audit = AuditStore::new(pool, crypto);
     (store, audit)
+}
+
+/// An [`update_scim_group`] edit that sets a group's attributes and keeps
+/// its members.
+fn set_group_attributes(
+    display_name: &str,
+    external_id: Option<&str>,
+) -> impl Fn(&mut ScimGroupState) -> Result<(), std::convert::Infallible> {
+    let display_name = display_name.to_string();
+    let external_id = external_id.map(String::from);
+    move |group| {
+        group.display_name.clone_from(&display_name);
+        group.external_id.clone_from(&external_id);
+        Ok(())
+    }
+}
+
+/// An [`update_scim_group`] edit that replaces a group's members.
+fn set_group_members(
+    user_ids: &[&str],
+) -> impl Fn(&mut ScimGroupState) -> Result<(), std::convert::Infallible> {
+    let user_ids: std::collections::BTreeSet<String> =
+        user_ids.iter().map(|id| (*id).to_string()).collect();
+    move |group| {
+        group.members.clone_from(&user_ids);
+        Ok(())
+    }
+}
+
+/// An [`update_scim_group`] edit that adds one member.
+fn add_group_member(
+    user_id: &str,
+) -> impl Fn(&mut ScimGroupState) -> Result<(), std::convert::Infallible> {
+    let user_id = user_id.to_string();
+    move |group| {
+        group.members.insert(user_id.clone());
+        Ok(())
+    }
+}
+
+/// A Users list filter, parsed the way the SCIM handler parses `filter`.
+fn user_filter(filter: &str) -> UserListFilter {
+    scim_filter::parse(filter, "urn:ietf:params:scim:schemas:core:2.0:User")
+        .and_then(UserListFilter::try_from)
+        .expect("valid Users filter")
+}
+
+/// A Groups list filter, parsed the way the SCIM handler parses `filter`.
+fn group_filter(filter: &str) -> GroupListFilter {
+    scim_filter::parse(filter, "urn:ietf:params:scim:schemas:core:2.0:Group")
+        .and_then(GroupListFilter::try_from)
+        .expect("valid Groups filter")
 }
 
 const TEST_ORG_ID: &str = "test-org";
@@ -90,8 +146,8 @@ async fn seed_test_org(store: &DocumentStore) {
 /// A minimal org document owning `domain` — no name, creator, additional
 /// domains, or subdomain. The shape every org fixture in this file needs;
 /// construct through here instead of inlining the literal.
-fn test_org_doc(domain: &str) -> crate::db::documents::organization::OrganizationDoc {
-    crate::db::documents::organization::OrganizationDoc {
+fn test_org_doc(domain: &str) -> OrganizationDoc {
+    OrganizationDoc {
         domain: domain.to_string(),
         name: None,
         created_by_user_id: None,
@@ -100,6 +156,7 @@ fn test_org_doc(domain: &str) -> crate::db::documents::organization::Organizatio
     }
 }
 
+mod arrival_anchored_expiry;
 mod audit_events;
 mod authenticators;
 mod cascade_delete;
@@ -114,6 +171,7 @@ mod oauth_clients;
 mod oauth_secrets;
 mod occ_modify;
 mod oidc_state;
+mod org_domain;
 mod scim_filters;
 mod scim_groups;
 mod scim_provisioning;

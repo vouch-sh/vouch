@@ -14,6 +14,7 @@
 //!   or JWKS routes.
 
 use super::helpers::*;
+use crate::crypto::alg::JwsAlgorithm;
 use crate::infra::resource_metadata::WELL_KNOWN_SUFFIX;
 use crate::services::oidc::protected_resource::{PROTECTED_RESOURCE_PREFIXES, SIGNED_METADATA_TYP};
 use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED, UnparsedPublicKey};
@@ -173,8 +174,15 @@ async fn test_rfc9728_required_fields_present() {
         "FAPI 2.0 forbids query-string tokens"
     );
 
-    // DPoP posture.
-    assert_eq!(m["dpop_bound_access_tokens_required"], true);
+    // DPoP posture: Vouch issues and accepts both sender-constrained
+    // (DPoP/mTLS) and unbound Bearer tokens, so the resource does NOT
+    // always require DPoP-bound tokens. Per RFC 9728 §2, `false` is the
+    // spec-defined default and accurately describes the runtime policy.
+    assert_eq!(
+        m["dpop_bound_access_tokens_required"], false,
+        "Vouch accepts unbound Bearer tokens; advertising `true` would \
+         contradict the resource's runtime behavior (RFC 9728 §2)"
+    );
     let dpop_algs = m["dpop_signing_alg_values_supported"]
         .as_array()
         .expect("dpop_signing_alg_values_supported must be array");
@@ -294,7 +302,7 @@ async fn test_rfc9728_dpop_signing_algs_match_fapi_allowed() {
     assert_eq!(status, StatusCode::OK);
     let outer: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
 
-    let source: BTreeSet<String> = crate::crypto::alg::JwsAlgorithm::FAPI_ALLOWED
+    let source: BTreeSet<String> = JwsAlgorithm::FAPI_ALLOWED
         .iter()
         .map(|alg| alg.as_str().to_string())
         .collect();
@@ -327,7 +335,7 @@ async fn test_rfc9728_dpop_signing_algs_match_fapi_allowed() {
 
     for alg in &source {
         assert!(
-            alg.parse::<crate::crypto::alg::JwsAlgorithm>().is_ok(),
+            alg.parse::<JwsAlgorithm>().is_ok(),
             "FAPI_ALLOWED wire string does not round-trip through JwsAlgorithm parsing: {alg}"
         );
     }
@@ -490,15 +498,17 @@ async fn test_rfc9728_resource_identity_path_variants() {
 
 #[tokio::test]
 async fn test_rfc9728_resource_identity_deeper_path() {
-    // Paths deeper than a registered prefix match (e.g. `scim/v2/Users/42`).
-    // The returned `resource` echoes the entire sub-path.
+    // Paths deeper than a registered prefix match (e.g. a specific
+    // RFC 7592 client under the `oauth/register` prefix). The returned
+    // `resource` echoes the entire sub-path.
     let (app, state) = test_app().await;
 
-    let url = format!("{WELL_KNOWN_SUFFIX}/scim/v2/Users/42");
+    let deeper = "oauth/register/test-client-123";
+    let url = format!("{WELL_KNOWN_SUFFIX}/{deeper}");
     let (status, body) = http_get(&app, &url, &[]).await;
     assert_eq!(status, StatusCode::OK);
     let m: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
-    let expected = format!("{}/scim/v2/Users/42", state.config().base_url);
+    let expected = format!("{}/{deeper}", state.config().base_url);
     assert_eq!(m["resource"].as_str(), Some(expected.as_str()));
 }
 
@@ -513,13 +523,58 @@ async fn test_rfc9728_unknown_subpath_returns_404() {
     assert_eq!(response.status, StatusCode::NOT_FOUND);
 }
 
-/// Canonical, hand-maintained list of every URL prefix Vouch serves
-/// as an OAuth 2.0 protected resource (i.e. requires a bearer/DPoP
-/// access token). Mirrors the routes layered with
-/// [`crate::infra::resource_metadata::layer`] in
-/// [`crate::infra::router`]. The drift-detection test below cross-
-/// checks this against [`PROTECTED_RESOURCE_PREFIXES`] in the service
-/// layer; updates to either side must keep them in sync.
+#[tokio::test]
+async fn test_rfc9728_scim_v2_metadata_not_served() {
+    // `/scim/v2/*` authenticates against a disjoint SCIM token table
+    // (admin-minted opaque credentials via `/api/v1/org/scim-tokens`),
+    // not AS-issued OAuth access tokens. It is therefore not an
+    // RFC 6749/9728 OAuth 2.0 protected resource, and serving an RFC
+    // 9728 document for it cannot be truthful: the `authorization_servers`
+    // field would have to list an AS that can mint a token `/scim/v2/*`
+    // accepts, and no such AS exists (the AS at `base_url` issues tokens
+    // whose scope universe is `openid`/`email`, and any OAuth token
+    // presented at `/scim/v2/*` fails the SCIM-token-table lookup with
+    // `401 "Invalid token"`). The fix is to omit `scim/v2` from
+    // `PROTECTED_RESOURCE_PREFIXES` so every per-resource SCIM document
+    // 404s via `SubPathClassification::Unknown`.
+    let (app, _state) = test_app().await;
+
+    // The per-prefix document and every deeper SCIM path must 404.
+    for sub in [
+        "scim/v2",
+        "scim/v2/Users",
+        "scim/v2/Users/42",
+        "scim/v2/Groups",
+    ] {
+        let url = format!("{WELL_KNOWN_SUFFIX}/{sub}");
+        let (status, _body) = http_get(&app, &url, &[]).await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "GET {url} must 404: scim/v2 is not an RFC 6749/9728 OAuth 2.0 \
+             protected resource"
+        );
+    }
+}
+
+/// Canonical, hand-maintained list of every URL prefix for which Vouch
+/// serves an RFC 9728 per-resource Protected Resource Metadata document
+/// at `/.well-known/oauth-protected-resource/{path}`. Entries must be
+/// endpoints that are OAuth 2.0 protected resources in the RFC 6749/9728
+/// sense — they accept AS-issued access tokens, not merely RFC 6750
+/// Bearer transport for an opaque admin-minted credential. The drift-
+/// detection test below cross-checks this against
+/// [`PROTECTED_RESOURCE_PREFIXES`] in the service layer; the two lists
+/// MUST stay in sync.
+///
+/// This is a subset of the routes layered with
+/// [`crate::infra::resource_metadata::layer`]: that middleware also
+/// applies to `/scim/v2/*` (which carries RFC 6750 Bearer transport),
+/// but SCIM is deliberately omitted here because its tokens are
+/// admin-minted opaque credentials looked up in a disjoint token
+/// table — no authorization server can issue a token `/scim/v2/*`
+/// accepts, so an RFC 9728 document for it cannot be truthful. See
+/// [`PROTECTED_RESOURCE_PREFIXES`] for the rationale.
 const KNOWN_PROTECTED_ENDPOINTS: &[&str] = &[
     "oauth/userinfo",
     "oauth/introspect",
@@ -533,7 +588,6 @@ const KNOWN_PROTECTED_ENDPOINTS: &[&str] = &[
     "v1/keys",
     "api/v1/org",
     "api/v1/applications",
-    "scim/v2",
 ];
 
 #[tokio::test]
@@ -847,8 +901,19 @@ async fn test_rfc9728_www_authenticate_preserves_step_up() {
     let auth_id2 = create_test_authenticator(&state.store, &user.id).await;
 
     let stale_iat = jiff::Timestamp::now().as_second() - 600;
-    let token =
-        create_test_session_with_iat(&state, &user.id, &user.email, &auth_id, stale_iat).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            verification: TestVerification::Verified {
+                auth_time: jiff::Timestamp::from_second(stale_iat).ok(),
+            },
+            ..Default::default()
+        },
+    )
+    .await;
 
     let response = http_delete_full(
         &app,
@@ -964,4 +1029,89 @@ async fn test_rfc9728_www_authenticate_idempotent() {
             "resource_metadata must appear exactly once, header: {header}"
         );
     }
+}
+
+// ============================================================================
+// Composition: metadata advertisement must agree with resource runtime
+// ============================================================================
+
+/// Regression for the contradiction fixed in this change: the metadata
+/// document advertises a `dpop_bound_access_tokens_required` value that
+/// must agree with what the resource server actually enforces at request
+/// time. The runtime issues and accepts unbound Bearer tokens (browser
+/// sessions, enrollment, the built-in device flow, non-FAPI clients), so
+/// the published value MUST be `false`. This composes both halves in one
+/// test against the real AS==RS wire path:
+///
+/// 1. Fetch `/.well-known/oauth-protected-resource` and assert the outer
+///    JSON and the `signed_metadata` JWT both carry
+///    `dpop_bound_access_tokens_required == false`.
+/// 2. Mint an unbound Bearer access token (no `cnf` claim), present it
+///    at a protected resource (`/oauth/userinfo`), and assert it is
+///    accepted (200).
+///
+/// A future regression that flips the metadata back to `true` without
+/// adding a corresponding rejection gate in `extract_resource_token`
+/// will fail here: the metadata half would say `true` while the runtime
+/// half still accepts the unbound token.
+#[tokio::test]
+async fn test_rfc9728_dpop_required_metadata_consistent_with_runtime() {
+    let (app, state) = test_app().await;
+
+    // Half 1 — the published metadata advertises `false`, in both the
+    // unsigned JSON and the signed `signed_metadata` JWT (which
+    // RFC 9728 §3.3 requires to mirror the outer JSON).
+    let (status, body) = http_get(&app, WELL_KNOWN_SUFFIX, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    let outer: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+    assert_eq!(
+        outer["dpop_bound_access_tokens_required"], false,
+        "outer JSON: Vouch accepts unbound Bearer tokens, so the \
+         advertised DPoP-required policy MUST be `false` (RFC 9728 §2)"
+    );
+    let signed = decode_jwt_payload(outer["signed_metadata"].as_str().expect("signed_metadata"));
+    assert_eq!(
+        signed["dpop_bound_access_tokens_required"], false,
+        "signed_metadata: dpop_bound_access_tokens_required must mirror \
+         the outer JSON and be `false` (RFC 9728 §3.3)"
+    );
+
+    // Half 2 — an unbound Bearer access token is actually accepted at a
+    // protected resource endpoint. The default `TestSessionSpec` binding
+    // is `Bearer` (no `cnf`), matching browser sessions, enrollment, the
+    // built-in device flow, and non-FAPI clients.
+    let user = create_test_user(&state.store, "rfc9728-consistency@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // The token is genuinely unbound (no `cnf` claim at all).
+    let claims = decode_jwt_payload(&token);
+    assert!(
+        claims.get("cnf").is_none(),
+        "test fixture must produce an unbound Bearer token (no cnf)"
+    );
+
+    let (status, body) = http_get(
+        &app,
+        "/oauth/userinfo",
+        &[("Authorization", &format!("Bearer {token}"))],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an unbound Bearer token must be accepted at the protected \
+         resource, matching the `false` metadata advertisement: {body}"
+    );
+    let userinfo: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+    assert!(userinfo.get("sub").is_some(), "userinfo must return sub");
 }

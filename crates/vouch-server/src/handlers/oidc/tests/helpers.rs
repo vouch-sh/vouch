@@ -3,21 +3,28 @@
 
 pub(super) use crate::db;
 pub(super) use crate::services::oidc::ScopeSet;
-pub(super) use crate::services::oidc::authorization::{
-    AuthorizationCodeParams, CodeChallengeMethod, issue_authorization_code,
+pub(super) use crate::services::oidc::authorization::CodeChallengeMethod;
+// Only `issue_code` below builds these directly; test modules go through it.
+use crate::crypto::kms_signer;
+use crate::db::{ParConsumptionProof, TokenEndpointAuthMethod, User};
+use crate::services::oidc::authorization::{AuthorizationCodeParams, issue_authorization_code};
+use crate::services::oidc::fapi::{
+    FAPI_AUTH_CODE_LIFETIME_SECONDS, STANDARD_AUTH_CODE_LIFETIME_SECONDS,
 };
+use crate::services::oidc::mtls::{self, CertThumbprint};
 pub(super) use crate::test_utils::*;
 pub(super) use aws_lc_rs::digest::SHA256;
 pub(super) use axum::http::StatusCode;
 pub(super) use base64::Engine;
 pub(super) use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use vouch_common::jwk::JwkThumbprintKey;
 
 /// Create an authorization code and exchange it at `/oauth/token` to get an access token.
 /// Returns `(access_token, id_token)`.
 pub(super) async fn issue_oauth_access_token(
     app: &axum::Router,
     state: &std::sync::Arc<crate::AppState>,
-    user: &crate::db::User,
+    user: &User,
     auth_id: &str,
     client: &TestOAuthClient,
 ) -> (String, String) {
@@ -31,40 +38,22 @@ pub(super) async fn issue_oauth_access_token(
 pub(super) async fn issue_oauth_access_token_with_scope(
     app: &axum::Router,
     state: &std::sync::Arc<crate::AppState>,
-    user: &crate::db::User,
+    user: &User,
     auth_id: &str,
     client: &TestOAuthClient,
     scope: &str,
 ) -> (String, String) {
-    use crate::services::oidc::authorization::{AuthorizationCodeParams, issue_authorization_code};
-
-    let scope_set = ScopeSet::parse(scope);
-
-    let code_params = AuthorizationCodeParams {
-        client_id: &client.client_id,
-        redirect_uri: "https://example.com/callback",
-        user_id: &user.id,
-        email: &user.email,
-        authenticator_id: auth_id,
-        aaguid: None,
-        scope: &scope_set,
-        nonce: None,
-        code_challenge: None,
-        code_challenge_method: None,
-        resource: None,
-        acr_values: None,
-        dpop_jkt: None,
-        // Use standard lifetime for test helpers; FAPI enforcement tested separately.
-        auth_code_lifetime_seconds:
-            crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-        authorization_details: None,
-        auth_time: None,
-        par: crate::db::ParConsumptionProof::not_pushed(),
-    };
-
-    let code = issue_authorization_code(state, code_params)
-        .await
-        .expect("Failed to issue authorization code");
+    let code = issue_code(
+        state,
+        user,
+        auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope,
+            ..Default::default()
+        },
+    )
+    .await;
 
     let auth_header = client.basic_auth_header();
 
@@ -97,6 +86,118 @@ pub(super) async fn issue_oauth_access_token_with_scope(
         .to_string();
 
     (access_token, id_token)
+}
+
+/// The parts of an authorization code that tests actually vary, with the rest
+/// of [`AuthorizationCodeParams`] fixed at values every OIDC test shares:
+/// `https://example.com/callback` as the redirect URI, no AAGUID, and a
+/// request that was never pushed (RFC 9126).
+///
+/// Build one with `..Default::default()` and name only the field under test.
+pub(super) struct TestCodeSpec<'a> {
+    /// Space-separated scope string. Default: `"openid email"`.
+    pub scope: &'a str,
+    /// OIDC nonce. Default: `None`.
+    ///
+    /// The code is an HS256 JWT over an `iat` at second granularity and carries
+    /// no `jti`, so two codes issued in the same second for the same subject,
+    /// client, scope and redirect URI are byte-identical. A distinct nonce is
+    /// what makes them distinct codes with distinct hashes.
+    pub nonce: Option<&'a str>,
+    /// PKCE challenge (RFC 7636). Setting it selects the `S256` method.
+    /// Default: `None`.
+    pub code_challenge: Option<&'a str>,
+    /// RFC 8707 resource indicator. Default: `None`.
+    pub resource: Option<&'a str>,
+    /// RFC 9470 requested ACR values. Default: `None`.
+    pub acr_values: Option<&'a str>,
+    /// RFC 9449 DPoP key thumbprint to bind the code to. Default: `None`.
+    pub dpop_jkt: Option<&'a str>,
+    /// RFC 9396 rich authorization details. Default: `None`.
+    pub authorization_details: Option<&'a serde_json::Value>,
+    /// Use the 60s FAPI 2.0 code lifetime instead of the 300s standard one.
+    /// Default: `false`.
+    pub fapi_lifetime: bool,
+    /// The FIDO2 ceremony instant behind the session this code was issued
+    /// from — the code's `auth_time` (OIDC Core §2) is its whole second. Defaults to the
+    /// present, matching the only sessions that can reach code issuance:
+    /// `check_session_for_authorization` turns away anything not
+    /// hardware-verified. Set `None` for a session whose verification was
+    /// inherited rather than observed (RFC 8693 exchange).
+    pub auth_time: Option<jiff::Timestamp>,
+}
+
+impl Default for TestCodeSpec<'_> {
+    fn default() -> Self {
+        Self {
+            scope: "openid email",
+            nonce: Option::None,
+            code_challenge: Option::None,
+            resource: Option::None,
+            acr_values: Option::None,
+            dpop_jkt: Option::None,
+            authorization_details: Option::None,
+            fapi_lifetime: false,
+            auth_time: Some(jiff::Timestamp::now()),
+        }
+    }
+}
+
+/// Issue an authorization code through the real `issue_authorization_code`
+/// service — so the code is signed and stored server-side, and single-use
+/// enforcement applies — without exchanging it, leaving the caller in control
+/// of the token request.
+pub(super) async fn issue_code(
+    state: &std::sync::Arc<crate::AppState>,
+    user: &User,
+    authenticator_id: &str,
+    client_id: &str,
+    spec: TestCodeSpec<'_>,
+) -> String {
+    let scope_set = ScopeSet::parse(spec.scope);
+    issue_authorization_code(
+        state,
+        AuthorizationCodeParams {
+            client_id,
+            redirect_uri: "https://example.com/callback",
+            user_id: &user.id,
+            email: &user.email,
+            authenticator_id,
+            aaguid: None,
+            scope: &scope_set,
+            nonce: spec.nonce,
+            code_challenge: spec.code_challenge,
+            code_challenge_method: spec.code_challenge.map(|_| CodeChallengeMethod::S256),
+            resource: spec.resource,
+            acr_values: spec.acr_values,
+            dpop_jkt: spec.dpop_jkt,
+            auth_code_lifetime_seconds: if spec.fapi_lifetime {
+                FAPI_AUTH_CODE_LIFETIME_SECONDS
+            } else {
+                STANDARD_AUTH_CODE_LIFETIME_SECONDS
+            },
+            authorization_details: spec.authorization_details,
+            authenticated_at: spec.auth_time,
+            par: ParConsumptionProof::not_pushed(),
+        },
+    )
+    .await
+    .expect("Failed to issue authorization code")
+}
+
+/// Assert that `token` is still accepted as a bearer credential at `/v1/keys`.
+pub(super) async fn assert_token_alive(app: &axum::Router, token: &str, label: &str) {
+    let (status, body) = http_get(
+        app,
+        "/v1/keys",
+        &[("Authorization", &format!("Bearer {token}"))],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{label} should still be valid, got {status}: {body}"
+    );
 }
 
 // ========================================================================
@@ -168,7 +269,7 @@ pub(super) async fn create_test_jwt_client(
         user_id,
         TestClientSpec {
             jwks: TestJwks::Custom(jwks_value),
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
             ..Default::default()
         },
     )
@@ -188,8 +289,8 @@ pub(super) fn generate_rs256_signing_key() -> (aws_lc_rs::rsa::KeyPair, serde_js
 
     let key_pair = RsaKeyPair::generate(KeySize::Rsa2048).expect("RSA-2048 keygen");
     let spki_der = key_pair.public_key().as_der().expect("SPKI DER");
-    let (n_bytes, e_bytes) = crate::crypto::kms_signer::parse_spki_rsa(spki_der.as_ref())
-        .expect("parse RSA SPKI components");
+    let (n_bytes, e_bytes) =
+        kms_signer::parse_spki_rsa(spki_der.as_ref()).expect("parse RSA SPKI components");
 
     let jwk = serde_json::json!({
         "kty": "RSA",
@@ -286,56 +387,11 @@ pub(super) fn sha256_base64url(input: &str) -> String {
 // mTLS Certificate Helpers (shared across rfc8705, rfc7523, rfc9449)
 // ========================================================================
 
-/// Generate a self-signed P-256 certificate DER for testing.
-pub(super) fn make_test_cert_der(cn: &str) -> Vec<u8> {
-    use der::{Decode as _, Encode, asn1::Utf8StringRef};
-    use p256::ecdsa::SigningKey;
-    use spki::EncodePublicKey as _;
-    use x509_cert::builder::{Builder as _, CertificateBuilder, Profile};
-    use x509_cert::serial_number::SerialNumber;
-    use x509_cert::time::Validity;
-
-    let key = SigningKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
-
-    let cn_oid = der::oid::ObjectIdentifier::new_unwrap("2.5.4.3");
-    let cn_value = Utf8StringRef::new(cn).expect("valid CN");
-    let atv = x509_cert::attr::AttributeTypeAndValue {
-        oid: cn_oid,
-        value: der::asn1::Any::from(cn_value),
-    };
-    let mut rdn_set = der::asn1::SetOfVec::new();
-    rdn_set.insert(atv).expect("insert RDN");
-    let subject =
-        x509_cert::name::RdnSequence(vec![x509_cert::name::RelativeDistinguishedName(rdn_set)]);
-
-    let validity = Validity::from_now(core::time::Duration::from_secs(86400)).expect("validity");
-    let serial = SerialNumber::new(&[1u8]).expect("serial");
-    let spki_der = key.verifying_key().to_public_key_der().expect("spki DER");
-    let spki = spki::SubjectPublicKeyInfoOwned::from_der(spki_der.as_ref()).expect("parse spki");
-
-    let builder = CertificateBuilder::new(
-        Profile::Leaf {
-            issuer: subject.clone(),
-            enable_key_agreement: false,
-            enable_key_encipherment: false,
-        },
-        serial,
-        validity,
-        subject,
-        spki,
-        &key,
-    )
-    .expect("cert builder");
-
-    let cert = builder
-        .build::<p256::ecdsa::DerSignature>()
-        .expect("build cert");
-    cert.to_der().expect("DER encode")
-}
+pub(super) use crate::test_utils::make_test_cert_der;
 
 /// Compute the base64url SHA-256 thumbprint of DER bytes.
-pub(super) fn cert_thumbprint(der: &[u8]) -> crate::services::oidc::mtls::CertThumbprint {
-    crate::services::oidc::mtls::compute_cert_thumbprint(der)
+pub(super) fn cert_thumbprint(der: &[u8]) -> CertThumbprint {
+    mtls::compute_cert_thumbprint(der)
 }
 
 // ========================================================================
@@ -369,7 +425,7 @@ pub(super) fn generate_dpop_key_pair() -> (EcdsaKeyPair, serde_json::Value) {
 /// Compute the RFC 7638 JWK thumbprint for a DPoP JWK (lexicographic JSON
 /// of the required members: crv, kty, x, y).
 pub(super) fn dpop_jkt(jwk: &serde_json::Value) -> String {
-    vouch_common::jwk::JwkThumbprintKey::from_json(jwk)
+    JwkThumbprintKey::from_json(jwk)
         .expect("test JWK carries the required members")
         .thumbprint()
 }
@@ -488,4 +544,12 @@ pub(super) fn assert_bare_bearer_challenge(response: &HttpResponse) {
         www_auth.contains("resource_metadata="),
         "missing credentials must still advertise resource_metadata (RFC 9728 §5.2): {www_auth}"
     );
+}
+
+/// Build the device_code token-endpoint form body.
+pub(super) fn device_token_body(device_code: &str) -> String {
+    format!(
+        "grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code={}",
+        device_code
+    )
 }

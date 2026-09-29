@@ -8,6 +8,7 @@
 )]
 
 use super::*;
+use crate::handlers::scim::users;
 
 // ========================================================================
 // RFC 7643 Section 3.1 - meta.lastModified (regression tests)
@@ -185,8 +186,7 @@ async fn test_user_last_modified_uses_db_updated_at_not_created_at() {
     let fetched_updated = fetched.updated_at;
 
     // The HTTP-layer projection must agree with the DB layer.
-    let scim_user =
-        crate::handlers::scim::users::db_user_to_scim("https://test.example.com", fetched);
+    let scim_user = users::db_user_to_scim("https://test.example.com", fetched);
     let meta = scim_user.meta.as_ref().expect("meta");
     assert_eq!(
         meta.created, fetched_created,

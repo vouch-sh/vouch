@@ -6,6 +6,9 @@
     reason = "test code: panic on assertion failure is acceptable"
 )]
 use super::*;
+use crate::services::idp::saml::signature::SignatureError;
+use crate::services::idp::saml::{SamlProvider, c14n};
+use crate::test_utils::test_arrival;
 
 // =========================================================================
 // Timestamp parsing tests
@@ -257,8 +260,11 @@ fn domain_extracted_from_email() {
     "##;
     let doc = roxmltree::Document::parse(xml).unwrap();
     let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
-    let domain = extract_domain(assertion, None, "user@example.com");
-    assert_eq!(domain, Some("example.com".to_string()));
+    let domain = extract_domain(assertion, None, "user@example.com").expect("valid domain");
+    assert_eq!(
+        domain.map(|d| d.into_string()),
+        Some("example.com".to_string())
+    );
 }
 
 // SAML Core §2.7.3: the identity is parsed out of the named attribute.
@@ -273,8 +279,12 @@ fn domain_extracted_from_configured_attribute() {
 </saml:Assertion>"##;
     let doc = roxmltree::Document::parse(xml).unwrap();
     let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
-    let domain = extract_domain(assertion, Some("domain"), "user@example.com");
-    assert_eq!(domain, Some("custom.example.com".to_string()));
+    let domain =
+        extract_domain(assertion, Some("domain"), "user@example.com").expect("valid domain");
+    assert_eq!(
+        domain.map(|d| d.into_string()),
+        Some("custom.example.com".to_string())
+    );
 }
 
 /// Regression: mixed-case configured-attribute value must be lowercased
@@ -292,8 +302,12 @@ fn domain_from_configured_attribute_is_lowercased() {
 </saml:Assertion>"##;
     let doc = roxmltree::Document::parse(xml).unwrap();
     let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
-    let domain = extract_domain(assertion, Some("domain"), "user@example.com");
-    assert_eq!(domain, Some("corp.example.com".to_string()));
+    let domain =
+        extract_domain(assertion, Some("domain"), "user@example.com").expect("valid domain");
+    assert_eq!(
+        domain.map(|d| d.into_string()),
+        Some("corp.example.com".to_string())
+    );
 }
 
 /// Regression: when falling back to the email domain, the extracted
@@ -305,8 +319,66 @@ fn domain_from_email_fallback_is_lowercased() {
     "##;
     let doc = roxmltree::Document::parse(xml).unwrap();
     let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
-    let domain = extract_domain(assertion, None, "Alice@CORP.Example.COM");
-    assert_eq!(domain, Some("corp.example.com".to_string()));
+    let domain = extract_domain(assertion, None, "Alice@CORP.Example.COM").expect("valid domain");
+    assert_eq!(
+        domain.map(|d| d.into_string()),
+        Some("corp.example.com".to_string())
+    );
+}
+
+/// Regression (#1270): the configured `domain_attribute` is free-form
+/// IdP-controlled text, and whatever it holds is what enrollment persists
+/// as `Organization.domain` — so it is parsed here, not merely lowercased.
+/// A value with internal whitespace is not a DNS domain and fails the
+/// assertion rather than reaching the enrollment chokepoint, which cannot
+/// re-derive it from the email (the two diverge precisely when this
+/// attribute is configured).
+// SAML Core §2.7.3: an attribute value is arbitrary text; the SP decides
+// what it will accept.
+#[test]
+fn domain_from_configured_attribute_rejects_whitespace() {
+    let xml = r##"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
+  <saml:AttributeStatement>
+<saml:Attribute Name="domain">
+  <saml:AttributeValue>bar .com</saml:AttributeValue>
+</saml:Attribute>
+  </saml:AttributeStatement>
+</saml:Assertion>"##;
+    let doc = roxmltree::Document::parse(xml).unwrap();
+    let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
+    let err = extract_domain(assertion, Some("domain"), "alice@example.com").unwrap_err();
+    assert!(
+        matches!(err, DomainValidationError::LabelInvalidChar),
+        "a whitespace-bearing domain attribute must not parse, got: {err}"
+    );
+}
+
+/// The enrollment domain is held to the same DNS rules as an
+/// admin-added one: whitespace was only the instance that surfaced first.
+/// An IdP asserting a reserved or internal top-level label (RFC 6761 /
+/// RFC 9476) does not enroll — such a name has no public ownership
+/// semantics, so it cannot identify an organization.
+// SAML Core §2.7.3: an attribute value is arbitrary text; the SP decides
+// what it will accept.
+#[test]
+fn domain_from_configured_attribute_rejects_reserved_tld() {
+    let xml = r##"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
+  <saml:AttributeStatement>
+<saml:Attribute Name="domain">
+  <saml:AttributeValue>acme.internal</saml:AttributeValue>
+</saml:Attribute>
+  </saml:AttributeStatement>
+</saml:Assertion>"##;
+    let doc = roxmltree::Document::parse(xml).unwrap();
+    let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
+    let err = extract_domain(assertion, Some("domain"), "alice@example.com").unwrap_err();
+    assert!(
+        matches!(
+            err,
+            DomainValidationError::ReservedTld(ref tld) if tld == "internal"
+        ),
+        "a reserved top-level label must not parse, got: {err}"
+    );
 }
 
 // =========================================================================
@@ -379,8 +451,13 @@ fn invalid_base64_returns_decode_error() {
         domain_attribute: None,
     };
 
-    let err =
-        validate_saml_response("!!!not-valid-base64!!!", "_request_id", &provider).unwrap_err();
+    let err = validate_saml_response(
+        "!!!not-valid-base64!!!",
+        "_request_id",
+        &provider,
+        test_arrival(),
+    )
+    .unwrap_err();
     assert!(
         matches!(err, ResponseError::DecodeFailed(_)),
         "Expected DecodeFailed for invalid base64, got: {err}"
@@ -409,7 +486,8 @@ fn invalid_xml_returns_xml_parse_error() {
     };
 
     let bad_xml = BASE64_STANDARD.encode("<unclosed");
-    let err = validate_saml_response(&bad_xml, "_request_id", &provider).unwrap_err();
+    let err =
+        validate_saml_response(&bad_xml, "_request_id", &provider, test_arrival()).unwrap_err();
     assert!(
         matches!(err, ResponseError::XmlParse(_)),
         "Expected XmlParse for invalid XML, got: {err}"
@@ -825,7 +903,7 @@ fn audience_restriction_error_displays_correctly() {
 
 /// Build a real RSA key pair and a self-signed X.509 DER certificate.
 /// Reuses the same helpers from signature.rs tests.
-fn generate_test_key_and_cert() -> (aws_lc_rs::rsa::KeyPair, Vec<u8>) {
+pub(crate) fn generate_test_key_and_cert() -> (aws_lc_rs::rsa::KeyPair, Vec<u8>) {
     let key_pair = aws_lc_rs::rsa::KeyPair::generate(aws_lc_rs::rsa::KeySize::Rsa2048).unwrap();
     let cert_der = build_self_signed_der(&key_pair);
     (key_pair, cert_der)
@@ -923,7 +1001,7 @@ fn der_wrap(tag: u8, content: &[u8]) -> Vec<u8> {
     clippy::too_many_arguments,
     reason = "test helper builds SAML response with all signed-element parameters"
 )]
-fn build_signed_saml_response(
+pub(crate) fn build_signed_saml_response(
     key_pair: &aws_lc_rs::rsa::KeyPair,
     email: &str,
     response_id: &str,
@@ -935,6 +1013,7 @@ fn build_signed_saml_response(
     not_before: &str,
     not_on_or_after: &str,
     subject_confirmation_in_response_to: Option<&str>,
+    subject_confirmation_not_on_or_after: Option<&str>,
 ) -> String {
     use aws_lc_rs::digest;
     use base64::Engine as _;
@@ -948,6 +1027,16 @@ fn build_signed_saml_response(
         None => String::new(),
     };
 
+    // Build the optional NotOnOrAfter attribute for SubjectConfirmationData.
+    // When None, the attribute is omitted entirely — distinct from the
+    // Conditions/@NotOnOrAfter (still `not_on_or_after`) so a caller can
+    // keep the Conditions time window valid while omitting the bearer
+    // confirmation's time bound.
+    let scd_noa_attr = match subject_confirmation_not_on_or_after {
+        Some(noa) => format!(r#" NotOnOrAfter="{noa}""#),
+        None => String::new(),
+    };
+
     // Step 1: Build the assertion XML *without* the Signature element.
     // The Signature will be inserted immediately after </saml:Issuer> without
     // adding any extra whitespace text nodes around it (see whitespace design note).
@@ -957,7 +1046,7 @@ fn build_signed_saml_response(
   <saml:Subject>
 <saml:NameID Format="urn:oasis:names:tc:SAML:2.0:nameid-format:emailAddress">{email}</saml:NameID>
 <saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">
-  <saml:SubjectConfirmationData Recipient="{destination}"{scd_irt_attr} NotOnOrAfter="{not_on_or_after}"/>
+  <saml:SubjectConfirmationData Recipient="{destination}"{scd_irt_attr}{scd_noa_attr}/>
 </saml:SubjectConfirmation>
   </saml:Subject>
   <saml:Conditions NotBefore="{not_before}" NotOnOrAfter="{not_on_or_after}">
@@ -984,7 +1073,7 @@ fn build_signed_saml_response(
         .children()
         .find(|n| n.is_element())
         .unwrap();
-    let canonical_assertion = super::super::c14n::exclusive_c14n(assertion_node, &[]);
+    let canonical_assertion = c14n::exclusive_c14n(assertion_node, &[]);
 
     // Step 3: Compute SHA-256 digest over canonicalized assertion.
     let digest_bytes = digest::digest(&digest::SHA256, canonical_assertion.as_bytes());
@@ -1001,7 +1090,7 @@ fn build_signed_saml_response(
     // Parse and re-canonicalize to be safe.
     let doc_si = roxmltree::Document::parse(&signed_info_xml).unwrap();
     let signed_info_node = doc_si.root().children().find(|n| n.is_element()).unwrap();
-    let canonical_signed_info = super::super::c14n::exclusive_c14n(signed_info_node, &[]);
+    let canonical_signed_info = c14n::exclusive_c14n(signed_info_node, &[]);
 
     // Step 6: Sign the canonical SignedInfo with RSA-PKCS1-SHA256.
     let rng = aws_lc_rs::rand::SystemRandom::new();
@@ -1070,6 +1159,7 @@ fn build_response_signed_saml_response(
     not_before: &str,
     not_on_or_after: &str,
     subject_confirmation_in_response_to: Option<&str>,
+    subject_confirmation_not_on_or_after: Option<&str>,
 ) -> String {
     use aws_lc_rs::digest;
     use base64::Engine as _;
@@ -1080,6 +1170,13 @@ fn build_response_signed_saml_response(
         None => String::new(),
     };
 
+    // Optional NotOnOrAfter for SCD; None omits it (Conditions/@NotOnOrAfter
+    // still uses `not_on_or_after`).
+    let scd_noa_attr = match subject_confirmation_not_on_or_after {
+        Some(noa) => format!(r#" NotOnOrAfter="{noa}""#),
+        None => String::new(),
+    };
+
     // Step 1: Build the Assertion WITHOUT a Signature (the Response will be signed).
     let assertion_xml = format!(
         r#"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="{assertion_id}" Version="2.0" IssueInstant="{not_before}">
@@ -1087,7 +1184,7 @@ fn build_response_signed_saml_response(
   <saml:Subject>
 <saml:NameID Format="urn:oasis:names:tc:SAML:2.0:nameid-format:emailAddress">{email}</saml:NameID>
 <saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">
-  <saml:SubjectConfirmationData Recipient="{destination}"{scd_irt_attr} NotOnOrAfter="{not_on_or_after}"/>
+  <saml:SubjectConfirmationData Recipient="{destination}"{scd_irt_attr}{scd_noa_attr}/>
 </saml:SubjectConfirmation>
   </saml:Subject>
   <saml:Conditions NotBefore="{not_before}" NotOnOrAfter="{not_on_or_after}">
@@ -1121,7 +1218,7 @@ fn build_response_signed_saml_response(
         .children()
         .find(|n| n.is_element())
         .unwrap();
-    let canonical_response = super::super::c14n::exclusive_c14n(response_node, &[]);
+    let canonical_response = c14n::exclusive_c14n(response_node, &[]);
 
     // Step 4: Compute SHA-256 digest over canonicalized Response.
     let digest_bytes = digest::digest(&digest::SHA256, canonical_response.as_bytes());
@@ -1136,7 +1233,7 @@ fn build_response_signed_saml_response(
     // Step 6: Canonicalize SignedInfo.
     let doc_si = roxmltree::Document::parse(&signed_info_xml).unwrap();
     let signed_info_node = doc_si.root().children().find(|n| n.is_element()).unwrap();
-    let canonical_signed_info = super::super::c14n::exclusive_c14n(signed_info_node, &[]);
+    let canonical_signed_info = c14n::exclusive_c14n(signed_info_node, &[]);
 
     // Step 7: Sign the canonical SignedInfo with RSA-PKCS1-SHA256.
     let rng = aws_lc_rs::rand::SystemRandom::new();
@@ -1165,9 +1262,9 @@ fn build_response_signed_saml_response(
 }
 
 /// Build a `SamlProvider` for the test IdP/SP configuration.
-fn test_provider(cert_der: Vec<u8>) -> super::super::SamlProvider {
+pub(crate) fn test_provider(cert_der: Vec<u8>) -> SamlProvider {
     use crate::services::idp::saml::IdpMetadata;
-    super::super::SamlProvider {
+    SamlProvider {
         id: "corp-saml".to_string(),
         idp_metadata: IdpMetadata {
             entity_id: "https://idp.example.com".to_string(),
@@ -1183,7 +1280,7 @@ fn test_provider(cert_der: Vec<u8>) -> super::super::SamlProvider {
 }
 
 /// Returns (not_before, not_on_or_after) strings suitable for a currently-valid assertion.
-fn valid_time_window() -> (String, String) {
+pub(crate) fn valid_time_window() -> (String, String) {
     let now = Timestamp::now();
     let not_before = now
         .checked_sub(jiff::Span::new().minutes(5))
@@ -1222,14 +1319,18 @@ fn validate_saml_response_rsa_signed_happy_path() {
         &not_before,
         &not_on_or_after,
         Some("_request001"),
+        Some(&not_on_or_after),
     );
 
     let base64_response = B64.encode(xml.as_bytes());
-    let result = validate_saml_response(&base64_response, "_request001", &provider);
+    let result = validate_saml_response(&base64_response, "_request001", &provider, test_arrival());
     let assertion = result.expect("Expected Ok");
 
     assert_eq!(assertion.email, "alice@example.com");
-    assert_eq!(assertion.domain, Some("example.com".to_string()));
+    assert_eq!(
+        assertion.domain.map(|d| d.into_string()),
+        Some("example.com".to_string())
+    );
     // NameID and its Format must be captured for identity binding.
     assert_eq!(assertion.name_id.as_deref(), Some("alice@example.com"));
     assert_eq!(
@@ -1361,6 +1462,7 @@ fn validate_saml_response_comment_injection_does_not_truncate_identity() {
         &not_before,
         &not_on_or_after,
         Some("_request003"),
+        Some(&not_on_or_after),
     );
 
     // Split the signed NameID with a comment, aiming to truncate the identity
@@ -1372,8 +1474,9 @@ fn validate_saml_response_comment_injection_does_not_truncate_identity() {
     assert_ne!(xml, injected_xml, "Injection must actually change the XML");
 
     let base64_response = B64.encode(injected_xml.as_bytes());
-    let assertion = validate_saml_response(&base64_response, "_request003", &provider)
-        .expect("comment injection leaves the signature valid, so validation succeeds");
+    let assertion =
+        validate_saml_response(&base64_response, "_request003", &provider, test_arrival())
+            .expect("comment injection leaves the signature valid, so validation succeeds");
 
     assert_eq!(
         assertion.email, "attacker@example.com.evil.tld",
@@ -1410,6 +1513,7 @@ fn validate_saml_response_tampered_email_fails_digest_check() {
         &not_before,
         &not_on_or_after,
         Some("_request002"),
+        Some(&not_on_or_after),
     );
 
     // Tamper: replace the NameID email after signing.
@@ -1417,7 +1521,7 @@ fn validate_saml_response_tampered_email_fails_digest_check() {
     assert_ne!(xml, tampered_xml, "Tamper must actually change the XML");
 
     let base64_response = B64.encode(tampered_xml.as_bytes());
-    let result = validate_saml_response(&base64_response, "_request002", &provider);
+    let result = validate_saml_response(&base64_response, "_request002", &provider, test_arrival());
 
     assert!(
         result.is_err(),
@@ -1428,9 +1532,7 @@ fn validate_saml_response_tampered_email_fails_digest_check() {
     assert!(
         matches!(
             err,
-            ResponseError::SignatureInvalid(
-                super::super::signature::SignatureError::DigestMismatch
-            )
+            ResponseError::SignatureInvalid(SignatureError::DigestMismatch)
         ),
         "Expected DigestMismatch for tampered assertion, got: {err}"
     );
@@ -1533,6 +1635,7 @@ fn xsw_nested_assertion_rejected() {
         &not_before,
         &not_on_or_after,
         Some("_request_xsw"),
+        Some(&not_on_or_after),
     );
 
     // Extract the Assertion (which contains an enveloped Signature
@@ -1570,7 +1673,8 @@ fn xsw_nested_assertion_rejected() {
     );
 
     let base64_response = B64.encode(xsw_xml.as_bytes());
-    let result = validate_saml_response(&base64_response, "_request_xsw", &provider);
+    let result =
+        validate_saml_response(&base64_response, "_request_xsw", &provider, test_arrival());
 
     assert!(result.is_err(), "Expected Err for nested Assertion XSW");
     let err_msg = result.unwrap_err().to_string();
@@ -1603,7 +1707,7 @@ fn oversized_response_returns_decode_error() {
     // Create a payload that exceeds MAX_RESPONSE_BYTES when decoded
     let oversized = vec![b'A'; MAX_RESPONSE_BYTES + 1];
     let encoded = BASE64_STANDARD.encode(&oversized);
-    let err = validate_saml_response(&encoded, "_req", &provider).unwrap_err();
+    let err = validate_saml_response(&encoded, "_req", &provider, test_arrival()).unwrap_err();
     assert!(
         matches!(err, ResponseError::DecodeFailed(ref msg) if msg.contains("maximum size")),
         "Expected DecodeFailed for oversized response, got: {err}"
@@ -1815,10 +1919,12 @@ fn xsw_inresponseto_unsigned_response_missing_scd_irt_rejected() {
         &not_before,
         &not_on_or_after,
         None, // SubjectConfirmationData.InResponseTo is ABSENT
+        Some(&not_on_or_after),
     );
 
     let base64_response = B64.encode(xml.as_bytes());
-    let result = validate_saml_response(&base64_response, "_attacker_req", &provider);
+    let result =
+        validate_saml_response(&base64_response, "_attacker_req", &provider, test_arrival());
 
     let err = result.unwrap_err();
     assert!(
@@ -1852,10 +1958,16 @@ fn xsw_inresponseto_unsigned_response_with_matching_scd_irt_passes() {
         &not_before,
         &not_on_or_after,
         Some("_request_irt_2"),
+        Some(&not_on_or_after),
     );
 
     let base64_response = B64.encode(xml.as_bytes());
-    let result = validate_saml_response(&base64_response, "_request_irt_2", &provider);
+    let result = validate_saml_response(
+        &base64_response,
+        "_request_irt_2",
+        &provider,
+        test_arrival(),
+    );
     let assertion = result
         .expect("Expected Ok for assertion-only signed response with matching SCD.InResponseTo");
     assert_eq!(assertion.email, "alice@example.com");
@@ -1889,10 +2001,12 @@ fn xsw_inresponseto_scd_irt_mismatch_fails() {
         &not_before,
         &not_on_or_after,
         Some("_victim_req"),
+        Some(&not_on_or_after),
     );
 
     let base64_response = B64.encode(xml.as_bytes());
-    let result = validate_saml_response(&base64_response, "_attacker_req", &provider);
+    let result =
+        validate_saml_response(&base64_response, "_attacker_req", &provider, test_arrival());
 
     let err = result.unwrap_err();
     assert!(
@@ -1933,6 +2047,7 @@ fn xsw_inresponseto_attack_scenario_rejected() {
         &not_before,
         &not_on_or_after,
         Some("_victim_req"),
+        Some(&not_on_or_after),
     );
 
     // Attacker modifies the UNSIGNED Response.InResponseTo to their own
@@ -1948,7 +2063,8 @@ fn xsw_inresponseto_attack_scenario_rejected() {
 
     let base64_response = B64.encode(attacked_xml.as_bytes());
     // Attacker submits with their own request ID as expected.
-    let result = validate_saml_response(&base64_response, "_attacker_req", &provider);
+    let result =
+        validate_saml_response(&base64_response, "_attacker_req", &provider, test_arrival());
 
     let err = result.unwrap_err();
     assert!(
@@ -1986,10 +2102,11 @@ fn xsw_inresponseto_assertion_matches_but_response_differs_fails() {
         &not_before,
         &not_on_or_after,
         Some("_req_irt_5"),
+        Some(&not_on_or_after),
     );
 
     let base64_response = B64.encode(xml.as_bytes());
-    let result = validate_saml_response(&base64_response, "_req_irt_5", &provider);
+    let result = validate_saml_response(&base64_response, "_req_irt_5", &provider, test_arrival());
 
     let err = result.unwrap_err();
     assert!(
@@ -2029,11 +2146,17 @@ fn response_signed_missing_scd_irt_is_still_rejected() {
         &not_before,
         &not_on_or_after,
         None,
+        Some(&not_on_or_after),
     );
 
     let base64_response = B64.encode(xml.as_bytes());
-    let err = validate_saml_response(&base64_response, "_request_irt_6", &provider)
-        .expect_err("a solicited response must carry SubjectConfirmationData.InResponseTo");
+    let err = validate_saml_response(
+        &base64_response,
+        "_request_irt_6",
+        &provider,
+        test_arrival(),
+    )
+    .expect_err("a solicited response must carry SubjectConfirmationData.InResponseTo");
     assert!(
         matches!(err, ResponseError::MissingSubjectConfirmationInResponseTo),
         "Expected MissingSubjectConfirmationInResponseTo, got: {err}"
@@ -2064,10 +2187,16 @@ fn response_signed_with_scd_irt_passes() {
         &not_before,
         &not_on_or_after,
         Some("_request_irt_7"),
+        Some(&not_on_or_after),
     );
 
     let base64_response = B64.encode(xml.as_bytes());
-    let result = validate_saml_response(&base64_response, "_request_irt_7", &provider);
+    let result = validate_saml_response(
+        &base64_response,
+        "_request_irt_7",
+        &provider,
+        test_arrival(),
+    );
     let assertion = result.expect("Expected Ok for Response-signed with matching SCD.InResponseTo");
     assert_eq!(assertion.email, "alice@example.com");
 }
@@ -2097,14 +2226,295 @@ fn response_signed_scd_irt_mismatch_fails() {
         &not_before,
         &not_on_or_after,
         Some("_wrong_req"),
+        Some(&not_on_or_after),
     );
 
     let base64_response = B64.encode(xml.as_bytes());
-    let result = validate_saml_response(&base64_response, "_request_irt_8", &provider);
+    let result = validate_saml_response(
+        &base64_response,
+        "_request_irt_8",
+        &provider,
+        test_arrival(),
+    );
 
     let err = result.unwrap_err();
     assert!(
         matches!(err, ResponseError::InResponseToMismatch { .. }),
         "Expected InResponseToMismatch (SCD.InResponseTo differs from expected), got: {err}"
     );
+}
+
+// =========================================================================
+// SubjectConfirmationData.NotOnOrAfter required tests
+//
+// SAML Profiles 4.1.4.3 lists NotOnOrAfter under "Regardless of the SAML
+// binding used, the service provider MUST do the following", alongside
+// Recipient and InResponseTo. Both siblings are enforced unconditionally
+// (absence -> hard error). NotOnOrAfter must be too: a bearer confirmation
+// with no time bound must not be accepted.
+// =========================================================================
+
+/// SAML Profiles 4.1.4.3: SubjectConfirmationData.NotOnOrAfter MUST be
+/// validated. A bearer confirmation that omits it has no time bound and MUST
+/// be rejected. Before the fix, the `if let Some` skipped the check when the
+/// attribute was absent, silently accepting an unbounded confirmation.
+// SAML Core §2.4.1.2: bearer confirmation without NotOnOrAfter is rejected.
+#[test]
+fn subject_confirmation_missing_not_on_or_after_is_rejected() {
+    let now = Timestamp::now();
+    // SCD has Recipient and InResponseTo but NO NotOnOrAfter.
+    let xml = r##"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
+  <saml:Subject>
+<saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">
+  <saml:SubjectConfirmationData Recipient="https://vouch.example.com/saml/acs" InResponseTo="_req123"/>
+</saml:SubjectConfirmation>
+  </saml:Subject>
+</saml:Assertion>"##;
+    let doc = roxmltree::Document::parse(xml).unwrap();
+    let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
+    let err = validate_subject_confirmation(
+        assertion,
+        "_req123",
+        "https://vouch.example.com/saml/acs",
+        now,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ResponseError::TimeValidation(ref msg) if msg.contains("NotOnOrAfter")),
+        "Expected TimeValidation mentioning NotOnOrAfter for missing attribute, got: {err}"
+    );
+}
+
+/// SAML Profiles 4.1.4.3: an expired NotOnOrAfter (beyond the clock-skew
+/// tolerance) MUST be rejected. This is the existing expiry behavior, which
+/// the fix must preserve.
+// SAML Core §2.4.1.2: an expired confirmation is rejected.
+#[test]
+fn subject_confirmation_not_on_or_after_expired_fails() {
+    let now = Timestamp::now();
+    // 1 hour in the past — well beyond the 120s clock-skew tolerance.
+    let expired = now
+        .checked_sub(jiff::Span::new().hours(1))
+        .unwrap()
+        .strftime("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+    let xml = format!(
+        r##"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
+  <saml:Subject>
+<saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">
+  <saml:SubjectConfirmationData Recipient="https://vouch.example.com/saml/acs" InResponseTo="_req123" NotOnOrAfter="{expired}"/>
+</saml:SubjectConfirmation>
+  </saml:Subject>
+</saml:Assertion>"##
+    );
+    let doc = roxmltree::Document::parse(&xml).unwrap();
+    let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
+    let err = validate_subject_confirmation(
+        assertion,
+        "_req123",
+        "https://vouch.example.com/saml/acs",
+        now,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ResponseError::TimeValidation(ref msg) if msg.contains("expired")),
+        "Expected TimeValidation for expired NotOnOrAfter, got: {err}"
+    );
+}
+
+/// SAML Core 2.4.1: a Subject with multiple SubjectConfirmation elements is
+/// confirmed if ANY ONE is satisfied. The first confirmation omits
+/// NotOnOrAfter (rejected by the fix), the second is fully valid — the
+/// assertion MUST still pass via the second. Pins that requiring
+/// NotOnOrAfter does not regress the "any one" semantics.
+// SAML Profiles §4.1.4: one satisfied bearer confirmation is enough.
+#[test]
+fn subject_confirmation_multiple_one_missing_noa_one_valid_passes() {
+    let now = Timestamp::now();
+    let future = now
+        .checked_add(jiff::Span::new().hours(1))
+        .unwrap()
+        .strftime("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+    let acs = "https://vouch.example.com/saml/acs";
+    let confirmations = format!(
+        r#"<saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">
+  <saml:SubjectConfirmationData Recipient="{acs}" InResponseTo="_req123"/>
+</saml:SubjectConfirmation>
+<saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">
+  <saml:SubjectConfirmationData Recipient="{acs}" InResponseTo="_req123" NotOnOrAfter="{future}"/>
+</saml:SubjectConfirmation>"#
+    );
+    let xml = assertion_with_subject_confirmations(&confirmations);
+    let doc = roxmltree::Document::parse(&xml).unwrap();
+    let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
+    let result = validate_subject_confirmation(assertion, "_req123", acs, now);
+    assert!(
+        result.is_ok(),
+        "Expected Ok when at least one SubjectConfirmation has a valid NotOnOrAfter, got: {result:?}"
+    );
+}
+
+/// When every bearer SubjectConfirmation omits NotOnOrAfter, none carries a
+/// time bound, so the assertion MUST be rejected.
+// SAML Profiles 4.1.4.3: NotOnOrAfter is required on every bearer confirmation.
+#[test]
+fn subject_confirmation_multiple_all_missing_noa_rejected() {
+    let now = Timestamp::now();
+    let acs = "https://vouch.example.com/saml/acs";
+    let confirmations = format!(
+        r#"<saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">
+  <saml:SubjectConfirmationData Recipient="{acs}" InResponseTo="_req123"/>
+</saml:SubjectConfirmation>
+<saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">
+  <saml:SubjectConfirmationData Recipient="{acs}" InResponseTo="_req123"/>
+</saml:SubjectConfirmation>"#
+    );
+    let xml = assertion_with_subject_confirmations(&confirmations);
+    let doc = roxmltree::Document::parse(&xml).unwrap();
+    let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
+    let err = validate_subject_confirmation(assertion, "_req123", acs, now).unwrap_err();
+    assert!(
+        matches!(err, ResponseError::TimeValidation(ref msg) if msg.contains("NotOnOrAfter")),
+        "Expected TimeValidation mentioning NotOnOrAfter when all confirmations omit it, got: {err}"
+    );
+}
+
+/// End-to-end: an assertion-only-signed SAML response whose
+/// SubjectConfirmationData omits NotOnOrAfter MUST be rejected by the full
+/// `validate_saml_response` pipeline. The Conditions/@NotOnOrAfter is still
+/// present and valid so the Conditions time check passes, confirming the
+/// rejection comes specifically from the SubjectConfirmationData check.
+//
+// This mirrors the #991 end-to-end test shape (e.g.
+// `xsw_inresponseto_unsigned_response_missing_scd_irt_rejected`) for the
+// third §4.1.4.3 MUST attribute.
+// SAML Core §2.4.1.2: a bearer confirmation without a time bound is rejected.
+#[test]
+fn validate_saml_response_missing_scd_not_on_or_after_rejected() {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as B64;
+
+    let (key_pair, cert_der) = generate_test_key_and_cert();
+    let provider = test_provider(cert_der);
+    let (not_before, not_on_or_after) = valid_time_window();
+
+    // SubjectConfirmationData.NotOnOrAfter is ABSENT; Conditions/@NotOnOrAfter
+    // is still the valid `not_on_or_after` so the Conditions check passes.
+    let xml = build_signed_saml_response(
+        &key_pair,
+        "alice@example.com",
+        "_response_noa_1",
+        "_assertion_noa_1",
+        "_request_noa_1",
+        "https://vouch.example.com/saml/acs",
+        "https://idp.example.com",
+        "https://vouch.example.com",
+        &not_before,
+        &not_on_or_after,
+        Some("_request_noa_1"),
+        None, // SubjectConfirmationData.NotOnOrAfter is ABSENT
+    );
+
+    let base64_response = B64.encode(xml.as_bytes());
+    let err = validate_saml_response(
+        &base64_response,
+        "_request_noa_1",
+        &provider,
+        test_arrival(),
+    )
+    .expect_err("a solicited response must carry SubjectConfirmationData.NotOnOrAfter");
+    assert!(
+        matches!(err, ResponseError::TimeValidation(ref msg) if msg.contains("NotOnOrAfter")),
+        "Expected TimeValidation mentioning NotOnOrAfter (bearer confirmation requires a time bound), got: {err}"
+    );
+}
+
+/// End-to-end complement: signing the Response does not excuse a missing
+/// SubjectConfirmationData.NotOnOrAfter. The SCD sits inside the signed
+/// assertion (4.1.4.5 requires the assertion to be signed for POST binding),
+/// so the check can always be made regardless of which element carries the
+/// signature.
+//
+// Mirrors `response_signed_missing_scd_irt_is_still_rejected` for the third
+// §4.1.4.3 MUST attribute.
+// SAML Profiles §4.1.4.3: NotOnOrAfter is required regardless of the binding.
+#[test]
+fn response_signed_missing_scd_not_on_or_after_is_still_rejected() {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as B64;
+
+    let (key_pair, cert_der) = generate_test_key_and_cert();
+    let provider = test_provider(cert_der);
+    let (not_before, not_on_or_after) = valid_time_window();
+
+    // Response-signed, SubjectConfirmationData.NotOnOrAfter absent.
+    let xml = build_response_signed_saml_response(
+        &key_pair,
+        "alice@example.com",
+        "_response_noa_2",
+        "_assertion_noa_2",
+        "_request_noa_2",
+        "https://vouch.example.com/saml/acs",
+        "https://idp.example.com",
+        "https://vouch.example.com",
+        &not_before,
+        &not_on_or_after,
+        Some("_request_noa_2"),
+        None, // SubjectConfirmationData.NotOnOrAfter is ABSENT
+    );
+
+    let base64_response = B64.encode(xml.as_bytes());
+    let err = validate_saml_response(
+        &base64_response,
+        "_request_noa_2",
+        &provider,
+        test_arrival(),
+    )
+    .expect_err("a solicited response must carry SubjectConfirmationData.NotOnOrAfter");
+    assert!(
+        matches!(err, ResponseError::TimeValidation(ref msg) if msg.contains("NotOnOrAfter")),
+        "Expected TimeValidation mentioning NotOnOrAfter (signing the Response does not excuse the missing time bound), got: {err}"
+    );
+}
+
+/// NO REGRESSION: an assertion-only-signed response with a present, valid
+/// SubjectConfirmationData.NotOnOrAfter MUST still pass end-to-end. This is
+/// the common IdP configuration (Azure AD, Okta, Google, SAMLtest), every one
+/// of which always emits NotOnOrAfter on SubjectConfirmationData.
+//
+// SAML Core §2.4.1.2: a valid confirmation with a time bound is accepted.
+#[test]
+fn validate_saml_response_with_scd_not_on_or_after_passes() {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as B64;
+
+    let (key_pair, cert_der) = generate_test_key_and_cert();
+    let provider = test_provider(cert_der);
+    let (not_before, not_on_or_after) = valid_time_window();
+
+    let xml = build_signed_saml_response(
+        &key_pair,
+        "alice@example.com",
+        "_response_noa_3",
+        "_assertion_noa_3",
+        "_request_noa_3",
+        "https://vouch.example.com/saml/acs",
+        "https://idp.example.com",
+        "https://vouch.example.com",
+        &not_before,
+        &not_on_or_after,
+        Some("_request_noa_3"),
+        Some(&not_on_or_after), // SubjectConfirmationData.NotOnOrAfter present + valid
+    );
+
+    let base64_response = B64.encode(xml.as_bytes());
+    let assertion = validate_saml_response(
+        &base64_response,
+        "_request_noa_3",
+        &provider,
+        test_arrival(),
+    )
+    .expect("Expected Ok for signed response with present, valid SCD.NotOnOrAfter");
+    assert_eq!(assertion.email, "alice@example.com");
 }

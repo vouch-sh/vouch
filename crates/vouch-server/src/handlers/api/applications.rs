@@ -1,28 +1,30 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-//! API handlers for OAuth Application Registration.
-//!
-//! These handlers return JSON responses for programmatic access to
-//! application management.
+//! JSON handlers for `/api/v1/applications/*` — programmatic OAuth
+//! application management. Every handler takes the `AuthenticatedToken`
+//! extractor and answers with a JSON error envelope; the browser portal for
+//! the same data lives in [`crate::handlers::applications`], which also owns
+//! the request/response types and validation rules both surfaces share.
 
 use crate::AppState;
+use crate::arrival::ArrivalTime;
 use crate::db::{self, AccessScope, OAuthEventType, UpdateOAuthClientParams};
 use axum::{Json, extract::State, http::StatusCode};
 use std::sync::Arc;
 
-use super::generate_client_secret;
-use super::types::{
+use crate::error::ServiceError;
+use crate::handlers::applications::generate_client_secret;
+use crate::handlers::applications::types::{
     AddSecretRequest, AddSecretResponse, ApplicationResponse, CreateApplicationRequest,
     CreateApplicationResponse, ListApplicationsResponse, ListSecretsResponse, SecretInfo,
     UpdateApplicationRequest,
 };
-use super::validate::{
+use crate::handlers::applications::validate::{
     CreateAppContext, CreateAppInput, UpdateAppInput, build_create_params,
     compute_fapi_update_fields, validate_create_application, validate_update_fapi,
     validate_update_format,
 };
-use crate::error::ServiceError;
 use crate::handlers::hash_token;
-use crate::handlers::session::AuthenticatedToken;
+use crate::handlers::session::{self, AuthenticatedToken};
 use crate::handlers::{ValidPath, ValidUuid};
 
 /// List user's applications (API).
@@ -51,15 +53,33 @@ pub(crate) async fn list_applications_api(
 /// Load the requesting user and enforce account-status and access-scope rules.
 ///
 /// The account must be active, and organization scope requires organization
-/// membership. Shared by the create and update handlers.
+/// membership. Used by the create handler, which has no ownership check and
+/// therefore gates in a single step.
 async fn load_active_user_for_scope(
     state: &AppState,
     user_id: &str,
     wants_org_scope: bool,
 ) -> Result<db::User, ServiceError> {
-    let user = crate::handlers::session::load_active_user(state, user_id).await?;
+    let user = session::load_active_user(state, user_id).await?;
+    validate_org_scope_membership(&user, wants_org_scope)?;
+    Ok(user)
+}
 
-    // Validate: Organization scope requires user to have an org
+/// Reject an organization-scope request when the user is not an organization
+/// member.
+///
+/// Extracted from [`load_active_user_for_scope`] as the half the update
+/// handler must keep *after* its ownership check: the active-user gate (the
+/// rejection inside [`load_active_user`]) moves before ownership in
+/// `update_application_api` to match `load_active_owned_client`, but this
+/// validation stays after it so an active non-org user PATCHing a non-owned
+/// app still hits the ownership `404` rather than the org-scope `400`.
+///
+/// [`load_active_user`]: crate::handlers::session::load_active_user
+fn validate_org_scope_membership(
+    user: &db::User,
+    wants_org_scope: bool,
+) -> Result<(), ServiceError> {
     if wants_org_scope && user.org_id.is_none() {
         return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
@@ -67,8 +87,50 @@ async fn load_active_user_for_scope(
             "Organization scope requires organization membership",
         ));
     }
+    Ok(())
+}
 
-    Ok(user)
+/// Load the requesting user and the application, enforcing the account-active
+/// invariant and ownership before any state-changing operation.
+///
+/// `AuthenticatedToken` establishes token validity only — it does not load
+/// the user record — so a deactivated user holding a live session would
+/// otherwise reach the destructive operations below. This is the shared gate
+/// for the delete/secret/revoke handlers, mirroring
+/// [`load_active_user_for_scope`] on the create/update path; see
+/// `session::load_active_user`.
+async fn load_active_owned_client(
+    state: &AppState,
+    user_id: &str,
+    app_id: &str,
+) -> Result<db::OAuthClient, ServiceError> {
+    // Active-user gate first: a deactivated account is rejected before we
+    // disclose whether the application exists.
+    session::load_active_user(state, user_id).await?;
+
+    let client = db::get_oauth_client_by_id(&state.store, app_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get application: {e}");
+            ServiceError::api(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                "Internal database error",
+            )
+        })?
+        .ok_or_else(|| {
+            ServiceError::api(StatusCode::NOT_FOUND, "not_found", "Application not found")
+        })?;
+
+    if client.user_id.as_deref() != Some(user_id) {
+        return Err(ServiceError::api(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "Application not found",
+        ));
+    }
+
+    Ok(client)
 }
 
 /// Create a new application (API).
@@ -91,6 +153,7 @@ pub(crate) async fn create_application_api(
         post_logout_redirect_uris: post_logout_redirect_uris_raw,
         access_scope: req.access_scope.as_deref(),
         fapi_profile: req.fapi_profile.as_deref(),
+        token_endpoint_auth_method: req.token_endpoint_auth_method.as_deref(),
         jwks: req.jwks.as_deref(),
         jwks_uri: req.jwks_uri.as_deref(),
     })?;
@@ -144,9 +207,7 @@ pub(crate) async fn create_application_api(
         )
     })?;
 
-    let client_secret = if client.token_endpoint_auth_method
-        == db::TokenEndpointAuthMethod::ClientSecretBasic
-    {
+    let client_secret = if client.token_endpoint_auth_method.uses_client_secret() {
         let secret = generate_client_secret();
         let secret_hash = hash_token(&secret);
 
@@ -260,6 +321,19 @@ pub(crate) async fn update_application_api(
     // extraction fails before touching the store when no credential is sent.
     let AuthenticatedToken(token) = token?;
 
+    // Active-user gate first — match `load_active_owned_client` and every
+    // other state-changing application handler: a deactivated account holding
+    // a live session is rejected (401) before we disclose whether the
+    // application exists or is owned by the caller (404). The org-scope half
+    // of the previous `load_active_user_for_scope` call stays *after* the
+    // ownership check below, so an active non-org user PATCHing a non-owned
+    // app still hits the ownership 404 rather than the org-scope 400 — only
+    // deactivated-user behavior changes (404 → 401 on non-owned/non-existent
+    // apps).
+    let access_scope = validated.access_scope;
+    let wants_org_scope = access_scope == Some(AccessScope::Organization);
+    let user = session::load_active_user(&state, &token.sub).await?;
+
     // Get existing application
     let client = db::get_oauth_client_by_id(&state.store, &app_id)
         .await
@@ -284,14 +358,9 @@ pub(crate) async fn update_application_api(
         ));
     }
 
-    let access_scope = validated.access_scope;
-
-    let user = load_active_user_for_scope(
-        &state,
-        &token.sub,
-        access_scope == Some(AccessScope::Organization),
-    )
-    .await?;
+    // Org-scope validation stays after the ownership check, preserving the
+    // existing behavior for active non-org users.
+    validate_org_scope_membership(&user, wants_org_scope)?;
 
     // Set org_id only for organization-scoped apps
     let org_id = if access_scope == Some(AccessScope::Organization) {
@@ -380,42 +449,81 @@ pub(crate) async fn update_application_api(
 /// DELETE /api/v1/applications/:id
 pub(crate) async fn delete_application_api(
     State(state): State<Arc<AppState>>,
+    client_info: db::ClientInfo,
     AuthenticatedToken(token): AuthenticatedToken,
     ValidPath(app_id): ValidPath<ValidUuid>,
 ) -> Result<StatusCode, ServiceError> {
-    // Verify ownership
-    let client = db::get_oauth_client_by_id(&state.store, &app_id)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to get application for deletion: {e}");
-            ServiceError::api(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                "Internal database error",
-            )
-        })?
-        .ok_or_else(|| {
-            ServiceError::api(StatusCode::NOT_FOUND, "not_found", "Application not found")
-        })?;
+    // Active-user gate + ownership check (deactivated users must not delete
+    // applications).
+    let client = load_active_owned_client(&state, &token.sub, &app_id).await?;
 
-    if client.user_id.as_deref() != Some(token.sub.as_str()) {
-        return Err(ServiceError::api(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            "Application not found",
-        ));
-    }
+    // Delete the client and revoke every session it minted (M2M and
+    // user-issued). Deleting an application is a stronger revocation intent
+    // than the /revoke endpoint, so it must revoke at least as much — without
+    // the session delete, access tokens minted for the deleted application
+    // keep validating at resource endpoints until `exp`. Fail closed: on
+    // error the caller must not see 204 while tokens may still validate.
+    db::delete_oauth_client_and_revoke_sessions(
+        &state.store,
+        &state.session_cache,
+        &app_id,
+        &client.client_id,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to delete OAuth client: {e}");
+        ServiceError::api(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "db_error",
+            "Internal database error",
+        )
+    })?;
 
-    db::delete_oauth_client(&state.store, &app_id)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to delete OAuth client: {e}");
-            ServiceError::api(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                "Internal database error",
-            )
-        })?;
+    // Record the `ClientDeleted` audit event, mirroring the RFC 7592 delete
+    // path (`services::oidc::registration::delete_client_configuration`). The
+    // less-destructive secret/token handlers on this same surface already
+    // record `SecretAdded`/`SecretRevoked`/`TokenRevoked`; the delete cascade
+    // is a strictly stronger revocation and must not be the one lifecycle
+    // event that leaves no durable record.
+    //
+    // The client document is already deleted above, so the `Unresolved`
+    // client-org fallback inside `record_oauth_event` (a lookup by
+    // `client.id`) would always miss. Pre-resolve org-domain attribution
+    // from the already-in-scope `client.user_id`/`client.org_id` instead,
+    // exactly as the RFC 7592 path does, then stamp it via `Known`.
+    let user_org_domain = if let Some(user_id) = client.user_id.as_deref()
+        && let Ok(Some(user)) = db::get_user_by_id(&state.store, user_id).await
+        && let Some(org_id) = user.org_id.as_deref()
+    {
+        match user.org_domain.clone() {
+            Some(domain) => Some(domain),
+            None => db::get_organization_domain(&state.store, org_id)
+                .await
+                .ok()
+                .flatten(),
+        }
+    } else {
+        None
+    };
+    let audit_org_domain = db::resolve_event_org_domain(
+        &state.store,
+        user_org_domain.as_deref(),
+        client.org_id.as_deref(),
+    )
+    .await;
+    db::record_oauth_event(
+        &state.audit,
+        &state.store,
+        &db::RecordOAuthEventParams {
+            oauth_client_id: &app_id,
+            event_type: OAuthEventType::ClientDeleted,
+            user_id: Some(&token.sub),
+            client: &client_info,
+            details: Some("Application deleted via API"),
+            org_domain: db::RecordedOrgDomain::Known(audit_org_domain.as_deref()),
+        },
+    )
+    .await;
 
     tracing::info!("Deleted OAuth application: {}", client.client_id);
 
@@ -426,47 +534,35 @@ pub(crate) async fn delete_application_api(
 /// POST /api/v1/applications/:id/secrets
 pub(crate) async fn add_secret_api(
     State(state): State<Arc<AppState>>,
+    client_info: db::ClientInfo,
     AuthenticatedToken(token): AuthenticatedToken,
     ValidPath(app_id): ValidPath<ValidUuid>,
     Json(req): Json<AddSecretRequest>,
 ) -> Result<(StatusCode, Json<AddSecretResponse>), ServiceError> {
-    let client = db::get_oauth_client_by_id(&state.store, &app_id)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to get application: {e}");
-            ServiceError::api(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                "Internal database error",
-            )
-        })?
-        .ok_or_else(|| {
-            ServiceError::api(StatusCode::NOT_FOUND, "not_found", "Application not found")
-        })?;
+    // Active-user gate + ownership check (deactivated users must not mint
+    // client secrets).
+    let client = load_active_owned_client(&state, &token.sub, &app_id).await?;
 
-    if client.user_id.as_deref() != Some(token.sub.as_str()) {
-        return Err(ServiceError::api(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            "Application not found",
-        ));
-    }
-
-    if !client.application_type.requires_secret() {
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "no_secret",
-            "This application type does not use client secrets",
-        ));
-    }
-
-    if client.is_fapi()
-        && client.token_endpoint_auth_method == db::TokenEndpointAuthMethod::PrivateKeyJwt
+    // Mint only a secret that authenticates the client: its registered method
+    // is `client_secret_*` and it is not FAPI, whose clients authenticate via
+    // `private_key_jwt` or mTLS. This includes native apps: RFC 8252 §8.4
+    // "Except when using a mechanism like Dynamic Client Registration
+    // [RFC7591] to provision per-instance secrets, native apps are classified
+    // as public clients", so a native app that registered a secret method
+    // may rotate it.
+    if !client
+        .token_endpoint_auth_method
+        .secret_is_credential(client.fapi_profile)
     {
+        let message = if client.is_fapi() {
+            "FAPI clients do not use client secrets"
+        } else {
+            "This client does not use client secrets"
+        };
         return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "no_secret",
-            "FAPI clients using private_key_jwt do not use client secrets",
+            message,
         ));
     }
 
@@ -493,9 +589,9 @@ pub(crate) async fn add_secret_api(
             oauth_client_id: &app_id,
             event_type: OAuthEventType::SecretAdded,
             user_id: Some(&token.sub),
-            ip_address: None,
-            user_agent: None,
+            client: &client_info,
             details: Some("Secret added"),
+            org_domain: db::RecordedOrgDomain::Unresolved,
         },
     )
     .await;
@@ -516,6 +612,7 @@ pub(crate) async fn add_secret_api(
 /// List secrets for an application (API).
 /// GET /api/v1/applications/:id/secrets
 pub(crate) async fn list_secrets_api(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     AuthenticatedToken(token): AuthenticatedToken,
     ValidPath(app_id): ValidPath<ValidUuid>,
@@ -542,7 +639,7 @@ pub(crate) async fn list_secrets_api(
         ));
     }
 
-    let now = jiff::Timestamp::now();
+    let now = arrival.timestamp();
     let secrets = db::get_oauth_client_secrets(&state.store, &app_id)
         .await
         .map_err(|e| {
@@ -573,31 +670,15 @@ pub(crate) async fn list_secrets_api(
 /// Delete (revoke) a secret (API).
 /// DELETE /api/v1/applications/:id/secrets/:secret_id
 pub(crate) async fn delete_secret_api(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
+    client_info: db::ClientInfo,
     AuthenticatedToken(token): AuthenticatedToken,
     ValidPath((app_id, secret_id)): ValidPath<(ValidUuid, ValidUuid)>,
 ) -> Result<StatusCode, ServiceError> {
-    let client = db::get_oauth_client_by_id(&state.store, &app_id)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to get application: {e}");
-            ServiceError::api(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                "Internal database error",
-            )
-        })?
-        .ok_or_else(|| {
-            ServiceError::api(StatusCode::NOT_FOUND, "not_found", "Application not found")
-        })?;
-
-    if client.user_id.as_deref() != Some(token.sub.as_str()) {
-        return Err(ServiceError::api(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            "Application not found",
-        ));
-    }
+    // Active-user gate + ownership check (deactivated users must not revoke
+    // secrets).
+    let client = load_active_owned_client(&state, &token.sub, &app_id).await?;
 
     let secret = db::get_oauth_client_secret_by_id(&state.store, &secret_id)
         .await
@@ -627,7 +708,7 @@ pub(crate) async fn delete_secret_api(
         ));
     }
 
-    let now = jiff::Timestamp::now();
+    let now = arrival.timestamp();
     let all_secrets = db::get_oauth_client_secrets(&state.store, &app_id)
         .await
         .map_err(|e| {
@@ -644,7 +725,18 @@ pub(crate) async fn delete_secret_api(
         .filter(|s| s.id != *secret_id && s.is_valid(&now))
         .count();
 
-    if other_active == 0 {
+    // The floor protects a usable credential; a dead secret stays deletable.
+    // The floor fires only when revoking the target would actually reduce the
+    // active count to zero — i.e. when the target itself is still an active
+    // credential.  The authoritative check is the same one inside
+    // `revoke_oauth_client_secret`'s transaction.
+    let target_active = secret.is_valid(&now);
+    if other_active == 0
+        && client
+            .token_endpoint_auth_method
+            .secret_is_credential(client.fapi_profile)
+        && target_active
+    {
         return Err(ServiceError::api(
             StatusCode::CONFLICT,
             "last_secret",
@@ -664,9 +756,9 @@ pub(crate) async fn delete_secret_api(
             oauth_client_id: &app_id,
             event_type: OAuthEventType::SecretRevoked,
             user_id: Some(&token.sub),
-            ip_address: None,
-            user_agent: None,
+            client: &client_info,
             details: Some("Secret revoked"),
+            org_domain: db::RecordedOrgDomain::Unresolved,
         },
     )
     .await;
@@ -684,33 +776,20 @@ pub(crate) async fn delete_secret_api(
 /// `POST /api/v1/applications/:id/revoke`
 pub(crate) async fn revoke_tokens_api(
     State(state): State<Arc<AppState>>,
+    client_info: db::ClientInfo,
     AuthenticatedToken(token): AuthenticatedToken,
     ValidPath(app_id): ValidPath<ValidUuid>,
 ) -> Result<StatusCode, ServiceError> {
-    // Verify ownership
-    let client = db::get_oauth_client_by_id(&state.store, &app_id)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to get application for token revocation: {e}");
-            ServiceError::api(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                "Internal database error",
-            )
-        })?
-        .ok_or_else(|| {
-            ServiceError::api(StatusCode::NOT_FOUND, "not_found", "Application not found")
-        })?;
+    // Active-user gate + ownership check (deactivated users must not revoke
+    // an application's tokens).
+    let client = load_active_owned_client(&state, &token.sub, &app_id).await?;
 
-    if client.user_id.as_deref() != Some(token.sub.as_str()) {
-        return Err(ServiceError::api(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            "Application not found",
-        ));
-    }
-
-    // Revoke all secrets (effectively revoking all tokens)
+    // Revoke all secrets. This blocks new issuance only —
+    // `db::revoke_all_oauth_client_secrets` sets `revoked_at` on
+    // `OAuthClientSecretDoc` rows, which the token-endpoint client-auth path
+    // consults; the resource-protection and introspection paths never read
+    // `revoked_at`. Already-minted access tokens are invalidated by the
+    // session deletes below.
     db::revoke_all_oauth_client_secrets(&state.store, &app_id)
         .await
         .map_err(|e| {
@@ -722,34 +801,74 @@ pub(crate) async fn revoke_tokens_api(
             )
         })?;
 
-    // Terminate live M2M (client_credentials) sessions.
+    // The secrets are revoked, which is durable whether or not the session
+    // sweeps below succeed. Audit exactly what committed: the event is
+    // written after the sweeps either way, with `details` naming a partial
+    // outcome, so a failed sweep cannot leave revoked secrets with no
+    // `TokenRevoked` event while the caller is told to retry.
     //
-    // Per RFC 9068 §2.2, client_credentials access tokens are persisted as
-    // sessions whose `user_id` equals the OAuth client's `client_id`.
-    // Revoking secrets is not enough on its own: the session cache may still
-    // serve unexpired tokens until their TTL elapses.  Deleting those sessions
-    // and invalidating the cache makes the `TokenRevoked` audit event accurate.
-    //
-    // Fail closed: if session deletion fails, do not report revocation success.
-    // Secrets are already revoked, but unexpired M2M access tokens could still
-    // validate via DB-backed session lookup, so the caller must be told the
-    // revocation was incomplete (and retry) rather than see a 204 + TokenRevoked.
-    db::delete_sessions_for_user(&state.store, &client.client_id)
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                "Failed to delete M2M sessions for {}: {e}",
-                client.client_id
-            );
-            ServiceError::api(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                "Internal database error",
-            )
-        })?;
-    state.session_cache.invalidate_for_user(&client.client_id);
+    // The sweeps fail closed: if either fails, revocation is not reported as
+    // successful. Secrets are already revoked, but unexpired access tokens
+    // could still validate via DB-backed session lookup, so the caller must
+    // be told the revocation was incomplete (and retry) rather than see a
+    // 204.
+    let sessions_revoked: Result<(), ServiceError> = async {
+        // Terminate live M2M (client_credentials) sessions.
+        //
+        // Per RFC 9068 §2.2, client_credentials access tokens are persisted as
+        // sessions whose `user_id` equals the OAuth client's `client_id`, so this
+        // delete reaches exactly the M2M sessions for this client. Revoking
+        // secrets is not enough on its own: the session cache may still serve
+        // unexpired tokens until their TTL elapses. Deleting those sessions and
+        // invalidating the cache is what closes the M2M half of revocation.
+        db::delete_sessions_for_user(&state.store, &client.client_id)
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    "Failed to delete M2M sessions for {}: {e}",
+                    client.client_id
+                );
+                ServiceError::api(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "db_error",
+                    "Internal database error",
+                )
+            })?;
+        state.session_cache.invalidate_for_user(&client.client_id);
 
-    // Log the event
+        // Terminate user-issued access-token sessions minted for this client.
+        //
+        // `authorization_code`, `device_code`, RFC 8693 `token_exchange`, and
+        // FIDO2-assertion grants all persist sessions under the *real resource
+        // owner's* `user_id` (not the client's), so the M2M delete above — which
+        // filters by `user_id == client_id` — cannot reach them. Those sessions
+        // carry the issuing client's id on the `client_id` index (stamped by
+        // `create_oauth_access_token` from the RFC 9068 `client_id` claim), so a
+        // client-scoped delete is what "revoke all tokens for an application"
+        // must cover. Without it the tokens keep validating at resource
+        // endpoints until their `exp`.
+        //
+        // Pre-migration sessions issued before the `client_id` index existed
+        // deserialize `client_id` to `None` and so are not matched; they remain
+        // valid until their `exp` (bounded by `session_hours`). New tokens minted
+        // after this change are revocable on demand.
+        db::delete_sessions_for_oauth_client(&state.store, &client.client_id)
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    "Failed to delete user-issued sessions for client {}: {e}",
+                    client.client_id
+                );
+                ServiceError::api(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "db_error",
+                    "Internal database error",
+                )
+            })?;
+        state.session_cache.invalidate_for_client(&client.client_id);
+        Ok(())
+    }
+    .await;
     db::record_oauth_event(
         &state.audit,
         &state.store,
@@ -757,12 +876,17 @@ pub(crate) async fn revoke_tokens_api(
             oauth_client_id: &app_id,
             event_type: OAuthEventType::TokenRevoked,
             user_id: Some(&token.sub),
-            ip_address: None,
-            user_agent: None,
-            details: Some("All tokens revoked"),
+            client: &client_info,
+            details: Some(if sessions_revoked.is_ok() {
+                "All tokens revoked"
+            } else {
+                "Client secrets revoked; session revocation failed, retry required"
+            }),
+            org_domain: db::RecordedOrgDomain::Unresolved,
         },
     )
     .await;
+    sessions_revoked?;
 
     tracing::info!(
         "Revoked all tokens for OAuth application: {}",

@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/vouch-sh/vouch/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/vouch-sh/vouch/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0%20OR%20MIT-blue)](LICENSE-APACHE)
-[![Rust](https://img.shields.io/badge/rust-1.97%2B-orange)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.98%2B-orange)](https://www.rust-lang.org)
 
 **Prove you're here.**
 
@@ -104,7 +104,7 @@ sudo apt install vouch
 # See https://packages.vouch.sh for repository setup
 sudo dnf install vouch
 
-# From source (requires Rust 1.97+)
+# From source (requires Rust 1.98+)
 cargo install --git https://github.com/vouch-sh/vouch vouch-cli
 ```
 

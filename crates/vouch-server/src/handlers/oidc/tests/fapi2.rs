@@ -12,8 +12,19 @@
 //! Reference: <https://openid.net/specs/fapi-security-profile-2_0-final.html>
 
 use super::helpers::*;
-use crate::db::TokenEndpointAuthMethod;
+use crate::crypto::document_crypto::{DocumentCrypto, PlaintextDocumentCrypto};
+use crate::crypto::jwt::StateTokenSigner;
+use crate::crypto::keys::OidcSigningKey;
+use crate::crypto::webauthn_verify::AuthTime;
+use crate::db::audit::AuditStore;
+use crate::db::store::DocumentStore;
+use crate::db::{
+    self, AuthorizeDeviceAuthParams, DeviceApproval, SessionCache, TokenEndpointAuthMethod, User,
+};
+use crate::services::oidc::mtls::ClientCertTrust;
 use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair};
+use vouch_common::jwk::JwkThumbprintKey;
+use vouch_common::protocol::{CLIENT_ASSERTION_TYPE_JWT_BEARER, GRANT_TYPE_DEVICE_CODE};
 
 // ========================================================================
 // FAPI Helper Functions
@@ -209,7 +220,7 @@ async fn acquire_dpop_nonce(
 ///
 /// The canonical form for EC keys is `{"crv":"...","kty":"...","x":"...","y":"..."}`.
 fn compute_jwk_thumbprint(jwk: &serde_json::Value) -> String {
-    vouch_common::jwk::JwkThumbprintKey::from_json(jwk)
+    JwkThumbprintKey::from_json(jwk)
         .expect("test JWK carries the required members")
         .thumbprint()
 }
@@ -235,7 +246,7 @@ async fn create_fapi_test_client(
         user_id,
         TestClientSpec {
             jwks: TestJwks::Custom(jwks_value),
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
             fapi_profile: Some(db::FapiProfile::Fapi2Security),
             dpop_bound_access_tokens: true,
             ..Default::default()
@@ -264,32 +275,19 @@ async fn test_fapi2_dpop_code_binding_matching_key() {
     let jkt = compute_jwk_thumbprint(&dpop_jwk);
 
     // Issue an auth code with the DPoP key thumbprint bound to it
-    let scope_set = ScopeSet::parse("openid");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
             dpop_jkt: Some(&jkt),
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::FAPI_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+            fapi_lifetime: true,
+            ..Default::default()
         },
     )
-    .await
-    .expect("Failed to issue auth code with dpop_jkt");
+    .await;
 
     // Acquire DPoP nonce
     let token_uri = format!("{}/oauth/token", state.config().base_url);
@@ -350,32 +348,19 @@ async fn test_fapi2_dpop_code_binding_mismatching_key() {
     // Key B will be used at the token endpoint
     let (dpop_key_b, dpop_jwk_b) = generate_dpop_key_pair();
 
-    let scope_set = ScopeSet::parse("openid");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
             dpop_jkt: Some(&jkt_a),
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::FAPI_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+            fapi_lifetime: true,
+            ..Default::default()
         },
     )
-    .await
-    .expect("Failed to issue auth code");
+    .await;
 
     let token_uri = format!("{}/oauth/token", state.config().base_url);
     let nonce = acquire_dpop_nonce(&app, &dpop_key_b, &dpop_jwk_b, "POST", &token_uri).await;
@@ -438,32 +423,19 @@ async fn test_fapi2_dpop_code_binding_missing_dpop_at_token() {
     let (_dpop_key, dpop_jwk) = generate_dpop_key_pair();
     let jkt = compute_jwk_thumbprint(&dpop_jwk);
 
-    let scope_set = ScopeSet::parse("openid");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
             dpop_jkt: Some(&jkt),
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::FAPI_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+            fapi_lifetime: true,
+            ..Default::default()
         },
     )
-    .await
-    .expect("Failed to issue auth code with dpop_jkt");
+    .await;
 
     let token_uri = format!("{}/oauth/token", state.config().base_url);
     let assertion = build_client_assertion(&client.client_id, &token_uri, &pkcs8_bytes, None);
@@ -656,33 +628,18 @@ async fn test_fapi2_token_rejects_without_dpop() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let (client, pkcs8_bytes) = create_fapi_test_client(&state.store, &user.id).await;
 
-    let scope_set = ScopeSet::parse("openid");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
-            // No DPoP binding on the code itself
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::FAPI_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            fapi_lifetime: true,
+            ..Default::default()
         },
     )
-    .await
-    .expect("Failed to issue auth code");
+    .await;
 
     let token_uri = format!("{}/oauth/token", state.config().base_url);
     let assertion = build_client_assertion(&client.client_id, &token_uri, &pkcs8_bytes, None);
@@ -749,32 +706,17 @@ async fn test_fapi2_non_fapi_client_standard_flow() {
     );
 
     // Issue an auth code via the service (simulating a completed authorization)
-    let scope_set = ScopeSet::parse("openid");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            ..Default::default()
         },
     )
-    .await
-    .expect("Failed to issue auth code");
+    .await;
 
     // Exchange without DPoP (standard client does not require it)
     let (status, response_body) = http_post_form(
@@ -1049,22 +991,17 @@ async fn test_discovery_mtls_absent_with_partial_tls_config() {
     );
 }
 
-#[tokio::test]
-async fn test_discovery_tls_client_auth_in_auth_methods_with_tls() {
-    // When TLS is configured, token_endpoint_auth_methods_supported must include
-    // tls_client_auth and self_signed_tls_client_auth, and mtls_endpoint_aliases
-    // must be present.
-    //
-    // Build a fresh AppState with a TLS cert set — test_app() has tls_cert: None.
-    use crate::services::oidc::discovery::build_discovery_document;
+/// An `AppState` with TLS fully configured (placeholder cert and key —
+/// `test_app()` has none) and `client_cert_trust` as given.
+async fn tls_configured_state(
+    client_cert_trust: Option<ClientCertTrust>,
+) -> std::sync::Arc<crate::AppState> {
     use crate::test_utils::{test_config, test_db};
     use arc_swap::ArcSwap;
     use std::sync::Arc;
 
     let pool = test_db().await;
     let mut config = test_config();
-    // Set placeholder TLS cert and key to enable mTLS discovery
-    // advertisement (requires full TLS configuration).
     config.tls_cert = Some("placeholder-cert".to_string());
     config.tls_key = Some(secrecy::SecretString::from("placeholder-key".to_string()));
 
@@ -1075,14 +1012,13 @@ async fn test_discovery_tls_client_auth_in_auth_methods_with_tls() {
         .build()
         .expect("Webauthn");
 
-    let oidc_key = crate::crypto::keys::OidcSigningKey::generate().expect("oidc key");
+    let oidc_key = OidcSigningKey::generate().expect("oidc key");
 
-    let crypto: Arc<dyn crate::crypto::document_crypto::DocumentCrypto> =
-        Arc::new(crate::crypto::document_crypto::PlaintextDocumentCrypto);
-    let store = crate::db::store::DocumentStore::new(pool.clone(), crypto.clone());
-    let audit = crate::db::audit::AuditStore::new(pool.clone(), crypto);
+    let crypto: Arc<dyn DocumentCrypto> = Arc::new(PlaintextDocumentCrypto);
+    let store = DocumentStore::new(pool.clone(), crypto.clone());
+    let audit = AuditStore::new(pool.clone(), crypto);
 
-    let state = Arc::new(crate::AppState {
+    Arc::new(crate::AppState {
         db: pool,
         store,
         audit,
@@ -1091,17 +1027,27 @@ async fn test_discovery_tls_client_auth_in_auth_methods_with_tls() {
         ssh_ca: None,
         oidc_key,
         oidc_rsa_key: None,
-        state_signer: crate::crypto::jwt::StateTokenSigner::local(
+        state_signer: StateTokenSigner::local(
             b"test_jwt_secret_must_be_at_least_32_characters_long".to_vec(),
         ),
         github_app: None,
         http_client: reqwest::Client::new(),
-        session_cache: crate::db::SessionCache::new(10_000, 30),
+        session_cache: SessionCache::new(10_000, 30),
         org_keys_cache: Default::default(),
         policy: Default::default(),
         idps: Vec::new(),
-    });
+        client_cert_trust,
+    })
+}
 
+#[tokio::test]
+async fn test_discovery_tls_client_auth_in_auth_methods_with_tls() {
+    // When TLS and client CAs are configured, token_endpoint_auth_methods_supported
+    // must include tls_client_auth and self_signed_tls_client_auth, and
+    // mtls_endpoint_aliases must be present.
+    use crate::services::oidc::discovery::build_discovery_document;
+
+    let state = tls_configured_state(Some(test_client_ca().trust())).await;
     let doc = build_discovery_document(&state);
 
     assert!(
@@ -1124,6 +1070,28 @@ async fn test_discovery_tls_client_auth_in_auth_methods_with_tls() {
     );
 }
 
+// RFC 8705 §2.1: tls_client_auth "relies on a validated certificate chain",
+// so without client CAs it cannot authenticate anyone and is not advertised.
+// self_signed_tls_client_auth (§2.2) validates no chain and stays.
+#[tokio::test]
+async fn test_discovery_omits_tls_client_auth_without_client_ca() {
+    use crate::services::oidc::discovery::build_discovery_document;
+
+    let state = tls_configured_state(None).await;
+    let doc = build_discovery_document(&state);
+
+    assert!(
+        !doc.token_endpoint_auth_methods_supported
+            .contains(&TokenEndpointAuthMethod::TlsClientAuth),
+        "tls_client_auth must not be advertised without client CAs"
+    );
+    assert!(
+        doc.token_endpoint_auth_methods_supported
+            .contains(&TokenEndpointAuthMethod::SelfSignedTlsClientAuth),
+        "self_signed_tls_client_auth must still be advertised"
+    );
+}
+
 // ============================================================================
 // FAPI 2.0 Device Authorization Grant (RFC 8628) — Sender Constraints
 //
@@ -1138,8 +1106,8 @@ async fn test_discovery_tls_client_auth_in_auth_methods_with_tls() {
 /// `device::hash_device_code`).
 async fn setup_authorized_device(
     state: &std::sync::Arc<crate::AppState>,
-    client_id: Option<&str>,
-    user: &crate::db::User,
+    client_id: &str,
+    user: &User,
     auth_id: &str,
     label: &str,
 ) -> String {
@@ -1150,7 +1118,7 @@ async fn setup_authorized_device(
     let now = jiff::Timestamp::now();
     let expires_at = now.checked_add(jiff::Span::new().hours(1)).unwrap();
 
-    let id = crate::db::create_device_auth_request(
+    let id = db::create_device_auth_request(
         &state.store,
         &device_code_hash,
         &user_code,
@@ -1161,14 +1129,16 @@ async fn setup_authorized_device(
     .await
     .expect("create device auth");
 
-    crate::db::authorize_device_auth(
+    db::authorize_device_auth(
         &state.store,
-        crate::db::AuthorizeDeviceAuthParams {
+        AuthorizeDeviceAuthParams {
             id: &id,
             user_id: &user.id,
             user_email: &user.email,
             authenticator_id: auth_id,
-            hardware_verified: true,
+            verification: DeviceApproval::Observed(AuthTime::for_test(
+                jiff::Timestamp::now().as_second(),
+            )),
         },
     )
     .await
@@ -1177,11 +1147,20 @@ async fn setup_authorized_device(
     device_code
 }
 
-/// Build the device_code token-endpoint form body.
-fn device_token_body(device_code: &str) -> String {
+/// The device_code token-endpoint form body for a `private_key_jwt` client,
+/// carrying a fresh assertion: the endpoint commits each assertion's JTI, so
+/// every poll needs its own.
+fn fapi_device_token_body(
+    state: &std::sync::Arc<crate::AppState>,
+    client_id: &str,
+    pkcs8: &[u8],
+    device_code: &str,
+) -> String {
+    let assertion = build_client_assertion(client_id, &state.config().base_url, pkcs8, None);
     format!(
-        "grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code={}",
-        device_code
+        "{}&client_assertion={assertion}&client_assertion_type={}",
+        device_token_body(device_code),
+        CLIENT_ASSERTION_TYPE_JWT_BEARER
     )
 }
 
@@ -1194,13 +1173,18 @@ async fn test_fapi2_device_flow_rejects_without_dpop() {
 
     let user = create_test_user(&state.store, "fapi2-dev-nodpop@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let (client, _pkcs8) = create_fapi_test_client(&state.store, &user.id).await;
+    let (client, pkcs8) = create_fapi_test_client(&state.store, &user.id).await;
 
     let device_code =
-        setup_authorized_device(&state, Some(&client.client_id), &user, &auth_id, "nodpop").await;
+        setup_authorized_device(&state, &client.client_id, &user, &auth_id, "nodpop").await;
 
-    let (status, resp_body) =
-        http_post_form(&app, "/oauth/token", &device_token_body(&device_code), &[]).await;
+    let (status, resp_body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &fapi_device_token_body(&state, &client.client_id, &pkcs8, &device_code),
+        &[],
+    )
+    .await;
 
     assert_eq!(
         status,
@@ -1223,7 +1207,7 @@ async fn test_fapi2_device_flow_rejects_without_dpop() {
     let (status, resp_body) = http_post_form(
         &app,
         "/oauth/token",
-        &device_token_body(&device_code),
+        &fapi_device_token_body(&state, &client.client_id, &pkcs8, &device_code),
         &[("DPoP", &proof)],
     )
     .await;
@@ -1243,10 +1227,10 @@ async fn test_fapi2_device_flow_with_dpop_issues_bound_token() {
 
     let user = create_test_user(&state.store, "fapi2-dev-dpop@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let (client, _pkcs8) = create_fapi_test_client(&state.store, &user.id).await;
+    let (client, pkcs8) = create_fapi_test_client(&state.store, &user.id).await;
 
     let device_code =
-        setup_authorized_device(&state, Some(&client.client_id), &user, &auth_id, "dpop").await;
+        setup_authorized_device(&state, &client.client_id, &user, &auth_id, "dpop").await;
 
     let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
     let expected_jkt = compute_jwk_thumbprint(&dpop_jwk);
@@ -1257,7 +1241,7 @@ async fn test_fapi2_device_flow_with_dpop_issues_bound_token() {
     let (status, resp_body) = http_post_form(
         &app,
         "/oauth/token",
-        &device_token_body(&device_code),
+        &fapi_device_token_body(&state, &client.client_id, &pkcs8, &device_code),
         &[("DPoP", &proof)],
     )
     .await;
@@ -1284,6 +1268,79 @@ async fn test_fapi2_device_flow_with_dpop_issues_bound_token() {
     );
 }
 
+/// RFC 8628 §3.1: "The client authentication requirements of Section 3.2.1 of
+/// [RFC6749] apply to requests on this endpoint"; §3.4: "If the client was
+/// issued client credentials (or assigned other authentication requirements),
+/// the client MUST authenticate". A `private_key_jwt` client sending
+/// `client_assertion` and `client_assertion_type` at both device-flow endpoints
+/// still receives a DPoP-bound token.
+#[tokio::test]
+async fn test_fapi2_device_flow_accepts_client_assertion_parameters() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "fapi2-dev-assertion@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (pkcs8_bytes, jwk) = generate_es256_signing_key();
+    let client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            jwks: TestJwks::Custom(serde_json::json!({ "keys": [jwk] })),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
+            fapi_profile: Some(db::FapiProfile::Fapi2Security),
+            dpop_bound_access_tokens: true,
+            grant_types: Some(vec![GRANT_TYPE_DEVICE_CODE.to_string()]),
+            ..Default::default()
+        },
+    )
+    .await;
+    let issuer = state.config().base_url.clone();
+    let assertion_type = CLIENT_ASSERTION_TYPE_JWT_BEARER;
+
+    let assertion = build_client_assertion(&client.client_id, &issuer, &pkcs8_bytes, None);
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/device",
+        &format!(
+            "client_id={}&client_assertion={assertion}&client_assertion_type={assertion_type}",
+            client.client_id
+        ),
+        &[],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "device authorization with a client assertion: {body}"
+    );
+
+    let device_code =
+        setup_authorized_device(&state, &client.client_id, &user, &auth_id, "assertion").await;
+    let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
+    let token_uri = format!("{issuer}/oauth/token");
+    let nonce = acquire_dpop_nonce(&app, &dpop_key, &dpop_jwk, "POST", &token_uri).await;
+    let proof = create_dpop_proof(&dpop_key, &dpop_jwk, "POST", &token_uri, Some(&nonce), None);
+    let poll_assertion = build_client_assertion(&client.client_id, &issuer, &pkcs8_bytes, None);
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "{}&client_assertion={poll_assertion}&client_assertion_type={assertion_type}",
+            device_token_body(&device_code)
+        ),
+        &[("DPoP", &proof)],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "device token request with a client assertion: {body}"
+    );
+    let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(resp["token_type"].as_str(), Some("DPoP"), "{body}");
+}
+
 /// RFC 9449 Section 4.3: A DPoP proof without a nonce at the token endpoint
 /// must return `use_dpop_nonce` with a `DPoP-Nonce` header. The device code
 /// must NOT be consumed so the client can retry with the nonce.
@@ -1293,10 +1350,10 @@ async fn test_fapi2_device_flow_dpop_without_nonce_returns_use_dpop_nonce() {
 
     let user = create_test_user(&state.store, "fapi2-dev-nonce@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let (client, _pkcs8) = create_fapi_test_client(&state.store, &user.id).await;
+    let (client, pkcs8) = create_fapi_test_client(&state.store, &user.id).await;
 
     let device_code =
-        setup_authorized_device(&state, Some(&client.client_id), &user, &auth_id, "nonce").await;
+        setup_authorized_device(&state, &client.client_id, &user, &auth_id, "nonce").await;
 
     let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
     let token_uri = format!("{}/oauth/token", state.config().base_url);
@@ -1306,7 +1363,7 @@ async fn test_fapi2_device_flow_dpop_without_nonce_returns_use_dpop_nonce() {
     let response = http_post_form_full(
         &app,
         "/oauth/token",
-        &device_token_body(&device_code),
+        &fapi_device_token_body(&state, &client.client_id, &pkcs8, &device_code),
         &[("DPoP", &proof)],
     )
     .await;
@@ -1335,7 +1392,7 @@ async fn test_fapi2_device_flow_dpop_without_nonce_returns_use_dpop_nonce() {
     let (status, _) = http_post_form(
         &app,
         "/oauth/token",
-        &device_token_body(&device_code),
+        &fapi_device_token_body(&state, &client.client_id, &pkcs8, &device_code),
         &[("DPoP", &proof)],
     )
     .await;
@@ -1354,15 +1411,15 @@ async fn test_fapi2_device_flow_invalid_dpop_proof_rejected() {
 
     let user = create_test_user(&state.store, "fapi2-dev-badproof@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let (client, _pkcs8) = create_fapi_test_client(&state.store, &user.id).await;
+    let (client, pkcs8) = create_fapi_test_client(&state.store, &user.id).await;
 
     let device_code =
-        setup_authorized_device(&state, Some(&client.client_id), &user, &auth_id, "badproof").await;
+        setup_authorized_device(&state, &client.client_id, &user, &auth_id, "badproof").await;
 
     let (status, resp_body) = http_post_form(
         &app,
         "/oauth/token",
-        &device_token_body(&device_code),
+        &fapi_device_token_body(&state, &client.client_id, &pkcs8, &device_code),
         &[("DPoP", "not-a-valid-jwt")],
     )
     .await;
@@ -1386,7 +1443,7 @@ async fn test_fapi2_device_flow_invalid_dpop_proof_rejected() {
     let (status, _) = http_post_form(
         &app,
         "/oauth/token",
-        &device_token_body(&device_code),
+        &fapi_device_token_body(&state, &client.client_id, &pkcs8, &device_code),
         &[("DPoP", &proof)],
     )
     .await;
@@ -1408,10 +1465,15 @@ async fn test_fapi2_device_flow_non_fapi_client_succeeds_without_dpop() {
     let client = create_test_client(&state.store, &user.id, TestClientSpec::default()).await;
 
     let device_code =
-        setup_authorized_device(&state, Some(&client.client_id), &user, &auth_id, "std").await;
+        setup_authorized_device(&state, &client.client_id, &user, &auth_id, "std").await;
 
-    let (status, resp_body) =
-        http_post_form(&app, "/oauth/token", &device_token_body(&device_code), &[]).await;
+    let (status, resp_body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &device_token_body(&device_code),
+        &[("Authorization", client.basic_auth_header().as_str())],
+    )
+    .await;
 
     assert_eq!(
         status,
@@ -1441,7 +1503,7 @@ async fn test_fapi2_device_flow_non_fapi_client_with_dpop_issues_bound_token() {
     let client = create_test_client(&state.store, &user.id, TestClientSpec::default()).await;
 
     let device_code =
-        setup_authorized_device(&state, Some(&client.client_id), &user, &auth_id, "opt").await;
+        setup_authorized_device(&state, &client.client_id, &user, &auth_id, "opt").await;
 
     let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
     let expected_jkt = compute_jwk_thumbprint(&dpop_jwk);
@@ -1453,7 +1515,10 @@ async fn test_fapi2_device_flow_non_fapi_client_with_dpop_issues_bound_token() {
         &app,
         "/oauth/token",
         &device_token_body(&device_code),
-        &[("DPoP", &proof)],
+        &[
+            ("DPoP", &proof),
+            ("Authorization", client.basic_auth_header().as_str()),
+        ],
     )
     .await;
 
@@ -1477,56 +1542,42 @@ async fn test_fapi2_device_flow_non_fapi_client_with_dpop_issues_bound_token() {
     );
 }
 
-/// The built-in CLI flow (no registered client_id) must continue to work
-/// without DPoP — FAPI constraints only apply to registered FAPI clients.
-#[tokio::test]
-async fn test_fapi2_device_flow_no_client_id_succeeds_without_dpop() {
-    let (app, state) = test_app().await;
-
-    let user = create_test_user(&state.store, "fapi2-dev-builtin@example.com").await;
-    let auth_id = create_test_authenticator(&state.store, &user.id).await;
-
-    let device_code = setup_authorized_device(&state, None, &user, &auth_id, "builtin").await;
-
-    let (status, resp_body) =
-        http_post_form(&app, "/oauth/token", &device_token_body(&device_code), &[]).await;
-
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "Built-in device flow (no client_id) must succeed without DPoP: {resp_body}"
-    );
-}
-
-/// A device request whose client_id no longer resolves (client deleted
-/// mid-flow) must be rejected with `invalid_client`, not fall through with
-/// FAPI enforcement disabled and issue an unbound token.
+/// A device request bound to a client that no longer resolves (deleted
+/// mid-flow) can be redeemed by nobody: an authenticated client is not the
+/// one the code was issued to, so RFC 6749 §5.2 `invalid_grant` ("was issued
+/// to another client") applies and no token is issued.
 #[tokio::test]
 async fn test_fapi2_device_flow_unknown_client_id_rejected() {
     let (app, state) = test_app().await;
 
     let user = create_test_user(&state.store, "fapi2-dev-ghost@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_client(&state.store, &user.id, TestClientSpec::default()).await;
 
     let device_code = setup_authorized_device(
         &state,
-        Some("ghost-client-deleted-mid-flow"),
+        "ghost-client-deleted-mid-flow",
         &user,
         &auth_id,
         "ghost",
     )
     .await;
 
-    let (status, resp_body) =
-        http_post_form(&app, "/oauth/token", &device_token_body(&device_code), &[]).await;
+    let (status, resp_body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &device_token_body(&device_code),
+        &[("Authorization", client.basic_auth_header().as_str())],
+    )
+    .await;
 
     assert_eq!(
         status,
-        StatusCode::UNAUTHORIZED,
-        "Unresolvable client_id must be rejected: {resp_body}"
+        StatusCode::BAD_REQUEST,
+        "a code issued to another client must be refused: {resp_body}"
     );
     let error: serde_json::Value = serde_json::from_str(&resp_body).expect("Valid JSON");
-    assert_eq!(error["error"], "invalid_client");
+    assert_eq!(error["error"], "invalid_grant");
 }
 
 // ============================================================================
@@ -1546,7 +1597,16 @@ async fn test_fapi2_token_exchange_rejects_unbound_fapi_client() {
 
     let user = create_test_user(&state.store, "fapi2-exchange-unbound@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let subject_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let subject_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let (client, pkcs8_bytes) = create_fapi_test_client(&state.store, &user.id).await;
 
     let assertion = build_client_assertion(
@@ -1585,7 +1645,16 @@ async fn test_fapi2_token_exchange_with_dpop_issues_bound_token() {
 
     let user = create_test_user(&state.store, "fapi2-exchange-dpop@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let subject_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let subject_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let (client, pkcs8_bytes) = create_fapi_test_client(&state.store, &user.id).await;
 
     let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
@@ -1648,7 +1717,7 @@ async fn create_fapi_client_credentials_client(
         user_id,
         TestClientSpec {
             jwks: TestJwks::Custom(jwks_value),
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
             fapi_profile: Some(db::FapiProfile::Fapi2Security),
             grant_types: Some(vec!["client_credentials".to_string()]),
             ..Default::default()
@@ -1760,7 +1829,7 @@ async fn test_client_credentials_rejects_dpop_bound_client_without_proof() {
         &user.id,
         TestClientSpec {
             jwks: TestJwks::Custom(serde_json::json!({ "keys": [jwk] })),
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
             // Not a FAPI client: the binding flag alone must be enforced.
             dpop_bound_access_tokens: true,
             grant_types: Some(vec!["client_credentials".to_string()]),
@@ -1790,4 +1859,108 @@ async fn test_client_credentials_rejects_dpop_bound_client_without_proof() {
     );
     let error: serde_json::Value = serde_json::from_str(&resp_body).expect("Valid JSON");
     assert_eq!(error["error"], "invalid_request", "body: {resp_body}");
+}
+
+/// RFC 9449 §8: "The client will typically retry the request with the new
+/// nonce value supplied upon receiving a use_dpop_nonce error". The poll checks
+/// DPoP before client authentication, so the retry reuses the assertion; once
+/// that retry authenticates, the assertion is spent.
+#[tokio::test]
+async fn test_fapi2_device_flow_poll_nonce_retry_reuses_assertion() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "fapi2-dev-jti@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8) = create_fapi_test_client(&state.store, &user.id).await;
+    let device_code =
+        setup_authorized_device(&state, &client.client_id, &user, &auth_id, "jti").await;
+
+    let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
+    let token_uri = format!("{}/oauth/token", state.config().base_url);
+    let proof_without_nonce =
+        create_dpop_proof(&dpop_key, &dpop_jwk, "POST", &token_uri, None, None);
+    let body = fapi_device_token_body(&state, &client.client_id, &pkcs8, &device_code);
+
+    let response = http_post_form_full(
+        &app,
+        "/oauth/token",
+        &body,
+        &[("DPoP", &proof_without_nonce)],
+    )
+    .await;
+    let json: serde_json::Value = serde_json::from_str(&response.body).expect("Valid JSON");
+    assert_eq!(json["error"], "use_dpop_nonce", "{}", response.body);
+    let nonce = response
+        .headers
+        .get("dpop-nonce")
+        .expect("DPoP-Nonce header")
+        .to_str()
+        .expect("nonce UTF-8")
+        .to_string();
+
+    let proof = create_dpop_proof(&dpop_key, &dpop_jwk, "POST", &token_uri, Some(&nonce), None);
+    let retry = http_post_form_full(&app, "/oauth/token", &body, &[("DPoP", &proof)]).await;
+    assert_eq!(
+        retry.status,
+        StatusCode::OK,
+        "nonce retry, same assertion: {}",
+        retry.body
+    );
+
+    // Without a DPoP header the request reaches client authentication.
+    let (status, resp) = http_post_form(&app, "/oauth/token", &body, &[]).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "spent assertion: {resp}");
+    let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_client", "{resp}");
+}
+
+/// Consecutive polls of an unapproved device code, each carrying a DPoP proof
+/// with the nonce the client holds, all answer `authorization_pending`. A
+/// nonce consumed by the first poll would make every second poll a
+/// `use_dpop_nonce` round trip and double the time to notice approval.
+#[tokio::test]
+async fn test_fapi2_device_flow_pending_polls_reuse_one_nonce() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "fapi2-pending-nonce@example.com").await;
+    let (client, pkcs8) = create_fapi_test_client(&state.store, &user.id).await;
+    let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
+    let token_uri = format!("{}/oauth/token", state.config().base_url);
+
+    let device_code = "pending-poll-nonce";
+    let expires_at = jiff::Timestamp::now()
+        .checked_add(jiff::Span::new().hours(1))
+        .expect("device code expiry");
+    db::create_device_auth_request(
+        &state.store,
+        &sha256_base64url(device_code),
+        "PENDNONCE",
+        &client.client_id,
+        expires_at,
+        0,
+    )
+    .await
+    .expect("create device authorization request");
+
+    // The first poll has no nonce and is answered with one.
+    let body = fapi_device_token_body(&state, &client.client_id, &pkcs8, device_code);
+    let proof = create_dpop_proof(&dpop_key, &dpop_jwk, "POST", &token_uri, None, None);
+    let challenge = http_post_form_full(&app, "/oauth/token", &body, &[("DPoP", &proof)]).await;
+    let nonce = challenge
+        .headers
+        .get("dpop-nonce")
+        .and_then(|v| v.to_str().ok())
+        .expect("DPoP-Nonce header")
+        .to_string();
+
+    for poll in 0..3 {
+        let body = fapi_device_token_body(&state, &client.client_id, &pkcs8, device_code);
+        let proof = create_dpop_proof(&dpop_key, &dpop_jwk, "POST", &token_uri, Some(&nonce), None);
+        let (status, resp) = http_post_form(&app, "/oauth/token", &body, &[("DPoP", &proof)]).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "poll {poll}: {resp}");
+        let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+        assert_eq!(
+            json["error"], "authorization_pending",
+            "poll {poll}: {resp}"
+        );
+    }
 }

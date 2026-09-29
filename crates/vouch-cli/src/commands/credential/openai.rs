@@ -12,18 +12,19 @@ use secrecy::{ExposeSecret, SecretString};
 use vouch_cli::tr;
 
 use crate::config::Config;
+use crate::server_url::ServerUrl;
 
 /// Default OpenAI token endpoint.
 const DEFAULT_ENDPOINT: &str = "https://auth.openai.com/oauth/token";
 
 /// Run `vouch credential openai`.
-pub(crate) async fn run(server: &str) -> Result<()> {
+pub(crate) async fn run(server: &ServerUrl) -> Result<()> {
     let token = get_token(server).await?;
     print!("{}", token.expose_secret());
     Ok(())
 }
 
-pub(crate) async fn get_token(server: &str) -> Result<SecretString> {
+pub(crate) async fn get_token(server: &ServerUrl) -> Result<SecretString> {
     let config = Config::load().context(tr!("err-failed-load-vouch-config"))?;
     let fed = config.ai().and_then(|ai| ai.openai.clone()).context(tr!(
         "err-openai-federation-not-configured-run-vouch-setup-ope"
@@ -37,7 +38,7 @@ pub(crate) async fn get_token(server: &str) -> Result<SecretString> {
     let agent = super::aws::detect_agent_source();
     let cache_key =
         super::wif::build_cache_key("openai", &fed.identity_provider_id, agent.as_deref());
-    let server = server.to_string();
+    let server = server.clone();
 
     let data = super::cache::get_or_fetch(&cache_key, "OpenAI token", || async move {
         // The Vouch assertion's expires_in is discarded: we cache the provider

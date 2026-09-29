@@ -50,29 +50,29 @@ set -euo pipefail
 # efitools is Linux-only. On macOS, re-exec this script inside a container.
 
 if [ "${1:-}" = "--docker" ]; then
-    shift
-    OUTPUT_DIR="${1:-./secureboot-keys}"
-    mkdir -p "$OUTPUT_DIR"
-    ABS_OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)"
-    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+  shift
+  OUTPUT_DIR="${1:-./secureboot-keys}"
+  mkdir -p "$OUTPUT_DIR"
+  ABS_OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)"
+  SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-    echo "=== Running in Docker (efitools is Linux-only) ==="
-    echo "Script: $SCRIPT_DIR/generate-sb-keys.sh"
-    echo "Output: $ABS_OUTPUT_DIR"
-    docker run --rm \
-        -v "$SCRIPT_DIR/generate-sb-keys.sh:/generate-sb-keys.sh:ro" \
-        -v "$ABS_OUTPUT_DIR:/output" \
-        ubuntu:24.04 \
-        bash -eux -c '
+  echo "=== Running in Docker (efitools is Linux-only) ==="
+  echo "Script: $SCRIPT_DIR/generate-sb-keys.sh"
+  echo "Output: $ABS_OUTPUT_DIR"
+  docker run --rm \
+    -v "$SCRIPT_DIR/generate-sb-keys.sh:/generate-sb-keys.sh:ro" \
+    -v "$ABS_OUTPUT_DIR:/output" \
+    ubuntu:24.04 \
+    bash -eux -c '
             apt-get update -qq
             apt-get install -y -qq efitools openssl python3 python3-pip 2>&1 | tail -1
             pip install --break-system-packages uefivars 2>&1 | tail -1
             bash /generate-sb-keys.sh /output
         '
-    echo ""
-    echo "Output written to: ${OUTPUT_DIR}/"
-    ls -la "${OUTPUT_DIR}/"
-    exit 0
+  echo ""
+  echo "Output written to: ${OUTPUT_DIR}/"
+  ls -la "${OUTPUT_DIR}/"
+  exit 0
 fi
 
 # --- Native mode (Linux) ---
@@ -80,7 +80,7 @@ fi
 OUTPUT_DIR="${1:-./secureboot-keys}"
 GUID="$(python3 -c 'import uuid; print(str(uuid.uuid4()))')"
 SUBJECT_PREFIX="/CN=Vouch Secure Boot"
-VALIDITY_DAYS=3650  # ~10 years
+VALIDITY_DAYS=3650 # ~10 years
 
 echo "=== Vouch UEFI Secure Boot Key Generation ==="
 echo "Output directory: ${OUTPUT_DIR}"
@@ -89,22 +89,22 @@ echo ""
 
 # Check prerequisites
 for cmd in openssl cert-to-efi-sig-list sign-efi-sig-list; do
-    if ! command -v "$cmd" &>/dev/null; then
-        echo "ERROR: Required command not found: $cmd"
-        echo ""
-        echo "On macOS, run with --docker flag instead:"
-        echo "  ./generate-sb-keys.sh --docker [output-dir]"
-        echo ""
-        echo "On Linux, install dependencies:"
-        echo "  apt install efitools openssl"
-        echo "  pip install uefivars"
-        exit 1
-    fi
+  if ! command -v "$cmd" &>/dev/null; then
+    echo "ERROR: Required command not found: $cmd"
+    echo ""
+    echo "On macOS, run with --docker flag instead:"
+    echo "  ./generate-sb-keys.sh --docker [output-dir]"
+    echo ""
+    echo "On Linux, install dependencies:"
+    echo "  apt install efitools openssl"
+    echo "  pip install uefivars"
+    exit 1
+  fi
 done
 
 if ! command -v uefivars &>/dev/null; then
-    echo "ERROR: uefivars not found. Install with: pip install uefivars"
-    exit 1
+  echo "ERROR: uefivars not found. Install with: pip install uefivars"
+  exit 1
 fi
 
 mkdir -p "${OUTPUT_DIR}"
@@ -114,16 +114,16 @@ mkdir -p "${OUTPUT_DIR}"
 echo "=== Generating RSA-4096 key pairs ==="
 
 for name in PK KEK DB; do
-    echo "Generating ${name} key pair..."
-    openssl req -new -x509 \
-        -newkey rsa:4096 \
-        -sha256 \
-        -days "${VALIDITY_DAYS}" \
-        -nodes \
-        -subj "${SUBJECT_PREFIX} ${name}" \
-        -keyout "${OUTPUT_DIR}/${name}.key" \
-        -out "${OUTPUT_DIR}/${name}.crt"
-    chmod 600 "${OUTPUT_DIR}/${name}.key"
+  echo "Generating ${name} key pair..."
+  openssl req -new -x509 \
+    -newkey rsa:4096 \
+    -sha256 \
+    -days "${VALIDITY_DAYS}" \
+    -nodes \
+    -subj "${SUBJECT_PREFIX} ${name}" \
+    -keyout "${OUTPUT_DIR}/${name}.key" \
+    -out "${OUTPUT_DIR}/${name}.crt"
+  chmod 600 "${OUTPUT_DIR}/${name}.key"
 done
 
 echo ""
@@ -133,10 +133,10 @@ echo ""
 echo "=== Generating EFI Signature Lists ==="
 
 for name in PK KEK DB; do
-    echo "Creating ${name}.esl..."
-    cert-to-efi-sig-list -g "${GUID}" \
-        "${OUTPUT_DIR}/${name}.crt" \
-        "${OUTPUT_DIR}/${name}.esl"
+  echo "Creating ${name}.esl..."
+  cert-to-efi-sig-list -g "${GUID}" \
+    "${OUTPUT_DIR}/${name}.crt" \
+    "${OUTPUT_DIR}/${name}.esl"
 done
 
 echo ""
@@ -148,29 +148,29 @@ echo "=== Generating signed .auth variables ==="
 # PK signs itself
 echo "Signing PK.auth (self-signed)..."
 sign-efi-sig-list -g "${GUID}" \
-    -k "${OUTPUT_DIR}/PK.key" \
-    -c "${OUTPUT_DIR}/PK.crt" \
-    PK \
-    "${OUTPUT_DIR}/PK.esl" \
-    "${OUTPUT_DIR}/PK.auth"
+  -k "${OUTPUT_DIR}/PK.key" \
+  -c "${OUTPUT_DIR}/PK.crt" \
+  PK \
+  "${OUTPUT_DIR}/PK.esl" \
+  "${OUTPUT_DIR}/PK.auth"
 
 # PK signs KEK
 echo "Signing KEK.auth (signed by PK)..."
 sign-efi-sig-list -g "${GUID}" \
-    -k "${OUTPUT_DIR}/PK.key" \
-    -c "${OUTPUT_DIR}/PK.crt" \
-    KEK \
-    "${OUTPUT_DIR}/KEK.esl" \
-    "${OUTPUT_DIR}/KEK.auth"
+  -k "${OUTPUT_DIR}/PK.key" \
+  -c "${OUTPUT_DIR}/PK.crt" \
+  KEK \
+  "${OUTPUT_DIR}/KEK.esl" \
+  "${OUTPUT_DIR}/KEK.auth"
 
 # KEK signs DB
 echo "Signing DB.auth (signed by KEK)..."
 sign-efi-sig-list -g "${GUID}" \
-    -k "${OUTPUT_DIR}/KEK.key" \
-    -c "${OUTPUT_DIR}/KEK.crt" \
-    db \
-    "${OUTPUT_DIR}/DB.esl" \
-    "${OUTPUT_DIR}/DB.auth"
+  -k "${OUTPUT_DIR}/KEK.key" \
+  -c "${OUTPUT_DIR}/KEK.crt" \
+  db \
+  "${OUTPUT_DIR}/DB.esl" \
+  "${OUTPUT_DIR}/DB.auth"
 
 echo ""
 
@@ -179,10 +179,10 @@ echo ""
 echo "=== Generating UEFI variable store ==="
 
 uefivars -i none -o aws \
-    -P "${OUTPUT_DIR}/PK.esl" \
-    -K "${OUTPUT_DIR}/KEK.esl" \
-    -b "${OUTPUT_DIR}/DB.esl" \
-    -O "${OUTPUT_DIR}/uefi-vars.b64"
+  -P "${OUTPUT_DIR}/PK.esl" \
+  -K "${OUTPUT_DIR}/KEK.esl" \
+  -b "${OUTPUT_DIR}/DB.esl" \
+  -O "${OUTPUT_DIR}/uefi-vars.b64"
 
 echo ""
 

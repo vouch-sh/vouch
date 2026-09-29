@@ -11,9 +11,13 @@ use http::request::Parts;
 use serde::Deserialize;
 
 use crate::AppState;
-use crate::db::ClientInfo;
-use crate::error::ServiceError;
-use crate::infra::rate_limit::resolve_client_ip;
+use crate::arrival::ArrivalTime;
+use crate::db;
+use crate::error::{OAuthErrorCode, OAuthErrorResponse, ServiceError};
+use crate::handlers::session::{self, AuthContext, extract_org_admin, get_resource_auth_context};
+use crate::infra::mtls_listener::PeerClientCert;
+use crate::services::oidc::mtls::{self, ClientCertificate};
+use axum_extra::extract::cookie::CookieJar;
 
 /// A validated UUID string. Rejects during deserialization if not valid.
 /// Derefs to `&str` so it can be passed directly to db functions.
@@ -140,7 +144,7 @@ fn deserialize_present_params<T: serde::de::DeserializeOwned>(encoded: &[u8]) ->
 /// Build the OAuth `invalid_request` envelope (RFC 6749 §5.2) for a request
 /// whose parameters could not be read.
 fn reject_oauth_params(description: String) -> axum::response::Response {
-    ServiceError::oauth(crate::error::OAuthErrorCode::InvalidRequest, description)
+    ServiceError::oauth(OAuthErrorCode::InvalidRequest, description)
         .into_oauth_response()
         .into_response()
 }
@@ -154,6 +158,20 @@ fn reject_oauth_params(description: String) -> axum::response::Response {
 /// request the same way it reads every other failure.
 pub(crate) struct OAuthForm<T>(pub T);
 
+/// RFC 6749 §4.1.3: request parameters are sent "in the HTTP request
+/// entity-body using the application/x-www-form-urlencoded format". The
+/// media type may carry parameters (`; charset=utf-8`), so only the type
+/// itself is compared.
+fn is_form_urlencoded(headers: &HeaderMap) -> bool {
+    headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| {
+            let media_type = v.split(';').next().unwrap_or(v).trim();
+            media_type.eq_ignore_ascii_case("application/x-www-form-urlencoded")
+        })
+}
+
 impl<T, S> FromRequest<S> for OAuthForm<T>
 where
     T: serde::de::DeserializeOwned,
@@ -162,25 +180,12 @@ where
     type Rejection = axum::response::Response;
 
     async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
-        // RFC 6749 §4.1.3: request parameters are sent "in the HTTP request
-        // entity-body using the application/x-www-form-urlencoded format".
         // Any other media type is unsupported rather than malformed.
-        let is_form = req
-            .headers()
-            .get(axum::http::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| {
-                // The media type may carry parameters (`; charset=utf-8`).
-                let media_type = v.split(';').next().unwrap_or(v).trim();
-                media_type.eq_ignore_ascii_case("application/x-www-form-urlencoded")
-            });
-        if !is_form {
+        if !is_form_urlencoded(req.headers()) {
             return Err((
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                axum::Json(crate::error::OAuthErrorResponse {
-                    error: crate::error::OAuthErrorCode::InvalidRequest
-                        .as_str()
-                        .to_string(),
+                axum::Json(OAuthErrorResponse {
+                    error: OAuthErrorCode::InvalidRequest.as_str().to_string(),
                     error_description: Some(
                         "Expected application/x-www-form-urlencoded request body".to_string(),
                     ),
@@ -188,6 +193,41 @@ where
                 }),
             )
                 .into_response());
+        }
+
+        let body = axum::body::Bytes::from_request(req, state)
+            .await
+            .map_err(|e| reject_oauth_params(e.body_text()))?;
+
+        deserialize_present_params(&body)
+            .map(Self)
+            .map_err(reject_oauth_params)
+    }
+}
+
+/// Form-body extractor for `POST /oauth/fido2/challenge` during its staged
+/// client-authentication rollout (see `handlers::oidc::fido2_challenge`).
+///
+/// Unlike [`OAuthForm`], a request whose body is not
+/// `application/x-www-form-urlencoded` — including the JSON `{}` body sent
+/// by CLI versions built before this endpoint accepted client
+/// authentication — is treated as carrying no parameters (`T::default()`)
+/// rather than rejected as an unsupported media type. A form-encoded body is
+/// still parsed and validated exactly as [`OAuthForm`] does. Only the FIDO2
+/// challenge endpoint uses this relaxed extractor; every other OAuth
+/// endpoint keeps `OAuthForm`'s strict media-type check.
+pub(crate) struct OAuthFormOrLegacyEmpty<T>(pub T);
+
+impl<T, S> FromRequest<S> for OAuthFormOrLegacyEmpty<T>
+where
+    T: serde::de::DeserializeOwned + Default,
+    S: Send + Sync,
+{
+    type Rejection = axum::response::Response;
+
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
+        if !is_form_urlencoded(req.headers()) {
+            return Ok(Self(T::default()));
         }
 
         let body = axum::body::Bytes::from_request(req, state)
@@ -221,74 +261,6 @@ where
     }
 }
 
-/// Maximum length for hostname values (RFC 1035: 253 chars).
-const MAX_HOSTNAME_LEN: usize = 253;
-/// Maximum length for other client metadata header values.
-const MAX_CLIENT_HEADER_LEN: usize = 256;
-
-impl FromRequestParts<Arc<AppState>> for ClientInfo {
-    type Rejection = std::convert::Infallible;
-
-    async fn from_request_parts(
-        parts: &mut Parts,
-        state: &Arc<AppState>,
-    ) -> Result<Self, Self::Rejection> {
-        let peer_ip = parts
-            .extensions
-            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-            .map(|ci| ci.0.ip().to_canonical());
-
-        let config = state.config.load();
-        let client_ip = resolve_client_ip(peer_ip, &parts.headers, &config.trusted_proxies);
-
-        let mut info = Self::from(&parts.headers);
-        info.client_ip = client_ip;
-        Ok(info)
-    }
-}
-
-impl From<&HeaderMap> for ClientInfo {
-    fn from(headers: &HeaderMap) -> Self {
-        let user_agent = headers
-            .get("user-agent")
-            .and_then(|h| h.to_str().ok())
-            .map(String::from);
-
-        let client_hostname =
-            extract_validated_header(headers, "vouch-client-hostname", MAX_HOSTNAME_LEN);
-        let client_os = extract_validated_header(headers, "vouch-client-os", MAX_CLIENT_HEADER_LEN);
-        let client_arch =
-            extract_validated_header(headers, "vouch-client-arch", MAX_CLIENT_HEADER_LEN);
-        let client_version =
-            extract_validated_header(headers, "vouch-client-version", MAX_CLIENT_HEADER_LEN);
-
-        Self {
-            client_ip: None,
-            user_agent,
-            client_hostname,
-            client_os,
-            client_arch,
-            client_version,
-        }
-    }
-}
-
-/// Extract and validate a client metadata header value.
-///
-/// Returns `None` if the header is missing, empty, exceeds `max_len`,
-/// or contains non-printable ASCII characters (control chars, null bytes).
-fn extract_validated_header(headers: &HeaderMap, name: &str, max_len: usize) -> Option<String> {
-    let value = headers.get(name).and_then(|h| h.to_str().ok())?;
-    let trimmed = value.trim();
-    if trimmed.is_empty() || trimmed.len() > max_len {
-        return None;
-    }
-    if !trimmed.bytes().all(|b| (0x20..0x7f).contains(&b)) {
-        return None;
-    }
-    Some(trimmed.to_string())
-}
-
 /// Optional client certificate extracted from mTLS connection.
 ///
 /// Reads the certificate from [`PeerClientCert`] injected via
@@ -297,7 +269,7 @@ fn extract_validated_header(headers: &HeaderMap, name: &str, max_len: usize) -> 
 ///
 /// On the main (non-mTLS) port this always yields `None`.
 #[derive(Debug, Clone)]
-pub(crate) struct OptionalClientCert(pub Option<crate::services::oidc::mtls::ClientCertificate>);
+pub(crate) struct OptionalClientCert(pub Option<ClientCertificate>);
 
 impl FromRequestParts<Arc<AppState>> for OptionalClientCert {
     type Rejection = std::convert::Infallible;
@@ -308,11 +280,178 @@ impl FromRequestParts<Arc<AppState>> for OptionalClientCert {
     ) -> Result<Self, Self::Rejection> {
         let from_tls = parts
             .extensions
-            .get::<axum::extract::ConnectInfo<crate::infra::mtls_listener::PeerClientCert>>()
-            .and_then(|ci| ci.0.0.as_ref())
-            .and_then(|der| crate::services::oidc::mtls::parse_client_certificate(der).ok());
+            .get::<axum::extract::ConnectInfo<PeerClientCert>>()
+            .and_then(|ci| {
+                let (leaf, intermediates) = ci.0.peer_chain_der.split_first()?;
+                let mut cert = mtls::parse_client_certificate(leaf).ok()?;
+                cert.intermediates = intermediates.to_vec();
+                Some(cert)
+            });
 
         Ok(Self(from_tls))
+    }
+}
+
+/// A signed-in, active user answering a browser page.
+///
+/// The default extractor for browser pages: the upstream IdP is the trust
+/// root for the browser UI, so a session cookie from IdP sign-in is the whole
+/// bar — no key ceremony is required to read or use these pages. Hardware
+/// proof is demanded where credentials move instead: issuance
+/// ([`HardwareVerifiedToken`]) and key deletion ([`SteppedUpToken`]).
+///
+/// It answers a person, not an API client: a request without a usable
+/// session is redirected to sign in. [`AdminPage`] adds the org-admin role
+/// on top of this one.
+///
+/// [`SteppedUpToken`]: crate::handlers::session::SteppedUpToken
+pub(crate) struct SignedInSession {
+    /// Header/template context for the rendered page.
+    pub(crate) auth: AuthContext,
+}
+
+impl FromRequestParts<Arc<AppState>> for SignedInSession {
+    type Rejection = axum::response::Response;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        use axum::response::IntoResponse;
+
+        let jar = CookieJar::from_headers(&parts.headers);
+        let sign_in = || axum::response::Redirect::to("/enroll/start").into_response();
+
+        let Ok(arrival) = ArrivalTime::from_request_parts(parts, state).await else {
+            return Err(StatusCode::INTERNAL_SERVER_ERROR.into_response());
+        };
+        let Ok(session) = session::extract_session_from_cookie(state, &jar, arrival).await else {
+            return Err(sign_in());
+        };
+
+        // Missing or deactivated users are unauthenticated — the active-account
+        // invariant is enforced once, in `load_active_user`.
+        let Ok(user) = session::load_active_user(state, &session.sub).await else {
+            return Err(sign_in());
+        };
+
+        Ok(Self {
+            auth: AuthContext {
+                authenticated: true,
+                user_id: Some(session.sub),
+                user_email: Some(user.email),
+                has_org: user.org_id.is_some(),
+                is_org_admin: user.is_org_admin,
+            },
+        })
+    }
+}
+
+/// An organization administrator viewing an admin page.
+///
+/// Every admin page needs the same three facts — a signed-in user, the
+/// org-admin role, and the organization being administered — and each
+/// failure has its own destination. Taking this type is what runs those
+/// checks, so a new admin page cannot render privileged controls by
+/// forgetting them.
+///
+/// Where [`OrgAdmin`] answers an API caller with 403, this redirects: a
+/// person reading a page needs somewhere to go.
+pub(crate) struct AdminPage {
+    /// Header/template context for the rendered page.
+    pub(crate) auth: AuthContext,
+    /// The administrator's user id.
+    pub(crate) user_id: String,
+    /// The organization the administrator belongs to.
+    pub(crate) org_id: String,
+}
+
+impl FromRequestParts<Arc<AppState>> for AdminPage {
+    type Rejection = axum::response::Response;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        use axum::response::{IntoResponse, Redirect};
+
+        let jar = CookieJar::from_headers(&parts.headers);
+        let Ok(arrival) = ArrivalTime::from_request_parts(parts, state).await else {
+            return Err(StatusCode::INTERNAL_SERVER_ERROR.into_response());
+        };
+        let auth = get_resource_auth_context(state, &jar, arrival).await;
+
+        if !auth.authenticated {
+            return Err(Redirect::to("/enroll/start").into_response());
+        }
+        if !auth.is_org_admin {
+            return Err(Redirect::to("/integrations").into_response());
+        }
+        let Some(user_id) = auth.user_id.clone() else {
+            return Err(Redirect::to("/enroll/start").into_response());
+        };
+
+        let org_id = match db::get_user_by_id(&state.store, &user_id).await {
+            Ok(Some(user)) => match user.org_id {
+                Some(org_id) => org_id,
+                None => return Err(Redirect::to("/integrations").into_response()),
+            },
+            Ok(None) => return Err(Redirect::to("/enroll/start").into_response()),
+            Err(e) => {
+                tracing::error!(error = %e, "admin page: user lookup failed");
+                return Err(Redirect::to("/integrations").into_response());
+            }
+        };
+
+        Ok(Self {
+            auth,
+            user_id,
+            org_id,
+        })
+    }
+}
+
+/// An organization administrator.
+///
+/// The proof is the type: a handler that mutates org-wide state takes
+/// `OrgAdmin` in its signature and cannot run without the admin-role check
+/// in [`extract_org_admin`].
+pub(crate) struct OrgAdmin {
+    /// The administrator's user record (active, org member, admin).
+    pub(crate) user: db::User,
+    /// The organization the administrator belongs to.
+    pub(crate) org_id: String,
+}
+
+impl axum::extract::FromRequestParts<Arc<AppState>> for OrgAdmin {
+    type Rejection = ServiceError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        let axum::extract::OriginalUri(uri) =
+            axum::extract::OriginalUri::from_request_parts(parts, state)
+                .await
+                .unwrap_or_else(|infallible| match infallible {});
+        let client_cert = OptionalClientCert::from_request_parts(parts, state)
+            .await
+            .unwrap_or_else(|infallible| match infallible {});
+        let jar = CookieJar::from_headers(&parts.headers);
+        let arrival = ArrivalTime::from_request_parts(parts, state)
+            .await
+            .map_err(|_| ServiceError::Internal("Request arrival time unavailable".to_string()))?;
+        let (user, org_id) = extract_org_admin(
+            state,
+            &parts.headers,
+            &jar,
+            parts.method.as_str(),
+            uri.path(),
+            client_cert.0.as_ref(),
+            arrival,
+        )
+        .await?;
+        Ok(Self { user, org_id })
     }
 }
 
@@ -323,139 +462,8 @@ impl FromRequestParts<Arc<AppState>> for OptionalClientCert {
 )]
 mod tests {
     use super::*;
-    use axum::http::HeaderValue;
-
-    // ========================================================================
-    // ClientInfo Header Extraction Tests
-    // ========================================================================
-
-    #[test]
-    fn test_extract_user_agent() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "user-agent",
-            HeaderValue::from_static("vouch-cli/0.1.0 (macos; aarch64)"),
-        );
-
-        let info = ClientInfo::from(&headers);
-        assert_eq!(
-            info.user_agent,
-            Some("vouch-cli/0.1.0 (macos; aarch64)".to_string())
-        );
-    }
-
-    #[test]
-    fn test_extract_no_headers() {
-        let headers = HeaderMap::new();
-        let info = ClientInfo::from(&headers);
-        assert_eq!(info.client_ip, None);
-        assert_eq!(info.user_agent, None);
-        assert_eq!(info.client_hostname, None);
-        assert_eq!(info.client_os, None);
-        assert_eq!(info.client_arch, None);
-        assert_eq!(info.client_version, None);
-    }
-
-    // ========================================================================
-    // Vouch-Client-* Header Extraction Tests
-    // ========================================================================
-
-    #[test]
-    fn test_extract_vouch_client_headers() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "vouch-client-hostname",
-            HeaderValue::from_static("dev.local"),
-        );
-        headers.insert("vouch-client-os", HeaderValue::from_static("macos"));
-        headers.insert("vouch-client-arch", HeaderValue::from_static("aarch64"));
-        headers.insert("vouch-client-version", HeaderValue::from_static("1.2.3"));
-
-        let info = ClientInfo::from(&headers);
-        assert_eq!(info.client_hostname.as_deref(), Some("dev.local"));
-        assert_eq!(info.client_os.as_deref(), Some("macos"));
-        assert_eq!(info.client_arch.as_deref(), Some("aarch64"));
-        assert_eq!(info.client_version.as_deref(), Some("1.2.3"));
-    }
-
-    #[test]
-    fn test_extract_vouch_client_header_rejects_too_long() {
-        let mut headers = HeaderMap::new();
-        let long_value = "a".repeat(MAX_CLIENT_HEADER_LEN + 1);
-        headers.insert(
-            "vouch-client-os",
-            HeaderValue::from_str(&long_value).unwrap(),
-        );
-
-        let info = ClientInfo::from(&headers);
-        assert_eq!(info.client_os, None);
-    }
-
-    #[test]
-    fn test_extract_vouch_client_header_rejects_empty() {
-        let mut headers = HeaderMap::new();
-        headers.insert("vouch-client-os", HeaderValue::from_static(""));
-
-        let info = ClientInfo::from(&headers);
-        assert_eq!(info.client_os, None);
-    }
-
-    #[test]
-    fn test_extract_vouch_client_header_trims_whitespace() {
-        let mut headers = HeaderMap::new();
-        headers.insert("vouch-client-os", HeaderValue::from_static("  macos  "));
-
-        let info = ClientInfo::from(&headers);
-        assert_eq!(info.client_os.as_deref(), Some("macos"));
-    }
-
-    #[test]
-    fn test_extract_vouch_client_hostname_max_length() {
-        let mut headers = HeaderMap::new();
-        // Exactly at the 253-char limit should be accepted
-        let hostname = "a".repeat(MAX_HOSTNAME_LEN);
-        headers.insert(
-            "vouch-client-hostname",
-            HeaderValue::from_str(&hostname).unwrap(),
-        );
-        let info = ClientInfo::from(&headers);
-        assert_eq!(info.client_hostname.as_deref(), Some(hostname.as_str()));
-
-        // One over should be rejected
-        let too_long = "a".repeat(MAX_HOSTNAME_LEN + 1);
-        let mut headers2 = HeaderMap::new();
-        headers2.insert(
-            "vouch-client-hostname",
-            HeaderValue::from_str(&too_long).unwrap(),
-        );
-        let info2 = ClientInfo::from(&headers2);
-        assert_eq!(info2.client_hostname, None);
-    }
-
-    #[test]
-    fn test_extract_validated_header_rejects_control_chars() {
-        let mut headers = HeaderMap::new();
-        // Tab character (0x09) is a control character
-        headers.insert(
-            "vouch-client-os",
-            HeaderValue::from_bytes(b"mac\tos").unwrap(),
-        );
-
-        let info = ClientInfo::from(&headers);
-        assert_eq!(info.client_os, None);
-    }
-
-    #[test]
-    fn test_extract_validated_header_accepts_printable_ascii() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "vouch-client-version",
-            HeaderValue::from_static("1.2.3-beta+build.456"),
-        );
-
-        let info = ClientInfo::from(&headers);
-        assert_eq!(info.client_version.as_deref(), Some("1.2.3-beta+build.456"));
-    }
+    use crate::services::oidc::mtls::ClientCertificate;
+    use crate::test_utils;
 
     #[test]
     fn test_valid_uuid_accepts_valid() {
@@ -532,77 +540,61 @@ mod tests {
     // OptionalClientCert Tests
     // ========================================================================
 
-    /// When `PeerClientCert` contains invalid DER bytes, the `.ok()` in
-    /// `from_request_parts` swallows the parse error and yields `None` rather
-    /// than returning an error response. This keeps the extractor infallible.
-    #[tokio::test]
-    async fn test_optional_client_cert_with_invalid_der_returns_none() {
+    /// Run `OptionalClientCert` over a request carrying `chain` as the
+    /// connection's presented certificates, or no `PeerClientCert` at all.
+    async fn extract_client_cert(chain: Option<Vec<Vec<u8>>>) -> Option<ClientCertificate> {
         use crate::infra::mtls_listener::PeerClientCert;
         use axum::extract::ConnectInfo;
 
+        let state = test_utils::test_app_state().await;
         let mut request = http::Request::builder().body(()).unwrap();
-        request
-            .extensions_mut()
-            .insert(ConnectInfo(PeerClientCert(Some(vec![
-                0xFF, 0xFF, 0xDE, 0xAD,
-            ]))));
-        let (parts, _) = request.into_parts();
+        if let Some(chain) = chain {
+            request.extensions_mut().insert(ConnectInfo(PeerClientCert {
+                peer_chain_der: chain,
+                peer_addr: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
+            }));
+        }
+        let (mut parts, _) = request.into_parts();
+        let Ok(OptionalClientCert(cert)) =
+            OptionalClientCert::from_request_parts(&mut parts, &state).await;
+        cert
+    }
 
-        // OptionalClientCert::from_request_parts requires Arc<AppState>, but all it
-        // does with _state is ignore it — the cert extraction only reads extensions.
-        // We exercise the same code path by replicating the extractor logic inline,
-        // which lets us verify the `.ok()` swallows the DER parse error.
-        let cert = parts
-            .extensions
-            .get::<ConnectInfo<PeerClientCert>>()
-            .and_then(|ci| ci.0.0.as_ref())
-            .and_then(|der| crate::services::oidc::mtls::parse_client_certificate(der).ok());
-
+    /// Invalid DER yields `None` rather than an error response, keeping the
+    /// extractor infallible.
+    #[tokio::test]
+    async fn test_optional_client_cert_with_invalid_der_returns_none() {
+        let cert = extract_client_cert(Some(vec![vec![0xFF, 0xFF, 0xDE, 0xAD]])).await;
         assert!(
             cert.is_none(),
             "Invalid DER must yield None, not an error or panic"
         );
     }
 
-    /// When no `PeerClientCert` extension is present (non-mTLS connection),
-    /// the extractor must yield `None` without panicking.
+    /// No `PeerClientCert` extension (the non-mTLS port) yields `None`.
     #[tokio::test]
     async fn test_optional_client_cert_no_extension_returns_none() {
-        use crate::infra::mtls_listener::PeerClientCert;
-        use axum::extract::ConnectInfo;
-
-        let request = http::Request::builder().body(()).unwrap();
-        let (parts, _) = request.into_parts();
-
-        let cert = parts
-            .extensions
-            .get::<ConnectInfo<PeerClientCert>>()
-            .and_then(|ci| ci.0.0.as_ref())
-            .and_then(|der| crate::services::oidc::mtls::parse_client_certificate(der).ok());
-
-        assert!(cert.is_none(), "Missing extension must yield None");
+        assert!(extract_client_cert(None).await.is_none());
     }
 
-    /// When `PeerClientCert` wraps `None` (client connected but presented no cert),
-    /// the extractor must yield `None` without panicking.
+    /// A client that connected without presenting a certificate yields `None`.
     #[tokio::test]
-    async fn test_optional_client_cert_with_none_der_returns_none() {
-        use crate::infra::mtls_listener::PeerClientCert;
-        use axum::extract::ConnectInfo;
+    async fn test_optional_client_cert_with_empty_chain_returns_none() {
+        assert!(extract_client_cert(Some(Vec::new())).await.is_none());
+    }
 
-        let mut request = http::Request::builder().body(()).unwrap();
-        request
-            .extensions_mut()
-            .insert(ConnectInfo(PeerClientCert(None)));
-        let (parts, _) = request.into_parts();
-
-        let cert = parts
-            .extensions
-            .get::<ConnectInfo<PeerClientCert>>()
-            .and_then(|ci| ci.0.0.as_ref())
-            .and_then(|der| crate::services::oidc::mtls::parse_client_certificate(der).ok());
-
-        assert!(cert.is_none(), "PeerClientCert(None) must yield None");
+    /// RFC 8705 §2.1 validates the chain at the application layer, so the
+    /// intermediates the client sent must reach the certificate alongside the
+    /// leaf.
+    #[tokio::test]
+    async fn test_optional_client_cert_carries_intermediates() {
+        let leaf = test_utils::make_test_cert_der("leaf.example.com");
+        let intermediate = test_utils::make_test_cert_der("intermediate.example.com");
+        let cert = extract_client_cert(Some(vec![leaf.clone(), intermediate.clone()]))
+            .await
+            .unwrap();
+        assert_eq!(cert.der, leaf);
+        assert_eq!(cert.intermediates, vec![intermediate]);
     }
 
     #[test]

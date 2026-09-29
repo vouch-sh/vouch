@@ -45,8 +45,11 @@ itself is a hardware authentication, so requiring a recent login there would alw
 > posture policies would reject at `vouch login`. Treat posture policies as a control on the CLI
 > credential path, not a fleet-wide device gate, until browser enrollment is covered.
 
-If any active policy fails, the token request is rejected with OAuth `access_denied` and a message
-naming the failed policy plus remediation guidance for the user's operating system:
+If any active policy fails, the token request is rejected with a message naming the failed policy
+plus remediation guidance for the user's operating system. The OAuth error code is `access_denied`
+on the login (FIDO2 assertion) grant and `invalid_request` on the RFC 8693 token-exchange grant —
+RFC 8693 §2.2.2 requires `invalid_request` for a subject token that is unacceptable based on
+policy:
 
 ```
 Device posture policy 'Disk Encryption' not satisfied. Enable FileVault in
@@ -98,6 +101,21 @@ History comes from the audit log, scoped to the requesting user and the past 24 
 consequences worth knowing: audit retention shorter than two days truncates the window a policy can
 see (the server warns at startup), and audit writes on the login path are best-effort, so a dropped
 write can under-count a rate limit by one event.
+
+`failed_login_burst` counts only failures by a user the server verified: a refusal after the
+user's hardware-key signature checked out (such as a posture denial, or a signature counter that
+did not increase — a possible cloned key, checked only after the signature verified), or a refusal
+of an identity the upstream IdP verified. The following still appear as `login_failed` audit events but have no
+`user_id`, so they never count toward the burst:
+
+- An unknown credential, a `user_handle` that does not own the presented credential, or a
+  signature that fails to verify. The request-supplied id is kept as `data.asserted_user_id`.
+- A server fault after a successful browser login. The id is kept as `data.fault_user_id`.
+
+A storage fault during the credential lookup, or a signature verification that fails to run to
+completion, is a server error, not a failed login, and writes no `login_failed` event. Filter the audit log by `user_id` and you see only the attributed failures;
+the unattributed ones are still visible to org-scoped queries when they carry the owner's email
+domain (deactivated-account and signature failures).
 
 `os_recency` is the one with moving parts, and the one to be careful with. It passes a device only
 if it is macOS 14.0.0 or later, **or** Windows 10.0.26100 (24H2) or later.

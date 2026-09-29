@@ -16,9 +16,11 @@
 //! The handlers remain thin, focusing on HTTP concerns.
 
 use crate::AppState;
+use crate::arrival::ArrivalTime;
+use crate::assurance::{AuthMethod, HardwareVerification};
 use crate::crypto::hash_token;
 use crate::crypto::keys::OidcSigningKey;
-use crate::crypto::webauthn_verify::{self, OriginPolicy};
+use crate::crypto::webauthn_verify::{self, AuthTime, OriginPolicy};
 use crate::db::{self, Authenticator, SessionPurpose, User};
 use crate::services::oidc::mtls::CertThumbprint;
 use crate::services::oidc::{CnfClaim, ScopeSet, ValidatedDpopProof};
@@ -26,126 +28,20 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::{Span, Timestamp};
 use secrecy::SecretString;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::fmt;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::crypto::jwt::{self, TokenValidationContext};
+use crate::db::{
+    AuthCodeClaim, ChallengeStateClaim, ClientType, DeviceCodeClaim, JwtAssertionJtiClaim,
+    OAuthClient, OidcStateClaim,
+};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
+use crate::services::oidc::OAuthScope;
+use crate::services::oidc::fapi::{self, SenderConstraints};
+use crate::services::oidc::jwt_bearer::client_auth::JwtAuthSucceeded;
+use crate::services::oidc::token::{ClientSecretVerification, MtlsCertVerification};
 use vouch_common::protocol;
-
-// ============================================================================
-// Authentication Method References (RFC 8176)
-// ============================================================================
-
-/// Authentication method reference value (RFC 8176).
-///
-/// Represents a single authentication method used during user authentication.
-/// Vouch always uses FIDO2 hardware keys with PIN and user presence, so all
-/// three methods are present in every authentication event.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AuthMethod {
-    /// RFC 8176: Proof-of-possession of a hardware-secured key.
-    HardwareKey,
-    /// RFC 8176: Personal Identification Number or pattern verified on device.
-    Pin,
-    /// RFC 8176: User presence test (physical interaction with authenticator).
-    UserPresence,
-}
-
-impl AuthMethod {
-    /// Return the wire-format string per RFC 8176.
-    #[must_use]
-    pub const fn as_str(&self) -> &'static str {
-        match self {
-            Self::HardwareKey => "hwk",
-            Self::Pin => "pin",
-            Self::UserPresence => "user",
-        }
-    }
-
-    /// All authentication methods used in a FIDO2 hardware key flow.
-    ///
-    /// Vouch always requires hardware key + PIN + user presence, so this
-    /// returns all three methods.
-    #[must_use]
-    pub const fn all_fido2() -> &'static [Self] {
-        &[Self::HardwareKey, Self::Pin, Self::UserPresence]
-    }
-}
-
-impl fmt::Display for AuthMethod {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl Serialize for AuthMethod {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(self.as_str())
-    }
-}
-
-impl<'de> Deserialize<'de> for AuthMethod {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let s = String::deserialize(deserializer)?;
-        match s.as_str() {
-            "hwk" => Ok(Self::HardwareKey),
-            "pin" => Ok(Self::Pin),
-            "user" => Ok(Self::UserPresence),
-            other => Err(serde::de::Error::unknown_variant(
-                other,
-                &["hwk", "pin", "user"],
-            )),
-        }
-    }
-}
-
-/// NIST SP 800-63B AAL3: Hardware-based multi-factor authentication.
-///
-/// FIDO2 hardware key + PIN + user presence meets AAL3 per NIST SP 800-63B.
-pub(crate) const ACR_AAL3: &str = "urn:nist:authentication:assurance-level:aal3";
-
-/// Authentication assurance level for an issued token.
-///
-/// Bundles `hardware_verified`, `amr`, and `acr` into a single type
-/// to prevent inconsistent combinations (e.g., `hardware_verified: true`
-/// with `amr: None`).
-#[derive(Debug, Clone)]
-pub(crate) enum HardwareVerification {
-    /// FIDO2 hardware key verified by Vouch (UP + UV).
-    /// Sets `hardware_verified: true`, `amr: [hwk, pin, user]`,
-    /// `acr: urn:nist:...:aal3`.
-    Verified,
-    /// No hardware verification performed (M2M, JWT bearer, etc.).
-    /// Sets `hardware_verified: false`, `amr: None`, `acr: None`.
-    NotVerified,
-}
-
-impl HardwareVerification {
-    /// Whether FIDO2 hardware verification was performed.
-    #[must_use]
-    pub(crate) fn hardware_verified(&self) -> bool {
-        matches!(self, Self::Verified)
-    }
-
-    /// RFC 8176 authentication methods reference.
-    #[must_use]
-    pub(crate) fn amr(&self) -> Option<Vec<AuthMethod>> {
-        match self {
-            Self::Verified => Some(AuthMethod::all_fido2().to_vec()),
-            Self::NotVerified => None,
-        }
-    }
-
-    /// RFC 9068 authentication context class reference.
-    #[must_use]
-    pub(crate) fn acr(&self) -> Option<String> {
-        match self {
-            Self::Verified => Some(ACR_AAL3.to_string()),
-            Self::NotVerified => None,
-        }
-    }
-}
 
 /// Parameters for verifying authenticator ownership.
 pub(crate) struct AuthenticatorLookupParams<'a> {
@@ -163,34 +59,125 @@ pub(crate) struct AuthenticatorLookupResult {
     pub user: User,
 }
 
-/// Look up an authenticator and verify it belongs to the specified user.
+/// Error from [`lookup_and_verify_authenticator`].
 ///
-/// Uses a single JOIN query to fetch both the authenticator and user,
-/// eliminating a sequential DB round-trip.
+/// Refusals are separate variants so callers can audit each one. The lookup
+/// runs before any assertion signature is checked, so no refusal proves who
+/// is asking: the `user_handle` and credential ID are request-supplied, and a
+/// credential ID is not a secret. WebAuthn Level 2 §14.6.3 (non-normative)
+/// notes that a non-empty `allowCredentials` "exposes the user’s credential
+/// IDs to an unauthenticated caller" (<https://www.w3.org/TR/webauthn-2/>). See
+/// [`record_lookup_failure`] for how each variant is audited.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum LookupError {
+    /// Credential or owning user row not found.
+    #[error("not found: {0}")]
+    NotFound(&'static str),
+
+    /// The asserted `user_handle` is not the credential's owner. Carries the
+    /// credential's authenticator id so the audit payload records which
+    /// credential was presented; the refusal names no account and no email.
+    #[error("forbidden: user_mismatch")]
+    UserMismatch { authenticator_id: String },
+
+    /// The credential's owner is deactivated. Carries the owner's email so the
+    /// refusal audit row lands in the owner's org-scoped audit feed.
+    #[error("forbidden: user_deactivated")]
+    Deactivated {
+        authenticator_id: String,
+        email: String,
+    },
+
+    /// A storage or internal fault. Callers return it as a 5xx, not a refusal.
+    #[error(transparent)]
+    Service(#[from] ServiceError),
+}
+
+/// Record a `login_failed` audit event for a failed authenticator lookup.
+///
+/// `asserted` is the request's `user_handle`. Browser login and the FIDO2
+/// assertion grant both call this, so a refusal leaves the same row on
+/// either path.
+///
+/// No refusal here is attributed to a user: the row is written with
+/// [`db::Principal::Unverified`], so its `user_id` column is NULL and
+/// per-user temporal policies (`failed_login_burst`) never count it.
+/// Otherwise anyone who knows a user's id, or holds one of their credential
+/// IDs, could pin lockout-driving rows on them without a signature. The
+/// asserted id stays in the payload for forensics.
+///
+/// [`LookupError::Service`] writes no row at all: a storage fault is an
+/// operational incident, not an authentication refusal, and the call sites
+/// log it at `error!`.
+pub(crate) async fn record_lookup_failure(
+    audit: &db::audit::AuditStore,
+    client: db::ClientInfo,
+    asserted: Uuid,
+    error: &LookupError,
+) {
+    let (reason, authenticator_id, email) = match error {
+        LookupError::NotFound(entity) => (format!("{entity}_not_found"), None, None),
+        LookupError::UserMismatch { authenticator_id } => (
+            "user_mismatch".to_string(),
+            Some(authenticator_id.clone()),
+            None,
+        ),
+        LookupError::Deactivated {
+            authenticator_id,
+            email,
+        } => (
+            "user_deactivated".to_string(),
+            Some(authenticator_id.clone()),
+            Some(email.clone()),
+        ),
+        LookupError::Service(_) => return,
+    };
+    let params = db::AuthEventParams {
+        user_id: db::Principal::Unverified {
+            asserted: Some(asserted.to_string()),
+        },
+        event_type: db::AuthEventType::LoginFailed,
+        authenticator_id,
+        success: false,
+        failure_reason: Some(reason),
+        client,
+        client_id: None,
+        idp_issuer: None,
+    };
+    db::record_auth_event(audit, params, email).await;
+}
+
+/// Look up an authenticator and verify it belongs to the specified user.
 ///
 /// # Errors
 ///
-/// Returns `ServiceError::NotFound` if the credential or user is not found.
-/// Returns `ServiceError::Forbidden` if the credential doesn't belong to the user.
+/// Returns [`LookupError::NotFound`] if the credential or owning user is not
+/// found; [`LookupError::UserMismatch`] if the credential doesn't belong to
+/// the asserted user; or [`LookupError::Deactivated`] if the credential's
+/// owner is deactivated (carrying the owner's email for the org audit feed).
 pub(crate) async fn lookup_and_verify_authenticator(
     state: &AppState,
     params: AuthenticatorLookupParams<'_>,
-) -> ServiceResult<AuthenticatorLookupResult> {
-    // Get the authenticator and user in a single JOIN query
+) -> Result<AuthenticatorLookupResult, LookupError> {
     let row = db::get_authenticator_with_user_by_credential_id(&state.store, params.credential_id)
         .await
         .map_err(|e| ServiceError::Internal(e.to_string()))?
-        .ok_or(ServiceError::NotFound("credential"))?;
+        .ok_or(LookupError::NotFound("credential"))?;
 
     let (authenticator, user) = (row.authenticator, row.user);
 
     // Verify authenticator belongs to this user (from user_handle)
     if authenticator.user_id != params.user_id.to_string() {
-        return Err(ServiceError::Forbidden("user_mismatch"));
+        return Err(LookupError::UserMismatch {
+            authenticator_id: authenticator.id,
+        });
     }
 
     if !user.active {
-        return Err(ServiceError::Forbidden("user_deactivated"));
+        return Err(LookupError::Deactivated {
+            authenticator_id: authenticator.id,
+            email: user.email,
+        });
     }
 
     Ok(AuthenticatorLookupResult {
@@ -233,6 +220,53 @@ pub(crate) struct LoginAssertionResult {
     pub new_counter: u32,
     /// Whether user verification was performed.
     pub user_verified: bool,
+    /// When this assertion verified — the `auth_time` any token or device
+    /// approval resting on this ceremony must report.
+    pub verified_at: AuthTime,
+}
+
+/// Why a WebAuthn login assertion was not accepted.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum AssertionFailure {
+    /// The verifier rejected the assertion.
+    #[error("WebAuthn verification failed: {0}")]
+    Rejected(#[from] webauthn_verify::VerifyError),
+    /// The blocking verification task failed to complete (panicked or was
+    /// cancelled). Nothing was decided about the assertion.
+    #[error("WebAuthn verification task failed")]
+    TaskFailed,
+}
+
+impl AssertionFailure {
+    /// The principal a `login_failed` row for this failure names, given the
+    /// owner of the credential the assertion claimed to come from — or
+    /// `None` when the failure is not a failed login and writes no row.
+    ///
+    /// A counter regression is reported only after the signature verified
+    /// against that credential's public key (WebAuthn Level 2 §7.2 steps 20
+    /// then 21), so a registered key signed it: clone detection is a real
+    /// signal about that owner and is attributed to them. Every other
+    /// rejection happened before or at the signature, so the credential ID
+    /// and `user_handle` are still only request-supplied.
+    ///
+    /// A verification task that did not complete is a server fault that
+    /// decided nothing about the assertion. It is handled like a storage
+    /// fault during the credential lookup ([`LookupError::Service`]): no
+    /// `login_failed` row, and the caller answers with a server error.
+    /// `Principal::ServerFault` would not fit — it records a user the server
+    /// *verified*, and here nothing was verified.
+    #[must_use]
+    pub(crate) fn principal(&self, owner_user_id: &str) -> Option<db::Principal> {
+        match self {
+            Self::Rejected(webauthn_verify::VerifyError::CounterNotIncreasing) => {
+                Some(db::Principal::Verified(owner_user_id.to_string()))
+            }
+            Self::Rejected(_) => Some(db::Principal::Unverified {
+                asserted: Some(owner_user_id.to_string()),
+            }),
+            Self::TaskFailed => None,
+        }
+    }
 }
 
 /// Verify a WebAuthn login assertion (WebAuthn Level 2 Section 7.2).
@@ -246,10 +280,12 @@ pub(crate) struct LoginAssertionResult {
 ///
 /// # Errors
 ///
-/// Returns `ServiceError::OAuth` with `InvalidGrant` if verification fails.
+/// Returns [`AssertionFailure::Rejected`] if verification fails, and
+/// [`AssertionFailure::TaskFailed`] if the verification task did not run to
+/// completion.
 pub(crate) async fn verify_login_assertion(
     params: LoginAssertionParams,
-) -> ServiceResult<LoginAssertionResult> {
+) -> Result<LoginAssertionResult, AssertionFailure> {
     tokio::task::spawn_blocking(move || {
         let expected_challenge = URL_SAFE_NO_PAD.encode(&params.challenge);
 
@@ -264,23 +300,18 @@ pub(crate) async fn verify_login_assertion(
             stored_counter: params.stored_counter,
             require_user_verification: true,
             origin_policy: params.origin_policy,
-        })
-        .map_err(|e| {
-            ServiceError::oauth(
-                OAuthErrorCode::InvalidGrant,
-                format!("WebAuthn verification failed: {e}"),
-            )
         })?;
 
         Ok(LoginAssertionResult {
             new_counter: result.counter,
             user_verified: result.user_verified,
+            verified_at: result.verified_at,
         })
     })
     .await
     .map_err(|e| {
         tracing::error!("WebAuthn verification task failed: {e}");
-        ServiceError::Internal("WebAuthn verification failed".to_string())
+        AssertionFailure::TaskFailed
     })?
 }
 
@@ -361,7 +392,7 @@ pub(crate) enum GrantProof {
     /// `authorization_code` grant. Carries a [`crate::db::AuthCodeClaim`]
     /// witness — proof that the authorization code was atomically consumed
     /// before this token issuance.
-    AuthorizationCode(crate::db::AuthCodeClaim),
+    AuthorizationCode(AuthCodeClaim),
 
     /// `client_credentials` grant — no grant-level replay primitive; the
     /// single-use guarantee is enforced entirely via [`ClientAuthProof`].
@@ -375,12 +406,12 @@ pub(crate) enum GrantProof {
     /// FIDO2 assertion grant. Carries a [`crate::db::ChallengeStateClaim`]
     /// witness — proof that the challenge state JWT was atomically marked
     /// consumed before this token issuance.
-    Fido2Assertion(crate::db::ChallengeStateClaim),
+    Fido2Assertion(ChallengeStateClaim),
 
     /// Device authorization grant (RFC 8628). Carries a [`crate::db::DeviceCodeClaim`]
     /// witness — proof that the device code was atomically transitioned to
     /// `Consumed` before this token issuance.
-    DeviceCode(crate::db::DeviceCodeClaim),
+    DeviceCode(DeviceCodeClaim),
 
     /// Enrollment bootstrap session — issued post-IdP authentication and
     /// pre-FIDO2 registration. `hardware_verified` is false here. Carries
@@ -389,18 +420,18 @@ pub(crate) enum GrantProof {
     /// before this token issuance, closing the read-vs-consume TOCTOU
     /// window that existed when callers used `get_oidc_state` +
     /// `delete_oidc_state` as separate steps.
-    EnrollmentBootstrap(crate::db::OidcStateClaim),
+    EnrollmentBootstrap(OidcStateClaim),
 
     /// Enrollment complete session — issued after WebAuthn registration.
     /// Carries a [`crate::db::ChallengeStateClaim`] witness — proof that
     /// the registration state JWT was atomically marked consumed before
     /// this token issuance.
-    EnrollmentComplete(crate::db::ChallengeStateClaim),
+    EnrollmentComplete(ChallengeStateClaim),
 
     /// Browser WebAuthn login. Carries a [`crate::db::ChallengeStateClaim`]
     /// witness — proof that the authentication state JWT was atomically
     /// marked consumed before this token issuance.
-    BrowserLogin(crate::db::ChallengeStateClaim),
+    BrowserLogin(ChallengeStateClaim),
 
     /// Certification test bypass (only available when
     /// `VOUCH_CERTIFICATION_TEST_TOKEN` is configured). Deliberately does
@@ -431,15 +462,12 @@ pub(crate) enum GrantProof {
 /// must supply both witnesses. Witnesses are consumed by drop.
 #[derive(Debug)]
 pub(crate) struct JwtClientAuthProof {
-    _auth: crate::services::oidc::jwt_bearer::client_auth::JwtAuthSucceeded,
-    _jti: Option<crate::db::JwtAssertionJtiClaim>,
+    _auth: JwtAuthSucceeded,
+    _jti: Option<JwtAssertionJtiClaim>,
 }
 
 impl JwtClientAuthProof {
-    pub(crate) fn new(
-        auth: crate::services::oidc::jwt_bearer::client_auth::JwtAuthSucceeded,
-        jti: Option<crate::db::JwtAssertionJtiClaim>,
-    ) -> Self {
+    pub(crate) fn new(auth: JwtAuthSucceeded, jti: Option<JwtAssertionJtiClaim>) -> Self {
         Self {
             _auth: auth,
             _jti: jti,
@@ -479,9 +507,9 @@ impl SenderConstraintProof {
     /// requirement is unmet.
     pub(crate) fn validate(
         client: &db::OAuthClient,
-        constraints: crate::services::oidc::fapi::SenderConstraints,
+        constraints: SenderConstraints,
     ) -> ServiceResult<Self> {
-        crate::services::oidc::fapi::validate_fapi_token_request(client, constraints)?;
+        fapi::validate_fapi_token_request(client, constraints)?;
 
         if client.dpop_bound_access_tokens && !constraints.dpop {
             return Err(ServiceError::oauth(
@@ -510,8 +538,7 @@ impl SenderConstraintProof {
     ///
     /// Browser sessions, enrollment bootstrap/completion, and the
     /// certification-test bypass mint tokens for a user rather than for a
-    /// client. The device grant's built-in CLI flow (no `client_id`) is the
-    /// same case.
+    /// client.
     pub(crate) fn no_registered_client() -> Self {
         Self { _private: () }
     }
@@ -532,19 +559,19 @@ pub(crate) enum ClientAuthProof {
     /// `client_secret_basic` / `client_secret_post` (RFC 6749 §2.3.1).
     /// Carries the verification witness from
     /// [`crate::services::oidc::token::authenticate_client`].
-    ClientSecret(crate::services::oidc::token::ClientSecretVerification),
+    ClientSecret(ClientSecretVerification),
 
     /// `tls_client_auth` / `self_signed_tls_client_auth` (RFC 8705 §2).
     /// Carries the verification witness from
     /// [`crate::services::oidc::token::authenticate_client_mtls`].
-    MutualTls(crate::services::oidc::token::MtlsCertVerification),
+    MutualTls(MtlsCertVerification),
 
     /// No external client authentication was performed. Carries a
     /// [`NoClientAuth`] witness whose two named constructors document
     /// why client auth is absent — either the client is a registered
     /// public OAuth client (RFC 6749 §2.1), or the request originates
     /// from an internal flow where the server is both issuer and client
-    /// (browser login, enrollment, device polling).
+    /// (browser login, enrollment, certification bypass).
     NoAuth(NoClientAuth),
 }
 
@@ -556,7 +583,7 @@ pub(crate) enum ClientAuthProof {
 ///   is `None` (public client, RFC 6749 §2.1).
 /// - [`Self::internal_endpoint`] — the request originates from a
 ///   server-internal endpoint (browser login, enrollment callbacks,
-///   device-code polling) where there is no external OAuth client and
+///   certification bypass) where there is no external OAuth client and
 ///   the server itself is the client.
 ///
 /// A confidential client's grant arm cannot accidentally satisfy the
@@ -575,14 +602,12 @@ impl NoClientAuth {
     /// (RFC 6749 §2.1 — `token_endpoint_auth_method = None`). Returns
     /// `Err` if the client is registered as confidential; in that case
     /// the caller must produce a real verification witness instead.
-    pub(crate) fn for_public_client(
-        client: &crate::db::OAuthClient,
-    ) -> Result<Self, crate::error::ServiceError> {
-        if client.token_endpoint_auth_method == crate::db::TokenEndpointAuthMethod::None {
+    pub(crate) fn for_public_client(client: &OAuthClient) -> Result<Self, ServiceError> {
+        if client.client_type() == ClientType::Public {
             Ok(Self { _private: () })
         } else {
-            Err(crate::error::ServiceError::oauth(
-                crate::error::OAuthErrorCode::InvalidClient,
+            Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidClient,
                 "client authentication required",
             ))
         }
@@ -592,8 +617,8 @@ impl NoClientAuth {
     /// server-internal endpoint where there is no external OAuth client.
     ///
     /// Use **only** for endpoints where the server is acting as both
-    /// issuer and client — browser login, enrollment callbacks, device
-    /// polling, certification test bypass. Adding new call sites is an
+    /// issuer and client — browser login, enrollment callbacks,
+    /// certification test bypass. Adding new call sites is an
     /// audit-relevant decision: grep for this constructor before merging
     /// any change that introduces a new caller.
     pub(crate) fn internal_endpoint() -> Self {
@@ -660,8 +685,12 @@ pub(crate) struct AccessTokenClaims {
     /// RFC 9449 Section 6: DPoP confirmation (sender-constrained token binding).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cnf: Option<CnfClaim>,
-    /// RFC 9068 Section 2.2: Time when the End-User authentication occurred.
-    /// RECOMMENDED per OIDC Core Section 2. Reflects FIDO2 session creation time.
+    /// RFC 9068 Section 2.2.1: "auth_time OPTIONAL - as defined in Section 2
+    /// of [OpenID.Core]", i.e. "Time when the End-User authentication
+    /// occurred" — the instant the FIDO2 ceremony verified, not when the
+    /// token carrying it was issued. OIDC Core Section 2 makes it REQUIRED
+    /// when `max_age` is requested or `auth_time` is an Essential Claim, and
+    /// OPTIONAL otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_time: Option<i64>,
     /// RFC 8693 Section 4.1: Actor claim for delegation chains.
@@ -697,11 +726,18 @@ pub(crate) struct CreateOAuthTokenParams<'a> {
     /// Optional audience override (for token exchange with explicit audience).
     /// When `None`, defaults to `client_id`.
     pub audience: Option<&'a str>,
-    /// Time when the End-User authentication occurred (Unix timestamp).
-    /// Populated from FIDO2 session creation time for authorization code grants.
-    pub auth_time: Option<i64>,
-    /// Authentication assurance level — bundles `hardware_verified`, `amr`,
-    /// and `acr` to prevent inconsistent combinations.
+    /// Ceiling on the issued token's lifetime, in seconds. When `Some(secs)`,
+    /// the JWT `exp` claim and the `sessions.expires_at` row are stamped
+    /// `now + secs` instead of `now + session_hours*3600`. Used by RFC 8693
+    /// token exchange to cap the issued token by the subject token's
+    /// remaining TTL — `expires_in` reported to the client (RFC 8693 §2.2.1)
+    /// then describes the token it accompanies. `None` for every grant that
+    /// is not token exchange; those keep the full `session_hours` lifetime.
+    pub max_lifetime_secs: Option<u64>,
+    /// Authentication assurance level — bundles `hardware_verified`,
+    /// `auth_time`, `amr`, and `acr` to prevent inconsistent combinations.
+    /// The `auth_time` claim is derived from this field, so a token issued
+    /// without a FIDO2 assertion cannot claim one.
     pub hardware_verification: HardwareVerification,
     /// Session purpose for the database record.
     pub session_purpose: SessionPurpose,
@@ -712,6 +748,13 @@ pub(crate) struct CreateOAuthTokenParams<'a> {
     pub hardware_aaguid: Option<&'a str>,
     /// Organization domain (`hd` claim) at session creation time.
     pub org_domain: Option<&'a str>,
+    /// Hash of the single-use grant code that sourced this token. `None` for
+    /// grants with no single-use code (FIDO2, client_credentials, token
+    /// exchange, browser login, enrollment); `Some` for the authorization-code
+    /// and device-code grants. Recorded on the session so that replay
+    /// detection (RFC 6749 §10.5) can revoke only the tokens issued from the
+    /// replayed code rather than every session for the user.
+    pub source_code_hash: Option<&'a str>,
 }
 
 /// How an issued token is bound to the party that may present it.
@@ -792,8 +835,16 @@ impl<'a> TokenBinding<'a> {
 pub(crate) struct CreateSessionResult {
     /// The JWT token.
     pub token: SecretString,
-    /// Token lifetime in seconds.
+    /// Token lifetime in seconds (the value the caller should report as
+    /// RFC 8693 §2.2.1 `expires_in`, and which matches the JWT `exp - iat`).
     pub expires_in: u64,
+    /// The absolute expiration timestamp stamped into the JWT `exp` claim
+    /// and the `sessions.expires_at` row. Callers that record an audit row
+    /// for the issued token should use this directly so the audit row, the
+    /// `sessions` row, and the JWT `exp` claim all record the same lifetime
+    /// for one token (rather than re-deriving it from a separately-stamped
+    /// `now` that can drift from the mint-time `now`).
+    pub expires_at: Timestamp,
     /// RFC 6749 §5.1 `token_type`, derived from the binding stamped into the
     /// token so the advertisement cannot contradict the `cnf` claim.
     pub token_type: &'static str,
@@ -818,6 +869,7 @@ pub(crate) async fn create_oauth_access_token(
     state: &AppState,
     params: CreateOAuthTokenParams<'_>,
     proof: TokenIssuanceProof,
+    arrival: ArrivalTime,
 ) -> ServiceResult<CreateSessionResult> {
     // Consume the witness. Its presence is the structural guarantee that the
     // caller has consumed the required replay primitives — once consumed
@@ -837,10 +889,24 @@ pub(crate) async fn create_oauth_access_token(
         "token issuance proof consumed"
     );
 
-    let now = Timestamp::now();
-    let session_hours = i64::try_from(state.config().session_hours)
-        .map_err(|_| ServiceError::Internal("Invalid session hours".to_string()))?;
-    let duration = Span::new().hours(session_hours);
+    // The issued `exp` is measured from the request's arrival, the same
+    // instant any caller-supplied `max_lifetime_secs` was computed against.
+    // RFC 8693 exchange derives that ceiling from the subject token's
+    // remaining TTL; measuring it here from a second, later reading would
+    // let the exchanged token outlive its subject by the gap between the two.
+    let now = arrival.timestamp();
+    // The lifetime in seconds is the configured `session_hours * 3600` unless
+    // the caller supplied a ceiling (RFC 8693 token exchange caps the issued
+    // token by the subject token's remaining TTL). The same value drives the
+    // JWT `exp` claim and the `sessions.expires_at` row, and is returned as
+    // `expires_in` so the value the client receives describes the token it
+    // accompanies (RFC 8693 §2.2.1).
+    let session_secs = params
+        .max_lifetime_secs
+        .unwrap_or_else(|| state.config().session_hours.saturating_mul(3600));
+    let session_secs_i64 = i64::try_from(session_secs)
+        .map_err(|_| ServiceError::Internal("Invalid session lifetime".to_string()))?;
+    let duration = Span::new().seconds(session_secs_i64);
     let expires = now
         .checked_add(duration)
         .map_err(|_| ServiceError::Internal("Time overflow".to_string()))?;
@@ -855,7 +921,7 @@ pub(crate) async fn create_oauth_access_token(
     let has_email_scope = params
         .scope
         .as_ref()
-        .is_some_and(|s| s.contains(crate::services::oidc::OAuthScope::Email));
+        .is_some_and(|s| s.contains(OAuthScope::Email));
 
     // RFC 9449 / RFC 8705: the binding decides the confirmation claim and the
     // advertised token type together.
@@ -879,7 +945,7 @@ pub(crate) async fn create_oauth_access_token(
         email_verified: if has_email_scope { Some(true) } else { None },
         hardware_verified: params.hardware_verification.hardware_verified(),
         cnf,
-        auth_time: params.auth_time,
+        auth_time: params.hardware_verification.auth_time(),
         act: params.act,
         amr: params.hardware_verification.amr(),
         acr: params.hardware_verification.acr(),
@@ -905,17 +971,21 @@ pub(crate) async fn create_oauth_access_token(
             authorization_details: params.authorization_details,
             hardware_aaguid: params.hardware_aaguid,
             org_domain: params.org_domain,
+            client_id: Some(params.client_id),
+            source_code_hash: params.source_code_hash,
+            authenticated_at: params.hardware_verification.authenticated_at(),
         },
     )
     .await
     .map_err(|e| ServiceError::Internal(format!("Failed to store session: {e}")))?;
 
-    let expires_in = state.config().session_hours.saturating_mul(3600);
+    let expires_in = session_secs;
 
     Ok(CreateSessionResult {
         token_type: params.binding.token_type(),
         token: SecretString::from(token),
         expires_in,
+        expires_at: expires,
     })
 }
 
@@ -976,10 +1046,28 @@ impl DecodedToken {
     }
 
     /// Reconstruct the hardware verification level from token claims.
+    ///
+    /// `auth_time` is dropped while `amr` and `acr` are carried over, which is
+    /// a deliberate deviation from RFC 9068 Section 2.2.1. That section groups
+    /// all three as Authentication Information Claims and says their "values
+    /// are fixed and remain the same across all access tokens that derive from
+    /// a given authorization response ... or after one or more token exchanges
+    /// (e.g., ... exchanging one access token for another via [RFC8693]
+    /// procedures)". Read strictly, an exchanged token should carry the
+    /// subject's original `auth_time` unchanged.
+    ///
+    /// We drop it because `auth_time` is load-bearing for the step-up gate on
+    /// key deletion, and propagating it would let a token obtained by exchange
+    /// satisfy a freshness requirement on a ceremony the exchange did not
+    /// perform. Dropping it fails closed: such a token reads as epoch and is
+    /// challenged. Revisit if a resource server ever needs the exchanged
+    /// token's `auth_time` for its own decisions.
     #[must_use]
     pub(crate) fn hardware_verification(&self) -> HardwareVerification {
         match self {
-            Self::AccessToken(c) if c.hardware_verified => HardwareVerification::Verified,
+            Self::AccessToken(c) if c.hardware_verified => {
+                HardwareVerification::Verified { auth_time: None }
+            }
             Self::AccessToken(_) => HardwareVerification::NotVerified,
         }
     }
@@ -1006,7 +1094,7 @@ pub(crate) struct ValidatedResourceToken {
     /// already been enforced by `extract_resource_token`.
     pub aud: String,
     /// Granted OAuth scope.
-    pub scope: Option<crate::services::oidc::ScopeSet>,
+    pub scope: Option<ScopeSet>,
     /// Authenticator ID from the server-side session record (not in JWT).
     ///
     /// Presence merely means a key is registered to the user — it does
@@ -1045,8 +1133,8 @@ pub(crate) fn decode_token(
     oidc_key: &OidcSigningKey,
     expected_issuer: &str,
 ) -> Option<DecodedToken> {
-    let ctx = crate::crypto::jwt::TokenValidationContext::new(oidc_key, expected_issuer);
-    let claims: AccessTokenClaims = crate::crypto::jwt::decode_es256_token(token, &ctx)?;
+    let ctx = TokenValidationContext::new(oidc_key, expected_issuer);
+    let claims: AccessTokenClaims = jwt::decode_es256_token(token, &ctx)?;
     Some(DecodedToken::AccessToken(claims))
 }
 
@@ -1092,6 +1180,51 @@ pub(crate) async fn revoke_user_access(
     Ok(())
 }
 
+/// Which step of [`revoke_then_persist`] failed.
+pub(crate) enum DeactivationError<E> {
+    /// [`revoke_user_access`] failed; the caller's state change was **not**
+    /// persisted, so the user is left active and the operation is safe to retry.
+    Revoke(ServiceError),
+    /// Revocation succeeded but persisting the state change failed afterward.
+    Persist(E),
+}
+
+/// Revoke a user's live credentials, then persist a deactivation — in that
+/// order, and only persisting if revocation succeeded.
+///
+/// Deactivating a user must withdraw sessions and certificates **before** the
+/// `active = false` write commits. If the write landed first and revocation
+/// then failed, the user would be marked inactive while previously-issued SSH
+/// certificates stayed valid until they expire — and, on the SCIM path, the
+/// deactivation transition gate would not fire again on retry, so no retry
+/// would re-attempt revocation (issue #1116). Revoking first means a revocation
+/// failure leaves the user active and recoverable by an IdP or admin retry.
+///
+/// `persist` runs exactly when [`revoke_user_access`] returns `Ok`; a caller
+/// therefore cannot persist the state change ahead of revocation.
+///
+/// # Errors
+///
+/// Returns [`DeactivationError::Revoke`] if revocation fails (in which case
+/// `persist` does not run), or [`DeactivationError::Persist`] if the state
+/// change fails after a successful revocation.
+pub(crate) async fn revoke_then_persist<T, E, F, Fut>(
+    state: &AppState,
+    user_id: &str,
+    reason: &str,
+    revoked_by: &str,
+    persist: F,
+) -> Result<T, DeactivationError<E>>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+{
+    revoke_user_access(state, user_id, reason, revoked_by)
+        .await
+        .map_err(DeactivationError::Revoke)?;
+    persist().await.map_err(DeactivationError::Persist)
+}
+
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
@@ -1101,7 +1234,91 @@ pub(crate) async fn revoke_user_access(
 )]
 mod tests {
     use super::*;
-    use crate::test_utils::{TEST_ISSUER, make_test_access_token, make_test_oidc_key};
+    use crate::db;
+
+    // WebAuthn L2 §7.2: the signCount check (step 21) runs only after the
+    // signature verified (step 20), so a counter regression — and only a
+    // counter regression — is attributable to the credential's owner.
+    // A verification task that never finished decided nothing: like a
+    // storage fault during the credential lookup, it writes no login_failed
+    // row.
+    #[test]
+    fn assertion_task_failure_writes_no_login_failed_row() {
+        assert!(AssertionFailure::TaskFailed.principal("user-1").is_none());
+    }
+
+    #[test]
+    fn assertion_failure_attributes_only_counter_regression() {
+        use webauthn_verify::VerifyError;
+        let owner = "user-1";
+        assert!(matches!(
+            AssertionFailure::Rejected(VerifyError::CounterNotIncreasing).principal(owner),
+            Some(db::Principal::Verified(ref id)) if id == owner
+        ));
+        for failure in [
+            AssertionFailure::Rejected(VerifyError::SignatureInvalid),
+            AssertionFailure::Rejected(VerifyError::ChallengeMismatch),
+            AssertionFailure::Rejected(VerifyError::UserNotVerified),
+        ] {
+            assert!(
+                matches!(
+                    failure.principal(owner),
+                    Some(db::Principal::Unverified { asserted: Some(ref id) }) if id == owner
+                ),
+                "{failure} must stay unattributed"
+            );
+        }
+    }
+    use crate::test_utils::{
+        TEST_ISSUER, create_test_user, make_test_access_token, make_test_oidc_key, test_app,
+    };
+
+    #[tokio::test]
+    async fn revoke_then_persist_revokes_before_running_persist() {
+        // #1116: `revoke_then_persist` must withdraw the user's live
+        // credentials before the caller's persist step runs, so a deactivation
+        // is never committed while credentials are still valid. The persist
+        // closure observes an already-revoked certificate.
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let (_app, state) = test_app().await;
+        let user = create_test_user(&state.store, "revoke-order@example.com").await;
+
+        let expires_at = jiff::Timestamp::now()
+            .checked_add(jiff::Span::new().hours(8))
+            .expect("future timestamp");
+        db::record_ssh_certificate_issuance(
+            &state.store,
+            42_000_002,
+            &user.id,
+            &user.email,
+            &["user".to_string()],
+            expires_at,
+        )
+        .await
+        .expect("record issuance");
+
+        let revoked_at_persist = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&revoked_at_persist);
+        let state_ref = &state;
+        let outcome: Result<(), ()> =
+            revoke_then_persist(&state, &user.id, "test", "test", || async {
+                let revoked = db::get_revoked_ssh_certificates(&state_ref.store)
+                    .await
+                    .expect("list revoked");
+                flag.store(!revoked.is_empty(), Ordering::SeqCst);
+                Ok::<(), ()>(())
+            })
+            .await
+            .map_err(|_| ());
+
+        assert!(outcome.is_ok(), "revocation and persist both succeed");
+        assert!(
+            revoked_at_persist.load(Ordering::SeqCst),
+            "the certificate must already be revoked when persist runs"
+        );
+    }
 
     #[tokio::test]
     async fn test_decode_token_routes_es256_to_access_token() {
@@ -1248,53 +1465,6 @@ mod tests {
         assert!(actor.depth() > MAX_DELEGATION_DEPTH);
     }
 
-    // AMR tests (RFC 8176)
-
-    #[test]
-    fn test_auth_method_wire_format() {
-        assert_eq!(AuthMethod::HardwareKey.as_str(), "hwk");
-        assert_eq!(AuthMethod::Pin.as_str(), "pin");
-        assert_eq!(AuthMethod::UserPresence.as_str(), "user");
-    }
-
-    #[test]
-    fn test_all_fido2() {
-        let methods = AuthMethod::all_fido2();
-        assert_eq!(methods.len(), 3);
-        assert_eq!(methods[0], AuthMethod::HardwareKey);
-        assert_eq!(methods[1], AuthMethod::Pin);
-        assert_eq!(methods[2], AuthMethod::UserPresence);
-    }
-
-    #[test]
-    fn test_auth_method_serde_roundtrip() {
-        let methods: Vec<AuthMethod> = AuthMethod::all_fido2().to_vec();
-        let json = serde_json::to_string(&methods).unwrap();
-        assert_eq!(json, r#"["hwk","pin","user"]"#);
-
-        let deserialized: Vec<AuthMethod> = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized, methods);
-    }
-
-    #[test]
-    fn test_auth_method_deserialize_rejects_unknown() {
-        let result: Result<AuthMethod, _> = serde_json::from_str(r#""mfa""#);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_auth_method_display() {
-        assert_eq!(format!("{}", AuthMethod::HardwareKey), "hwk");
-        assert_eq!(format!("{}", AuthMethod::Pin), "pin");
-        assert_eq!(format!("{}", AuthMethod::UserPresence), "user");
-    }
-
-    #[test]
-    fn test_acr_aal3_constant() {
-        assert!(ACR_AAL3.starts_with("urn:nist:"));
-        assert!(ACR_AAL3.contains("aal3"));
-    }
-
     #[test]
     fn test_access_token_claims_optional_fields_omitted() {
         let claims = AccessTokenClaims {
@@ -1384,7 +1554,7 @@ mod tests {
             .err()
             .expect("expected error — signature is bogus");
         let description = match &err {
-            ServiceError::OAuth { description, .. } => description.clone(),
+            AssertionFailure::Rejected(e) => e.to_string(),
             other => format!("unexpected error variant: {other}"),
         };
         assert!(

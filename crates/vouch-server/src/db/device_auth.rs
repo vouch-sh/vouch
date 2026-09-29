@@ -4,28 +4,61 @@
 use super::claim::ClaimError;
 use super::document_type::Document;
 use super::documents::device_auth::{DeviceAuthRequestDoc, OidcStateDoc};
-use super::store::DocumentStore;
+use super::store::{DocumentStore, Transition};
+use crate::assurance::HardwareVerification;
+use crate::crypto::webauthn_verify::AuthTime;
 use anyhow::{Result, bail};
 use jiff::Timestamp;
 
 // Re-export DeviceAuthStatus from documents module
 pub use super::documents::device_auth::DeviceAuthStatus;
 
-/// Approval evidence recorded when a pending request is authorized.
+/// What the approving browser observed, as evidence rather than assertion.
+///
+/// [`Observed`] can only be built by someone holding an [`AuthTime`], which
+/// only a completed WebAuthn ceremony yields — so a request that ran no
+/// ceremony, such as the device-code poll, cannot claim one happened
+/// (issue #1166). This is the write side; the read side gets
+/// [`HardwareVerification`], because a rehydrated row carries a bare
+/// integer and no evidence.
+///
+/// [`Observed`]: Self::Observed
+#[derive(Debug, Clone, Copy)]
+pub enum DeviceApproval {
+    /// The browser completed a WebAuthn ceremony at this instant.
+    Observed(AuthTime),
+    /// The approval rests on an upstream IdP sign-in alone.
+    NotVerified,
+}
+
+impl From<DeviceApproval> for HardwareVerification {
+    fn from(approval: DeviceApproval) -> Self {
+        match approval {
+            DeviceApproval::Observed(at) => Self::Verified {
+                auth_time: Some(at.instant()),
+            },
+            DeviceApproval::NotVerified => Self::NotVerified,
+        }
+    }
+}
+
+/// Approval evidence read back from a stored row.
 ///
 /// Only [`state_from_stored`] constructs one, and only from a row whose
 /// approval fields are all present — the device-code grant cannot reach
 /// token issuance holding a partial approval.
 #[derive(Debug, Clone)]
-pub struct DeviceAuthApproval {
+pub struct StoredApproval {
     pub user_id: String,
     pub user_email: String,
     /// Authenticator that approved the request.
     pub authenticator_id: String,
-    /// Whether the approving browser session completed a WebAuthn ceremony.
-    /// The device-code grant issues its token with this as the
-    /// `hardware_verified` claim.
-    pub hardware_verified: bool,
+    /// Whether the approving browser session completed a WebAuthn ceremony,
+    /// and when. The device-code grant issues its token with this verbatim,
+    /// so `auth_time` is the ceremony instant — not the later token poll.
+    /// Rows written before the instant was recorded read as
+    /// `Verified { auth_time: None }`, which freshness gates treat as epoch.
+    pub verification: HardwareVerification,
 }
 
 /// Domain state of a device authorization request. The stored document
@@ -35,7 +68,7 @@ pub struct DeviceAuthApproval {
 #[derive(Debug)]
 pub enum DeviceAuthState {
     Pending,
-    Authorized(DeviceAuthApproval),
+    Authorized(StoredApproval),
     Denied,
     /// `user_id` is retained for replay revocation; `None` on rows written
     /// before approval attribution was recorded.
@@ -58,11 +91,17 @@ fn state_from_stored(data: &DeviceAuthRequestDoc) -> DeviceAuthState {
         DeviceAuthStatus::Authorized => {
             match (&data.user_id, &data.user_email, &data.authenticator_id) {
                 (Some(user_id), Some(user_email), Some(authenticator_id)) => {
-                    DeviceAuthState::Authorized(DeviceAuthApproval {
+                    DeviceAuthState::Authorized(StoredApproval {
                         user_id: user_id.clone(),
                         user_email: user_email.clone(),
                         authenticator_id: authenticator_id.clone(),
-                        hardware_verified: data.hardware_verified,
+                        verification: if data.hardware_verified {
+                            HardwareVerification::Verified {
+                                auth_time: data.authenticated_at,
+                            }
+                        } else {
+                            HardwareVerification::NotVerified
+                        },
                     })
                 }
                 _ => DeviceAuthState::Denied,
@@ -81,28 +120,33 @@ pub struct DeviceAuthRequest {
     pub device_code_hash: String,
     pub user_code: String,
     pub state: DeviceAuthState,
-    /// OAuth client_id that initiated this device authorization.
-    pub client_id: Option<String>,
+    /// OAuth client that initiated this device authorization and the only
+    /// one that may redeem it.
+    pub client_id: String,
     pub expires_at: Timestamp,
     pub interval_seconds: i32,
     pub last_poll_at: Option<Timestamp>,
     pub consumed_at: Option<Timestamp>,
 }
 
-impl From<Document<DeviceAuthRequestDoc>> for DeviceAuthRequest {
-    fn from(doc: Document<DeviceAuthRequestDoc>) -> Self {
+impl DeviceAuthRequest {
+    /// `None` for a row with no `client_id`: no client can prove it issued
+    /// the code, so nothing may read it (RFC 6749 §5.2: `invalid_grant` when
+    /// the grant "was issued to another client").
+    fn from_doc(doc: Document<DeviceAuthRequestDoc>) -> Option<Self> {
         let state = state_from_stored(&doc.data);
-        Self {
+        let client_id = doc.data.client_id?;
+        Some(Self {
             id: doc.id,
             device_code_hash: doc.data.device_code_hash,
             user_code: doc.data.user_code,
             state,
-            client_id: doc.data.client_id,
+            client_id,
             expires_at: doc.data.expires_at,
             interval_seconds: doc.data.interval_seconds,
             last_poll_at: doc.data.last_poll_at,
             consumed_at: doc.data.consumed_at,
-        }
+        })
     }
 }
 
@@ -129,20 +173,6 @@ fn stored_device_auth_id(stored: String) -> Option<String> {
     (!stored.is_empty()).then_some(stored)
 }
 
-impl From<Document<OidcStateDoc>> for OidcState {
-    fn from(doc: Document<OidcStateDoc>) -> Self {
-        Self {
-            id: doc.id,
-            state: doc.data.state,
-            device_auth_id: stored_device_auth_id(doc.data.device_auth_id),
-            nonce: doc.data.nonce,
-            code_verifier: doc.data.code_verifier,
-            expires_at: doc.data.expires_at,
-            provider_id: doc.data.provider_id,
-        }
-    }
-}
-
 /// Witness that an OIDC state record was atomically transitioned to
 /// `consumed_at = Some(now)` by this caller. Construction is private to
 /// this module — the only path to an instance is a successful return from
@@ -166,7 +196,7 @@ pub async fn create_device_auth_request(
     store: &DocumentStore,
     device_code_hash: &str,
     user_code: &str,
-    client_id: Option<&str>,
+    client_id: &str,
     expires_at: Timestamp,
     interval_seconds: i32,
 ) -> Result<String> {
@@ -174,11 +204,12 @@ pub async fn create_device_auth_request(
         device_code_hash: device_code_hash.to_string(),
         user_code: user_code.to_string(),
         status: DeviceAuthStatus::Pending,
-        client_id: client_id.map(String::from),
+        client_id: Some(client_id.to_string()),
         user_id: None,
         user_email: None,
         authenticator_id: None,
         hardware_verified: false,
+        authenticated_at: None,
         expires_at,
         interval_seconds,
         last_poll_at: None,
@@ -196,7 +227,7 @@ pub async fn get_device_auth_by_code_hash(
     let doc = store
         .find_one::<DeviceAuthRequestDoc>("device_code_hash", device_code_hash)
         .await?;
-    Ok(doc.map(DeviceAuthRequest::from))
+    Ok(doc.and_then(DeviceAuthRequest::from_doc))
 }
 
 /// Get a device auth request by user code.
@@ -207,7 +238,7 @@ pub async fn get_device_auth_by_user_code(
     let doc = store
         .find_one::<DeviceAuthRequestDoc>("user_code", user_code)
         .await?;
-    Ok(doc.map(DeviceAuthRequest::from))
+    Ok(doc.and_then(DeviceAuthRequest::from_doc))
 }
 
 /// Get a device auth request by ID.
@@ -220,7 +251,7 @@ pub(crate) async fn get_device_auth_by_id(
     id: &str,
 ) -> Result<Option<DeviceAuthRequest>> {
     let doc = store.get::<DeviceAuthRequestDoc>(id).await?;
-    Ok(doc.map(DeviceAuthRequest::from))
+    Ok(doc.and_then(DeviceAuthRequest::from_doc))
 }
 
 /// Inputs for [`authorize_device_auth`].
@@ -231,19 +262,26 @@ pub struct AuthorizeDeviceAuthParams<'a> {
     pub user_email: &'a str,
     /// Authenticator that approved the request.
     pub authenticator_id: &'a str,
-    /// Whether the approving browser session completed a WebAuthn ceremony.
-    /// Recorded on the request so the device-code grant issues its token with
-    /// a `hardware_verified` claim that reflects what actually happened.
-    pub hardware_verified: bool,
+    /// What the approving browser observed. Recorded on the request so the
+    /// device-code grant issues its token with claims that reflect what
+    /// actually happened — `auth_time` in particular is the ceremony
+    /// instant, not the later token poll (OIDC Core §2: "Time when the
+    /// End-User authentication occurred").
+    pub verification: DeviceApproval,
 }
 
 /// Authorize a device auth request.
 ///
-/// Uses `compare_and_update` (OCC) so two concurrent authorization
-/// attempts cannot both succeed under PostgreSQL READ COMMITTED — the
-/// loser sees a version mismatch and is reported as a conflict. The
-/// blind `tx.update` it replaced would have let both writers commit,
-/// each clobbering the other's user attribution.
+/// A [`DocumentStore::transition`] gated on `status == Pending`, so two
+/// concurrent authorization attempts cannot both succeed under PostgreSQL
+/// READ COMMITTED (the loser re-reads `Authorized` and is rejected), while a
+/// concurrent device-code poll ([`update_device_auth_poll_time`]) — which
+/// bumps the row's version without leaving `Pending` — only costs a retry.
+/// A single-shot `compare_and_update` that bailed on any version mismatch
+/// failed a valid approval (WebAuthn ceremony already verified, row still
+/// `Pending`) whenever the CLI's poll landed inside its read-to-write
+/// window, surfacing as a 500 the user could only clear by re-running the
+/// browser ceremony.
 pub async fn authorize_device_auth(
     store: &DocumentStore,
     params: AuthorizeDeviceAuthParams<'_>,
@@ -253,55 +291,56 @@ pub async fn authorize_device_auth(
         user_id,
         user_email,
         authenticator_id,
-        hardware_verified,
+        verification,
     } = params;
 
     if id.is_empty() {
         bail!("authorize_device_auth called with empty id");
     }
 
-    let doc = store.get::<DeviceAuthRequestDoc>(id).await?;
-    let Some(doc) = doc else {
-        bail!(
-            "authorize_device_auth: no device auth request \
-             found with id '{}'",
-            id
-        );
-    };
-
-    if doc.data.status != DeviceAuthStatus::Pending {
-        bail!(
+    let hw = HardwareVerification::from(verification);
+    let outcome = store
+        .transition::<DeviceAuthRequestDoc, (), DeviceAuthStatus, _>(id, |data| {
+            if data.status != DeviceAuthStatus::Pending {
+                return Err(data.status);
+            }
+            data.status = DeviceAuthStatus::Authorized;
+            data.user_id = Some(user_id.to_string());
+            data.user_email = Some(user_email.to_string());
+            data.authenticator_id = Some(authenticator_id.to_string());
+            data.hardware_verified = hw.hardware_verified();
+            data.authenticated_at = hw.authenticated_at();
+            Ok(())
+        })
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "authorize_device_auth: device auth request '{id}' was \
+                 concurrently modified after retries: {e}"
+            )
+        })?;
+    match outcome {
+        Transition::Applied(()) => Ok(()),
+        Transition::Rejected(status) => bail!(
             "authorize_device_auth: device auth request '{}' \
              already has status '{:?}'",
             id,
-            doc.data.status
-        );
-    }
-
-    let version = doc.version;
-    let mut data = doc.data;
-    data.status = DeviceAuthStatus::Authorized;
-    data.user_id = Some(user_id.to_string());
-    data.user_email = Some(user_email.to_string());
-    data.authenticator_id = Some(authenticator_id.to_string());
-    data.hardware_verified = hardware_verified;
-    let won = store.compare_and_update(id, version, &data).await?;
-    if !won {
-        bail!(
-            "authorize_device_auth: device auth request '{}' was \
-             concurrently modified",
+            status
+        ),
+        Transition::NotFound => bail!(
+            "authorize_device_auth: no device auth request \
+             found with id '{}'",
             id
-        );
+        ),
     }
-
-    Ok(())
 }
 
 /// Deny a device auth request.
 ///
-/// Uses `compare_and_update` (OCC) for the same reason as
-/// [`authorize_device_auth`]: two concurrent denials (or a concurrent
-/// authorize + deny) cannot both win under READ COMMITTED.
+/// A [`DocumentStore::transition`] gated on `status == Pending`, for the
+/// same reason as [`authorize_device_auth`]: two concurrent denials (or a
+/// concurrent authorize + deny) cannot both win under READ COMMITTED, and a
+/// concurrent poll cannot spuriously fail a denial.
 ///
 /// Test-only: no production path denies explicitly — a request either gets
 /// approved, expires, or is voided when its approving authenticator is
@@ -312,37 +351,35 @@ pub async fn deny_device_auth(store: &DocumentStore, id: &str) -> Result<()> {
         bail!("deny_device_auth called with empty id");
     }
 
-    let doc = store.get::<DeviceAuthRequestDoc>(id).await?;
-    let Some(doc) = doc else {
-        bail!(
-            "deny_device_auth: no device auth request \
-             found with id '{}'",
-            id
-        );
-    };
-
-    if doc.data.status != DeviceAuthStatus::Pending {
-        bail!(
+    let outcome = store
+        .transition::<DeviceAuthRequestDoc, (), DeviceAuthStatus, _>(id, |data| {
+            if data.status != DeviceAuthStatus::Pending {
+                return Err(data.status);
+            }
+            data.status = DeviceAuthStatus::Denied;
+            Ok(())
+        })
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "deny_device_auth: device auth request '{id}' was \
+                 concurrently modified after retries: {e}"
+            )
+        })?;
+    match outcome {
+        Transition::Applied(()) => Ok(()),
+        Transition::Rejected(status) => bail!(
             "deny_device_auth: device auth request '{}' \
              already has status '{:?}'",
             id,
-            doc.data.status
-        );
-    }
-
-    let version = doc.version;
-    let mut data = doc.data;
-    data.status = DeviceAuthStatus::Denied;
-    let won = store.compare_and_update(id, version, &data).await?;
-    if !won {
-        bail!(
-            "deny_device_auth: device auth request '{}' was \
-             concurrently modified",
+            status
+        ),
+        Transition::NotFound => bail!(
+            "deny_device_auth: no device auth request \
+             found with id '{}'",
             id
-        );
+        ),
     }
-
-    Ok(())
 }
 
 /// Witness that an authorized device code (RFC 8628 Section 3.5) was
@@ -365,20 +402,35 @@ pub struct DeviceCodeClaim {
 
 /// Try to consume an authorized device code (RFC 8628 Section 3.5).
 ///
-/// On success returns the [`DeviceAuthApproval`] read in the same atomic
+/// On success returns the [`StoredApproval`] read in the same atomic
 /// step plus a [`DeviceCodeClaim`] witness — proof that this caller won the
 /// optimistic-concurrency consume. Token issuance takes its user
-/// attribution from this approval, never from an earlier (raceable) read.
-/// All "lost" cases (not found, no redeemable approval, expired, or
-/// concurrent consumer won via version mismatch) map to
-/// [`ClaimError::AlreadyConsumed`] — deliberately indistinguishable, each
-/// rejected as an invalid_grant.
+/// attribution from this approval, never from an earlier (raceable) read:
+/// the approval is taken from the exact row version the
+/// [`DocumentStore::transition`] committed against. All "lost" cases (not
+/// found, no redeemable approval, expired, or a concurrent consumer won —
+/// the retry re-reads its `Consumed` write and the precondition rejects it)
+/// map to [`ClaimError::AlreadyConsumed`] — deliberately
+/// indistinguishable, each rejected as an invalid_grant. A concurrent
+/// version bump that leaves the approval redeemable (a poll, a cascade
+/// clearing an unrelated field) costs a retry rather than a spurious
+/// `AlreadyConsumed`, which the handler would otherwise treat as a replay.
+///
+/// The `transition` closure re-stamps `now = Timestamp::now()` on every
+/// retry attempt. `transition` re-reads and re-evaluates the closure
+/// against the fresh row on each OCC retry (backoff ~100/200/400 ms), so a
+/// single entry-time `now` would be stale on retry and could let an expired
+/// code be redeemed when a retry lands past `expires_at`. The per-attempt
+/// stamp is authoritative for both the `data.expires_at <= now` gate and
+/// the `consumed_at` audit record.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "OCC retry re-reads the clock per attempt"
+)]
 pub async fn try_consume_device_auth(
     store: &DocumentStore,
     device_code_hash: &str,
-) -> std::result::Result<(DeviceAuthApproval, DeviceCodeClaim), ClaimError> {
-    let now = Timestamp::now();
-
+) -> std::result::Result<(StoredApproval, DeviceCodeClaim), ClaimError> {
     let doc = store
         .find_one::<DeviceAuthRequestDoc>("device_code_hash", device_code_hash)
         .await
@@ -387,47 +439,77 @@ pub async fn try_consume_device_auth(
         return Err(ClaimError::AlreadyConsumed);
     };
 
-    let DeviceAuthState::Authorized(approval) = state_from_stored(&doc.data) else {
-        return Err(ClaimError::AlreadyConsumed);
-    };
-    if doc.data.expires_at <= now {
+    // Pre-check on the indexed read so the common "not redeemable" cases
+    // never open a transition. The `now` here is NOT authoritative — it is
+    // only the fast-path reject. The closure below re-stamps `now` per
+    // attempt, and that per-attempt stamp is the only gate that counts: a
+    // retry that lands after `expires_at` must reject even if this entry
+    // check ran before expiry. Do NOT "simplify" the closure's
+    // `Timestamp::now()` back out by reusing `now0` — that reintroduces the
+    // stale-now bug (an expired code redeemed on OCC retry).
+    let now0 = Timestamp::now();
+    if !matches!(state_from_stored(&doc.data), DeviceAuthState::Authorized(_))
+        || doc.data.expires_at <= now0
+    {
         return Err(ClaimError::AlreadyConsumed);
     }
 
-    // Atomic transition: compare_and_update returns false on version mismatch
-    // (a concurrent caller wrote a newer version first).
-    let mut data = doc.data;
-    data.status = DeviceAuthStatus::Consumed;
-    data.consumed_at = Some(now);
-    let won = store
-        .compare_and_update(&doc.id, doc.version, &data)
+    let outcome = store
+        .transition::<DeviceAuthRequestDoc, StoredApproval, (), _>(&doc.id, |data| {
+            let DeviceAuthState::Authorized(approval) = state_from_stored(data) else {
+                return Err(());
+            };
+            // Re-stamp `now` on every retry attempt so the expiry gate and
+            // the `consumed_at` audit stamp both reflect the wall-clock
+            // instant of the attempt that actually commits, not the instant
+            // captured at function entry. `transition` re-reads and re-runs
+            // this closure against the fresh row on every OCC retry, with
+            // backoff ~100ms/200ms/400ms — a single entry-time `now` would
+            // be stale on retry and could let an expired code be redeemed.
+            let now = Timestamp::now();
+            if data.expires_at <= now {
+                return Err(());
+            }
+            data.status = DeviceAuthStatus::Consumed;
+            data.consumed_at = Some(now);
+            Ok(approval)
+        })
         .await
         .map_err(|e| ClaimError::Database(e.to_string()))?;
-    if won {
-        Ok((approval, DeviceCodeClaim { _private: () }))
-    } else {
-        Err(ClaimError::AlreadyConsumed)
+    match outcome {
+        Transition::Applied(approval) => Ok((approval, DeviceCodeClaim { _private: () })),
+        Transition::Rejected(()) | Transition::NotFound => Err(ClaimError::AlreadyConsumed),
     }
 }
 
 /// Update the last poll time for a device auth request.
 /// Returns true if poll was allowed, false if polling too fast.
+///
+/// `now` is the polling request's arrival instant. It both decides the
+/// interval and becomes the row's `last_poll_at`, so consecutive polls are
+/// measured on one clock — the one each request arrived on — at full
+/// precision. RFC 8628 §3.2 defines `interval` as "The minimum amount of
+/// time in seconds that the client SHOULD wait between polling requests to
+/// the token endpoint.", so a poll that waited exactly `interval` is
+/// allowed and one that waited any less is told to slow down.
 pub async fn update_device_auth_poll_time(
     store: &DocumentStore,
     id: &str,
     interval_seconds: i32,
+    now: Timestamp,
 ) -> Result<bool> {
-    let now = jiff::Timestamp::now();
-
     let doc = store.get::<DeviceAuthRequestDoc>(id).await?;
     let Some(doc) = doc else {
         return Ok(false);
     };
 
-    // Check if polling too fast
+    // Check if polling too fast. Whole seconds would floor both instants
+    // and misjudge a poll by up to a second either way: one sent 0.2s after
+    // its predecessor could straddle a second boundary and pass a 1s
+    // interval, while one that waited the full interval could be refused.
     if let Some(last_poll) = doc.data.last_poll_at {
-        let elapsed = now.as_second().saturating_sub(last_poll.as_second());
-        if elapsed < i64::from(interval_seconds) {
+        let elapsed = now.duration_since(last_poll);
+        if elapsed < jiff::SignedDuration::from_secs(i64::from(interval_seconds)) {
             return Ok(false);
         }
     }
@@ -485,12 +567,6 @@ pub async fn create_oidc_state(
     Ok(result.id)
 }
 
-/// Get an OIDC state by state value.
-pub async fn get_oidc_state(store: &DocumentStore, state: &str) -> Result<Option<OidcState>> {
-    let doc = store.find_one::<OidcStateDoc>("state", state).await?;
-    Ok(doc.map(OidcState::from))
-}
-
 /// Atomically consume an OIDC state record.
 ///
 /// On success returns `(OidcState, OidcStateClaim)` — the state data
@@ -505,12 +581,16 @@ pub async fn get_oidc_state(store: &DocumentStore, state: &str) -> Result<Option
 /// two concurrent enrollment-callback requests could both read the same
 /// state, both pass validation, and both proceed to issue tokens before
 /// either delete completed.
+///
+/// `now` both decides the expiry comparison and stamps `consumed_at`, so
+/// request-path callers pass the request's [`crate::arrival::ArrivalTime`]
+/// instant rather than letting this read a later clock than the rest of the
+/// callback's checks.
 pub async fn try_consume_oidc_state(
     store: &DocumentStore,
     state: &str,
+    now: Timestamp,
 ) -> std::result::Result<(OidcState, OidcStateClaim), ClaimError> {
-    let now = Timestamp::now();
-
     let doc = store
         .find_one::<OidcStateDoc>("state", state)
         .await

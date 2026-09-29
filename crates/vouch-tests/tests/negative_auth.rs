@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-//! Negative-auth coverage for API routes (security evaluation P2.5).
+//! Negative-auth coverage for API routes.
 //!
 //! Individual handlers verify authentication correctly, but that is a
 //! per-handler property. This test turns "every handler looks right" into a

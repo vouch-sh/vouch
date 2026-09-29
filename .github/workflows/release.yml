@@ -59,7 +59,7 @@ jobs:
       id-token: write
       attestations: write
       artifact-metadata: write
-    uses: ./.github/workflows/reusable-build.yml
+    uses: $/.github/workflows/reusable-build.yml
     with:
       version: ${{ needs.version.outputs.version }}
     secrets:
@@ -234,10 +234,10 @@ jobs:
           echo "SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}" >> "$GITHUB_ENV"
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Rebuild binaries
-        uses: docker/bake-action@d3418bd7d0e9324001bca92fa8ba175ea7e6dc9b # v7.3.0
+        uses: docker/bake-action@018cb6412ab401ebaa809aa5f85966b74628600f # v7.4.0
         with:
           targets: reproduce
         env:
@@ -445,7 +445,7 @@ jobs:
       - name: Upload release artifacts
         # Pinned action handles draft creation and multi-glob asset upload;
         # kept intentionally over a hand-rolled gh release script step.
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2 # zizmor: ignore[superfluous-actions]
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.2 # zizmor: ignore[superfluous-actions]
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           draft: true
@@ -799,7 +799,7 @@ jobs:
       - name: Generate release notes
         # Pinned action handles GitHub auto-generated release notes plus the
         # custom body; kept intentionally over a hand-rolled gh release step.
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2 # zizmor: ignore[superfluous-actions]
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.2 # zizmor: ignore[superfluous-actions]
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           draft: false

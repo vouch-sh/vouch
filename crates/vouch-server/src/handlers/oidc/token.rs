@@ -2,25 +2,40 @@
 //! Token endpoint handler.
 
 use super::client_auth::{
-    ClientAuthFields, ClientAuthPresentation, ExtractedClientAuth, complete_client_auth,
-    extract_client_auth, extract_client_credentials, with_client_auth_challenge,
+    ClientAuthFields, ClientAuthPresentation, ExtractedClientAuth, client_auth_proof,
+    complete_client_auth, extract_client_auth, extract_client_credentials,
+    with_client_auth_challenge,
 };
 use crate::AppState;
-use crate::db::JwtAssertionJtiClaim;
+use crate::arrival::ArrivalTime;
+use crate::db::{
+    self, ClientInfo, ClientType, OAuthClient, OAuthEventType, RecordOAuthEventParams,
+    RecordedOrgDomain,
+};
 use crate::error::OAuthErrorResponse;
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
+use crate::handlers::device;
 use crate::handlers::extractors::{OAuthForm, OptionalClientCert};
+use crate::infra::metrics;
 use crate::services::auth::{
-    ClientAuthProof, GrantProof, SenderConstraintProof, TokenBinding, TokenIssuanceProof,
+    ClientAuthProof, GrantProof, JwtClientAuthProof, NoClientAuth, SenderConstraintProof,
+    TokenBinding, TokenIssuanceProof,
 };
 use crate::services::oidc::mtls::CertThumbprint;
+use crate::services::oidc::validated_client::ValidatedOAuthClient;
 use crate::services::oidc::{
-    ScopeSet,
+    ResourceUri, ScopeSet,
     client_credentials::exchange_client_credentials,
-    exchange::{ActorToken, SubjectToken, TokenExchangeParams, TokenType, exchange_token},
+    dpop::DpopError,
+    exchange::{ActorToken, RequestedTokenType, SubjectToken, TokenExchangeParams, exchange_token},
+    fapi::SenderConstraints,
+    fido2_grant,
     grant_type::{OAuthGrantType, ParseOAuthGrantTypeError},
-    jwt_bearer::client_auth::{PendingJti, authenticate_client_jwt},
-    token::{AuthCodeExchangeParams, exchange_authorization_code, validate_dpop_if_present},
+    jwt_bearer::client_auth::authenticate_client_jwt,
+    token::{
+        AuthCodeExchangeParams, authenticate_client, authenticate_client_mtls,
+        exchange_authorization_code, validate_dpop_if_present,
+    },
 };
 use axum::{
     Json,
@@ -383,8 +398,9 @@ const MAX_ASSERTION_LEN: usize = 8192;
 /// - `urn:ietf:params:oauth:grant-type:device_code` grant (RFC 8628 Section 3.4)
 /// - `urn:ietf:params:oauth:grant-type:token-exchange` grant (RFC 8693 Section 2.1)
 pub(crate) async fn token(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
-    client_info: crate::db::ClientInfo,
+    client_info: ClientInfo,
     client_cert: OptionalClientCert,
     headers: HeaderMap,
     OAuthForm(params): OAuthForm<TokenRequestForm>,
@@ -478,10 +494,20 @@ pub(crate) async fn token(
 
     match grant {
         GrantParams::AuthorizationCode(params) => {
-            handle_authorization_code_grant(State(state), client_cert, headers, auth, params).await
+            handle_authorization_code_grant(
+                arrival,
+                State(state),
+                client_info,
+                client_cert,
+                headers,
+                auth,
+                params,
+            )
+            .await
         }
         GrantParams::ClientCredentials(params) => {
             handle_client_credentials_grant(
+                arrival,
                 State(state),
                 client_info,
                 client_cert,
@@ -492,10 +518,20 @@ pub(crate) async fn token(
             .await
         }
         GrantParams::DeviceCode(params) => {
-            handle_device_code_grant(State(state), client_info, client_cert, headers, params).await
+            handle_device_code_grant(
+                arrival,
+                State(state),
+                client_info,
+                client_cert,
+                headers,
+                auth,
+                params,
+            )
+            .await
         }
         GrantParams::TokenExchange(params) => {
             handle_token_exchange_grant(
+                arrival,
                 State(state),
                 client_info,
                 client_cert,
@@ -507,6 +543,7 @@ pub(crate) async fn token(
         }
         GrantParams::Fido2Assertion(params) => {
             handle_fido2_assertion_grant(
+                arrival,
                 State(state),
                 client_info,
                 client_cert,
@@ -519,46 +556,23 @@ pub(crate) async fn token(
     }
 }
 
-/// Commit an optional pending JTI and translate failures to a response-ready
-/// `Response`. Shared by the token-issuance handlers so per-grant logging and
-/// error mapping stay consistent across grants.
-///
-/// The MUST-run-before-grant-state-persistence invariant (issue #391) is
-/// enforced by the type system: the returned `Option<JwtAssertionJtiClaim>` is
-/// the only path to building a `ClientAuthProof::PrivateKeyJwt`, which is the
-/// only path to a `TokenIssuanceProof` carrying that client-auth method.
-async fn commit_optional_jti(
-    state: &Arc<AppState>,
-    pending: Option<PendingJti>,
-    grant_name: &'static str,
-) -> Result<Option<JwtAssertionJtiClaim>, Response> {
-    let Some(p) = pending else {
-        return Ok(None);
-    };
-    p.commit(state).await.map_err(|e| {
-        tracing::warn!("JTI commit failed for {grant_name}: {e:?}");
-        e.into_service_error().into_oauth_response().into_response()
-    })
-}
-
 /// Resolve non-JWT client authentication for the `authorization_code`
 /// grant. Returns the resolved client paired with a fully-formed
 /// [`ClientAuthProof`] (one of `ClientSecret`, `MutualTls`, `NoAuth`)
 /// on success, or a response-ready `Response` on any auth failure
 /// (unknown client, invalid secret, missing required cert, confidential
 /// client presented without auth, etc.).
+#[expect(
+    clippy::result_large_err,
+    reason = "Err is an HTTP Response; size is acceptable in error path"
+)]
 async fn resolve_non_jwt_auth(
     state: &Arc<AppState>,
     headers: &HeaderMap,
     auth: &ClientAuthParams,
     client_cert: &OptionalClientCert,
-) -> Result<
-    (
-        crate::services::oidc::token::AuthenticatedClient,
-        ClientAuthProof,
-    ),
-    Response,
-> {
+    arrival: ArrivalTime,
+) -> Result<(OAuthClient, ClientAuthProof), Response> {
     let creds = extract_client_credentials(headers, auth);
     let Some((c, _presentation)) = creds else {
         return Err(ServiceError::oauth(
@@ -574,7 +588,7 @@ async fn resolve_non_jwt_auth(
     // mTLS is the auth method — the secret is intentionally NOT validated).
     // In that case we fall through to the mTLS dispatch below.
     let secret_auth_outcome = if c.client_secret.is_some() {
-        match crate::services::oidc::token::authenticate_client(state, &c).await {
+        match authenticate_client(state, &c, arrival).await {
             Ok((auth_client, Some(verification))) => {
                 return Ok((auth_client, ClientAuthProof::ClientSecret(verification)));
             }
@@ -592,12 +606,12 @@ async fn resolve_non_jwt_auth(
     // clients, RFC 6749 §2.1 for public. If `secret_auth_outcome` is
     // `Some`, we already loaded the client; otherwise look it up.
     let client = match secret_auth_outcome {
-        Some(auth_client) => auth_client.client,
+        Some(auth_client) => auth_client,
         None => {
             // Fail closed: a DB error is a transient failure (→ 500), not a
             // missing client (→ invalid_client). Collapsing DB-Err + None +
             // inactive into one `invalid_client` masked connectivity problems.
-            let db_result = crate::db::get_oauth_client_by_client_id(&state.store, &c.client_id)
+            let db_result = db::get_oauth_client_by_client_id(&state.store, &c.client_id)
                 .await
                 .map_err(|e| {
                     tracing::error!(
@@ -621,62 +635,71 @@ async fn resolve_non_jwt_auth(
             }
         }
     };
-    let is_mtls_registered = matches!(
-        client.token_endpoint_auth_method,
-        crate::db::TokenEndpointAuthMethod::TlsClientAuth
-            | crate::db::TokenEndpointAuthMethod::SelfSignedTlsClientAuth
-    );
-    if is_mtls_registered {
-        let Some(cert) = client_cert.0.as_ref() else {
-            return Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidClient,
-                "mTLS client certificate required",
-            )
-            .into_oauth_response()
-            .into_response());
-        };
-        return match crate::services::oidc::token::authenticate_client_mtls(state, &client, cert)
+    // RFC 8705 §2: an mTLS-registered client authenticates by its certificate.
+    let mtls_verification =
+        authenticate_client_mtls(state, &client, client_cert.0.as_ref(), arrival)
             .await
-        {
-            Ok(verification) => Ok((
-                crate::services::oidc::token::AuthenticatedClient {
-                    client,
-                    is_public: false,
-                },
-                ClientAuthProof::MutualTls(verification),
-            )),
-            Err(e) => Err(e.into_service_error().into_oauth_response().into_response()),
-        };
+            .map_err(|e| e.into_service_error().into_oauth_response().into_response())?;
+    if let Some(verification) = mtls_verification {
+        return Ok((client, ClientAuthProof::MutualTls(verification)));
     }
     // Not mTLS-registered, no secret presented — must be a public client.
     // `for_public_client` errors if the client is confidential, closing
     // the "developer forgot to authenticate" hole at the type system level.
-    let witness = match crate::services::auth::NoClientAuth::for_public_client(&client) {
+    let witness = match NoClientAuth::for_public_client(&client) {
         Ok(w) => w,
         Err(svc) => return Err(svc.into_oauth_response().into_response()),
     };
-    Ok((
-        crate::services::oidc::token::AuthenticatedClient {
-            client,
-            is_public: true,
-        },
-        ClientAuthProof::NoAuth(witness),
-    ))
+    Ok((client, ClientAuthProof::NoAuth(witness)))
 }
 
 /// Handle authorization code grant.
 async fn handle_authorization_code_grant(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
+    client_info: ClientInfo,
     client_cert: OptionalClientCert,
     headers: HeaderMap,
     auth: ClientAuthParams,
     params: AuthorizationCodeParams,
 ) -> Response {
+    // RFC 9449 §8: "The client will typically retry the request with the new
+    // nonce value supplied upon receiving a use_dpop_nonce error". The proof
+    // is checked before client authentication, which spends a
+    // `private_key_jwt` assertion's `jti`, so that retry can reuse it.
+    let dpop_header = headers
+        .get(protocol::HEADER_DPOP)
+        .and_then(|v| v.to_str().ok());
+    let dpop_proof = match validate_dpop_if_present(
+        &state,
+        dpop_header,
+        "POST",
+        "/oauth/token",
+        arrival,
+    )
+    .await
+    {
+        Ok(proof) => proof,
+        Err(DpopError::UseNonce(nonce)) => {
+            return dpop_use_nonce_response(&nonce);
+        }
+        Err(e @ DpopError::Database(_)) => {
+            return ServiceError::oauth(OAuthErrorCode::ServerError, e.to_string())
+                .into_oauth_response()
+                .into_response();
+        }
+        Err(e) => {
+            return ServiceError::oauth(OAuthErrorCode::InvalidDpopProof, e.to_string())
+                .into_oauth_response()
+                .into_response();
+        }
+    };
+
     // Extract client credentials from headers or body (including JWT assertion)
     let has_jwt_assertion = auth.client_assertion.is_some();
 
     // For JWT assertion, authenticate and extract the client
-    let (jwt_authenticated, jwt_pending_jti, jwt_auth) = if has_jwt_assertion {
+    let (jwt_authenticated, jti_claim, jwt_auth) = if has_jwt_assertion {
         let client_auth = match extract_client_auth(&headers, &auth) {
             Ok(auth) => auth,
             Err(resp) => return resp,
@@ -686,8 +709,10 @@ async fn handle_authorization_code_grant(
             client_id,
         } = client_auth
         {
-            match authenticate_client_jwt(&state, &client_assertion, client_id.as_deref()).await {
-                Ok((client, pending_jti, auth)) => (Some(client), Some(pending_jti), Some(auth)),
+            match authenticate_client_jwt(&state, &client_assertion, client_id.as_deref(), arrival)
+                .await
+            {
+                Ok((client, jti_claim, auth)) => (Some(client), jti_claim, Some(auth)),
                 Err(e) => return e.into_service_error().into_oauth_response().into_response(),
             }
         } else {
@@ -697,39 +722,14 @@ async fn handle_authorization_code_grant(
         (None, None, None)
     };
 
-    // RFC 9449 Section 5: Validate DPoP proof if present. Must happen
-    // BEFORE client-auth resolution so the `use_dpop_nonce` recovery
-    // path (nonce header in the response) fires regardless of whether
-    // the request also has invalid client auth.
-    let dpop_header = headers
-        .get(protocol::HEADER_DPOP)
-        .and_then(|v| v.to_str().ok());
-    let dpop_proof =
-        match validate_dpop_if_present(&state, dpop_header, "POST", "/oauth/token").await {
-            Ok(proof) => proof,
-            Err(crate::services::oidc::dpop::DpopError::UseNonce(nonce)) => {
-                return dpop_use_nonce_response(&nonce);
-            }
-            Err(e @ crate::services::oidc::dpop::DpopError::Database(_)) => {
-                return ServiceError::oauth(OAuthErrorCode::ServerError, e.to_string())
-                    .into_oauth_response()
-                    .into_response();
-            }
-            Err(e) => {
-                return ServiceError::oauth(OAuthErrorCode::InvalidDpopProof, e.to_string())
-                    .into_oauth_response()
-                    .into_response();
-            }
-        };
-
-    // For non-JWT auth, resolve `(AuthenticatedClient, ClientAuthProof)`
+    // For non-JWT auth, resolve `(OAuthClient, ClientAuthProof)`
     // directly. The handler runs ALL non-JWT authentication itself so
     // the constructed `ClientAuthProof` is fully resolved before the
     // exchange — no transitional placeholders or downstream promotion.
     let non_jwt_auth = if has_jwt_assertion {
         None
     } else {
-        match resolve_non_jwt_auth(&state, &headers, &auth, &client_cert).await {
+        match resolve_non_jwt_auth(&state, &headers, &auth, &client_cert, arrival).await {
             Ok(pair) => Some(pair),
             // RFC 6749 §5.2: every failure inside `resolve_non_jwt_auth` is a
             // client-authentication failure, so a client that used
@@ -743,24 +743,18 @@ async fn handle_authorization_code_grant(
         }
     };
 
-    // Commit the JTI (if any) and resolve `(authenticated_client,
-    // client_auth)` in one move from both auth paths. Each branch
-    // carries a sealed witness produced by the upstream auth step —
-    // there is no path that produces a `ClientAuthProof` without a real
-    // witness, which is the chokepoint guarantee.
-    let jti_claim = match commit_optional_jti(&state, jwt_pending_jti, "authorization_code").await {
-        Ok(c) => c,
-        Err(r) => return r,
-    };
+    // Resolve `(authenticated_client, client_auth)` in one move from both
+    // auth paths. Each branch carries a sealed witness produced by the
+    // upstream auth step — there is no path that produces a
+    // `ClientAuthProof` without a real witness, which is the chokepoint
+    // guarantee.
     // RFC 7523 §3: `jti` is OPTIONAL. Gate on `jwt_auth` (the auth-succeeded
     // witness), not on `jti_claim` — a non-FAPI client may legitimately omit
     // `jti`, in which case `jti_claim == None` but JWT auth still succeeded.
     let (authenticated_client, client_auth) = match (jwt_authenticated, jwt_auth, non_jwt_auth) {
         (Some(client), Some(auth), _) => (
             client,
-            ClientAuthProof::PrivateKeyJwt(crate::services::auth::JwtClientAuthProof::new(
-                auth, jti_claim,
-            )),
+            ClientAuthProof::PrivateKeyJwt(JwtClientAuthProof::new(auth, jti_claim)),
         ),
         (_, _, Some(pair)) => pair,
         _ => {
@@ -773,21 +767,32 @@ async fn handle_authorization_code_grant(
         }
     };
 
-    // RFC 8705 Section 2: Validate mTLS client auth for JWT-authenticated clients
-    // that are also registered for mTLS (e.g., FAPI clients using both).
+    // RFC 6749 §5.2 `unauthorized_client`: "The authenticated client is not
+    // authorized to use this authorization grant type." Placed before
+    // `exchange_authorization_code` so an unauthorized client cannot burn the
+    // single-use code, matching where the device-code grant gates. Mirrors the
+    // checks the other four grant handlers perform, keeping the interpretation
+    // of `grant_types` consistent across every grant handler that
+    // authenticates a client.
+    //
+    // A registration that omitted `grant_types` is authorized here:
+    // `is_authorized_for_grant` reads a stored `None` as RFC 7591 §2's default
+    // of `["authorization_code"]`, so this gate rejects only a client whose
+    // explicit list leaves `authorization_code` out.
+    let authenticated_client = match ValidatedOAuthClient::for_grant(
+        authenticated_client,
+        OAuthGrantType::AuthorizationCode,
+    ) {
+        Ok(client) => client,
+        Err(e) => return e.into_oauth_response().into_response(),
+    };
+
     let has_mtls_cert = client_cert.0.is_some();
-    if !matches!(client_auth, ClientAuthProof::MutualTls(_))
-        && matches!(client_auth, ClientAuthProof::PrivateKeyJwt(_))
-        && let Err(resp) =
-            validate_mtls_client_auth(&state, &authenticated_client, &client_cert).await
-    {
-        return *resp;
-    }
 
     // Every sender-constraint requirement registered for this client.
     let sender_constraint = match SenderConstraintProof::validate(
-        &authenticated_client.client,
-        crate::services::oidc::fapi::SenderConstraints {
+        &authenticated_client,
+        SenderConstraints {
             dpop: dpop_proof.is_some(),
             mtls_cert: has_mtls_cert,
         },
@@ -804,18 +809,25 @@ async fn handle_authorization_code_grant(
     let exchange_params = AuthCodeExchangeParams {
         code: &params.code,
         redirect_uri: params.redirect_uri.as_deref(),
-        authenticated_client: Some(&authenticated_client),
+        client: &authenticated_client,
         code_verifier: params.code_verifier.as_deref(),
         binding: TokenBinding::new(dpop_proof.as_ref(), mtls_thumbprint.as_ref()),
-        client_id: &authenticated_client.client.client_id,
         resource: params.resource.as_deref(),
         authorization_details: params.authorization_details.as_deref(),
+        client_info: &client_info,
     };
 
-    match exchange_authorization_code(&state, exchange_params, client_auth, sender_constraint).await
+    match exchange_authorization_code(
+        &state,
+        exchange_params,
+        client_auth,
+        sender_constraint,
+        arrival,
+    )
+    .await
     {
         Ok(result) => {
-            crate::infra::metrics::record_auth_event("authorization_code_success");
+            metrics::record_auth_event("authorization_code_success");
             token_success_response(TokenResponse {
                 access_token: result.access_token,
                 token_type: result.token_type,
@@ -838,37 +850,78 @@ async fn handle_authorization_code_grant(
 /// Requires client authentication via `client_secret_basic` or `client_secret_post`.
 /// Issues an access token with `hardware_verified: false` and no ID token.
 async fn handle_client_credentials_grant(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
-    client_info: crate::db::ClientInfo,
+    client_info: ClientInfo,
     client_cert: OptionalClientCert,
     headers: HeaderMap,
     auth: ClientAuthParams,
     params: ClientCredentialsParams,
 ) -> Response {
+    // RFC 9449 §8: "The client will typically retry the request with the new
+    // nonce value supplied upon receiving a use_dpop_nonce error". The proof
+    // is checked before client authentication, which spends a
+    // `private_key_jwt` assertion's `jti`, so that retry can reuse it.
+    let dpop_header = headers
+        .get(protocol::HEADER_DPOP)
+        .and_then(|v| v.to_str().ok());
+    let dpop_proof = match validate_dpop_if_present(
+        &state,
+        dpop_header,
+        "POST",
+        "/oauth/token",
+        arrival,
+    )
+    .await
+    {
+        Ok(proof) => proof,
+        Err(DpopError::UseNonce(nonce)) => {
+            return dpop_use_nonce_response(&nonce);
+        }
+        Err(e @ DpopError::Database(_)) => {
+            return ServiceError::oauth(OAuthErrorCode::ServerError, e.to_string())
+                .into_oauth_response()
+                .into_response();
+        }
+        Err(e) => {
+            return ServiceError::oauth(OAuthErrorCode::InvalidDpopProof, e.to_string())
+                .into_oauth_response()
+                .into_response();
+        }
+    };
+
     // RFC 6749 Section 4.4.2: Client authentication is REQUIRED
     let client_auth = match extract_client_auth(&headers, &auth) {
         Ok(auth) => auth,
         Err(resp) => return resp,
     };
 
-    let Some(any_auth) = (match complete_client_auth(&state, client_auth).await {
-        Ok(result) => result,
-        Err(resp) => return resp,
-    }) else {
-        return ServiceError::oauth(
-            OAuthErrorCode::InvalidClient,
-            "Client authentication required for client_credentials grant",
-        )
-        .into_oauth_response()
-        .into_response();
+    let Some(any_auth) =
+        (match complete_client_auth(&state, client_auth, &client_cert, arrival).await {
+            Ok(result) => result,
+            Err(resp) => return resp,
+        })
+    else {
+        // RFC 6749 §5.2: the client attempted authentication via the
+        // `Authorization` header field, so the 401 MUST carry a matching
+        // `WWW-Authenticate` challenge. Derive the presentation from the
+        // request so a malformed `Basic` header still owes the challenge —
+        // mirroring `introspect`/`revoke` and the `authorization_code` grant.
+        return with_client_auth_challenge(
+            ClientAuthPresentation::of(&headers, &auth),
+            ServiceError::oauth(
+                OAuthErrorCode::InvalidClient,
+                "Client authentication required for client_credentials grant",
+            )
+            .into_oauth_response()
+            .into_response(),
+        );
     };
     let authenticated_client = any_auth.client;
-    let pending_jti = any_auth.pending_jti;
-    let jwt_auth = any_auth.jwt_auth;
-    let secret_verification = any_auth.secret_verification;
+    let witnesses = any_auth.witnesses;
 
     // RFC 6749 Section 4.4: client_credentials requires a confidential client
-    if authenticated_client.is_public {
+    if authenticated_client.client_type() == ClientType::Public {
         return ServiceError::oauth(
             OAuthErrorCode::UnauthorizedClient,
             "Public clients are not allowed to use client_credentials grant",
@@ -876,45 +929,22 @@ async fn handle_client_credentials_grant(
         .into_oauth_response()
         .into_response();
     }
-
-    // RFC 8705 Section 2: Validate mTLS client auth if the client uses it.
-    let mtls_verification =
-        match validate_mtls_client_auth(&state, &authenticated_client, &client_cert).await {
-            Ok(v) => v,
-            Err(resp) => return *resp,
-        };
+    let authenticated_client = match ValidatedOAuthClient::for_grant(
+        authenticated_client,
+        OAuthGrantType::ClientCredentials,
+    ) {
+        Ok(client) => client,
+        Err(e) => return e.into_oauth_response().into_response(),
+    };
 
     // RFC 8705 Section 3: Bind access token to cert thumbprint only when opted in.
     let mtls_thumbprint = extract_mtls_thumbprint(&authenticated_client, &client_cert);
 
-    // RFC 9449 Section 5: Validate the DPoP proof if present so the issued
-    // token carries a `cnf.jkt` binding.
-    let dpop_header = headers
-        .get(protocol::HEADER_DPOP)
-        .and_then(|v| v.to_str().ok());
-    let dpop_proof =
-        match validate_dpop_if_present(&state, dpop_header, "POST", "/oauth/token").await {
-            Ok(proof) => proof,
-            Err(crate::services::oidc::dpop::DpopError::UseNonce(nonce)) => {
-                return dpop_use_nonce_response(&nonce);
-            }
-            Err(e @ crate::services::oidc::dpop::DpopError::Database(_)) => {
-                return ServiceError::oauth(OAuthErrorCode::ServerError, e.to_string())
-                    .into_oauth_response()
-                    .into_response();
-            }
-            Err(e) => {
-                return ServiceError::oauth(OAuthErrorCode::InvalidDpopProof, e.to_string())
-                    .into_oauth_response()
-                    .into_response();
-            }
-        };
-
     // FAPI 2.0 Section 5.3.2.1: sender-constrained access tokens required
     // (DPoP or mTLS), same as every other grant a FAPI client can reach.
     let sender_constraint = match SenderConstraintProof::validate(
-        &authenticated_client.client,
-        crate::services::oidc::fapi::SenderConstraints {
+        &authenticated_client,
+        SenderConstraints {
             dpop: dpop_proof.is_some(),
             mtls_cert: client_cert.0.is_some(),
         },
@@ -923,46 +953,9 @@ async fn handle_client_credentials_grant(
         Err(e) => return e.into_oauth_response().into_response(),
     };
 
-    let jti_claim = match commit_optional_jti(&state, pending_jti, "client_credentials").await {
-        Ok(c) => c,
-        Err(r) => return r,
-    };
-    // Client-credentials grant: the client MUST authenticate (RFC 6749
-    // §4.4). Resolve the client-auth proof by precedence: JWT → secret
-    // → mTLS. If none succeeded, validate that the client is registered
-    // as public via `NoClientAuth::for_public_client` (which fails if
-    // the client is confidential — closing the "developer forgot to
-    // authenticate" hole).
-    //
-    // RFC 7523 §3: `jti` is OPTIONAL — gate the JWT arm on `jwt_auth`,
-    // not on `jti_claim`, so a non-FAPI client without `jti` is accepted.
-    let client_auth = if let Some(auth) = jwt_auth {
-        ClientAuthProof::PrivateKeyJwt(crate::services::auth::JwtClientAuthProof::new(
-            auth, jti_claim,
-        ))
-    } else {
-        match (secret_verification, mtls_verification) {
-            (Some(_), Some(_)) => {
-                return ServiceError::oauth(
-                    OAuthErrorCode::InvalidClient,
-                    "client presented multiple authentication methods \
-                     (RFC 6749 §2.3 violation)",
-                )
-                .into_oauth_response()
-                .into_response();
-            }
-            (Some(s), None) => ClientAuthProof::ClientSecret(s),
-            (None, Some(m)) => ClientAuthProof::MutualTls(m),
-            (None, None) => {
-                let witness = match crate::services::auth::NoClientAuth::for_public_client(
-                    &authenticated_client.client,
-                ) {
-                    Ok(w) => w,
-                    Err(svc) => return svc.into_oauth_response().into_response(),
-                };
-                ClientAuthProof::NoAuth(witness)
-            }
-        }
+    let client_auth = match client_auth_proof(witnesses, &authenticated_client) {
+        Ok(proof) => proof,
+        Err(resp) => return resp,
     };
     let proof = TokenIssuanceProof {
         grant: GrantProof::ClientCredentials,
@@ -972,25 +965,36 @@ async fn handle_client_credentials_grant(
 
     match exchange_client_credentials(
         &state,
-        &authenticated_client.client,
+        &authenticated_client,
         params.scope.as_deref(),
         TokenBinding::new(dpop_proof.as_ref(), mtls_thumbprint.as_ref()),
         proof,
+        arrival,
     )
     .await
     {
         Ok(result) => {
+            // Client-credentials grants have no user subject, so the event's
+            // default resolution would fall straight through to the
+            // client-org branch — the client is already in scope here, so
+            // skip that redundant re-lookup.
+            let audit_org_domain = db::resolve_event_org_domain(
+                &state.store,
+                None,
+                authenticated_client.org_id.as_deref(),
+            )
+            .await;
             // Record audit event
-            crate::db::record_oauth_event(
+            db::record_oauth_event(
                 &state.audit,
                 &state.store,
-                &crate::db::RecordOAuthEventParams {
-                    oauth_client_id: &authenticated_client.client.id,
-                    event_type: crate::db::OAuthEventType::TokenIssued,
+                &RecordOAuthEventParams {
+                    oauth_client_id: &authenticated_client.id,
+                    event_type: OAuthEventType::TokenIssued,
                     user_id: None,
-                    ip_address: client_info.client_ip,
-                    user_agent: client_info.user_agent.as_deref(),
+                    client: &client_info,
                     details: Some("grant_type=client_credentials"),
+                    org_domain: RecordedOrgDomain::Known(audit_org_domain.as_deref()),
                 },
             )
             .await;
@@ -1011,18 +1015,65 @@ async fn handle_client_credentials_grant(
 
 /// Handle device code grant.
 async fn handle_device_code_grant(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
-    client_info: crate::db::ClientInfo,
+    client_info: ClientInfo,
     client_cert: OptionalClientCert,
     headers: HeaderMap,
+    auth: ClientAuthParams,
     params: DeviceCodeParams,
 ) -> Response {
-    match super::super::device::device_token(
+    // RFC 9449 §8: "The client will typically retry the request with the new
+    // nonce value supplied upon receiving a use_dpop_nonce error". The proof
+    // is checked before client authentication, which spends a
+    // `private_key_jwt` assertion's `jti`, so that retry can reuse it.
+    let dpop_header = headers
+        .get(protocol::HEADER_DPOP)
+        .and_then(|v| v.to_str().ok());
+    let dpop_proof = match validate_dpop_if_present(
+        &state,
+        dpop_header,
+        "POST",
+        "/oauth/token",
+        arrival,
+    )
+    .await
+    {
+        Ok(proof) => proof,
+        Err(DpopError::UseNonce(nonce)) => {
+            return dpop_use_nonce_response(&nonce);
+        }
+        Err(e @ DpopError::Database(_)) => {
+            return ServiceError::oauth(OAuthErrorCode::ServerError, e.to_string())
+                .into_oauth_response()
+                .into_response();
+        }
+        Err(e) => {
+            return ServiceError::oauth(OAuthErrorCode::InvalidDpopProof, e.to_string())
+                .into_oauth_response()
+                .into_response();
+        }
+    };
+
+    // RFC 8628 §3.4: "If the client was issued client credentials (or
+    // assigned other authentication requirements), the client MUST
+    // authenticate with the authorization server as described in Section
+    // 3.2.1 of [RFC6749]."
+    let device_client =
+        match device::authenticate_device_client(&state, &headers, &auth, &client_cert, arrival)
+            .await
+        {
+            Ok(client) => client,
+            Err(resp) => return resp,
+        };
+    match device::device_token(
         State(state),
         client_info,
         client_cert,
-        headers,
         &params.device_code,
+        device_client,
+        dpop_proof,
+        arrival,
     )
     .await
     {
@@ -1040,7 +1091,7 @@ struct ExchangeTokens<'a> {
     /// `actor_token` + `actor_token_type`, present together or not at all.
     actor: Option<ActorToken<'a>>,
     /// `requested_token_type`, OPTIONAL.
-    requested_token_type: Option<TokenType>,
+    requested_token_type: Option<RequestedTokenType>,
 }
 
 impl<'a> ExchangeTokens<'a> {
@@ -1052,24 +1103,73 @@ impl<'a> ExchangeTokens<'a> {
     /// server does not accept, or a token and type that did not arrive
     /// together.
     fn from_request(params: &'a TokenExchangeRequestParams) -> ServiceResult<Self> {
-        let requested_token_type = match params.requested_token_type.as_deref() {
-            Some(urn) => Some(TokenType::parse(urn).ok_or_else(|| {
-                ServiceError::oauth(
-                    OAuthErrorCode::InvalidRequest,
-                    "Unsupported requested_token_type",
-                )
-            })?),
-            None => None,
-        };
         Ok(Self {
             subject: SubjectToken::new(&params.subject_token, &params.subject_token_type)?,
             actor: ActorToken::from_params(
                 params.actor_token.as_ref(),
                 params.actor_token_type.as_deref(),
             )?,
-            requested_token_type,
+            requested_token_type: RequestedTokenType::from_param(
+                params.requested_token_type.as_deref(),
+            )?,
         })
     }
+}
+
+/// Resolve the effective audience for an RFC 8693 token-exchange request.
+///
+/// Enforces, in order:
+/// - RFC 8693 §2.1: `resource`, when present, must be an absolute URI without
+///   a fragment (syntax only; the raw string is preserved as the audience
+///   because `ResourceUri::parse` normalizes host-only URIs).
+/// - RFC 8707: when both `audience` and `resource` are present they must match.
+/// - RFC 8707: the resolved audience must be on the authenticated client's
+///   registered `resource_uris` allowlist — the same `is_valid_resource_uri`
+///   check enforced at the `/authorize` (handlers/oidc/authorize.rs) and `/par`
+///   (handlers/oidc/par.rs) front doors. Token exchange has no front door: it
+///   is reachable directly at `/oauth/token`, so the allowlist must be gated
+///   here, at the chokepoint for both the RFC 9068 access-token and OIDC
+///   ID-token issuance forks.
+///
+/// Returns `Ok(Some(aud))` for an allowed audience, `Ok(None)` when neither
+/// `audience` nor `resource` was supplied, or `Err` with an `invalid_target`
+/// [`ServiceError`] for the caller to render as an OAuth response.
+fn resolve_exchange_audience(
+    audience: Option<&str>,
+    resource: Option<&str>,
+    client: &OAuthClient,
+) -> Result<Option<String>, ServiceError> {
+    if let Some(res) = resource
+        && ResourceUri::parse(res).is_err()
+    {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidTarget,
+            "Invalid resource parameter: must be an absolute URI without a fragment",
+        ));
+    }
+
+    let effective = match (audience, resource) {
+        (Some(aud), Some(res)) if aud != res => {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidTarget,
+                "resource and audience parameters must match when both are provided",
+            ));
+        }
+        (Some(aud), _) => Some(aud.to_string()),
+        (None, Some(res)) => Some(res.to_string()),
+        (None, None) => None,
+    };
+
+    if let Some(aud) = effective.as_deref()
+        && !client.is_valid_resource_uri(aud)
+    {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidTarget,
+            "The requested audience is not registered for this client",
+        ));
+    }
+
+    Ok(effective)
 }
 
 /// Handle token exchange grant (RFC 8693).
@@ -1078,64 +1178,94 @@ impl<'a> ExchangeTokens<'a> {
 /// authentication. The client_id in the authenticated credentials must
 /// match any client_id provided in the request body.
 async fn handle_token_exchange_grant(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
-    client_info: crate::db::ClientInfo,
+    client_info: ClientInfo,
     client_cert: OptionalClientCert,
     headers: HeaderMap,
     auth: ClientAuthParams,
     params: TokenExchangeRequestParams,
 ) -> Response {
     // Extract client authentication (supports secret-based and JWT assertion)
+    // RFC 9449 §8: "The client will typically retry the request with the new
+    // nonce value supplied upon receiving a use_dpop_nonce error". The proof
+    // is checked before client authentication, which spends a
+    // `private_key_jwt` assertion's `jti`, so that retry can reuse it.
+    let dpop_header = headers
+        .get(protocol::HEADER_DPOP)
+        .and_then(|v| v.to_str().ok());
+    let dpop_proof = match validate_dpop_if_present(
+        &state,
+        dpop_header,
+        "POST",
+        "/oauth/token",
+        arrival,
+    )
+    .await
+    {
+        Ok(proof) => proof,
+        Err(DpopError::UseNonce(nonce)) => {
+            return dpop_use_nonce_response(&nonce);
+        }
+        Err(e @ DpopError::Database(_)) => {
+            return ServiceError::oauth(OAuthErrorCode::ServerError, e.to_string())
+                .into_oauth_response()
+                .into_response();
+        }
+        Err(e) => {
+            return ServiceError::oauth(OAuthErrorCode::InvalidDpopProof, e.to_string())
+                .into_oauth_response()
+                .into_response();
+        }
+    };
+
     let client_auth = match extract_client_auth(&headers, &auth) {
         Ok(auth) => auth,
         Err(resp) => return resp,
     };
 
     // Authenticate client (required for token exchange)
-    let Some(any_auth) = (match complete_client_auth(&state, client_auth).await {
-        Ok(result) => result,
-        Err(resp) => return resp,
-    }) else {
-        return ServiceError::oauth(
-            OAuthErrorCode::InvalidClient,
-            "Client authentication required for token exchange",
-        )
-        .into_oauth_response()
-        .into_response();
+    let Some(any_auth) =
+        (match complete_client_auth(&state, client_auth, &client_cert, arrival).await {
+            Ok(result) => result,
+            Err(resp) => return resp,
+        })
+    else {
+        // RFC 6749 §5.2: the client attempted authentication via the
+        // `Authorization` header field, so the 401 MUST carry a matching
+        // `WWW-Authenticate` challenge. Derive the presentation from the
+        // request so a malformed `Basic` header still owes the challenge —
+        // mirroring `introspect`/`revoke` and the `authorization_code` grant.
+        return with_client_auth_challenge(
+            ClientAuthPresentation::of(&headers, &auth),
+            ServiceError::oauth(
+                OAuthErrorCode::InvalidClient,
+                "Client authentication required for token exchange",
+            )
+            .into_oauth_response()
+            .into_response(),
+        );
     };
     let authenticated_client = any_auth.client;
-    let pending_jti = any_auth.pending_jti;
-    let jwt_auth = any_auth.jwt_auth;
-    let secret_verification = any_auth.secret_verification;
+    let witnesses = any_auth.witnesses;
 
-    // RFC 9449 Section 5: Validate DPoP proof if present at the token endpoint
-    let dpop_header = headers
-        .get(protocol::HEADER_DPOP)
-        .and_then(|v| v.to_str().ok());
-    let dpop_proof =
-        match validate_dpop_if_present(&state, dpop_header, "POST", "/oauth/token").await {
-            Ok(proof) => proof,
-            Err(crate::services::oidc::dpop::DpopError::UseNonce(nonce)) => {
-                return dpop_use_nonce_response(&nonce);
-            }
-            Err(e @ crate::services::oidc::dpop::DpopError::Database(_)) => {
-                return ServiceError::oauth(OAuthErrorCode::ServerError, e.to_string())
-                    .into_oauth_response()
-                    .into_response();
-            }
-            Err(e) => {
-                return ServiceError::oauth(OAuthErrorCode::InvalidDpopProof, e.to_string())
-                    .into_oauth_response()
-                    .into_response();
-            }
-        };
-
-    // RFC 8705 Section 2: Validate mTLS client auth if the client uses it.
-    let mtls_verification =
-        match validate_mtls_client_auth(&state, &authenticated_client, &client_cert).await {
-            Ok(v) => v,
-            Err(resp) => return *resp,
-        };
+    // RFC 6749 §5.2 `unauthorized_client`: the client just authenticated, so
+    // credential failures have already mapped to `invalid_client` above. Now
+    // confirm the authenticated client is registered (RFC 7591 §2
+    // `grant_types`) for the token-exchange grant before any grant-specific
+    // validation runs — so a client registered for `authorization_code` only
+    // (the dynamic-registration default) cannot exercise
+    // `grant_type=urn:ietf:params:oauth:grant-type:token-exchange`. Mirrors the
+    // check `exchange_client_credentials` performs for the `client_credentials`
+    // grant, keeping the interpretation of `grant_types` consistent across
+    // every grant handler that authenticates a client.
+    let authenticated_client = match ValidatedOAuthClient::for_grant(
+        authenticated_client,
+        OAuthGrantType::TokenExchange,
+    ) {
+        Ok(client) => client,
+        Err(e) => return e.into_oauth_response().into_response(),
+    };
 
     // RFC 8705 Section 3: Bind access token to cert thumbprint only when opted in.
     let mtls_thumbprint = extract_mtls_thumbprint(&authenticated_client, &client_cert);
@@ -1145,8 +1275,8 @@ async fn handle_token_exchange_grant(
     // FAPI client could exchange a bound subject_token for an unbound one.
     // Mirrors `handle_authorization_code_grant`.
     let sender_constraint = match SenderConstraintProof::validate(
-        &authenticated_client.client,
-        crate::services::oidc::fapi::SenderConstraints {
+        &authenticated_client,
+        SenderConstraints {
             dpop: dpop_proof.is_some(),
             mtls_cert: client_cert.0.is_some(),
         },
@@ -1155,20 +1285,17 @@ async fn handle_token_exchange_grant(
         Err(e) => return e.into_oauth_response().into_response(),
     };
 
-    // RFC 8707: If resource is present, use it as audience (unless audience is explicitly set).
-    // If both are present, they must match.
-    let effective_audience = match (params.audience.as_deref(), params.resource.as_deref()) {
-        (Some(aud), Some(res)) if aud != res => {
-            return ServiceError::oauth(
-                OAuthErrorCode::InvalidTarget,
-                "resource and audience parameters must match when both are provided",
-            )
-            .into_oauth_response()
-            .into_response();
-        }
-        (Some(aud), _) => Some(aud),
-        (None, Some(res)) => Some(res),
-        (None, None) => None,
+    // Resolve the effective audience. This call is the chokepoint that
+    // enforces the client's `resource_uris` allowlist (RFC 8707) on the
+    // token-exchange back door, which (unlike /authorize and /par) has no
+    // front door to gate it earlier.
+    let effective_audience = match resolve_exchange_audience(
+        params.audience.as_deref(),
+        params.resource.as_deref(),
+        &authenticated_client,
+    ) {
+        Ok(aud) => aud,
+        Err(e) => return e.into_oauth_response().into_response(),
     };
 
     let tokens = match ExchangeTokens::from_request(&params) {
@@ -1179,54 +1306,21 @@ async fn handle_token_exchange_grant(
     let exchange_params = TokenExchangeParams {
         subject: tokens.subject,
         actor: tokens.actor,
-        audience: effective_audience,
+        audience: effective_audience.as_deref(),
         scope: params.scope.as_deref(),
         requested_token_type: tokens.requested_token_type,
-        client_id: &authenticated_client.client.client_id,
+        client: &authenticated_client,
         binding: TokenBinding::new(dpop_proof.as_ref(), mtls_thumbprint.as_ref()),
         authorization_details: params.authorization_details.as_deref(),
-        client_ip: client_info.client_ip,
+        client_info: &client_info,
     };
 
-    let jti_claim = match commit_optional_jti(&state, pending_jti, "token_exchange").await {
-        Ok(c) => c,
-        Err(r) => return r,
-    };
-    // Token exchange: same precedence + public-client validation as
-    // client_credentials. Token exchange does not mandate confidential
-    // clients per RFC 8693, but `NoClientAuth::for_public_client` is
-    // still the right check for the "no method succeeded" case — a
-    // confidential client must authenticate.
-    //
-    // RFC 7523 §3: `jti` is OPTIONAL — gate the JWT arm on `jwt_auth`,
-    // not on `jti_claim`, so a non-FAPI client without `jti` is accepted.
-    let client_auth = if let Some(auth) = jwt_auth {
-        ClientAuthProof::PrivateKeyJwt(crate::services::auth::JwtClientAuthProof::new(
-            auth, jti_claim,
-        ))
-    } else {
-        match (secret_verification, mtls_verification) {
-            (Some(_), Some(_)) => {
-                return ServiceError::oauth(
-                    OAuthErrorCode::InvalidClient,
-                    "client presented multiple authentication methods \
-                     (RFC 6749 §2.3 violation)",
-                )
-                .into_oauth_response()
-                .into_response();
-            }
-            (Some(s), None) => ClientAuthProof::ClientSecret(s),
-            (None, Some(m)) => ClientAuthProof::MutualTls(m),
-            (None, None) => {
-                let witness = match crate::services::auth::NoClientAuth::for_public_client(
-                    &authenticated_client.client,
-                ) {
-                    Ok(w) => w,
-                    Err(svc) => return svc.into_oauth_response().into_response(),
-                };
-                ClientAuthProof::NoAuth(witness)
-            }
-        }
+    // Token exchange does not mandate confidential clients (RFC 8693), so a
+    // public client passes with a `NoAuth` proof; a confidential one must
+    // have authenticated.
+    let client_auth = match client_auth_proof(witnesses, &authenticated_client) {
+        Ok(proof) => proof,
+        Err(resp) => return resp,
     };
     let proof = TokenIssuanceProof {
         grant: GrantProof::TokenExchange,
@@ -1234,7 +1328,7 @@ async fn handle_token_exchange_grant(
         sender_constraint,
     };
 
-    match exchange_token(&state, exchange_params, proof).await {
+    match exchange_token(&state, exchange_params, proof, arrival).await {
         Ok(result) => token_success_response(TokenExchangeResponse {
             access_token: result.access_token,
             issued_token_type: result.issued_token_type,
@@ -1296,8 +1390,9 @@ impl ClientAuthFields for ClientAuthParams {
 /// Requires `private_key_jwt` client authentication and a FIDO2 assertion
 /// in the `assertion` parameter. Optionally requires DPoP for FAPI clients.
 async fn handle_fido2_assertion_grant(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
-    client_info: crate::db::ClientInfo,
+    client_info: ClientInfo,
     client_cert: OptionalClientCert,
     headers: HeaderMap,
     auth: ClientAuthParams,
@@ -1306,20 +1401,56 @@ async fn handle_fido2_assertion_grant(
     let assertion = params.assertion;
     let presentation = ClientAuthPresentation::of(&headers, &auth);
 
+    // RFC 9449 §8: "The client will typically retry the request with the new
+    // nonce value supplied upon receiving a use_dpop_nonce error". The proof
+    // is checked before client authentication, which spends a
+    // `private_key_jwt` assertion's `jti`, so that retry can reuse it.
+    let dpop_header = headers
+        .get(protocol::HEADER_DPOP)
+        .and_then(|v| v.to_str().ok());
+    let dpop_proof = match validate_dpop_if_present(
+        &state,
+        dpop_header,
+        "POST",
+        "/oauth/token",
+        arrival,
+    )
+    .await
+    {
+        Ok(proof) => proof,
+        Err(DpopError::UseNonce(nonce)) => {
+            return dpop_use_nonce_response(&nonce);
+        }
+        Err(e @ DpopError::Database(_)) => {
+            return ServiceError::oauth(OAuthErrorCode::ServerError, e.to_string())
+                .into_oauth_response()
+                .into_response();
+        }
+        Err(e) => {
+            return ServiceError::oauth(OAuthErrorCode::InvalidDpopProof, e.to_string())
+                .into_oauth_response()
+                .into_response();
+        }
+    };
+
     // Extract and authenticate client via private_key_jwt
     let client_auth = match extract_client_auth(&headers, &auth) {
         Ok(auth) => auth,
         Err(resp) => return resp,
     };
 
-    let (jwt_authenticated, jwt_pending_jti, jwt_auth) = match client_auth {
+    let (jwt_authenticated, jti_claim, jwt_auth) = match client_auth {
         ExtractedClientAuth::JwtAssertion {
             client_assertion,
             client_id,
-        } => match authenticate_client_jwt(&state, &client_assertion, client_id.as_deref()).await {
-            Ok((client, pending_jti, auth)) => (client, pending_jti, auth),
-            Err(e) => return e.into_service_error().into_oauth_response().into_response(),
-        },
+        } => {
+            match authenticate_client_jwt(&state, &client_assertion, client_id.as_deref(), arrival)
+                .await
+            {
+                Ok((client, jti_claim, auth)) => (client, jti_claim, auth),
+                Err(e) => return e.into_service_error().into_oauth_response().into_response(),
+            }
+        }
         _ => {
             return token_error_response(
                 OAuthErrorCode::InvalidClient,
@@ -1329,34 +1460,29 @@ async fn handle_fido2_assertion_grant(
         }
     };
 
-    // Validate DPoP proof if present
-    let dpop_header = headers
-        .get(protocol::HEADER_DPOP)
-        .and_then(|v| v.to_str().ok());
-    let dpop_proof =
-        match validate_dpop_if_present(&state, dpop_header, "POST", "/oauth/token").await {
-            Ok(proof) => proof,
-            Err(crate::services::oidc::dpop::DpopError::UseNonce(nonce)) => {
-                return dpop_use_nonce_response(&nonce);
-            }
-            Err(e @ crate::services::oidc::dpop::DpopError::Database(_)) => {
-                return ServiceError::oauth(OAuthErrorCode::ServerError, e.to_string())
-                    .into_oauth_response()
-                    .into_response();
-            }
-            Err(e) => {
-                return ServiceError::oauth(OAuthErrorCode::InvalidDpopProof, e.to_string())
-                    .into_oauth_response()
-                    .into_response();
-            }
+    // RFC 6749 §5.2 `unauthorized_client`: the client just authenticated via
+    // `private_key_jwt`, so a bad assertion already mapped to `invalid_client`
+    // above. Now confirm the authenticated client is registered (RFC 7591 §2
+    // `grant_types`) for the fido2-assertion grant before the WebAuthn
+    // assertion is examined — matching the check `exchange_client_credentials`
+    // and `handle_token_exchange_grant` perform, so a client registered for
+    // `authorization_code` only cannot exercise this grant. The CLI registers
+    // FAPI clients with `grant_types: [..., "urn:ietf:params:oauth:grant-type:fido2-assertion"]`
+    // (`vouch-cli/src/fapi/registration.rs`); this enforces that contract. The
+    // response omits the `WWW-Authenticate` challenge — `unauthorized_client`
+    // is a grant-authorization failure, not a client-authentication failure.
+    let jwt_authenticated =
+        match ValidatedOAuthClient::for_grant(jwt_authenticated, OAuthGrantType::Fido2Assertion) {
+            Ok(client) => client,
+            Err(e) => return e.into_oauth_response().into_response(),
         };
 
     let has_mtls_cert = client_cert.0.is_some();
 
     // FAPI 2.0: Require sender-constrained tokens (DPoP or mTLS)
     let sender_constraint = match SenderConstraintProof::validate(
-        &jwt_authenticated.client,
-        crate::services::oidc::fapi::SenderConstraints {
+        &jwt_authenticated,
+        SenderConstraints {
             dpop: dpop_proof.is_some(),
             mtls_cert: has_mtls_cert,
         },
@@ -1369,12 +1495,9 @@ async fn handle_fido2_assertion_grant(
     let mtls_thumbprint = extract_mtls_thumbprint(&jwt_authenticated, &client_cert);
 
     // Exchange the FIDO2 assertion for an access token
-    let exchange_params = crate::services::oidc::fido2_grant::Fido2AssertionParams {
+    let exchange_params = fido2_grant::Fido2AssertionParams {
         assertion: assertion.expose_secret(),
-        client: &crate::services::oidc::token::AuthenticatedClient {
-            client: jwt_authenticated.client,
-            is_public: false,
-        },
+        client: &jwt_authenticated,
         binding: TokenBinding::new(dpop_proof.as_ref(), mtls_thumbprint.as_ref()),
         scope: params.scope.as_deref(),
         authorization_details: params.authorization_details.as_deref(),
@@ -1387,25 +1510,19 @@ async fn handle_fido2_assertion_grant(
     // `Some` — but the proof construction does not depend on it:
     // `jwt_auth` is the structural witness for "RFC 7523 §3 validation
     // passed", and `jti` is an additive replay-prevention witness.
-    let jti_claim =
-        match commit_optional_jti(&state, Some(jwt_pending_jti), "fido2_assertion").await {
-            Ok(c) => c,
-            Err(r) => return r,
-        };
-    let client_auth = ClientAuthProof::PrivateKeyJwt(
-        crate::services::auth::JwtClientAuthProof::new(jwt_auth, jti_claim),
-    );
+    let client_auth = ClientAuthProof::PrivateKeyJwt(JwtClientAuthProof::new(jwt_auth, jti_claim));
 
-    match crate::services::oidc::fido2_grant::exchange_fido2_assertion(
+    match fido2_grant::exchange_fido2_assertion(
         &state,
         exchange_params,
         client_auth,
         sender_constraint,
+        arrival,
     )
     .await
     {
         Ok(result) => {
-            crate::infra::metrics::record_auth_event("fido2_login_success");
+            metrics::record_auth_event("fido2_login_success");
             token_success_response(TokenResponse {
                 access_token: result.access_token,
                 token_type: result.token_type,
@@ -1417,44 +1534,10 @@ async fn handle_fido2_assertion_grant(
             })
         }
         Err(e) => {
-            crate::infra::metrics::record_auth_event("fido2_login_failure");
+            metrics::record_auth_event("fido2_login_failure");
             e.into_oauth_response().into_response()
         }
     }
-}
-
-/// Validate mTLS client authentication when the client uses `tls_client_auth`
-/// or `self_signed_tls_client_auth` (RFC 8705 Section 2).
-///
-/// Returns `Ok(None)` if the auth method is not mTLS-based (no verification
-/// performed); `Ok(Some(verification))` if the cert validated successfully.
-/// Returns `Err(Box<Response>)` with a 401-equivalent OAuth error if the
-/// cert is absent or invalid.
-async fn validate_mtls_client_auth(
-    state: &Arc<AppState>,
-    client: &crate::services::oidc::token::AuthenticatedClient,
-    client_cert: &OptionalClientCert,
-) -> Result<Option<crate::services::oidc::token::MtlsCertVerification>, Box<Response>> {
-    if client.client.token_endpoint_auth_method != crate::db::TokenEndpointAuthMethod::TlsClientAuth
-        && client.client.token_endpoint_auth_method
-            != crate::db::TokenEndpointAuthMethod::SelfSignedTlsClientAuth
-    {
-        return Ok(None);
-    }
-    let Some(ref cert) = client_cert.0 else {
-        return Err(Box::new(
-            ServiceError::oauth(
-                OAuthErrorCode::InvalidClient,
-                "mTLS client certificate required",
-            )
-            .into_oauth_response()
-            .into_response(),
-        ));
-    };
-    crate::services::oidc::token::authenticate_client_mtls(state, &client.client, cert)
-        .await
-        .map(Some)
-        .map_err(|e| Box::new(e.into_service_error().into_oauth_response().into_response()))
 }
 
 /// Extract mTLS certificate thumbprint for certificate-bound access tokens
@@ -1463,10 +1546,10 @@ async fn validate_mtls_client_auth(
 /// Returns `Some(thumbprint)` only when the client has opted in via
 /// `tls_client_certificate_bound_access_tokens` **and** a cert is present.
 fn extract_mtls_thumbprint(
-    client: &crate::services::oidc::token::AuthenticatedClient,
+    client: &OAuthClient,
     client_cert: &OptionalClientCert,
 ) -> Option<CertThumbprint> {
-    if client.client.tls_client_certificate_bound_access_tokens {
+    if client.tls_client_certificate_bound_access_tokens {
         client_cert.0.as_ref().map(|c| c.thumbprint.clone())
     } else {
         None

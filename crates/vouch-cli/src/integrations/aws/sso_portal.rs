@@ -12,6 +12,7 @@ use vouch_cli::tr;
 use vouch_common::aws::Partition;
 
 use super::sts::StsCredentials;
+use crate::exit_code::CliError;
 
 /// AWS SSO Portal `GetRoleCredentials` response envelope.
 #[derive(Deserialize)]
@@ -107,7 +108,7 @@ pub(crate) async fn list_accounts(
             .context(tr!("err-failed-call-sso-portal-list-accounts"))?;
 
         if response.status() == reqwest::StatusCode::UNAUTHORIZED {
-            return Err(crate::exit_code::CliError::NotAuthenticated {
+            return Err(CliError::NotAuthenticated {
                 reason: tr!("sso-portal-err-token-expired"),
             }
             .into());
@@ -116,7 +117,7 @@ pub(crate) async fn list_accounts(
         if !response.status().is_success() {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
-            return Err(crate::exit_code::CliError::NetworkError(format!(
+            return Err(CliError::NetworkError(format!(
                 "SSO Portal list accounts failed {status}: {text}"
             ))
             .into());
@@ -179,7 +180,7 @@ pub(crate) async fn list_account_roles(
             .context(tr!("err-failed-call-sso-portal-list-roles"))?;
 
         if response.status() == reqwest::StatusCode::UNAUTHORIZED {
-            return Err(crate::exit_code::CliError::NotAuthenticated {
+            return Err(CliError::NotAuthenticated {
                 reason: tr!("sso-portal-err-token-expired"),
             }
             .into());
@@ -188,7 +189,7 @@ pub(crate) async fn list_account_roles(
         if !response.status().is_success() {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
-            return Err(crate::exit_code::CliError::NetworkError(format!(
+            return Err(CliError::NetworkError(format!(
                 "SSO Portal list roles failed {status}: {text}"
             ))
             .into());
@@ -251,7 +252,7 @@ pub(crate) async fn get_role_credentials(
         .context(tr!("err-failed-call-sso-portal-get-role-credentials"))?;
 
     if response.status() == reqwest::StatusCode::UNAUTHORIZED {
-        return Err(crate::exit_code::CliError::NotAuthenticated {
+        return Err(CliError::NotAuthenticated {
             reason: tr!("sso-portal-err-token-expired"),
         }
         .into());
@@ -260,7 +261,7 @@ pub(crate) async fn get_role_credentials(
     if !response.status().is_success() {
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
-        return Err(crate::exit_code::CliError::NetworkError(format!(
+        return Err(CliError::NetworkError(format!(
             "SSO Portal get role credentials failed {status}: {text}"
         ))
         .into());

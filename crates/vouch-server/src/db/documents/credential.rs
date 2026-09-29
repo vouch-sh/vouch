@@ -51,16 +51,10 @@ impl DocumentType for SshIssuedCertDoc {
     const DOC_TYPE: &'static str = "ssh_issued_cert";
 
     fn index_entries(&self) -> Vec<IndexEntry> {
-        vec![
-            IndexEntry {
-                field: "serial",
-                value: self.serial.clone(),
-            },
-            IndexEntry {
-                field: "user_id",
-                value: self.user_id.clone(),
-            },
-        ]
+        vec![IndexEntry {
+            field: "user_id",
+            value: self.user_id.clone(),
+        }]
     }
 
     fn expires_at(&self) -> Option<Timestamp> {
@@ -83,16 +77,10 @@ impl DocumentType for SshRevokedCertDoc {
     const DOC_TYPE: &'static str = "ssh_revoked_cert";
 
     fn index_entries(&self) -> Vec<IndexEntry> {
-        vec![
-            IndexEntry {
-                field: "serial",
-                value: self.serial.clone(),
-            },
-            IndexEntry {
-                field: "user_id",
-                value: self.user_id.clone(),
-            },
-        ]
+        vec![IndexEntry {
+            field: "serial",
+            value: self.serial.clone(),
+        }]
     }
 
     fn expires_at(&self) -> Option<Timestamp> {

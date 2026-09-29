@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Install page handler.
 
+use crate::arrival::ArrivalTime;
 use crate::handlers::session::{AuthContext, get_auth_context};
 use crate::{AppState, impl_template_response};
 use askama::Template;
@@ -27,10 +28,11 @@ impl_template_response!(InstallTemplate);
 /// Install page - CLI installation and enrollment instructions.
 /// GET /install
 pub(crate) async fn install_page(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
 ) -> impl IntoResponse {
-    let auth = get_auth_context(&state, &jar).await;
+    let auth = get_auth_context(&state, &jar, arrival).await;
 
     let has_downloads = state.config().cli_download_macos.is_some()
         || state.config().cli_download_linux.is_some()

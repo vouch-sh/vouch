@@ -331,10 +331,24 @@ mod auth_security {
             .await
             .expect("Failed to get auth status");
 
-        // Expired token should return 200 but authenticated=false
+        // Expired token should return 200 but authenticated=false with the
+        // full unauthenticated SessionStatus shape: email, expires_in_seconds,
+        // and device_name all null (matches the SessionStatus contract).
         assert_eq!(response.status, 200);
         let status: serde_json::Value = response.json().expect("Failed to parse response");
         assert_eq!(status["authenticated"], false);
+        assert!(
+            status["email"].is_null(),
+            "email must be null when unauthenticated"
+        );
+        assert!(
+            status["expires_in_seconds"].is_null(),
+            "expires_in_seconds must be null when unauthenticated"
+        );
+        assert!(
+            status["device_name"].is_null(),
+            "device_name must be null when unauthenticated"
+        );
     }
 
     /// Test that protected endpoints reject missing authentication.
@@ -431,14 +445,34 @@ mod auth_security {
 
 mod device_flow {
     use super::*;
+    use vouch_server::db::AuditEventFilter;
+    use vouch_server::test_utils::TestOAuthClient;
+
+    /// A registered client for the device flow: both endpoints authenticate
+    /// the caller (RFC 8628 §3.1 and §3.4).
+    async fn device_client(harness: &TestHarness) -> TestOAuthClient {
+        let owner = harness
+            .create_user("device-client-owner@example.com")
+            .await
+            .expect("Failed to create client owner");
+        harness
+            .create_oauth_client(&owner.id)
+            .await
+            .expect("Failed to create client")
+    }
 
     /// Test that device code endpoint returns valid response.
     #[tokio::test]
     async fn test_device_code_returns_valid_response() {
         let harness = TestHarness::new().await;
 
+        let client = device_client(&harness).await;
         let response = harness
-            .post_form("/oauth/device", "scope=openid")
+            .post_form_with_auth(
+                "/oauth/device",
+                &format!("client_id={}&scope=openid", client.client_id),
+                &client.basic_auth_header(),
+            )
             .await
             .expect("Failed to post device code");
 
@@ -460,8 +494,13 @@ mod device_flow {
     async fn test_device_code_user_code_format() {
         let harness = TestHarness::new().await;
 
+        let client = device_client(&harness).await;
         let response = harness
-            .post_form("/oauth/device", "scope=openid")
+            .post_form_with_auth(
+                "/oauth/device",
+                &format!("client_id={}&scope=openid", client.client_id),
+                &client.basic_auth_header(),
+            )
             .await
             .expect("Failed to post device code");
 
@@ -485,8 +524,13 @@ mod device_flow {
         let harness = TestHarness::new().await;
 
         // Create device code
+        let client = device_client(&harness).await;
         let response = harness
-            .post_form("/oauth/device", "scope=openid")
+            .post_form_with_auth(
+                "/oauth/device",
+                &format!("client_id={}&scope=openid", client.client_id),
+                &client.basic_auth_header(),
+            )
             .await
             .expect("Failed to post device code");
         let resp: serde_json::Value = response.json().expect("Failed to parse response");
@@ -498,7 +542,7 @@ mod device_flow {
             device_code
         );
         let response = harness
-            .post_form("/oauth/token", &poll_body)
+            .post_form_with_auth("/oauth/token", &poll_body, &client.basic_auth_header())
             .await
             .expect("Failed to poll token");
 
@@ -517,10 +561,11 @@ mod device_flow {
     async fn test_device_token_poll_invalid_code() {
         let harness = TestHarness::new().await;
 
+        let client = device_client(&harness).await;
         let poll_body =
             "grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code=nonexistent";
         let response = harness
-            .post_form("/oauth/token", poll_body)
+            .post_form_with_auth("/oauth/token", poll_body, &client.basic_auth_header())
             .await
             .expect("Failed to poll token");
 
@@ -545,8 +590,13 @@ mod device_flow {
             .expect("Failed to create auth");
 
         // Create device code
+        let client = device_client(&harness).await;
         let response = harness
-            .post_form("/oauth/device", "scope=openid")
+            .post_form_with_auth(
+                "/oauth/device",
+                &format!("client_id={}&scope=openid", client.client_id),
+                &client.basic_auth_header(),
+            )
             .await
             .expect("Failed to post device code");
         let resp: serde_json::Value = response.json().expect("Failed to parse response");
@@ -565,7 +615,7 @@ mod device_flow {
             device_code
         );
         let response = harness
-            .post_form("/oauth/token", &poll_body)
+            .post_form_with_auth("/oauth/token", &poll_body, &client.basic_auth_header())
             .await
             .expect("Failed to poll token");
 
@@ -578,13 +628,93 @@ mod device_flow {
         assert_eq!(resp["token_type"], "Bearer");
     }
 
+    /// A device-poll success for an org member stamps the org's domain into
+    /// the `oauth_token_issued` event's `email_domain` — the hot-path
+    /// formula in `handlers/device.rs` must reproduce what the full lookup
+    /// would have done.
+    #[tokio::test]
+    async fn test_device_token_poll_success_records_org_email_domain() {
+        let harness = TestHarness::new().await;
+
+        let org = harness
+            .create_org("device-poll-org.example.com")
+            .await
+            .expect("Failed to create org");
+        let user = harness
+            .create_user_in_org(
+                "device-poll-member@device-poll-org.example.com",
+                &org.id,
+                false,
+            )
+            .await
+            .expect("Failed to create user");
+        let auth_id = harness
+            .create_authenticator(&user.id)
+            .await
+            .expect("Failed to create auth");
+
+        let client = device_client(&harness).await;
+        let response = harness
+            .post_form_with_auth(
+                "/oauth/device",
+                &format!("client_id={}&scope=openid", client.client_id),
+                &client.basic_auth_header(),
+            )
+            .await
+            .expect("Failed to post device code");
+        let resp: serde_json::Value = response.json().expect("Failed to parse response");
+        let device_code = resp["device_code"].as_str().expect("device_code");
+        let user_code = resp["user_code"].as_str().expect("user_code");
+
+        harness
+            .authorize_device_code(user_code, &user.id, &user.email, &auth_id)
+            .await
+            .expect("Failed to authorize device code");
+
+        let poll_body = format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code={}",
+            device_code
+        );
+        let response = harness
+            .post_form_with_auth("/oauth/token", &poll_body, &client.basic_auth_header())
+            .await
+            .expect("Failed to poll token");
+        assert_eq!(response.status, 200);
+
+        let rows = harness
+            .state
+            .audit
+            .query_events(&AuditEventFilter {
+                event_types: Some(vec!["oauth_token_issued".to_string()]),
+                user_id: Some(user.id.clone()),
+                ..Default::default()
+            })
+            .await
+            .expect("query audit events");
+        assert_eq!(
+            rows.len(),
+            1,
+            "the poll success must write exactly one oauth_token_issued row"
+        );
+        assert_eq!(
+            rows[0].email_domain.as_deref(),
+            Some("device-poll-org.example.com"),
+            "org member device-poll success must stamp the org's domain onto the audit event"
+        );
+    }
+
     /// Test that verification interval is respected.
     #[tokio::test]
     async fn test_device_code_interval_field() {
         let harness = TestHarness::new().await;
 
+        let client = device_client(&harness).await;
         let response = harness
-            .post_form("/oauth/device", "scope=openid")
+            .post_form_with_auth(
+                "/oauth/device",
+                &format!("client_id={}&scope=openid", client.client_id),
+                &client.basic_auth_header(),
+            )
             .await
             .expect("Failed to post device code");
 
@@ -715,6 +845,7 @@ mod register_flow {
 
 mod keys {
     use super::*;
+    use vouch_server::db;
 
     /// Test that list keys returns user's keys.
     #[tokio::test]
@@ -802,6 +933,11 @@ mod keys {
     }
 
     /// Test that cannot delete another user's key.
+    ///
+    /// The refusal is reported as 404, identically to a key id that does not
+    /// exist. Returning 403 here would tell any authenticated caller that a
+    /// given key id is real and simply owned by someone else, turning
+    /// `/v1/keys/{id}` into an existence oracle.
     #[tokio::test]
     async fn test_delete_key_wrong_user() {
         let harness = TestHarness::new().await;
@@ -823,9 +959,21 @@ mod keys {
             .await
             .expect("Failed to delete key");
 
-        assert_eq!(response.status, 403);
+        assert_eq!(response.status, 404);
         let error: serde_json::Value = response.json().expect("Failed to parse error");
-        assert_eq!(error["code"], "forbidden");
+        assert_eq!(error["code"], "not_found");
+
+        // ...and indistinguishable from a key id that was never issued.
+        let absent = harness
+            .delete_authenticated("/v1/keys/00000000-0000-0000-0000-000000000000", &token2)
+            .await
+            .expect("Failed to delete key");
+
+        assert_eq!(absent.status, response.status);
+        assert_eq!(
+            absent.body, response.body,
+            "another user's key and a nonexistent key must be indistinguishable"
+        );
     }
 
     /// Test that cannot delete last key.
@@ -937,10 +1085,9 @@ mod keys {
             "losing delete must return 400 or 409, got {loser} (s1={s1} s2={s2})"
         );
 
-        let remaining =
-            vouch_server::db::get_authenticators_for_user(&harness.state.store, &user.id)
-                .await
-                .expect("Failed to query remaining authenticators");
+        let remaining = db::get_authenticators_for_user(&harness.state.store, &user.id)
+            .await
+            .expect("Failed to query remaining authenticators");
         assert_eq!(
             remaining.len(),
             1,
@@ -1179,7 +1326,9 @@ mod token_exchange {
 
         assert_eq!(response.status, 400);
         let error: serde_json::Value = response.json().expect("Failed to parse error");
-        assert_eq!(error["error"], "invalid_grant");
+        // RFC 8693 §2.2.2: an invalid subject_token MUST be reported with the
+        // invalid_request error code.
+        assert_eq!(error["error"], "invalid_request");
     }
 
     /// Test that token exchange works with valid token.
@@ -2429,6 +2578,7 @@ mod es256_flow {
 
 mod encoding_verification {
     use super::*;
+    use vouch_server::crypto::webauthn_verify::OriginPolicy;
     /// Verify MockFidoDevice data survives JSON round-trip
     #[tokio::test]
     async fn test_mock_device_data_survives_serialization() {
@@ -2650,8 +2800,7 @@ mod encoding_verification {
                 expected_origin: "https://test.local",
                 stored_counter: 0,
                 require_user_verification: true,
-                origin_policy:
-                    vouch_server::crypto::webauthn_verify::OriginPolicy::AllowLoopbackVariations,
+                origin_policy: OriginPolicy::AllowLoopbackVariations,
             },
             &verifier,
         );
@@ -2669,6 +2818,8 @@ mod httpsig {
     use vouch_cli::fapi::ClientKey;
     use vouch_cli::fapi::httpsig::ClientKeySigner;
     use vouch_httpsig::SignatureBuilder;
+    use vouch_server::crypto::alg::JwsAlgorithm;
+    use vouch_server::db::{self, OAuthClientType, TokenEndpointAuthMethod};
 
     /// Helper: create a user with an OAuth client that has JWKS containing
     /// the given ClientKey's public key, and a session bound to that client.
@@ -2688,14 +2839,12 @@ mod httpsig {
             &user.id,
             TestClientSpec {
                 name: "Test FAPI Client".to_string(),
-                application_type: vouch_server::db::OAuthClientType::Native,
+                application_type: OAuthClientType::Native,
                 redirect_uris: vec![],
-                token_endpoint_auth_method: Some(
-                    vouch_server::db::TokenEndpointAuthMethod::PrivateKeyJwt,
-                ),
+                token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
                 jwks: TestJwks::Custom(jwks),
                 dpop_bound_access_tokens: true,
-                id_token_signed_response_alg: vouch_server::crypto::alg::JwsAlgorithm::Es256,
+                id_token_signed_response_alg: JwsAlgorithm::Es256,
                 with_secret: false,
                 ..Default::default()
             },
@@ -2801,22 +2950,20 @@ mod httpsig {
             &user.id,
             TestClientSpec {
                 name: "Test FAPI Client".to_string(),
-                application_type: vouch_server::db::OAuthClientType::Native,
+                application_type: OAuthClientType::Native,
                 redirect_uris: vec![],
-                token_endpoint_auth_method: Some(
-                    vouch_server::db::TokenEndpointAuthMethod::PrivateKeyJwt,
-                ),
+                token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
                 jwks: TestJwks::None,
                 jwks_uri: Some("https://client.example/jwks.json".to_string()),
                 dpop_bound_access_tokens: true,
-                id_token_signed_response_alg: vouch_server::crypto::alg::JwsAlgorithm::Es256,
+                id_token_signed_response_alg: JwsAlgorithm::Es256,
                 with_secret: false,
                 ..Default::default()
             },
         )
         .await;
 
-        vouch_server::db::upsert_jwks_cache(&harness.state.store, &client.app_id, &jwks)
+        db::upsert_jwks_cache(&harness.state.store, &client.app_id, &jwks)
             .await
             .unwrap();
 

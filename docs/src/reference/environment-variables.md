@@ -27,7 +27,11 @@ families, and `DSQL_USER`. They are listed in their relevant sections below.
 | `VOUCH_LISTEN_ADDR` | No | `[::]:3000` | Address and port to listen on. **Ignored when TLS is configured** — the server then binds 443 and 80 unconditionally. |
 | `VOUCH_MTLS_PORT` | No | `8443` | Port for the mTLS listener used by RFC 8705 certificate-bound tokens. The listener starts automatically whenever TLS is configured; there is no flag to disable it, and a bind failure here is fatal. |
 | `VOUCH_TRUSTED_PROXIES` | No | _(empty)_ | Comma-separated CIDRs of trusted reverse proxies (e.g. `10.0.0.0/8`). When empty, `X-Forwarded-For` is ignored entirely and the TCP peer is treated as the client — which behind a load balancer means **every user shares one rate-limit bucket**. An invalid CIDR is a fatal startup error. See [Behind a Reverse Proxy](../configuration/reverse-proxy.md). |
+| `VOUCH_PROXY_PROTOCOL` | No | `false` | When `true`, the HTTPS listener (443) and the mTLS listener (`VOUCH_MTLS_PORT`) take the client address from a PROXY protocol v2 header instead of `X-Forwarded-For`. Every connection to those listeners must come from `VOUCH_TRUSTED_PROXIES` and start with the header, or it is closed; the header's source address becomes the client IP, and `X-Forwarded-For` is ignored. For TLS-passthrough proxies (Istio/Envoy `PASSTHROUGH`, nginx `stream`, HAProxy `mode tcp`). Requires TLS and `VOUCH_TRUSTED_PROXIES`. See [PROXY protocol](../configuration/reverse-proxy.md#proxy-protocol). |
+| `VOUCH_MAX_CONNECTIONS` | No | `10000` | Maximum open connections across all listeners. When reached, Vouch stops accepting and new connections wait in the kernel's listen backlog until one closes. Keep it below the process's open-file limit (the AMI sets 65535). Must be at least 1. |
+| `VOUCH_MAX_CONNECTIONS_PER_IP` | No | `64` | Maximum open connections from one client address, counting IPv6 clients per /64. A connection over the cap is closed before its TLS handshake. Peers in `VOUCH_TRUSTED_PROXIES` are exempt, so behind a proxy that terminates TLS, set `VOUCH_TRUSTED_PROXIES` or the cap applies to the proxy itself. An address from a PROXY header is never exempt, even one inside `VOUCH_TRUSTED_PROXIES`. Must be at least 1. |
 | `VOUCH_EXTRA_CA_CERTS` | No | _(none)_ | Path to a PEM bundle of additional certificate authorities for the server's outbound HTTPS client. Needed when your IdP, or another service the server calls, uses an internal CA. An unreadable file is a fatal startup error. |
+| `VOUCH_MTLS_CLIENT_CA_CERTS` | No | _(none)_ | Path to a PEM bundle of the certificate authorities that issue client certificates for `tls_client_auth` OAuth clients. A `tls_client_auth` client authenticates only with a certificate that chains to one of these CAs **and** matches its registered subject. When unset, `tls_client_auth` is disabled: it is not advertised in discovery, registration refuses it, and existing `tls_client_auth` clients cannot authenticate. `self_signed_tls_client_auth` is unaffected. Read once at startup; an unreadable file or a bundle with no valid certificate is a fatal startup error. Separate from `VOUCH_EXTRA_CA_CERTS`, which trusts servers Vouch calls, not clients that call Vouch. See [TLS, Ports, and mTLS](../configuration/tls.md#client-certificate-authorities-for-tls_client_auth). |
 
 ## Upstream Identity Provider
 
@@ -128,8 +132,10 @@ These variables configure the Vouch GitHub App integration for issuing GitHub to
 | `VOUCH_GITHUB_APP_NAME` | No | _(none)_ | GitHub App name (the slug from `github.com/apps/{name}`). |
 | `VOUCH_GITHUB_APP_KEY` | No | _(none)_ | GitHub App private key (PEM format, RSA). Can use literal `\n` for newlines. |
 | `VOUCH_GITHUB_WEBHOOK_SECRET` | No | _(none)_ | GitHub webhook secret for verifying webhook signatures (HMAC-SHA256). |
-| `VOUCH_GITHUB_APP_CLIENT_ID` | No | _(none)_ | GitHub App Client ID for OAuth user authentication. Found in GitHub App settings (different from the numeric App ID). |
-| `VOUCH_GITHUB_APP_CLIENT_SECRET` | No | _(none)_ | GitHub App Client Secret for OAuth user authentication. |
+| `VOUCH_GITHUB_APP_CLIENT_ID` | No | _(none)_ | GitHub App Client ID for OAuth user authentication. Found in GitHub App settings (different from the numeric App ID). Required to link installations to an organization. |
+| `VOUCH_GITHUB_APP_CLIENT_SECRET` | No | _(none)_ | GitHub App Client Secret for OAuth user authentication. Required to link installations to an organization. An empty value (here or in the S3 overlay) is treated as unset, so GitHub OAuth stays off. |
+
+An org admin links an installation from `/github/connect` only after linking their own GitHub account there. Vouch links an installation only when it appears in that account's `GET /user/installations` list, so an admin cannot link an installation their GitHub account cannot see. Without the client ID and secret, admins cannot link GitHub accounts, so `/github/connect` shows "Not Available" and the server logs a warning at startup.
 
 ## TLS
 
@@ -160,7 +166,9 @@ Vouch supports loading configuration from an S3 object for centralized managemen
 The signing algorithm allowed for a client's assertion depends on its FAPI 2.0 profile, not
 just this lifetime bound. Applications with `fapi_profile = fapi2_security` may only sign
 assertions with ES256, PS256, or EdDSA (FAPI 2.0 Section 5.4.1); other applications may
-additionally use RS256. Discovery's `token_endpoint_auth_signing_alg_values_supported`
+additionally use RS256. That includes standard-profile applications created in the console with
+private key authentication (`token_endpoint_auth_method = private_key_jwt` without the FAPI
+profile), whose access tokens stay bearer tokens. Discovery's `token_endpoint_auth_signing_alg_values_supported`
 advertises the full four-algorithm union — an application's own profile determines which of
 those it may actually use. Setting `fapi_profile = fapi2_security` on an application whose
 JWKS keys are all pinned to an algorithm outside that set (e.g. every key declares
@@ -212,15 +220,14 @@ These optional variables configure download links displayed in the server UI.
 | `VOUCH_DB_MAX_CONNECTIONS` | No | `25` | Maximum size of the connection pool. Multiply by your instance count when sizing PostgreSQL's `max_connections`. |
 | `VOUCH_DB_MIN_CONNECTIONS` | No | `2` | Minimum idle connections kept open. |
 | `VOUCH_DB_IDLE_TIMEOUT_SECS` | No | `300` | How long an idle connection is kept before being closed. |
-| `VOUCH_DB_ACQUIRE_TIMEOUT_SECS` | No | `5` | How long a request waits for a free connection before failing. |
+| `VOUCH_DB_ACQUIRE_TIMEOUT_SECS` | No | `3` | How long a request waits for a free connection before failing. Keep it under 5 so it plus an outbound call (up to 5 seconds) fits inside the 10-second request timeout. |
 | `DSQL_USER` | No | `admin` | **Not `VOUCH_`-prefixed.** Database username for Aurora DSQL when the connection URL carries none. |
 
 ## Authenticator Policy
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `VOUCH_ALLOWED_AAGUIDS` | No | _(empty — any)_ | Which authenticator models may enroll. Accepts `fips-only`, `yubikey-5`, or a comma-separated list of AAGUID UUIDs. Empty means any hardware authenticator. A non-UUID entry in a list is a fatal startup error. |
-| `VOUCH_REQUIRE_ATTESTATION_CERT` | No | `false` | Reject self-attestation, requiring a full attestation certificate chain. Enable alongside `VOUCH_ALLOWED_AAGUIDS` if you rely on the model restriction, since self-attested AAGUIDs are unverified. |
+| `VOUCH_ALLOWED_AAGUIDS` | No | _(empty — any)_ | Which authenticator models may enroll, matched against the model named in the attestation certificate. Accepts `fips-only`, `yubikey-5`, or a comma-separated list of AAGUID UUIDs. Empty means any authenticator with a valid attestation chain. A non-UUID entry is a fatal startup error. |
 
 Regardless of these settings, software authenticators are always rejected: the `none` attestation
 format is refused, so only hardware-backed credentials can enroll. See
@@ -322,7 +329,11 @@ offending variable.
 | `VOUCH_ALLOWED_AAGUIDS` has a non-UUID entry | `Invalid VOUCH_ALLOWED_AAGUIDS` |
 | `VOUCH_LOG_FORMAT` is not `text` or `json` | `Invalid VOUCH_LOG_FORMAT` |
 | `VOUCH_TRUSTED_PROXIES` has a malformed CIDR | `Invalid CIDR in VOUCH_TRUSTED_PROXIES` |
+| `VOUCH_PROXY_PROTOCOL` is set without `VOUCH_TRUSTED_PROXIES` | `VOUCH_PROXY_PROTOCOL requires VOUCH_TRUSTED_PROXIES` |
+| `VOUCH_PROXY_PROTOCOL` is set without TLS | `VOUCH_PROXY_PROTOCOL applies to the TLS listeners` |
 | `VOUCH_EXTRA_CA_CERTS` file is unreadable | Read failure |
+| `VOUCH_MTLS_CLIENT_CA_CERTS` file is unreadable | `Failed to read VOUCH_MTLS_CLIENT_CA_CERTS file` |
+| `VOUCH_MTLS_CLIENT_CA_CERTS` holds no valid CA certificate | `Invalid VOUCH_MTLS_CLIENT_CA_CERTS bundle` |
 | `VOUCH_DATABASE_URL` scheme is not `sqlite:`/`postgres:`/`postgresql:` | Unsupported scheme |
 | A KMS key ID is set but the KMS client cannot be built | Names the key |
 | S3 configuration is enabled but the object cannot be fetched or parsed | `Failed to fetch S3 configuration` |

@@ -333,15 +333,22 @@ pub(super) fn find_element_by_id<'a, 'input>(
 
 /// Extract the `InclusiveNamespaces PrefixList` from a transform or c14n method node.
 ///
-/// Returns an empty vec if no `<ec:InclusiveNamespaces PrefixList="...">` child
+/// Returns an empty vec if no `<ec:InclusiveNamespaces PrefixList="...">` element
 /// is present. Splits the `PrefixList` attribute on whitespace.
+///
+/// Searches the node's descendants (not just direct children) so that the
+/// `InclusiveNamespaces` element is found regardless of its placement:
+///   - a direct child of `<ds:CanonicalizationMethod>` (for the SignedInfo c14n), or
+///   - nested inside the exc-c14n `<ds:Transform>` under `<ds:Transforms>` (for the
+///     signed-element c14n, the standard Azure AD/Entra placement, per XML-DSig
+///     where `InclusiveNamespaces` is a child of the c14n `Transform`).
 fn extract_inclusive_prefixes(parent: Option<roxmltree::Node<'_, '_>>) -> Vec<String> {
     let Some(parent) = parent else {
         return Vec::new();
     };
-    for child in parent.children() {
-        if child.has_tag_name((NS_EC, "InclusiveNamespaces"))
-            && let Some(prefix_list) = child.attribute("PrefixList")
+    for desc in parent.descendants() {
+        if desc.has_tag_name((NS_EC, "InclusiveNamespaces"))
+            && let Some(prefix_list) = desc.attribute("PrefixList")
         {
             return prefix_list.split_whitespace().map(str::to_string).collect();
         }
@@ -542,16 +549,31 @@ fn verify_signature_with_certs(
         return Err(SignatureError::NoCertificateMatch);
     }
 
+    let mut first_parse_err = None;
     for cert_der in signing_certificates {
         match try_verify_with_cert(algorithm_uri, sig_bytes, signed_info_bytes, cert_der) {
             Ok(()) => return Ok(()),
             Err(SignatureError::SignatureInvalid) => continue,
             Err(SignatureError::NoCertificateMatch) => continue,
+            // A per-candidate DER/SPKI parse failure only disqualifies that
+            // certificate: IdP metadata routinely lists multiple
+            // KeyDescriptors during certificate rotation (SAML Metadata
+            // Section 2.4.1.1), so a malformed entry must not mask a valid
+            // certificate later in the list. The first parse error is
+            // preserved so the all-candidates-fail case still reports it.
+            Err(SignatureError::Other(e)) => {
+                tracing::warn!(error = %e, "Skipping unparseable IdP signing certificate");
+                if first_parse_err.is_none() {
+                    first_parse_err = Some(SignatureError::Other(e));
+                }
+            }
+            // The signature algorithm is loop-invariant: if it is
+            // unsupported, no candidate can succeed.
             Err(e) => return Err(e),
         }
     }
 
-    Err(SignatureError::NoCertificateMatch)
+    Err(first_parse_err.unwrap_or(SignatureError::NoCertificateMatch))
 }
 
 /// Attempt to verify a signature using a single DER-encoded X.509 certificate.
@@ -836,6 +858,50 @@ mod tests {
         assert!(prefixes.is_empty());
     }
 
+    // XML Signature §4.4.3.4 + exc-c14n §3.1: in the standard XML-DSig placement, the
+    // `InclusiveNamespaces` element is a child of the exc-c14n `<ds:Transform>` inside
+    // `<ds:Transforms>`, not a direct child of `<ds:Transforms>`. This is the placement
+    // Azure AD/Entra and xmlsec1 use (`PrefixList="#default saml ds xs xsi"`).
+    // `verify_xml_signature` extracts the signed-element prefix list by calling
+    // `extract_inclusive_prefixes` with the `<ds:Transforms>` node, so the search MUST
+    // descend into the nested exc-c14n `<ds:Transform>` to find `#default`. The old
+    // direct-children-only search silently returned `[]`, forwarding an empty prefix
+    // list to `exclusive_c14n` and producing `SignatureError::DigestMismatch` against
+    // any IdP that signs with `#default` (fail-closed auth outage).
+    #[test]
+    fn extract_inclusive_prefixes_finds_nested_in_transform() {
+        let xml = r##"<ds:Transforms xmlns:ds="http://www.w3.org/2000/09/xmldsig#"
+                          xmlns:ec="http://www.w3.org/2001/10/xml-exc-c14n#">
+  <ds:Transform Algorithm="http://www.w3.org/2000/09/xmldsig#enveloped-signature"/>
+  <ds:Transform Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#">
+    <ec:InclusiveNamespaces PrefixList="#default saml ds xs xsi"/>
+  </ds:Transform>
+</ds:Transforms>"##;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let transforms = doc.root().children().find(|n| n.is_element()).unwrap();
+        let prefixes = extract_inclusive_prefixes(Some(transforms));
+        assert_eq!(
+            prefixes,
+            vec!["#default", "saml", "ds", "xs", "xsi"],
+            "must find the InclusiveNamespaces nested inside the exc-c14n <ds:Transform>"
+        );
+    }
+
+    // Verify the same extraction works when called on the `<ds:CanonicalizationMethod>`
+    // (used for the SignedInfo c14n), where `InclusiveNamespaces` IS a direct child.
+    #[test]
+    fn extract_inclusive_prefixes_from_canonicalization_method() {
+        let xml = r##"<ds:CanonicalizationMethod xmlns:ds="http://www.w3.org/2000/09/xmldsig#"
+                         xmlns:ec="http://www.w3.org/2001/10/xml-exc-c14n#"
+                         Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#">
+  <ec:InclusiveNamespaces PrefixList="#default saml"/>
+</ds:CanonicalizationMethod>"##;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let method = doc.root().children().find(|n| n.is_element()).unwrap();
+        let prefixes = extract_inclusive_prefixes(Some(method));
+        assert_eq!(prefixes, vec!["#default", "saml"]);
+    }
+
     // =========================================================================
     // Helper for generating a minimal DER certificate (RSA)
     // =========================================================================
@@ -920,6 +986,79 @@ mod tests {
     }
 
     // =========================================================================
+    // Certificate-loop candidate scan tests
+    // =========================================================================
+
+    /// Sign `message` with `key_pair` using RSA-PKCS1-SHA256.
+    fn rsa_sign(key_pair: &aws_lc_rs::rsa::KeyPair, message: &[u8]) -> Vec<u8> {
+        let mut sig = vec![0u8; key_pair.public_modulus_len()];
+        let rng = aws_lc_rs::rand::SystemRandom::new();
+        key_pair
+            .sign(
+                &aws_lc_rs::signature::RSA_PKCS1_SHA256,
+                &rng,
+                message,
+                &mut sig,
+            )
+            .unwrap();
+        sig
+    }
+
+    /// SAML Metadata §2.4.1.1: IdP metadata may list several KeyDescriptor
+    /// certificates (normal during certificate rotation), so a malformed DER
+    /// entry earlier in the list must not mask a valid certificate later on.
+    #[test]
+    fn cert_loop_skips_unparseable_cert_before_valid_one() {
+        let key_pair = aws_lc_rs::rsa::KeyPair::generate(aws_lc_rs::rsa::KeySize::Rsa2048).unwrap();
+        let good_cert = build_self_signed_der(&key_pair);
+        let message = b"signed-info bytes";
+        let sig = rsa_sign(&key_pair, message);
+
+        let certs = vec![vec![0xde, 0xad, 0xbe, 0xef], good_cert];
+        let result = verify_signature_with_certs(SIG_RSA_SHA256, &sig, message, &certs);
+        assert!(
+            result.is_ok(),
+            "a malformed certificate must not mask a valid later one: {result:?}"
+        );
+    }
+
+    // SAML Metadata §2.4.1.1: when every candidate certificate is unparseable,
+    // the first parse error is reported for diagnostics.
+    #[test]
+    fn cert_loop_reports_parse_error_when_all_certs_unparseable() {
+        let err = verify_signature_with_certs(
+            SIG_RSA_SHA256,
+            b"sig",
+            b"message",
+            &[vec![0xde, 0xad, 0xbe, 0xef]],
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, SignatureError::Other(_)),
+            "expected the preserved parse error, got: {err}"
+        );
+    }
+
+    // XML Signature §6.1: an unsupported algorithm fails the whole scan (the
+    // algorithm is loop-invariant, so no candidate could succeed).
+    #[test]
+    fn cert_loop_aborts_on_unsupported_algorithm() {
+        let key_pair = aws_lc_rs::rsa::KeyPair::generate(aws_lc_rs::rsa::KeySize::Rsa2048).unwrap();
+        let cert = build_self_signed_der(&key_pair);
+        let err = verify_signature_with_certs(
+            "http://www.w3.org/2000/09/xmldsig#rsa-sha1",
+            b"sig",
+            b"message",
+            &[cert],
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, SignatureError::UnsupportedAlgorithm(_)),
+            "expected UnsupportedAlgorithm, got: {err}"
+        );
+    }
+
+    // =========================================================================
     // Scoped signature search tests
     // =========================================================================
 
@@ -953,6 +1092,52 @@ mod tests {
         assert!(
             matches!(err, SignatureError::NoSignature),
             "Expected NoSignature for deeply nested sig, got: {err}"
+        );
+    }
+
+    // =========================================================================
+    // Canonicalization digest-input path (c14n_excluding_signature)
+    // =========================================================================
+
+    // exc-c14n §3 point 4 cond. 1 via XML Signature §4.4.1: a prefixed element that explicitly
+    // undeclares (xmlns="") an ancestor-rendered non-empty default namespace must NOT receive
+    // xmlns=""; it must land on the nearest unprefixed descendant. This exercises the real
+    // digest-input path -- `c14n_excluding_signature` serializes the signed element minus the
+    // Signature subtree (`serialize_node_excl`), reparses, and runs `exclusive_c14n`; those exact
+    // bytes are SHA-256-hashed and compared to <ds:DigestValue> in `verify_xml_signature`. A byte
+    // deviation here would yield `SignatureError::DigestMismatch` and reject a valid response.
+    // Reference form verified against `xmllint --exc-c14n` (libxml2, the engine xmlsec1 uses).
+    #[test]
+    fn c14n_excluding_signature_xmlns_undeclaration_on_prefixed_element() {
+        let xml = r##"<signed xmlns="urn:a" ID="s1">
+  <b:mid xmlns:b="urn:b" xmlns=""><leaf>text</leaf></b:mid>
+  <ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#" ID="sig1"><ds:SignedInfo/></ds:Signature>
+</signed>"##;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let signed = doc
+            .descendants()
+            .find(|n| n.has_tag_name("signed"))
+            .unwrap();
+        let sig = doc
+            .descendants()
+            .find(|n| n.has_tag_name((NS_DS, "Signature")))
+            .unwrap();
+        let vouch_out = c14n_excluding_signature(signed, sig, &[]).unwrap();
+
+        // xmlns="" must land on the unprefixed <leaf>, never on the prefixed <b:mid>.
+        let expected = "<signed xmlns=\"urn:a\" ID=\"s1\">\n  <b:mid xmlns:b=\"urn:b\"><leaf xmlns=\"\">text</leaf></b:mid>\n  \n</signed>";
+        assert_eq!(
+            vouch_out, expected,
+            "digest-input bytes diverge from reference exc-c14n form"
+        );
+        // Sanity: the digest over the fixed bytes is stable and distinct from the buggy form.
+        let digest = digest::digest(&digest::SHA256, vouch_out.as_bytes());
+        let buggy = "<signed xmlns=\"urn:a\" ID=\"s1\">\n  <b:mid xmlns:b=\"urn:b\" xmlns=\"\"><leaf>text</leaf></b:mid>\n  \n</signed>";
+        let buggy_digest = digest::digest(&digest::SHA256, buggy.as_bytes());
+        assert_ne!(
+            digest.as_ref(),
+            buggy_digest.as_ref(),
+            "fix must produce bytes that hash differently from the buggy form"
         );
     }
 }

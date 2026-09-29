@@ -15,6 +15,7 @@ use flate2::write::DeflateEncoder;
 use std::io::Write as _;
 
 use super::SamlProvider;
+use crate::crypto;
 
 // ============================================================================
 // SAML URN constants
@@ -129,7 +130,7 @@ pub(crate) fn build_authn_request(
 /// The `_` prefix ensures the ID is a valid XML NCName. SAML IDs may not
 /// start with a digit.
 fn generate_request_id() -> Result<String, AuthnRequestError> {
-    let bytes = crate::crypto::generate_random_bytes(16)
+    let bytes = crypto::generate_random_bytes(16)
         .map_err(|e| AuthnRequestError::RandomId(e.to_string()))?;
     let hex: String = bytes.iter().fold(String::with_capacity(32), |mut s, b| {
         use std::fmt::Write as _;
@@ -141,6 +142,10 @@ fn generate_request_id() -> Result<String, AuthnRequestError> {
 }
 
 /// Return the current UTC time formatted as ISO 8601 (`YYYY-MM-DDTHH:MM:SSZ`).
+#[expect(
+    clippy::disallowed_methods,
+    reason = "mints the AuthnRequest IssueInstant"
+)]
 fn current_utc_iso8601() -> String {
     use jiff::Timestamp;
     let now = Timestamp::now();

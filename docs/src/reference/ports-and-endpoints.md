@@ -7,7 +7,7 @@ Reference for writing firewall rules, security groups, and load balancer routing
 | Port | Protocol | Purpose | Configurable |
 |------|----------|---------|--------------|
 | **443** | HTTPS | Main listener | No — fixed whenever TLS is configured |
-| **80** | HTTP | 308 redirect to HTTPS, plus `/health` | No |
+| **80** | HTTP | 308 redirect to HTTPS, plus `/health` and `/health/ready` | No |
 | **8443** | HTTPS + mTLS | Client-certificate listener for RFC 8705 certificate-bound tokens | Port only, via `VOUCH_MTLS_PORT` |
 | **3000** | HTTP | Default listener when TLS is **not** configured | Yes, via `VOUCH_LISTEN_ADDR` |
 
@@ -47,7 +47,7 @@ Three things regularly surprise operators here:
 | Endpoint | Method | Auth | Notes |
 |----------|--------|------|-------|
 | `/health` | GET | None | Liveness. Returns `ok` as plain text. Also served on port 80 |
-| `/health/ready` | GET | None | Readiness. Checks the database; 503 when unreachable |
+| `/health/ready` | GET | None | Readiness. Checks the database; 503 when unreachable. Also served on port 80, which never takes the PROXY protocol |
 | `/metrics` | GET | Metrics token | Only registered when `VOUCH_METRICS_BEARER_TOKEN` is set |
 
 ### Discovery and metadata
@@ -68,7 +68,7 @@ Three things regularly surprise operators here:
 | `/oauth/token` | POST | Client auth | Authentication |
 | `/oauth/par` | POST | Client auth | Authentication |
 | `/oauth/fido2/challenge` | POST | None | Authentication |
-| `/oauth/device` | POST | None | Authentication |
+| `/oauth/device` | POST | Client auth (RFC 8628 §3.1); enrolling requires CLI 2026.9.4 or later | Authentication |
 | `/oauth/register` | POST | None (RFC 7591) | Authentication |
 | `/oauth/register/{client_id}` | GET/PUT/DELETE | Registration access token | Authentication |
 | `/oauth/authorize` | GET | Session | General |
@@ -105,7 +105,7 @@ revocation list without holding credentials.
 | `/api/v1/org/scim-tokens` | GET/POST | Admin | General |
 | `/api/v1/org/scim-tokens/{id}` | DELETE | Admin | General |
 | `/api/v1/org/policies/validate` | POST | Admin | General |
-| `/scim/v2/*` | GET/POST/PATCH/DELETE | SCIM token | General |
+| `/scim/v2/*` | GET/POST/PUT/PATCH/DELETE | SCIM token | General |
 | `/api/v1/applications*` | various | Bearer/DPoP | General |
 | `/api/webhooks/github` | POST | HMAC | General |
 
@@ -125,12 +125,18 @@ in front of Vouch at your proxy.
 
 | Scope | Limit |
 |-------|-------|
-| Global timeout | 30 seconds (408 on expiry) |
+| Global timeout | 10 seconds (408 on expiry) |
 | Global body | 256 KiB |
 | Credential issuance | 8 KiB |
 | SCIM, `/oauth/authorize`, SAML ACS | 64 KiB |
 | Enroll and login WebAuthn | 32 KiB |
 | GitHub webhook | 1 MiB |
+| TLS handshake | 5 seconds (connection closed) |
+| HTTP/1 request head, and idle keep-alive between requests | 10 seconds (connection closed) |
+| HTTP/2 connection with no request in flight | 10 seconds (GOAWAY, then closed) |
+| HTTP/2 keep-alive ping | every 20 seconds; closed if unacknowledged for 20 seconds |
+| Open connections, all listeners | 10,000 (`VOUCH_MAX_CONNECTIONS`); further connections wait to be accepted |
+| Open connections per client address (IPv6: per /64) | 64 (`VOUCH_MAX_CONNECTIONS_PER_IP`); further connections closed. Trusted proxies exempt as the connection's peer; a PROXY header's source never is |
 
 ## Outbound connections
 
@@ -141,7 +147,7 @@ The server itself makes outbound HTTPS calls; egress rules must allow them:
 | Your upstream IdP (discovery, JWKS, token) | Always — at startup and during enrollment |
 | Your SAML IdP metadata URL | At startup, if a SAML IdP is configured |
 | AWS KMS, S3, STS | When KMS keys, S3 configuration, or the AWS integration are used |
-| `api.github.com` | When the GitHub App integration is used |
+| `api.github.com`, `github.com` | When the GitHub App integration is used (`github.com` serves the OAuth token exchange) |
 | DNS resolvers | Domain-ownership TXT verification |
 | An OAuth client's `jwks_uri` | At dynamic client registration — restricted to public IPs by SSRF protection |
 

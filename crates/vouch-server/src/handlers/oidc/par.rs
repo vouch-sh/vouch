@@ -6,18 +6,21 @@ use super::client_auth::{
     with_client_auth_challenge,
 };
 use crate::AppState;
+use crate::arrival::ArrivalTime;
 use crate::db::{self, CreateParParams, PAR_EXPIRES_IN};
 use crate::error::OAuthErrorCode;
 use crate::error::OAuthErrorResponse;
 use crate::error::ServiceError;
 use crate::handlers::extractors::{OAuthForm, OptionalClientCert};
-use crate::services::auth::{ClientAuthProof, ParCreationProof};
+use crate::services::auth::{ClientAuthProof, JwtClientAuthProof, NoClientAuth, ParCreationProof};
 use crate::services::oidc::DpopError;
 use crate::services::oidc::authorization::{
-    AuthorizeRequestParams, Prompt, require_pkce_for_client, validate_authorize_request,
+    AuthorizeRequestParams, parse_response_mode, require_pkce_for_client,
+    validate_authorize_request,
 };
+use crate::services::oidc::fapi::validate_fapi_client_auth_method;
 use crate::services::oidc::jar::{validate_request_object, validate_request_object_header};
-use crate::services::oidc::token::{ClientAuthError, validate_dpop_if_present};
+use crate::services::oidc::token::validate_dpop_if_present;
 use axum::{
     Json,
     extract::State,
@@ -179,6 +182,7 @@ impl ClientAuthFields for ParRequest {
     reason = "single-pass FAPI 2.0 PAR validation per RFC 9126"
 )]
 pub(crate) async fn par(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     client_cert: OptionalClientCert,
     headers: HeaderMap,
@@ -211,6 +215,53 @@ pub(crate) async fn par(
         );
     }
 
+    // RFC 9449 Section 10: Capture DPoP proof at PAR for authorization code binding.
+    // If a DPoP proof is provided, bind the JWK thumbprint to the PAR record so
+    // that the same key must be used at the token endpoint.
+    //
+    // RFC 9449 §8: "The client will typically retry the request with the new
+    // nonce value supplied upon receiving a use_dpop_nonce error". The proof
+    // is checked before client authentication, which spends a
+    // `private_key_jwt` assertion's `jti`, so that retry can reuse it.
+    let dpop_header = headers
+        .get(protocol::HEADER_DPOP)
+        .and_then(|v| v.to_str().ok());
+    let dpop_proof =
+        match validate_dpop_if_present(&state, dpop_header, "POST", "/oauth/par", arrival).await {
+            Ok(proof) => proof,
+            Err(DpopError::UseNonce(nonce)) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    [(
+                        axum::http::header::HeaderName::from_static(protocol::HEADER_DPOP_NONCE),
+                        nonce.to_string(),
+                    )],
+                    Json(OAuthErrorResponse {
+                        error: OAuthErrorCode::UseDpopNonce.as_str().to_string(),
+                        error_description: Some(
+                            "Authorization server requires nonce in DPoP proof".to_string(),
+                        ),
+                        error_uri: None,
+                    }),
+                )
+                    .into_response();
+            }
+            Err(e @ DpopError::Database(_)) => {
+                return par_error_response(
+                    OAuthErrorCode::ServerError,
+                    presentation,
+                    &e.to_string(),
+                );
+            }
+            Err(e) => {
+                return par_error_response(
+                    OAuthErrorCode::InvalidDpopProof,
+                    presentation,
+                    &e.to_string(),
+                );
+            }
+        };
+
     // Extract and authenticate the client (required for PAR)
     let client_auth = match extract_client_auth(&headers, &params) {
         Ok(auth) => auth,
@@ -218,10 +269,12 @@ pub(crate) async fn par(
     };
 
     // RFC 9126 Section 2: Client authentication is REQUIRED
-    let Some(any_auth) = (match complete_client_auth(&state, client_auth).await {
-        Ok(result) => result,
-        Err(resp) => return resp,
-    }) else {
+    let Some(any_auth) =
+        (match complete_client_auth(&state, client_auth, &client_cert, arrival).await {
+            Ok(result) => result,
+            Err(resp) => return resp,
+        })
+    else {
         return par_error_response(
             OAuthErrorCode::InvalidClient,
             presentation,
@@ -229,42 +282,10 @@ pub(crate) async fn par(
         );
     };
     let authenticated_client = any_auth.client;
-    let pending_jti = any_auth.pending_jti;
-    let jwt_auth = any_auth.jwt_auth;
-    let secret_verification = any_auth.secret_verification;
-
-    // RFC 8705 §2 / FAPI 2.0 §5.3.2.1: mTLS dispatch. When the client is
-    // registered with `tls_client_auth` or `self_signed_tls_client_auth`
-    // and no body-level credential has authenticated it, verify the TLS
-    // client certificate. Must run before FAPI auth-method validation so
-    // a successfully mTLS-authenticated client is accepted by that gate.
-    let mtls_verification = if pending_jti.is_none()
-        && secret_verification.is_none()
-        && matches!(
-            authenticated_client.client.token_endpoint_auth_method,
-            crate::db::TokenEndpointAuthMethod::TlsClientAuth
-                | crate::db::TokenEndpointAuthMethod::SelfSignedTlsClientAuth
-        ) {
-        let Some(cert) = client_cert.0.as_ref() else {
-            return par_error_response(
-                OAuthErrorCode::InvalidClient,
-                presentation,
-                "mTLS client certificate required",
-            );
-        };
-        match crate::services::oidc::token::authenticate_client_mtls(
-            &state,
-            &authenticated_client.client,
-            cert,
-        )
-        .await
-        {
-            Ok(verification) => Some(verification),
-            Err(e) => return e.into_service_error().into_oauth_response().into_response(),
-        }
-    } else {
-        None
-    };
+    let jti_claim = any_auth.witnesses.jti_claim;
+    let jwt_auth = any_auth.witnesses.jwt_auth;
+    let secret_verification = any_auth.witnesses.secret_verification;
+    let mtls_verification = any_auth.witnesses.mtls_verification;
 
     // FAPI 2.0: Validate client authentication method.
     //
@@ -275,15 +296,12 @@ pub(crate) async fn par(
     // token_endpoint_auth_method, so a stale secret on a client since
     // migrated to a FAPI method cannot pass the gate.
     let actual_method = super::client_auth::actual_auth_method(
-        authenticated_client.client.token_endpoint_auth_method,
+        authenticated_client.token_endpoint_auth_method,
         jwt_auth.is_some(),
         secret_verification.is_some(),
         mtls_verification.is_some(),
     );
-    if let Err(e) = crate::services::oidc::fapi::validate_fapi_client_auth_method(
-        &authenticated_client.client,
-        actual_method,
-    ) {
+    if let Err(e) = validate_fapi_client_auth_method(&authenticated_client, actual_method) {
         return par_error_response(
             OAuthErrorCode::InvalidClient,
             presentation,
@@ -296,8 +314,7 @@ pub(crate) async fn par(
     // provided, reject the PAR request.  Use `invalid_request` per PAR-2.3:
     // the request itself is invalid (missing required parameter), not a
     // malformed request object.
-    if authenticated_client.client.require_signed_request_object == Some(true)
-        && params.request.is_none()
+    if authenticated_client.require_signed_request_object == Some(true) && params.request.is_none()
     {
         return par_error_response(
             OAuthErrorCode::InvalidRequest,
@@ -306,43 +323,6 @@ pub(crate) async fn par(
         );
     }
 
-    // RFC 9449 Section 10: Capture DPoP proof at PAR for authorization code binding.
-    // If a DPoP proof is provided, bind the JWK thumbprint to the PAR record so
-    // that the same key must be used at the token endpoint.
-    let dpop_header = headers
-        .get(protocol::HEADER_DPOP)
-        .and_then(|v| v.to_str().ok());
-    let dpop_proof = match validate_dpop_if_present(&state, dpop_header, "POST", "/oauth/par").await
-    {
-        Ok(proof) => proof,
-        Err(DpopError::UseNonce(nonce)) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                [(
-                    axum::http::header::HeaderName::from_static(protocol::HEADER_DPOP_NONCE),
-                    nonce.to_string(),
-                )],
-                Json(OAuthErrorResponse {
-                    error: OAuthErrorCode::UseDpopNonce.as_str().to_string(),
-                    error_description: Some(
-                        "Authorization server requires nonce in DPoP proof".to_string(),
-                    ),
-                    error_uri: None,
-                }),
-            )
-                .into_response();
-        }
-        Err(e @ DpopError::Database(_)) => {
-            return par_error_response(OAuthErrorCode::ServerError, presentation, &e.to_string());
-        }
-        Err(e) => {
-            return par_error_response(
-                OAuthErrorCode::InvalidDpopProof,
-                presentation,
-                &e.to_string(),
-            );
-        }
-    };
     let dpop_jkt = dpop_proof.as_ref().map(|p| p.jkt.as_str());
 
     // RFC 9449 Section 10: If both a DPoP proof header and a dpop_jkt request
@@ -359,8 +339,19 @@ pub(crate) async fn par(
     }
 
     // Helper: convert ServiceError to PAR error response fields.
+    //
+    // RFC 9126 Section 2.3: "Since initial processing of the pushed
+    // authorization request does not involve resource owner interaction,
+    // error codes related to user interaction, such as `consent_required`
+    // defined by [OIDC], are never returned." `account_selection_required` is
+    // one of those, so the rejection it carries is reported here under the
+    // code the same section names as the default, `invalid_request`.
     let service_error_codes = |e: &ServiceError| -> (OAuthErrorCode, String) {
         match e {
+            ServiceError::OAuth {
+                code: OAuthErrorCode::AccountSelectionRequired,
+                description,
+            } => (OAuthErrorCode::InvalidRequest, description.clone()),
             ServiceError::OAuth { code, description } => (*code, description.clone()),
             _ => (OAuthErrorCode::ServerError, e.to_string()),
         }
@@ -369,19 +360,24 @@ pub(crate) async fn par(
     // RFC 9101: If request parameter is present, validate the Request Object JWT
     // and extract parameters from it instead of using the form fields.
     let (validated, jar_response_mode) = if let Some(ref request_jwt) = params.request {
-        let request_params =
-            match validate_request_object(&state, request_jwt, &authenticated_client.client, None)
-                .await
-            {
-                Ok(params) => params,
-                Err(e) => {
-                    let (error_code, description) = service_error_codes(&e);
-                    return par_error_response(error_code, presentation, &description);
-                }
-            };
+        let request_params = match validate_request_object(
+            &state,
+            request_jwt,
+            &authenticated_client,
+            None,
+            arrival,
+        )
+        .await
+        {
+            Ok(params) => params,
+            Err(e) => {
+                let (error_code, description) = service_error_codes(&e);
+                return par_error_response(error_code, presentation, &description);
+            }
+        };
 
         // client_id from JWT must match the authenticated client
-        if request_params.client_id != authenticated_client.client.client_id {
+        if request_params.client_id != authenticated_client.client_id {
             return par_error_response(
                 OAuthErrorCode::InvalidRequestObject,
                 presentation,
@@ -401,27 +397,9 @@ pub(crate) async fn par(
         };
         (v, jar_rm)
     } else {
-        // Validate prompt before constructing params
-        let parsed_prompt = match params.prompt.as_deref() {
-            Some(p) => match Prompt::parse(p) {
-                Some(prompt) => Some(prompt),
-                None => {
-                    return par_error_response(
-                        OAuthErrorCode::InvalidRequest,
-                        presentation,
-                        &format!(
-                            "Unsupported prompt value. Supported values: {}",
-                            crate::services::oidc::authorization::Prompt::supported_values()
-                        ),
-                    );
-                }
-            },
-            None => None,
-        };
-
         let request_params = AuthorizeRequestParams {
             response_type: params.response_type.unwrap_or_default(),
-            client_id: authenticated_client.client.client_id.clone(),
+            client_id: authenticated_client.client_id.clone(),
             redirect_uri: params.redirect_uri.clone().unwrap_or_default(),
             scope: params.scope.clone(),
             state: params.state.clone(),
@@ -431,7 +409,7 @@ pub(crate) async fn par(
             resource: params.resource.clone(),
             acr_values: params.acr_values.clone(),
             max_age: params.max_age,
-            prompt: parsed_prompt,
+            prompt: params.prompt.clone(),
             dpop_jkt: params.dpop_jkt.clone(),
             authorization_details: params.authorization_details.clone(),
             response_mode: params.response_mode.clone(),
@@ -448,7 +426,7 @@ pub(crate) async fn par(
     };
 
     // RFC 9700: PKCE required for public clients and Native/SPA types.
-    if let Err(e) = require_pkce_for_client(&validated, &authenticated_client.client) {
+    if let Err(e) = require_pkce_for_client(&validated, &authenticated_client) {
         return par_error_response(
             OAuthErrorCode::InvalidRequest,
             presentation,
@@ -457,10 +435,7 @@ pub(crate) async fn par(
     }
 
     // Validate redirect_uri against registered URIs
-    if !authenticated_client
-        .client
-        .is_valid_redirect_uri(validated.redirect_uri())
-    {
+    if !authenticated_client.is_valid_redirect_uri(validated.redirect_uri()) {
         return par_error_response(
             OAuthErrorCode::InvalidRequest,
             presentation,
@@ -470,7 +445,7 @@ pub(crate) async fn par(
 
     // RFC 8707: Validate resource parameter against registered URIs
     if let Some(resource) = validated.resource()
-        && !authenticated_client.client.is_valid_resource_uri(resource)
+        && !authenticated_client.is_valid_resource_uri(resource)
     {
         return par_error_response(
             OAuthErrorCode::InvalidTarget,
@@ -503,25 +478,17 @@ pub(crate) async fn par(
     let scope_str = validated.scope().to_space_separated();
     let max_age_i64 = validated.max_age().and_then(|v| i64::try_from(v).ok());
     let ad_value = validated.authorization_details_value();
+    let prompt_str = validated.prompt().map(|p| p.to_space_separated());
     // JAR claims take precedence over the plain form body for response_mode.
     let response_mode_str = jar_response_mode
         .as_deref()
         .or(params.response_mode.as_deref());
-    let response_mode = match response_mode_str {
-        None | Some("query") => crate::db::documents::oauth::ResponseMode::Query,
-        Some(mode) => match crate::db::documents::oauth::ResponseMode::parse(mode) {
-            Some(m) => m,
-            None => {
-                return par_error_response(
-                    OAuthErrorCode::InvalidRequest,
-                    presentation,
-                    &format!(
-                        "Unsupported response_mode. Supported values: {}",
-                        crate::db::documents::oauth::ResponseMode::supported_values()
-                    ),
-                );
-            }
-        },
+    let response_mode = match parse_response_mode(response_mode_str) {
+        Ok(mode) => mode,
+        Err(e) => {
+            let (error_code, description) = service_error_codes(&e);
+            return par_error_response(error_code, presentation, &description);
+        }
     };
 
     let create_params = CreateParParams {
@@ -536,37 +503,12 @@ pub(crate) async fn par(
         resource: validated.resource(),
         acr_values: validated.acr_values(),
         max_age: max_age_i64,
-        prompt: validated.prompt().map(|p| p.as_str()),
+        prompt: prompt_str.as_deref(),
         dpop_jkt: effective_dpop_jkt,
         authorization_details: ad_value.as_ref(),
         response_mode,
     };
 
-    let jti_claim = match pending_jti {
-        Some(p) => match p.commit(&state).await {
-            Ok(claim) => claim,
-            Err(e) => {
-                tracing::warn!("JTI commit failed for PAR: {e:?}");
-                // Distinguish replay (client-auth failure) from transient DB error
-                // (server problem). Returning 401 for a DB outage tells well-behaved
-                // clients to abandon credentials they should reuse on retry; returning
-                // 500 for a replay tempts them to retry-loop with a consumed JTI.
-                return match e {
-                    ClientAuthError::InvalidCredentials => par_error_response(
-                        OAuthErrorCode::InvalidClient,
-                        presentation,
-                        "Client authentication failed",
-                    ),
-                    _ => par_error_response(
-                        OAuthErrorCode::ServerError,
-                        presentation,
-                        "Failed to complete client authentication",
-                    ),
-                };
-            }
-        },
-        None => None,
-    };
     // Resolve client-auth proof by precedence: JWT → secret → mTLS. If
     // none succeeded, fall back to `for_public_client` against the loaded
     // client — fails for confidential clients that should have authed.
@@ -576,17 +518,13 @@ pub(crate) async fn par(
     // `jti_claim`, to avoid silently rejecting a non-FAPI client that
     // legitimately omitted `jti`.
     let par_client_auth = if let Some(auth) = jwt_auth {
-        ClientAuthProof::PrivateKeyJwt(crate::services::auth::JwtClientAuthProof::new(
-            auth, jti_claim,
-        ))
+        ClientAuthProof::PrivateKeyJwt(JwtClientAuthProof::new(auth, jti_claim))
     } else if let Some(s) = secret_verification {
         ClientAuthProof::ClientSecret(s)
     } else if let Some(v) = mtls_verification {
         ClientAuthProof::MutualTls(v)
     } else {
-        let witness = match crate::services::auth::NoClientAuth::for_public_client(
-            &authenticated_client.client,
-        ) {
+        let witness = match NoClientAuth::for_public_client(&authenticated_client) {
             Ok(w) => w,
             Err(svc) => return svc.into_oauth_response().into_response(),
         };

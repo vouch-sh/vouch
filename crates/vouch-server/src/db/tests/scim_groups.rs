@@ -8,6 +8,7 @@
 )]
 
 use super::*;
+use crate::db::pool::Pool;
 
 // ========================================================================
 // SCIM groups — full lifecycle
@@ -18,7 +19,7 @@ async fn test_scim_group_lifecycle() {
     let (store, _audit) = test_db().await;
 
     // Create
-    let group = create_scim_group(&store, TEST_ORG_ID, "Engineering", Some("ext-grp-1"))
+    let group = create_scim_group(&store, TEST_ORG_ID, "Engineering", Some("ext-grp-1"), &[])
         .await
         .expect("create_scim_group failed");
     assert!(!group.id.is_empty());
@@ -37,8 +38,7 @@ async fn test_scim_group_lifecycle() {
         &store,
         &group.id,
         TEST_ORG_ID,
-        "Platform",
-        Some("ext-grp-2"),
+        set_group_attributes("Platform", Some("ext-grp-2")),
     )
     .await
     .expect("update_scim_group failed");
@@ -76,145 +76,66 @@ async fn test_scim_group_lifecycle() {
 }
 
 #[tokio::test]
-async fn test_scim_group_member_add_remove() {
+async fn test_scim_group_members_update_writes_only_the_difference() {
+    use crate::db::documents::scim::ScimGroupMemberDoc;
+
     let (store, _audit) = test_db().await;
     seed_test_org(&store).await;
-
-    let group = create_scim_group(&store, TEST_ORG_ID, "Beta", None)
-        .await
-        .expect("create group");
-    let user = create_scim_user(
+    let mut users = Vec::new();
+    for email in ["u1@example.com", "u2@example.com", "u3@example.com"] {
+        let user = create_scim_user(&store, Some(TEST_ORG_ID), email, None, None, true)
+            .await
+            .expect("create user");
+        users.push(user.id);
+    }
+    let group = create_scim_group(
         &store,
-        Some(TEST_ORG_ID),
-        "member@example.com",
+        TEST_ORG_ID,
+        "Gamma",
         None,
-        None,
-        true,
+        &[users[0].clone(), users[1].clone(), users[0].clone()],
     )
     .await
-    .expect("create user");
+    .expect("create group");
+    let docs = store
+        .find_all::<ScimGroupMemberDoc>("group_id", &group.id)
+        .await
+        .expect("member docs");
+    assert_eq!(docs.len(), 2, "a repeated member is stored once");
+    let kept_id = docs
+        .iter()
+        .find(|doc| doc.data.user_id == users[1])
+        .map(|doc| doc.id.clone())
+        .expect("u2 row");
 
-    // Add member
-    let _ = add_scim_group_member(&store, &group.id, TEST_ORG_ID, &user.id)
-        .await
-        .expect("add_scim_group_member failed");
+    let applied = update_scim_group(
+        &store,
+        &group.id,
+        TEST_ORG_ID,
+        set_group_members(&[&users[1], &users[2]]),
+    )
+    .await
+    .expect("replace members");
+    assert!(applied);
 
-    // Member appears in group
-    let members = get_scim_group_members(&store, &group.id, TEST_ORG_ID)
+    let docs = store
+        .find_all::<ScimGroupMemberDoc>("group_id", &group.id)
         .await
-        .expect("get_scim_group_members failed")
-        .unwrap_or_default();
-    assert_eq!(members.len(), 1);
-    assert_eq!(members[0].id, user.id);
-
-    // Add again is idempotent
-    let _ = add_scim_group_member(&store, &group.id, TEST_ORG_ID, &user.id)
-        .await
-        .expect("idempotent add failed");
-    let members_after = get_scim_group_members(&store, &group.id, TEST_ORG_ID)
-        .await
-        .expect("get members")
-        .unwrap_or_default();
-    assert_eq!(
-        members_after.len(),
-        1,
-        "idempotent add should not duplicate"
+        .expect("member docs");
+    let mut member_ids: Vec<&str> = docs.iter().map(|doc| doc.data.user_id.as_str()).collect();
+    member_ids.sort_unstable();
+    let mut expected = vec![users[1].as_str(), users[2].as_str()];
+    expected.sort_unstable();
+    assert_eq!(member_ids, expected);
+    assert!(
+        docs.iter().any(|doc| doc.id == kept_id),
+        "a member present before and after keeps its row"
     );
 
-    // Remove member
-    let removed = remove_scim_group_member(&store, &group.id, TEST_ORG_ID, &user.id)
+    let applied = update_scim_group(&store, &group.id, TEST_ORG_ID, set_group_members(&[]))
         .await
-        .expect("remove_scim_group_member failed");
-    assert!(removed);
-
-    // Group is now empty
-    let members_final = get_scim_group_members(&store, &group.id, TEST_ORG_ID)
-        .await
-        .expect("get members after remove")
-        .unwrap_or_default();
-    assert!(members_final.is_empty());
-
-    // Remove again returns false
-    let removed_again = remove_scim_group_member(&store, &group.id, TEST_ORG_ID, &user.id)
-        .await
-        .expect("remove should not error");
-    assert!(!removed_again);
-}
-
-#[tokio::test]
-async fn test_scim_group_replace_members() {
-    let (store, _audit) = test_db().await;
-    seed_test_org(&store).await;
-
-    let group = create_scim_group(&store, TEST_ORG_ID, "Gamma", None)
-        .await
-        .expect("create group");
-    let user1 = create_scim_user(
-        &store,
-        Some(TEST_ORG_ID),
-        "u1@example.com",
-        None,
-        None,
-        true,
-    )
-    .await
-    .expect("create user1");
-    let user2 = create_scim_user(
-        &store,
-        Some(TEST_ORG_ID),
-        "u2@example.com",
-        None,
-        None,
-        true,
-    )
-    .await
-    .expect("create user2");
-    let user3 = create_scim_user(
-        &store,
-        Some(TEST_ORG_ID),
-        "u3@example.com",
-        None,
-        None,
-        true,
-    )
-    .await
-    .expect("create user3");
-
-    // Start with user1 and user2
-    let _ = replace_scim_group_members(
-        &store,
-        &group.id,
-        TEST_ORG_ID,
-        &[user1.id.clone(), user2.id.clone()],
-    )
-    .await
-    .expect("replace members");
-    let members = get_scim_group_members(&store, &group.id, TEST_ORG_ID)
-        .await
-        .expect("get members")
-        .unwrap_or_default();
-    assert_eq!(members.len(), 2);
-
-    // Replace with just user3
-    let _ = replace_scim_group_members(
-        &store,
-        &group.id,
-        TEST_ORG_ID,
-        std::slice::from_ref(&user3.id),
-    )
-    .await
-    .expect("replace members");
-    let members_after = get_scim_group_members(&store, &group.id, TEST_ORG_ID)
-        .await
-        .expect("get members")
-        .unwrap_or_default();
-    assert_eq!(members_after.len(), 1);
-    assert_eq!(members_after[0].id, user3.id);
-
-    // Replace with empty list
-    let _ = replace_scim_group_members(&store, &group.id, TEST_ORG_ID, &[])
-        .await
-        .expect("replace with empty");
+        .expect("clear members");
+    assert!(applied);
     let empty = get_scim_group_members(&store, &group.id, TEST_ORG_ID)
         .await
         .expect("get members")
@@ -222,14 +143,125 @@ async fn test_scim_group_replace_members() {
     assert!(empty.is_empty());
 }
 
+// RFC 7644 §3.5.2: "A PATCH request, regardless of the number of operations,
+// SHALL be treated as atomic. If a single operation encounters an error
+// condition, the original SCIM resource MUST be restored".
+#[tokio::test]
+async fn test_update_scim_group_rejected_edit_writes_nothing() {
+    let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
+    let user = create_scim_user(
+        &store,
+        Some(TEST_ORG_ID),
+        "keep@example.com",
+        None,
+        None,
+        true,
+    )
+    .await
+    .expect("create user");
+    let group = create_scim_group(
+        &store,
+        TEST_ORG_ID,
+        "Stable",
+        Some("ext"),
+        std::slice::from_ref(&user.id),
+    )
+    .await
+    .expect("create group");
+
+    let result = update_scim_group(&store, &group.id, TEST_ORG_ID, |state| {
+        state.display_name = "Changed".to_string();
+        state.members.clear();
+        Err("rejected after editing")
+    })
+    .await;
+    assert!(matches!(
+        result,
+        Err(ScimGroupUpdateError::Rejected("rejected after editing"))
+    ));
+
+    let stored = get_scim_group(&store, &group.id, TEST_ORG_ID)
+        .await
+        .expect("get group")
+        .expect("group exists");
+    assert_eq!(stored.display_name, "Stable");
+    let members = get_scim_group_members(&store, &group.id, TEST_ORG_ID)
+        .await
+        .expect("get members")
+        .unwrap_or_default();
+    assert_eq!(members.len(), 1, "membership is untouched");
+}
+
+// RFC 7644 §3.5.2.1: adding a value already present "SHALL NOT change the
+// modify timestamp of the resource".
+#[tokio::test]
+async fn test_update_scim_group_without_changes_keeps_last_modified() {
+    let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
+    let user = create_scim_user(
+        &store,
+        Some(TEST_ORG_ID),
+        "same@example.com",
+        None,
+        None,
+        true,
+    )
+    .await
+    .expect("create user");
+    let group = create_scim_group(
+        &store,
+        TEST_ORG_ID,
+        "Same",
+        None,
+        std::slice::from_ref(&user.id),
+    )
+    .await
+    .expect("create group");
+
+    let applied = update_scim_group(&store, &group.id, TEST_ORG_ID, |state| {
+        state.members.insert(user.id.clone());
+        Ok::<(), std::convert::Infallible>(())
+    })
+    .await
+    .expect("no-op update");
+    assert!(applied);
+
+    let stored = get_scim_group(&store, &group.id, TEST_ORG_ID)
+        .await
+        .expect("get group")
+        .expect("group exists");
+    assert_eq!(stored.updated_at, group.updated_at);
+}
+
+#[tokio::test]
+async fn test_create_scim_group_failed_member_insert_creates_nothing() {
+    // The group and its members commit together: a member id the store
+    // rejects must not leave a group behind for a retried POST to duplicate.
+    let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
+
+    let result = create_scim_group(
+        &store,
+        TEST_ORG_ID,
+        "Orphan",
+        None,
+        &["bad\u{0}member".to_string()],
+    )
+    .await;
+    assert!(result.is_err());
+
+    let (groups, total) = list_scim_groups(&store, TEST_ORG_ID, None, 1, 100)
+        .await
+        .expect("list groups");
+    assert_eq!(total, 0, "no group was created: {groups:?}");
+}
+
 #[tokio::test]
 async fn test_scim_group_delete_cascades_members() {
     let (store, _audit) = test_db().await;
     seed_test_org(&store).await;
 
-    let group = create_scim_group(&store, TEST_ORG_ID, "ToBeCascaded", None)
-        .await
-        .expect("create group");
     let user = create_scim_user(
         &store,
         Some(TEST_ORG_ID),
@@ -240,10 +272,15 @@ async fn test_scim_group_delete_cascades_members() {
     )
     .await
     .expect("create user");
-
-    let _ = add_scim_group_member(&store, &group.id, TEST_ORG_ID, &user.id)
-        .await
-        .expect("add member");
+    let group = create_scim_group(
+        &store,
+        TEST_ORG_ID,
+        "ToBeCascaded",
+        None,
+        std::slice::from_ref(&user.id),
+    )
+    .await
+    .expect("create group");
 
     // Delete the group
     let _ = delete_scim_group(&store, &group.id, TEST_ORG_ID)
@@ -268,7 +305,7 @@ async fn test_scim_filter_group_external_id_co_is_case_sensitive() {
     let (store, _audit) = test_db().await;
     seed_test_org(&store).await;
 
-    create_scim_group(&store, TEST_ORG_ID, "Eng", Some("GroupCase-ID-1"))
+    create_scim_group(&store, TEST_ORG_ID, "Eng", Some("GroupCase-ID-1"), &[])
         .await
         .expect("Failed to create group");
 
@@ -276,7 +313,7 @@ async fn test_scim_filter_group_external_id_co_is_case_sensitive() {
     let (groups, total) = list_scim_groups(
         &store,
         TEST_ORG_ID,
-        Some(r#"externalId co "GroupCase""#),
+        Some(&group_filter(r#"externalId co "GroupCase""#)),
         1,
         100,
     )
@@ -290,7 +327,7 @@ async fn test_scim_filter_group_external_id_co_is_case_sensitive() {
     let (groups, total) = list_scim_groups(
         &store,
         TEST_ORG_ID,
-        Some(r#"externalId co "groupcase""#),
+        Some(&group_filter(r#"externalId co "groupcase""#)),
         1,
         100,
     )
@@ -310,14 +347,14 @@ async fn test_scim_filter_group_display_name_co_remains_case_insensitive() {
     let (store, _audit) = test_db().await;
     seed_test_org(&store).await;
 
-    create_scim_group(&store, TEST_ORG_ID, "Engineering", None)
+    create_scim_group(&store, TEST_ORG_ID, "Engineering", None, &[])
         .await
         .expect("Failed to create group");
 
     let (groups, total) = list_scim_groups(
         &store,
         TEST_ORG_ID,
-        Some(r#"displayName co "ENGINEER""#),
+        Some(&group_filter(r#"displayName co "ENGINEER""#)),
         1,
         100,
     )
@@ -343,7 +380,7 @@ async fn test_scim_filter_group_display_name_eq_is_case_insensitive() {
     let (store, _audit) = test_db().await;
     seed_test_org(&store).await;
 
-    create_scim_group(&store, TEST_ORG_ID, "Engineering", None)
+    create_scim_group(&store, TEST_ORG_ID, "Engineering", None, &[])
         .await
         .expect("Failed to create group");
 
@@ -351,7 +388,7 @@ async fn test_scim_filter_group_display_name_eq_is_case_insensitive() {
     let (groups, total) = list_scim_groups(
         &store,
         TEST_ORG_ID,
-        Some(r#"displayName eq "engineering""#),
+        Some(&group_filter(r#"displayName eq "engineering""#)),
         1,
         100,
     )
@@ -370,7 +407,7 @@ async fn test_scim_filter_group_display_name_eq_matches_exact_and_uppercase() {
     let (store, _audit) = test_db().await;
     seed_test_org(&store).await;
 
-    create_scim_group(&store, TEST_ORG_ID, "Engineering", None)
+    create_scim_group(&store, TEST_ORG_ID, "Engineering", None, &[])
         .await
         .expect("Failed to create group");
 
@@ -378,7 +415,7 @@ async fn test_scim_filter_group_display_name_eq_matches_exact_and_uppercase() {
     let (_groups, total) = list_scim_groups(
         &store,
         TEST_ORG_ID,
-        Some(r#"displayName eq "Engineering""#),
+        Some(&group_filter(r#"displayName eq "Engineering""#)),
         1,
         100,
     )
@@ -390,7 +427,7 @@ async fn test_scim_filter_group_display_name_eq_matches_exact_and_uppercase() {
     let (_groups, total) = list_scim_groups(
         &store,
         TEST_ORG_ID,
-        Some(r#"displayName eq "ENGINEERING""#),
+        Some(&group_filter(r#"displayName eq "ENGINEERING""#)),
         1,
         100,
     )
@@ -416,12 +453,12 @@ async fn test_scim_filter_group_display_name_eq_is_indexed_not_rescanned() {
     let (store, _audit) = test_db().await;
     seed_test_org(&store).await;
 
-    let group = create_scim_group(&store, TEST_ORG_ID, "Engineering", None)
+    let group = create_scim_group(&store, TEST_ORG_ID, "Engineering", None, &[])
         .await
         .expect("Failed to create group");
 
     // Simulate a pre-normalization index row.
-    let crate::db::pool::Pool::Sqlite(pool) = store.pool() else {
+    let Pool::Sqlite(pool) = store.pool() else {
         panic!("in-memory test DB must be SQLite");
     };
     sqlx::query(
@@ -437,7 +474,7 @@ async fn test_scim_filter_group_display_name_eq_is_indexed_not_rescanned() {
     let (groups, total) = list_scim_groups(
         &store,
         TEST_ORG_ID,
-        Some(r#"displayName eq "engineering""#),
+        Some(&group_filter(r#"displayName eq "engineering""#)),
         1,
         100,
     )
@@ -451,16 +488,23 @@ async fn test_scim_filter_group_display_name_eq_is_indexed_not_rescanned() {
     );
     assert!(groups.is_empty());
 
-    // Re-writing the group re-stores the index lowercased, and it is findable
-    // again — which is what makes the gap self-healing rather than permanent.
-    update_scim_group(&store, &group.id, TEST_ORG_ID, "Engineering", None)
-        .await
-        .expect("Failed to update group");
+    // Any change re-writes the group and re-stores the index lowercased, so it
+    // is findable again — which is what makes the gap self-healing rather
+    // than permanent. An update that changes nothing writes nothing (RFC 7644
+    // §3.5.2.1), so the repair waits for a real change.
+    update_scim_group(
+        &store,
+        &group.id,
+        TEST_ORG_ID,
+        set_group_attributes("Engineering", Some("ext-changed")),
+    )
+    .await
+    .expect("Failed to update group");
 
     let (groups, total) = list_scim_groups(
         &store,
         TEST_ORG_ID,
-        Some(r#"displayName eq "engineering""#),
+        Some(&group_filter(r#"displayName eq "engineering""#)),
         1,
         100,
     )
@@ -478,7 +522,7 @@ async fn test_scim_filter_group_external_id_eq_is_case_sensitive() {
     let (store, _audit) = test_db().await;
     seed_test_org(&store).await;
 
-    create_scim_group(&store, TEST_ORG_ID, "Eng", Some("Ext-Case-1"))
+    create_scim_group(&store, TEST_ORG_ID, "Eng", Some("Ext-Case-1"), &[])
         .await
         .expect("Failed to create group");
 
@@ -486,7 +530,7 @@ async fn test_scim_filter_group_external_id_eq_is_case_sensitive() {
     let (_groups, total) = list_scim_groups(
         &store,
         TEST_ORG_ID,
-        Some(r#"externalId eq "Ext-Case-1""#),
+        Some(&group_filter(r#"externalId eq "Ext-Case-1""#)),
         1,
         100,
     )
@@ -498,7 +542,7 @@ async fn test_scim_filter_group_external_id_eq_is_case_sensitive() {
     let (_groups, total) = list_scim_groups(
         &store,
         TEST_ORG_ID,
-        Some(r#"externalId eq "ext-case-1""#),
+        Some(&group_filter(r#"externalId eq "ext-case-1""#)),
         1,
         100,
     )
@@ -514,27 +558,26 @@ async fn test_scim_filter_group_external_id_eq_is_case_sensitive() {
 // Concurrent membership addition — duplicate-prevention regression
 // ========================================================================
 
-/// Two concurrent `add_scim_group_member` calls for the same group and user
-/// must produce exactly one membership document, not two.
+/// Two concurrent member adds for the same group and user must produce
+/// exactly one membership document, not two.
 ///
-/// The document ID is derived from `(group_id, user_id)` via
-/// `deterministic_group_member_id`, so concurrent inserts collide on the
-/// `documents` PRIMARY KEY. The losing insert fails with a unique/primary-key
-/// violation, which `is_unique_violation` maps to idempotent success
-/// (`Ok(true)`). A random per-call ID would let both inserts commit and
-/// duplicate the membership.
+/// Concurrent updates collide on the group document's version and the loser
+/// retries against the winner's membership, and the membership document ID is
+/// derived from `(group_id, user_id)`, so no interleaving stores the pair
+/// twice. In-memory SQLite serializes writers, so this is a real-scheduler
+/// smoke test rather than a proof of the version bump.
 ///
 /// Mirrors `test_create_scim_user_concurrent_same_email_produces_one_user`
 /// (`scim_provisioning.rs`). Uses `multi_thread` for defensive OS-level
 /// parallelism.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_add_scim_group_member_concurrent_same_user() {
+async fn test_scim_group_member_add_concurrent_same_user() {
     use crate::db::documents::scim::ScimGroupMemberDoc;
 
     let (store, _audit) = test_db().await;
     seed_test_org(&store).await;
 
-    let group = create_scim_group(&store, TEST_ORG_ID, "RaceGroup", None)
+    let group = create_scim_group(&store, TEST_ORG_ID, "RaceGroup", None, &[])
         .await
         .expect("create_scim_group failed");
     let user = create_scim_user(
@@ -549,14 +592,13 @@ async fn test_add_scim_group_member_concurrent_same_user() {
     .expect("create_scim_user failed");
 
     let (r1, r2) = tokio::join!(
-        add_scim_group_member(&store, &group.id, TEST_ORG_ID, &user.id),
-        add_scim_group_member(&store, &group.id, TEST_ORG_ID, &user.id),
+        update_scim_group(&store, &group.id, TEST_ORG_ID, add_group_member(&user.id)),
+        update_scim_group(&store, &group.id, TEST_ORG_ID, add_group_member(&user.id)),
     );
 
-    // Both calls must succeed — the operation is idempotent, so the unique
-    // violation on the losing insert is mapped to Ok(true).
-    let added1 = r1.expect("first add_scim_group_member should not error");
-    let added2 = r2.expect("second add_scim_group_member should not error");
+    // Both calls must succeed: the second finds the member already present.
+    let added1 = r1.expect("first the member add should not error");
+    let added2 = r2.expect("second the member add should not error");
     assert!(
         added1,
         "first add should report success for an existing group"
@@ -594,23 +636,21 @@ async fn test_add_scim_group_member_concurrent_same_user() {
     assert_eq!(members[0].id, user.id);
 }
 
-/// High-contention variant: 20 concurrent `add_scim_group_member` calls for
-/// the same group and user must still produce exactly one membership
-/// document. Every call returns `Ok(true)` — the winner inserts, and every
-/// loser's `insert_with_id` fails with a unique violation that is mapped to
-/// idempotent success.
+/// High-contention variant: 20 concurrent member adds for the same group and
+/// user must still produce exactly one membership document, and every call
+/// returns `Ok(true)`.
 ///
 /// Mirrors the 20-task burst in
 /// `test_create_scim_user_concurrent_same_email_produces_one_user`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_add_scim_group_member_concurrent_burst_same_user() {
+async fn test_scim_group_member_add_concurrent_burst_same_user() {
     use crate::db::documents::scim::ScimGroupMemberDoc;
 
     let (store, _audit) = test_db().await;
     seed_test_org(&store).await;
     let store = std::sync::Arc::new(store);
 
-    let group = create_scim_group(&store, TEST_ORG_ID, "BurstGroup", None)
+    let group = create_scim_group(&store, TEST_ORG_ID, "BurstGroup", None, &[])
         .await
         .expect("create_scim_group failed");
     let user = create_scim_user(
@@ -631,24 +671,22 @@ async fn test_add_scim_group_member_concurrent_burst_same_user() {
         let group_id = group.id.clone();
         let user_id = user.id.clone();
         handles.push(tokio::spawn(async move {
-            add_scim_group_member(&s, &group_id, TEST_ORG_ID, &user_id).await
+            update_scim_group(&s, &group_id, TEST_ORG_ID, add_group_member(&user_id)).await
         }));
     }
 
     let mut successes = 0u32;
     for handle in handles {
         let result = handle.await.expect("task should not panic");
-        let ok = result.expect("add_scim_group_member should not error for an existing group");
+        let ok = result.expect("the member add should not error for an existing group");
         assert!(
             ok,
-            "add_scim_group_member should return Ok(true) for an existing group"
+            "the member add should return Ok(true) for an existing group"
         );
         successes += 1;
     }
 
-    // Every concurrent call returns Ok(true) — the operation is idempotent,
-    // so both the winning insert and every losing unique-violation are mapped
-    // to success.
+    // Every concurrent call returns Ok(true): the add is idempotent.
     assert_eq!(
         successes, num_tasks,
         "every concurrent add should return Ok(true); got {successes}"
@@ -668,7 +706,7 @@ async fn test_add_scim_group_member_concurrent_burst_same_user() {
 
     // Verify idempotent add after the burst still returns Ok(true) without
     // creating a duplicate.
-    let added = add_scim_group_member(&store, &group.id, TEST_ORG_ID, &user.id)
+    let added = update_scim_group(&store, &group.id, TEST_ORG_ID, add_group_member(&user.id))
         .await
         .expect("post-burst idempotent add");
     assert!(added, "idempotent add after burst should return Ok(true)");
@@ -684,18 +722,19 @@ async fn test_add_scim_group_member_concurrent_burst_same_user() {
     );
 }
 
-/// Concurrent adds for *different* users in the same group must all succeed
-/// independently — the deterministic ID must not produce false collisions
-/// between distinct `(group_id, user_id)` pairs.
+/// Concurrent adds for *different* users in the same group must all land:
+/// the loser of a version collision retries against the winner's membership
+/// rather than overwriting it, and the deterministic ID produces no false
+/// collisions between distinct `(group_id, user_id)` pairs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_add_scim_group_member_concurrent_different_users() {
+async fn test_scim_group_member_add_concurrent_different_users() {
     use crate::db::documents::scim::ScimGroupMemberDoc;
 
     let (store, _audit) = test_db().await;
     seed_test_org(&store).await;
     let store = std::sync::Arc::new(store);
 
-    let group = create_scim_group(&store, TEST_ORG_ID, "DistinctGroup", None)
+    let group = create_scim_group(&store, TEST_ORG_ID, "DistinctGroup", None, &[])
         .await
         .expect("create_scim_group failed");
 
@@ -717,14 +756,14 @@ async fn test_add_scim_group_member_concurrent_different_users() {
         let group_id = group.id.clone();
         let user_id = user.id.clone();
         handles.push(tokio::spawn(async move {
-            add_scim_group_member(&s, &group_id, TEST_ORG_ID, &user_id).await
+            update_scim_group(&s, &group_id, TEST_ORG_ID, add_group_member(&user_id)).await
         }));
     }
 
     let mut successes = 0u32;
     for handle in handles {
         let result = handle.await.expect("task should not panic");
-        let ok = result.expect("add_scim_group_member should not error");
+        let ok = result.expect("the member add should not error");
         assert!(ok, "add should succeed for a distinct user");
         successes += 1;
     }
@@ -765,7 +804,7 @@ async fn test_add_scim_group_member_concurrent_different_users() {
 /// Read the raw `display_name` index value for a group directly from
 /// `document_indexes` (SQLite in-memory, plaintext crypto).
 async fn read_display_name_index(store: &DocumentStore, group_id: &str) -> String {
-    let crate::db::pool::Pool::Sqlite(p) = store.pool() else {
+    let Pool::Sqlite(p) = store.pool() else {
         panic!("expected SQLite pool");
     };
     let row: (String,) =
@@ -786,7 +825,7 @@ async fn test_scim_group_display_name_index_is_lowercased() {
     let (store, _audit) = test_db().await;
     seed_test_org(&store).await;
 
-    let group = create_scim_group(&store, TEST_ORG_ID, "Engineering", None)
+    let group = create_scim_group(&store, TEST_ORG_ID, "Engineering", None, &[])
         .await
         .expect("create group");
 

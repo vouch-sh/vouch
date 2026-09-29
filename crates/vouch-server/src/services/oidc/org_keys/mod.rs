@@ -209,6 +209,10 @@ async fn generate_key_material(alg: JwsAlgorithm) -> Result<KeyMaterial> {
 /// first use so relying-party caches are warm long before any rotate).
 /// Idempotent: the deterministic ID makes a concurrent creation or retry
 /// collide on the primary key rather than insert a duplicate.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "stamps a newly created signing key"
+)]
 async fn ensure_key(
     store: &DocumentStore,
     org_id: &str,
@@ -329,7 +333,9 @@ pub(super) mod test_support {
     use super::Operator;
     use crate::crypto::alg::JwsAlgorithm;
     use crate::db::documents::organization::SigningKeyState;
-    use crate::db::{OrgSigningKeyDoc, Organization, claim_subdomain, deterministic_org_key_id};
+    use crate::db::{
+        self, OrgSigningKeyDoc, Organization, claim_subdomain, deterministic_org_key_id,
+    };
     use crate::test_utils::{create_test_org, test_app_state_encrypted};
 
     /// No operator identity — service-level tests don't exercise audit trails.
@@ -345,7 +351,7 @@ pub(super) mod test_support {
         claim_subdomain(&state.store, &org.id, "acme-com")
             .await
             .unwrap();
-        let org = crate::db::get_organization(&state.store, &org.id)
+        let org = db::get_organization(&state.store, &org.id)
             .await
             .unwrap()
             .unwrap();

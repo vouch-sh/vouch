@@ -335,20 +335,6 @@ impl Arn {
     }
 }
 
-impl std::fmt::Display for Arn {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "arn:{}:{}:{}:{}:{}",
-            self.partition.as_str(),
-            self.service,
-            self.region.as_deref().unwrap_or(""),
-            self.account.as_deref().unwrap_or(""),
-            self.resource,
-        )
-    }
-}
-
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
@@ -497,20 +483,6 @@ mod tests {
     fn test_arn_is_not_iam_role() {
         let arn = Arn::parse("arn:aws:iam::123456789012:user/MyUser").unwrap();
         assert!(!arn.is_iam_role());
-    }
-
-    #[test]
-    fn test_arn_display_roundtrip() {
-        let inputs = [
-            "arn:aws:iam::123456789012:role/MyRole",
-            "arn:aws:s3:::my-bucket",
-            "arn:aws:sns:us-east-1:123456789012:my-topic",
-            "arn:aws-cn:iam::123456789012:role/MyRole",
-        ];
-        for input in &inputs {
-            let arn = Arn::parse(input).unwrap();
-            assert_eq!(arn.to_string(), *input);
-        }
     }
 
     #[test]

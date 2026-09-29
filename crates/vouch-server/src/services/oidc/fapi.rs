@@ -208,7 +208,7 @@ mod tests {
     )]
     use super::*;
     use crate::crypto::alg::JwsAlgorithm;
-    use crate::db::{AccessScope, FapiProfile, OAuthClientType};
+    use crate::db::{self, AccessScope, ClientKeys, FapiProfile, OAuthClientType};
 
     /// Create a minimal FAPI 2.0 confidential client for testing.
     fn fapi_client() -> OAuthClient {
@@ -228,9 +228,8 @@ mod tests {
             access_scope: AccessScope::Organization,
             org_id: None,
             resource_uris: vec![],
-            keys: Some(crate::db::ClientKeys::Inline(
-                crate::db::parse_jwks_set(&serde_json::json!({"keys": []}))
-                    .expect("valid test JWKS"),
+            keys: Some(ClientKeys::Inline(
+                db::parse_jwks_set(&serde_json::json!({"keys": []})).expect("valid test JWKS"),
             )),
             token_endpoint_auth_method: TokenEndpointAuthMethod::PrivateKeyJwt,
             request_object_signing_alg: None,

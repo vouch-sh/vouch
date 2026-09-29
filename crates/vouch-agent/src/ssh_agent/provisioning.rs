@@ -7,9 +7,11 @@
 //! `vouch credential ssh` path and pushed to the agent over IPC. The agent only
 //! serves what it has in memory or can reload from disk.
 
+use crate::audit::{self, AuditEvent};
 use crate::error::{AgentError, Result};
 use std::sync::Arc;
 use tracing::{debug, info};
+use vouch_common::paths;
 
 use super::DEFAULT_KEY_NAME;
 use super::credentials::SshCredentials;
@@ -52,7 +54,7 @@ pub(super) async fn handle_sign_request(buf: &[u8], state: &Arc<AgentState>) -> 
     // Sign the data (returns encoded signature blob)
     let sig_blob = sign_data(&creds.private_key, &data)?;
 
-    crate::audit::log_event(crate::audit::AuditEvent::SshSigning);
+    audit::log_event(AuditEvent::SshSigning);
 
     build_sign_response(&sig_blob)
 }
@@ -62,13 +64,16 @@ pub(super) async fn handle_sign_request(buf: &[u8], state: &Arc<AgentState>) -> 
 /// Only loads if the agent has a valid session (prevents stale certs after
 /// logout). `vouch logout` leaves the on-disk key and certificate in place, so
 /// without this gate a cleared session could be undone by the next signature
-/// request.
+/// request. The certificate must also have been issued to that session's user
+/// and server: a different user's login leaves the previous user's
+/// certificate on disk until it is re-issued, and
+/// [`AgentState::store_ssh_credentials`] refuses it.
 async fn try_load_from_disk(state: &Arc<AgentState>) -> Option<SshCredentials> {
     // Require a valid agent session to prevent serving stale certs
     state.get_session().await?;
 
     // Check for default key and cert files on disk
-    let home = std::env::home_dir()?;
+    let home = paths::home_dir()?;
     let ssh_dir = home.join(".ssh");
     let key_path = ssh_dir.join(DEFAULT_KEY_NAME);
     let cert_path = ssh_dir.join(format!("{DEFAULT_KEY_NAME}-cert.pub"));
@@ -93,15 +98,15 @@ async fn try_load_from_disk(state: &Arc<AgentState>) -> Option<SshCredentials> {
         return None;
     }
 
-    info!("Lazy-loaded SSH credentials from disk");
-
-    // Re-check the session under the same call that stores: the filesystem work
-    // above is slow enough for a concurrent logout to land in between, and
-    // storing afterwards would resurrect credentials that logout just cleared.
-    let server_url = state.get_ssh_server_url().await;
-    if !state.store_ssh_credentials(creds.clone(), server_url).await {
+    // Check the session and the certificate's owner under the same call that
+    // stores: the filesystem work above is slow enough for a concurrent logout
+    // or re-login to land in between, and storing afterwards would resurrect
+    // credentials that logout just cleared.
+    if let Err(refusal) = state.store_ssh_credentials(creds.clone()).await {
+        debug!("Not lazy-loading SSH credentials from disk: {refusal:?}");
         return None;
     }
 
+    info!("Lazy-loaded SSH credentials from disk");
     Some(creds)
 }

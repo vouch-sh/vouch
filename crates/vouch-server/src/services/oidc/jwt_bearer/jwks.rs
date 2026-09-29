@@ -5,17 +5,24 @@
 //! with database-backed caching for multi-instance deployments.
 
 use super::validate::JwtAssertionHeader;
-use crate::crypto::alg::JwsAlgorithm;
 use crate::db::documents::jwks_cache::JwksCacheDoc;
 use crate::db::store::DocumentStore;
-use crate::db::{JwkEntry, JwkSet, KeyType};
+use crate::db::{self, JwkSet, UnusableJwk};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
+use crate::infra::jwks;
+use crate::infra::jwks::JwksOrigin;
 
 /// Resolve the JWKS for a client — from an inline key set or a fetched
 /// `jwks_uri`. The two are exclusive (RFC 7591 §2), so there is no precedence
 /// between them: at most one is ever `Some`.
 ///
 /// For `jwks_uri` clients, uses database-backed caching with stale-while-revalidate.
+///
+/// Also returns [`JwksOrigin`] so the caller's kid-miss force-refresh can gate a
+/// second fetch on whether resolution already fetched in this request — the
+/// same within-request bound the mTLS self-signed path applies
+/// (`services::oidc::token`). Inline keys never fetch, so they report
+/// [`JwksOrigin::NoFetch`].
 pub async fn resolve_client_jwks(
     store: &DocumentStore,
     client_id: &str,
@@ -24,10 +31,10 @@ pub async fn resolve_client_jwks(
     jwks_cache: Option<&JwksCacheDoc>,
     allow_loopback: bool,
     http_client: &reqwest::Client,
-) -> ServiceResult<JwkSet> {
+) -> ServiceResult<(JwkSet, JwksOrigin)> {
     // An inline key set is already parsed — it arrives typed and needs no fetch.
     if let Some(jwks) = jwks {
-        return Ok(jwks.clone());
+        return Ok((jwks.clone(), JwksOrigin::NoFetch));
     }
 
     // JWKS URI with caching
@@ -60,25 +67,24 @@ async fn resolve_jwks_uri(
     cached: Option<&JwksCacheDoc>,
     allow_loopback: bool,
     http_client: &reqwest::Client,
-) -> ServiceResult<JwkSet> {
-    // This path doesn't act on whether the resolution fetched — that
-    // distinction only matters to the mTLS force-refetch retry gate
-    // (services/oidc/token.rs).
-    let (value, _origin) = crate::infra::jwks::resolve_cached_jwks(
-        store,
-        parent_id,
-        uri,
-        cached,
-        allow_loopback,
-        http_client,
-    )
-    .await?;
-    parse_jwks_value(&value)
+) -> ServiceResult<(JwkSet, JwksOrigin)> {
+    // Keep `origin` so the RFC 7523 kid-miss force-refresh path can gate a
+    // second fetch on it — the same within-request bound the mTLS self-signed
+    // path applies (`services::oidc::token`). With the compressed
+    // `REQUEST_TIMEOUT` (10s) and a 5s per-fetch cap, a second fetch in this
+    // request could race the router's innermost `TimeoutLayer` and surface as
+    // a bare 408 instead of the structured 401 `invalid_client` this path
+    // returns. Resolution already fetched → the kid is missing from a fresh
+    // set → fetching again would only repeat it.
+    let (value, origin) =
+        jwks::resolve_cached_jwks(store, parent_id, uri, cached, allow_loopback, http_client)
+            .await?;
+    parse_jwks_value(&value).map(|jwks| (jwks, origin))
 }
 
 /// Parse a JWKS from a `serde_json::Value`.
 fn parse_jwks_value(value: &serde_json::Value) -> ServiceResult<JwkSet> {
-    crate::db::parse_jwks_set(value).map_err(|e| {
+    db::parse_jwks_set(value).map_err(|e| {
         tracing::debug!("Failed to parse JWKS value: {e}");
         ServiceError::oauth(OAuthErrorCode::InvalidClient, "Invalid JWKS format")
     })
@@ -86,68 +92,38 @@ fn parse_jwks_value(value: &serde_json::Value) -> ServiceResult<JwkSet> {
 
 /// Find a matching key in a JWKS for the given JWT header.
 ///
-/// Matching strategy:
-/// 1. If `kid` is present in the header, match by `kid`.
-/// 2. Otherwise, match by algorithm/key type.
+/// The candidates are the keys whose `kid` equals the header's, or every key
+/// when the header has none. Each is tried with
+/// [`JwkEntry::decoding_key_for`], the rule write-time checks also use, and
+/// the first that builds is returned. A candidate that is not selectable for
+/// the algorithm is skipped; one that is selectable but malformed is skipped
+/// too, so an unbuildable key earlier in the set does not mask a usable one
+/// later (RFC 7517 §4.5 makes `kid` uniqueness a SHOULD). When none builds,
+/// the first malformed candidate's reason is returned.
 pub fn find_matching_key(
     jwks: &JwkSet,
     header: &JwtAssertionHeader,
 ) -> ServiceResult<jsonwebtoken::DecodingKey> {
-    // Try matching by kid first
-    if let Some(ref kid) = header.kid {
-        for key in &jwks.keys {
-            if key.kid.as_deref() == Some(kid) {
-                // Enforce the same `use`/`alg` constraints as the algorithm-fallback
-                // path: a key declared for encryption (`use != "sig"`) or a different
-                // algorithm must not be selected for signature verification, even when
-                // its `kid` matches. This mirrors the SAML KeyDescriptor behavior, which
-                // skips encryption-only keys.
-                if let Some(ref use_) = key.use_
-                    && use_ != "sig"
-                {
-                    continue;
-                }
-                if let Some(ref key_alg) = key.alg
-                    && key_alg.as_str() != header.alg.as_str()
-                {
-                    continue;
-                }
-                return build_decoding_key_from_jwk(key, header.alg);
-            }
-        }
-        tracing::debug!("No key with kid '{kid}' found in JWKS");
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidClient,
-            "No matching key found in JWKS",
-        ));
-    }
-
-    // Fall back to matching by algorithm/key type. The kty-per-alg rule is
-    // `KeyType::for_alg`, shared with the write-time usability checks so the
-    // two cannot disagree about which keys are selectable.
-    let expected_kty = KeyType::for_alg(header.alg);
-
+    let mut first_unusable = None;
     for key in &jwks.keys {
-        if key.kty == expected_kty {
-            // If key has an alg field, it must match
-            if let Some(ref key_alg) = key.alg
-                && key_alg.as_str() != header.alg.as_str()
-            {
-                continue;
+        if header.kid.is_some() && key.kid != header.kid {
+            continue;
+        }
+        match key.decoding_key_for(header.alg) {
+            Ok(decoding_key) => return Ok(decoding_key),
+            Err(UnusableJwk::NotSelectable) => {}
+            Err(reason) => {
+                first_unusable.get_or_insert(reason);
             }
-            // If key has a use field, it must be "sig"
-            if let Some(ref use_) = key.use_
-                && use_ != "sig"
-            {
-                continue;
-            }
-            return build_decoding_key_from_jwk(key, header.alg);
         }
     }
-
+    if let Some(ref kid) = header.kid {
+        tracing::debug!("No usable key with kid '{kid}' found in JWKS");
+    }
+    let reason = first_unusable.unwrap_or(UnusableJwk::NotSelectable);
     Err(ServiceError::oauth(
         OAuthErrorCode::InvalidClient,
-        "No matching key found in JWKS",
+        reason.to_string(),
     ))
 }
 
@@ -161,7 +137,7 @@ const JWKS_FORCE_REFRESH_MIN_INTERVAL_SECONDS: i64 = 10;
 /// where a client starts signing with a new key before the server's cache has expired.
 #[expect(
     clippy::too_many_arguments,
-    reason = "store/client/uri/cache/loopback-flag/http-client/jwks/header are all distinct inputs"
+    reason = "store/client/uri/cache/loopback-flag/http-client/jwks/header/origin are all distinct inputs"
 )]
 pub async fn find_matching_key_with_refresh_client(
     store: &DocumentStore,
@@ -173,6 +149,7 @@ pub async fn find_matching_key_with_refresh_client(
     http_client: &reqwest::Client,
     jwks: &JwkSet,
     header: &JwtAssertionHeader,
+    origin: JwksOrigin,
 ) -> ServiceResult<jsonwebtoken::DecodingKey> {
     // Try initial match first
     if let Ok(key) = find_matching_key(jwks, header) {
@@ -183,6 +160,27 @@ pub async fn find_matching_key_with_refresh_client(
     let Some(uri) = jwks_uri else {
         return find_matching_key(jwks, header);
     };
+
+    // Within-request gate: if `resolve_client_jwks` already fetched in this
+    // request (`JwksOrigin::Fetched`), the kid is missing from a freshly
+    // fetched set, so a second `fetch_and_cache` would only repeat it. This
+    // bounds every auth attempt to at most one network fetch — the same gate
+    // the mTLS self-signed path applies at `services::oidc::token`. Under the
+    // 10s `REQUEST_TIMEOUT` with a 5s per-fetch cap, a second fetch here could
+    // race the router's innermost `TimeoutLayer` and surface as a bare 408
+    // instead of the structured 401 `invalid_client` this function returns.
+    //
+    // The cross-request 10s throttle below cannot substitute: the
+    // `jwks_cache` snapshot is loaded once before resolution, so for a
+    // freshly-registered client it is `None` (the `if let Some(cache)` guard
+    // is skipped) and for a stale-cache client it already predates the 10s
+    // window by construction.
+    if matches!(origin, JwksOrigin::Fetched) {
+        tracing::debug!(
+            "Skipping JWKS force-refresh for client {client_id}: JWKS already fetched in this request"
+        );
+        return find_matching_key(jwks, header);
+    }
 
     // Rate-limit: skip force-refresh if cached within the last 10 seconds.
     if let Some(cache) = jwks_cache
@@ -200,9 +198,7 @@ pub async fn find_matching_key_with_refresh_client(
     // has already decided the cache is not to be trusted (the kid is missing
     // from it), so the TTL and the stale fallback must both be bypassed. The
     // 10-second rate limit above is what bounds the fetch rate here.
-    match crate::infra::jwks::fetch_and_cache(store, client_id, uri, allow_loopback, http_client)
-        .await
-    {
+    match jwks::fetch_and_cache(store, client_id, uri, allow_loopback, http_client).await {
         Ok(jwks_value) => match parse_jwks_value(&jwks_value) {
             Ok(fresh_jwks) => find_matching_key(&fresh_jwks, header),
             Err(e) => {
@@ -217,75 +213,6 @@ pub async fn find_matching_key_with_refresh_client(
     }
 }
 
-/// Build a `DecodingKey` from a JWK entry.
-fn build_decoding_key_from_jwk(
-    key: &JwkEntry,
-    alg: JwsAlgorithm,
-) -> ServiceResult<jsonwebtoken::DecodingKey> {
-    match (&key.kty, alg) {
-        (KeyType::Ec, JwsAlgorithm::Es256) => {
-            let x = key.x.as_deref().ok_or_else(|| {
-                ServiceError::oauth(OAuthErrorCode::InvalidClient, "EC key missing x component")
-            })?;
-            let y = key.y.as_deref().ok_or_else(|| {
-                ServiceError::oauth(OAuthErrorCode::InvalidClient, "EC key missing y component")
-            })?;
-            jsonwebtoken::DecodingKey::from_ec_components(x, y).map_err(|e| {
-                tracing::debug!("Invalid EC key in JWKS: {e}");
-                ServiceError::oauth(OAuthErrorCode::InvalidClient, "Invalid key in JWKS")
-            })
-        }
-        (KeyType::Rsa, JwsAlgorithm::Rs256 | JwsAlgorithm::Ps256) => {
-            let n = key.n.as_deref().ok_or_else(|| {
-                ServiceError::oauth(OAuthErrorCode::InvalidClient, "RSA key missing n component")
-            })?;
-            let e = key.e.as_deref().ok_or_else(|| {
-                ServiceError::oauth(OAuthErrorCode::InvalidClient, "RSA key missing e component")
-            })?;
-            jsonwebtoken::DecodingKey::from_rsa_components(n, e).map_err(|e| {
-                tracing::debug!("Invalid RSA key in JWKS: {e}");
-                ServiceError::oauth(OAuthErrorCode::InvalidClient, "Invalid key in JWKS")
-            })
-        }
-        (KeyType::Okp, JwsAlgorithm::EdDsa) => {
-            let x = key.x.as_deref().ok_or_else(|| {
-                ServiceError::oauth(OAuthErrorCode::InvalidClient, "OKP key missing x component")
-            })?;
-            let crv = key.crv.as_deref().ok_or_else(|| {
-                ServiceError::oauth(
-                    OAuthErrorCode::InvalidClient,
-                    "OKP key missing crv component",
-                )
-            })?;
-            if crv != "Ed25519" {
-                return Err(ServiceError::oauth(
-                    OAuthErrorCode::InvalidClient,
-                    "EdDSA requires OKP key with Ed25519 curve",
-                ));
-            }
-            jsonwebtoken::DecodingKey::from_ed_components(x).map_err(|e| {
-                tracing::debug!("Invalid Ed25519 key in JWKS: {e}");
-                ServiceError::oauth(OAuthErrorCode::InvalidClient, "Invalid key in JWKS")
-            })
-        }
-        // Known kty, wrong alg for it. Kept as a separate arm from the
-        // `Other` case below rather than merged, so an unrecognized kty is
-        // a deliberate, visible decision here — both produce the same
-        // error today, but the split is what the "Other" case means, not
-        // an accident of a shared wildcard.
-        (KeyType::Ec | KeyType::Rsa | KeyType::Okp, _) => Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidClient,
-            "No matching key found in JWKS",
-        )),
-        // Unrecognized kty (RFC 7517 §4.1's registry is open — see
-        // `KeyType`): never selectable, regardless of alg.
-        (KeyType::Other(_), _) => Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidClient,
-            "No matching key found in JWKS",
-        )),
-    }
-}
-
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
@@ -294,6 +221,10 @@ fn build_decoding_key_from_jwk(
 )]
 mod tests {
     use super::*;
+    use crate::crypto::alg::JwsAlgorithm;
+    use crate::crypto::jwk::EcJwk;
+    use crate::db::{JwkEntry, KeyType};
+    use crate::test_utils;
     use base64::Engine as _;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
@@ -346,6 +277,23 @@ mod tests {
             n: Some(RSA_N.to_string()),
             e: Some(RSA_E.to_string()),
             x5c: None,
+        }
+    }
+
+    /// An RSA key with no `n`/`e` components — metadata-complete (right `kty`,
+    /// absent `use`/`alg`) but unbuildable. `is_usable_for` does not check
+    /// component presence for RSA, so this passes write-time validation and
+    /// reaches the runtime matcher, reproducing the production scenario a
+    /// single malformed key ahead of a valid one creates.
+    fn malformed_rsa_jwk_entry(
+        kid: Option<&str>,
+        alg: Option<&str>,
+        use_: Option<&str>,
+    ) -> JwkEntry {
+        JwkEntry {
+            n: None,
+            e: None,
+            ..rsa_jwk_entry(kid, alg, use_)
         }
     }
 
@@ -545,7 +493,7 @@ mod tests {
         };
         let hdr = header(JwsAlgorithm::Es256, Some("rsa-key"));
 
-        // kid match causes build_decoding_key_from_jwk("RSA", "ES256") which is
+        // kid match causes JwkEntry::decoding_key_for("RSA", "ES256") which is
         // an unsupported combination and returns an error.
         let result = find_matching_key(&jwks, &hdr);
         assert!(
@@ -632,14 +580,123 @@ mod tests {
     }
 
     // =======================================================================
-    // build_decoding_key_from_jwk tests
+    // find_matching_key: skip unbuildable candidates (short-circuit fix)
+    //
+    // A key that matches the selector (by `kid` or by `kty`) but cannot be
+    // built into a `DecodingKey` — wrong `kty` for the algorithm, or
+    // missing/invalid `x`/`y`/`n`/`e`/`crv` components — is "not usable for
+    // this assertion," the same category as the `use`/`alg` metadata
+    // mismatches the loops already `continue` past. The search must skip it
+    // and try later candidates, returning an error only when none are usable.
+    // =======================================================================
+
+    // RFC 7517 §4: a `kty`-matched key that cannot be built is skipped, and a
+    // later key of the same `kty` satisfies the assertion. The algorithm
+    // fallback is reached whenever the JWS header carries no `kid`, so a
+    // single malformed key ahead of a valid one is reachable without any
+    // duplicate-`kid` precondition.
+    #[test]
+    fn test_find_matching_key_alg_fallback_skips_malformed_rsa() {
+        let jwks = JwkSet {
+            keys: vec![
+                malformed_rsa_jwk_entry(None, None, None), // kty=Rsa, missing n/e
+                rsa_jwk_entry(None, None, None),           // valid RSA
+            ],
+        };
+        let hdr = header(JwsAlgorithm::Rs256, None);
+
+        let result = find_matching_key(&jwks, &hdr);
+        assert!(
+            result.is_ok(),
+            "should skip the malformed first key and build the valid RSA key"
+        );
+    }
+
+    // RFC 7517 §4.5 makes `kid` uniqueness a SHOULD, not a MUST, and the
+    // write-time gates do not reject duplicate `kid`s. When two keys share a
+    // `kid` and the first is the wrong `kty` for the header's algorithm (RSA
+    // vs an ES256 header — the wrong-`kty`-for-`alg` arm of
+    // `JwkEntry::decoding_key_for`), the search must skip it and use the
+    // later, buildable sibling carrying the same `kid`.
+    #[test]
+    fn test_find_matching_key_kid_match_skips_unbuildable_sibling() {
+        // First key: RSA with kid="dup", wrong kty for ES256.
+        // Second key: EC with kid="dup", valid for ES256.
+        let jwks = JwkSet {
+            keys: vec![
+                rsa_jwk_entry(Some("dup"), None, None),
+                ec_jwk_entry(Some("dup"), None, None),
+            ],
+        };
+        let hdr = header(JwsAlgorithm::Es256, Some("dup"));
+
+        let result = find_matching_key(&jwks, &hdr);
+        assert!(
+            result.is_ok(),
+            "should skip the unbuildable RSA key and build the valid EC sibling"
+        );
+    }
+
+    // RFC 7517 §4: a single algorithm-fallback candidate that is unbuildable
+    // reports the build error (not the generic "no matching key"), matching
+    // the pre-fix behavior for a one-key set so error reporting is unchanged.
+    #[test]
+    fn test_find_matching_key_alg_fallback_single_unbuildable_returns_build_error() {
+        let jwks = JwkSet {
+            keys: vec![malformed_rsa_jwk_entry(None, None, None)],
+        };
+        let hdr = header(JwsAlgorithm::Rs256, None);
+
+        let err = find_matching_key(&jwks, &hdr).unwrap_err();
+        assert!(
+            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
+        );
+        assert!(
+            matches!(&err, ServiceError::OAuth { description, .. } if description == "RSA key missing n component")
+        );
+    }
+
+    // RFC 7517 §4: when every algorithm-fallback candidate is unbuildable,
+    // the FIRST candidate's build error is returned (not the last's, and not
+    // the generic "no matching key" fallback) — keeping error reporting
+    // identical to the single-key case the pre-fix code produced.
+    #[test]
+    fn test_find_matching_key_alg_fallback_all_unbuildable_returns_first_error() {
+        // First: missing `n` -> "RSA key missing n component".
+        // Second: has `n` but missing `e` -> "RSA key missing e component".
+        let first = JwkEntry {
+            n: None,
+            e: None,
+            ..rsa_jwk_entry(None, None, None)
+        };
+        let second = JwkEntry {
+            e: None,
+            ..rsa_jwk_entry(None, None, None)
+        };
+        let jwks = JwkSet {
+            keys: vec![first, second],
+        };
+        let hdr = header(JwsAlgorithm::Rs256, None);
+
+        let err = find_matching_key(&jwks, &hdr).unwrap_err();
+        assert!(
+            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
+        );
+        assert!(
+            matches!(&err, ServiceError::OAuth { description, .. } if description == "RSA key missing n component"),
+            "all-candidates-fail must return the FIRST build error, not the last's"
+        );
+    }
+
+    // =======================================================================
+    // JwkEntry::decoding_key_for tests
     // =======================================================================
 
     // RFC 7517 §4: an EC key is built from its crv, x and y parameters.
     #[test]
     fn test_build_decoding_key_ec_valid() {
         let key = ec_jwk_entry(None, None, None);
-        let result = build_decoding_key_from_jwk(&key, JwsAlgorithm::Es256);
+        let result = key.decoding_key_for(JwsAlgorithm::Es256);
         assert!(result.is_ok(), "should build valid EC decoding key");
     }
 
@@ -656,7 +713,8 @@ mod tests {
         // The full-size coordinates verify the token: the control case, without
         // which a truncated coordinate failing would prove nothing.
         let full = ec_entry_from_coordinates(jwk.x(), jwk.y());
-        let key = build_decoding_key_from_jwk(&full, JwsAlgorithm::Es256)
+        let key = full
+            .decoding_key_for(JwsAlgorithm::Es256)
             .expect("full-size EC key builds");
         assert!(
             verify_es256(&token, &key),
@@ -673,7 +731,8 @@ mod tests {
         );
         let truncated = ec_entry_from_coordinates(&short_x, jwk.y());
 
-        let verified = build_decoding_key_from_jwk(&truncated, JwsAlgorithm::Es256)
+        let verified = truncated
+            .decoding_key_for(JwsAlgorithm::Es256)
             .is_ok_and(|key| verify_es256(&token, &key));
         assert!(
             !verified,
@@ -682,8 +741,8 @@ mod tests {
     }
 
     /// Sign an ES256 JWT and return it with the public JWK that verifies it.
-    async fn es256_token_and_jwk() -> (String, crate::crypto::jwk::EcJwk) {
-        let key = crate::test_utils::make_test_oidc_key();
+    async fn es256_token_and_jwk() -> (String, EcJwk) {
+        let key = test_utils::make_test_oidc_key();
         let token = key
             .sign_jwt(&serde_json::json!({ "sub": "subject", "exp": 9_999_999_999i64 }))
             .await
@@ -717,14 +776,9 @@ mod tests {
         let mut key = ec_jwk_entry(None, None, None);
         key.x = None;
 
-        let result = build_decoding_key_from_jwk(&key, JwsAlgorithm::Es256);
+        let result = key.decoding_key_for(JwsAlgorithm::Es256);
         let err = result.unwrap_err();
-        assert!(
-            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
-        );
-        assert!(
-            matches!(&err, ServiceError::OAuth { description, .. } if description == "EC key missing x component")
-        );
+        assert!(err.to_string() == "EC key missing x component");
     }
 
     // RFC 7518 §6.2.1: "The following member MUST also be present for
@@ -736,14 +790,9 @@ mod tests {
         let mut key = ec_jwk_entry(None, None, None);
         key.y = None;
 
-        let result = build_decoding_key_from_jwk(&key, JwsAlgorithm::Es256);
+        let result = key.decoding_key_for(JwsAlgorithm::Es256);
         let err = result.unwrap_err();
-        assert!(
-            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
-        );
-        assert!(
-            matches!(&err, ServiceError::OAuth { description, .. } if description == "EC key missing y component")
-        );
+        assert!(err.to_string() == "EC key missing y component");
     }
 
     // RFC 7517 §4: EC parameters are base64url encoded.
@@ -752,14 +801,9 @@ mod tests {
         let mut key = ec_jwk_entry(None, None, None);
         key.x = Some("not-valid-base64url!!!".to_string());
 
-        let result = build_decoding_key_from_jwk(&key, JwsAlgorithm::Es256);
+        let result = key.decoding_key_for(JwsAlgorithm::Es256);
         let err = result.unwrap_err();
-        assert!(
-            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
-        );
-        assert!(
-            matches!(&err, ServiceError::OAuth { description, .. } if description == "Invalid key in JWKS")
-        );
+        assert!(err.to_string() == "Invalid key in JWKS");
     }
 
     // RFC 7518 §6.3.1: "The following members MUST be present for RSA public
@@ -767,7 +811,7 @@ mod tests {
     #[test]
     fn test_build_decoding_key_rsa_valid() {
         let key = rsa_jwk_entry(None, None, None);
-        let result = build_decoding_key_from_jwk(&key, JwsAlgorithm::Rs256);
+        let result = key.decoding_key_for(JwsAlgorithm::Rs256);
         assert!(result.is_ok(), "should build valid RSA decoding key");
     }
 
@@ -778,14 +822,9 @@ mod tests {
         let mut key = rsa_jwk_entry(None, None, None);
         key.n = None;
 
-        let result = build_decoding_key_from_jwk(&key, JwsAlgorithm::Rs256);
+        let result = key.decoding_key_for(JwsAlgorithm::Rs256);
         let err = result.unwrap_err();
-        assert!(
-            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
-        );
-        assert!(
-            matches!(&err, ServiceError::OAuth { description, .. } if description == "RSA key missing n component")
-        );
+        assert!(err.to_string() == "RSA key missing n component");
     }
 
     // RFC 7518 §6.3.1.2: the "e" (exponent) parameter is one of the members
@@ -795,14 +834,9 @@ mod tests {
         let mut key = rsa_jwk_entry(None, None, None);
         key.e = None;
 
-        let result = build_decoding_key_from_jwk(&key, JwsAlgorithm::Rs256);
+        let result = key.decoding_key_for(JwsAlgorithm::Rs256);
         let err = result.unwrap_err();
-        assert!(
-            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
-        );
-        assert!(
-            matches!(&err, ServiceError::OAuth { description, .. } if description == "RSA key missing e component")
-        );
+        assert!(err.to_string() == "RSA key missing e component");
     }
 
     // RFC 7517 §4: RSA parameters are base64url encoded.
@@ -811,14 +845,9 @@ mod tests {
         let mut key = rsa_jwk_entry(None, None, None);
         key.n = Some("not-valid!!!".to_string());
 
-        let result = build_decoding_key_from_jwk(&key, JwsAlgorithm::Rs256);
+        let result = key.decoding_key_for(JwsAlgorithm::Rs256);
         let err = result.unwrap_err();
-        assert!(
-            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
-        );
-        assert!(
-            matches!(&err, ServiceError::OAuth { description, .. } if description == "Invalid key in JWKS")
-        );
+        assert!(err.to_string() == "Invalid key in JWKS");
     }
 
     // RFC 7517 §4: kty and alg must agree.
@@ -826,14 +855,9 @@ mod tests {
     fn test_build_decoding_key_unsupported_kty_alg_combination() {
         // EC key with RS256 algorithm — unsupported combination
         let key = ec_jwk_entry(None, None, None);
-        let result = build_decoding_key_from_jwk(&key, JwsAlgorithm::Rs256);
+        let result = key.decoding_key_for(JwsAlgorithm::Rs256);
         let err = result.unwrap_err();
-        assert!(
-            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
-        );
-        assert!(
-            matches!(&err, ServiceError::OAuth { description, .. } if description == "No matching key found in JWKS")
-        );
+        assert!(err.to_string() == "No matching key found in JWKS");
     }
 
     // RFC 7517 §4: kty and alg must agree.
@@ -841,7 +865,7 @@ mod tests {
     fn test_build_decoding_key_rsa_key_with_ec_alg() {
         // RSA key with ES256 algorithm — unsupported combination
         let key = rsa_jwk_entry(None, None, None);
-        let result = build_decoding_key_from_jwk(&key, JwsAlgorithm::Es256);
+        let result = key.decoding_key_for(JwsAlgorithm::Es256);
         assert!(result.is_err());
     }
 
@@ -849,7 +873,7 @@ mod tests {
     #[test]
     fn test_build_decoding_key_algorithm_kty_mismatch() {
         let key = ec_jwk_entry(None, None, None);
-        let result = build_decoding_key_from_jwk(&key, JwsAlgorithm::Rs256);
+        let result = key.decoding_key_for(JwsAlgorithm::Rs256);
         assert!(result.is_err());
     }
 
@@ -876,7 +900,7 @@ mod tests {
     #[test]
     fn test_build_decoding_key_rsa_ps256_valid() {
         let key = rsa_jwk_entry(None, None, None);
-        let result = build_decoding_key_from_jwk(&key, JwsAlgorithm::Ps256);
+        let result = key.decoding_key_for(JwsAlgorithm::Ps256);
         assert!(
             result.is_ok(),
             "PS256 with valid RSA key should produce a decoding key"
@@ -906,7 +930,7 @@ mod tests {
     #[test]
     fn test_build_decoding_key_okp_eddsa_valid() {
         let key = okp_jwk_entry(None, None, None);
-        let result = build_decoding_key_from_jwk(&key, JwsAlgorithm::EdDsa);
+        let result = key.decoding_key_for(JwsAlgorithm::EdDsa);
         assert!(
             result.is_ok(),
             "EdDSA with valid OKP key should produce a decoding key"
@@ -919,14 +943,9 @@ mod tests {
         let mut key = okp_jwk_entry(None, None, None);
         key.x = None;
 
-        let result = build_decoding_key_from_jwk(&key, JwsAlgorithm::EdDsa);
+        let result = key.decoding_key_for(JwsAlgorithm::EdDsa);
         let err = result.unwrap_err();
-        assert!(
-            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
-        );
-        assert!(
-            matches!(&err, ServiceError::OAuth { description, .. } if description == "OKP key missing x component")
-        );
+        assert!(err.to_string() == "OKP key missing x component");
     }
 
     // RFC 7517 §4: an OKP key without crv is incomplete.
@@ -935,14 +954,9 @@ mod tests {
         let mut key = okp_jwk_entry(None, None, None);
         key.crv = None;
 
-        let result = build_decoding_key_from_jwk(&key, JwsAlgorithm::EdDsa);
+        let result = key.decoding_key_for(JwsAlgorithm::EdDsa);
         let err = result.unwrap_err();
-        assert!(
-            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
-        );
-        assert!(
-            matches!(&err, ServiceError::OAuth { description, .. } if description == "OKP key missing crv component")
-        );
+        assert!(err.to_string() == "OKP key missing crv component");
     }
 
     // RFC 7517 §4: crv must name the curve the algorithm uses.
@@ -951,14 +965,9 @@ mod tests {
         let mut key = okp_jwk_entry(None, None, None);
         key.crv = Some("Ed448".to_string());
 
-        let result = build_decoding_key_from_jwk(&key, JwsAlgorithm::EdDsa);
+        let result = key.decoding_key_for(JwsAlgorithm::EdDsa);
         let err = result.unwrap_err();
-        assert!(
-            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
-        );
-        assert!(
-            matches!(&err, ServiceError::OAuth { description, .. } if description == "EdDSA requires OKP key with Ed25519 curve")
-        );
+        assert!(err.to_string() == "EdDSA requires OKP key with Ed25519 curve");
     }
 
     // =======================================================================
@@ -969,7 +978,7 @@ mod tests {
     async fn test_find_matching_key_with_refresh_no_uri_returns_error_on_miss() {
         // When no JWKS URI is configured, a kid-miss must return an error without
         // any network call.
-        let state = crate::test_utils::test_app_state().await;
+        let state = test_utils::test_app_state().await;
         let http_client = reqwest::Client::new();
         let jwks = JwkSet { keys: vec![] }; // empty — no matching key
         let hdr = header(JwsAlgorithm::Es256, Some("unknown-kid"));
@@ -983,6 +992,9 @@ mod tests {
             &http_client,
             &jwks,
             &hdr,
+            // No URI → the function returns before the origin gate, so the
+            // value is irrelevant; `NoFetch` is the honest report.
+            JwksOrigin::NoFetch,
         )
         .await;
 
@@ -997,7 +1009,7 @@ mod tests {
         // When cached_at is within the 10-second rate-limit window, force-refresh
         // is skipped and the original error is returned without any network call.
         use jiff::Timestamp;
-        let state = crate::test_utils::test_app_state().await;
+        let state = test_utils::test_app_state().await;
         let http_client = reqwest::Client::new();
         let jwks = JwkSet { keys: vec![] };
         let hdr = header(JwsAlgorithm::Es256, Some("missing-kid"));
@@ -1018,6 +1030,9 @@ mod tests {
             &http_client,
             &jwks,
             &hdr,
+            // `NoFetch`: the origin gate must NOT fire here, so the 10s
+            // rate-limit gate below it is what this test exercises.
+            JwksOrigin::NoFetch,
         )
         .await;
 
@@ -1034,7 +1049,7 @@ mod tests {
         // enforces HTTPS and wiremock serves HTTP, the fetch fails gracefully and the
         // function falls back to the original error. This test verifies the refresh
         // attempt path is entered (not the rate-limit skip path).
-        let state = crate::test_utils::test_app_state().await;
+        let state = test_utils::test_app_state().await;
         let http_client = reqwest::Client::new();
         let stale_jwks = JwkSet { keys: vec![] };
         let hdr = header(JwsAlgorithm::Es256, Some("fresh-kid"));
@@ -1056,6 +1071,9 @@ mod tests {
             &http_client,
             &stale_jwks,
             &hdr,
+            // `NoFetch`: the origin gate must NOT fire here, so the
+            // force-refresh attempt path below is what this test exercises.
+            JwksOrigin::NoFetch,
         )
         .await;
 
@@ -1063,6 +1081,199 @@ mod tests {
         assert!(
             result.is_err(),
             "kid-miss with stale cache: fallback error expected when fetch fails"
+        );
+    }
+
+    // =======================================================================
+    // resolve_client_jwks — JwksOrigin reporting
+    //
+    // Mirrors the mTLS self-signed path's `resolve_self_signed_jwks` origin
+    // tests in `services::oidc::token::tests`: the `JwksOrigin` a URI-backed
+    // resolution reports is the signal the kid-miss force-refresh gate reads,
+    // so it must be `NoFetch` for a fresh cache and `Fetched` once a fetch is
+    // attempted (success or stale-while-revalidate fallback). An unreachable
+    // `https://` URI stands in for the fetch without a real network server:
+    // the SSRF guard permits loopback in the test default (no TLS configured),
+    // the connection is dialed, and it fails on connection-refused.
+    // =======================================================================
+
+    /// Directly seed a `JwksCacheDoc` at a given age — `db::upsert_jwks_cache`
+    /// always stamps `cached_at: now`, so a TTL-boundary test needs this.
+    /// Mirrors `services::oidc::token::tests::seed_jwks_cache`.
+    async fn seed_jwks_cache(
+        store: &DocumentStore,
+        parent_id: &str,
+        value: serde_json::Value,
+        age_seconds: i64,
+    ) {
+        let doc = JwksCacheDoc {
+            value,
+            cached_at: jiff::Timestamp::now()
+                .checked_sub(jiff::SignedDuration::from_secs(age_seconds))
+                .expect("cache age must be representable"),
+        };
+        store
+            .upsert(&format!("jwks_cache:{parent_id}"), &doc)
+            .await
+            .expect("seed jwks cache");
+    }
+
+    /// A URI the SSRF guard permits (loopback, allowed in the test default
+    /// where TLS is not configured) but nothing listens on, so a fetch
+    /// attempt fails fast on connection-refused.
+    const UNREACHABLE_JWKS_URI: &str = "https://127.0.0.1:1/jwks.json";
+
+    #[tokio::test]
+    async fn resolve_client_jwks_reports_no_fetch_for_inline_jwks() {
+        // An inline key set never fetches, so the RFC 7523 path's kid-miss
+        // gate reads `NoFetch` — moot for inline clients (no URI to
+        // force-refresh from), but the value must be correct so the gate
+        // never misfires for an inline-configured client.
+        let state = test_utils::test_app_state().await;
+        let inline = JwkSet {
+            keys: vec![ec_jwk_entry(Some("inline-kid"), None, None)],
+        };
+
+        let (resolved, origin) = resolve_client_jwks(
+            &state.store,
+            "inline-client",
+            Some(&inline),
+            None,
+            None,
+            false,
+            &state.http_client,
+        )
+        .await
+        .expect("inline jwks must resolve");
+
+        assert_eq!(resolved, inline);
+        assert!(
+            matches!(origin, JwksOrigin::NoFetch),
+            "an inline key set never fetches"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_client_jwks_reports_no_fetch_for_fresh_cache() {
+        // A cache within the 1h TTL is served without a fetch — the signal the
+        // kid-miss force-refresh gate relies on to know it may still fetch
+        // once this request. The unreachable URI would fail if dialed, so a
+        // success proves no fetch happened.
+        let state = test_utils::test_app_state().await;
+        let value = serde_json::json!({"keys":[]});
+        seed_jwks_cache(&state.store, "client-fresh-origin", value.clone(), 60).await;
+        let cached = db::get_jwks_cache(&state.store, "client-fresh-origin")
+            .await
+            .expect("cache read")
+            .expect("cache seeded");
+
+        let (resolved, origin) = resolve_client_jwks(
+            &state.store,
+            "client-fresh-origin",
+            None,
+            Some(UNREACHABLE_JWKS_URI),
+            Some(&cached),
+            true,
+            &state.http_client,
+        )
+        .await
+        .expect("a fresh cache must resolve without a fetch");
+
+        assert_eq!(resolved, db::parse_jwks_set(&value).expect("parse jwks"));
+        assert!(
+            matches!(origin, JwksOrigin::NoFetch),
+            "a cache within the TTL must not fetch"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_client_jwks_reports_fetched_for_stale_cache() {
+        // Past the 1h TTL but within the 24h stale window: resolution attempts
+        // a fetch (fails against the unreachable URI) and falls back to the
+        // stale cache — `JwksOrigin::Fetched`. This is the origin the kid-miss
+        // gate must read to skip a second fetch in the same request.
+        let state = test_utils::test_app_state().await;
+        let value = serde_json::json!({"keys":[]});
+        seed_jwks_cache(&state.store, "client-stale-origin", value.clone(), 7200).await;
+        let cached = db::get_jwks_cache(&state.store, "client-stale-origin")
+            .await
+            .expect("cache read")
+            .expect("cache seeded");
+
+        let (resolved, origin) = resolve_client_jwks(
+            &state.store,
+            "client-stale-origin",
+            None,
+            Some(UNREACHABLE_JWKS_URI),
+            Some(&cached),
+            true,
+            &state.http_client,
+        )
+        .await
+        .expect("a failed fetch within the stale window must fall back to the cache");
+
+        assert_eq!(resolved, db::parse_jwks_set(&value).expect("parse jwks"));
+        assert!(
+            matches!(origin, JwksOrigin::Fetched),
+            "a cache past the TTL must attempt a fetch"
+        );
+    }
+
+    // =======================================================================
+    // find_matching_key_with_refresh_client — within-request origin gate
+    // =======================================================================
+
+    #[tokio::test]
+    async fn find_matching_key_with_refresh_skips_when_origin_is_fetched() {
+        // When `resolve_client_jwks` already fetched in this request
+        // (`JwksOrigin::Fetched`), the kid-miss force-refresh must be skipped
+        // — bounding the auth attempt to at most one network fetch. This
+        // mirrors the mTLS self-signed path's gate
+        // (`test_authenticate_client_mtls_self_signed_skips_retry_when_resolution_already_fetched`).
+        //
+        // Structural coverage, not a mutation-killing assertion for the gate:
+        // a skipped refresh and an attempted-then-failed refresh both fall
+        // back to the same kid-miss error text by design, so this test alone
+        // cannot distinguish them. The mutation-killing assertion — that the
+        // skipped path performs exactly one network fetch, not two — lives in
+        // `client_auth::tests::resolve_client_decoding_key_bounded_to_one_jwks_fetch`
+        // (a network-call-counting harness). This test pins the gate's
+        // observable contract: `Fetched` returns a clean `invalid_client`,
+        // never a panic, hang, or a leaked network-error message.
+        let state = test_utils::test_app_state().await;
+        let http_client = reqwest::Client::new();
+        let jwks = JwkSet { keys: vec![] };
+        let hdr = header(JwsAlgorithm::Es256, Some("missing-kid"));
+
+        // Stale cache (2h old) — past the 10s rate-limit window, so the
+        // cross-request throttle does NOT skip; the within-request origin
+        // gate is the only thing that prevents the fetch.
+        let stale = JwksCacheDoc {
+            value: serde_json::json!({"keys": []}),
+            cached_at: jiff::Timestamp::now() - jiff::SignedDuration::from_secs(7200),
+        };
+
+        let result = find_matching_key_with_refresh_client(
+            &state.store,
+            "client-already-fetched",
+            Some(UNREACHABLE_JWKS_URI),
+            Some(&stale),
+            true,
+            &http_client,
+            &jwks,
+            &hdr,
+            JwksOrigin::Fetched,
+        )
+        .await;
+
+        let err = result.expect_err("already-fetched must skip the force-refresh");
+        assert!(
+            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient),
+            "already-fetched must resolve to invalid_client: {err:?}"
+        );
+        assert!(
+            matches!(&err, ServiceError::OAuth { description, .. } if description == "No matching key found in JWKS"),
+            "already-fetched must fall back to the original kid-miss, not a leaked fetch error: {err:?}"
         );
     }
 }

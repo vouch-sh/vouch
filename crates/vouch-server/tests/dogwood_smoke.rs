@@ -12,7 +12,6 @@
     clippy::panic_in_result_fn,
     reason = "tests assert with assert!/assert_eq! for expressive failures; Result carries setup errors"
 )]
-
 use dogwood_language::{
     Authorizer, Decision, Event, LoweredPolicySet, PolicySchema, ServiceSchema, Validator, Value,
 };

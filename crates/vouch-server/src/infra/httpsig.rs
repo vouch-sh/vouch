@@ -16,6 +16,12 @@ use vouch_httpsig::algorithm::ecdsa_p256::EcdsaP256Verifier;
 use vouch_httpsig::middleware::KeyResolver;
 
 use crate::AppState;
+use crate::crypto::alg::JwsAlgorithm;
+use crate::crypto::jwt::Jws;
+use crate::db::{self, ClaimError, ClientKeys};
+use crate::http::strip_auth_scheme;
+use crate::infra::jwks;
+use vouch_httpsig::middleware::NonceValidation;
 
 /// Key resolver that finds P-256 public keys from OAuth client JWKS.
 ///
@@ -58,11 +64,8 @@ impl KeyResolver for OAuthClientKeyResolver {
             // reject the request. Failing closed is right — an unresolvable
             // key cannot verify a signature — but the cause has to be visible,
             // or a database outage reads as a flood of signature failures.
-            let client = match crate::db::get_oauth_client_by_client_id(
-                &self.state.store,
-                &client_id,
-            )
-            .await
+            let client = match db::get_oauth_client_by_client_id(&self.state.store, &client_id)
+                .await
             {
                 Ok(client) => client?,
                 Err(e) => {
@@ -73,17 +76,22 @@ impl KeyResolver for OAuthClientKeyResolver {
                 }
             };
 
-            // Only clients registered with `jwks_uri` need the cached fetch —
-            // skip the extra DB round trip for the inline case.
-            let resolved;
-            let inline;
-            let jwks_value = match client.keys.as_ref()? {
-                crate::db::ClientKeys::Inline(jwks) => {
-                    inline = serde_json::to_value(jwks).ok()?;
-                    &inline
-                }
-                crate::db::ClientKeys::Uri(uri) => {
-                    let cached = crate::db::get_jwks_cache(&self.state.store, &client.id)
+            // Resolve the JWKS as the typed `JwkSet` so this resolver selects its
+            // verifying key through the same `JwkEntry::is_usable_for` predicate
+            // the JWT-bearer (`services/oidc/jwt_bearer/jwks`) and SAML
+            // (`KeyDescriptor`) paths share. The inline form is already parsed
+            // (stored as a `JwkSet`), and the URI form is fetched then run through
+            // `parse_jwks_set` — the same parser — so a malformed remote document
+            // is rejected the way a malformed inline submission would be. The
+            // previous scan read raw `serde_json::Value` and only checked `kid`
+            // + P-256 buildability, never `use`, so a key declared `use="enc"`
+            // (encryption-only) could verify HTTP signatures.
+            let jwks = match client.keys.as_ref()? {
+                ClientKeys::Inline(jwks) => jwks.clone(),
+                ClientKeys::Uri(uri) => {
+                    // Only `jwks_uri` clients need the cached fetch — the inline
+                    // case has the typed set already.
+                    let cached = db::get_jwks_cache(&self.state.store, &client.id)
                         .await
                         .map_err(|e| {
                             tracing::warn!(
@@ -93,14 +101,13 @@ impl KeyResolver for OAuthClientKeyResolver {
                         .ok()
                         .flatten();
 
-                    // Honor the cache TTL rather than trusting whatever was stored:
-                    // reading it verbatim let a key the client had already rotated
-                    // out keep verifying signatures until the row happened to be
-                    // replaced.
-                    // This path doesn't act on whether the resolution fetched —
-                    // that distinction only matters to the mTLS force-refetch
-                    // retry gate (services/oidc/token.rs).
-                    let (value, _origin) = crate::infra::jwks::resolve_cached_jwks(
+                    // Honor the cache TTL rather than trusting whatever was
+                    // stored: reading it verbatim let a key the client had
+                    // already rotated out keep verifying signatures until the row
+                    // happened to be replaced. This path doesn't act on whether
+                    // the resolution fetched — that distinction only matters to
+                    // the mTLS force-refetch retry gate (services/oidc/token.rs).
+                    let (value, _origin) = jwks::resolve_cached_jwks(
                         &self.state.store,
                         &client.id,
                         uri,
@@ -115,22 +122,40 @@ impl KeyResolver for OAuthClientKeyResolver {
                         );
                     })
                     .ok()?;
-                    resolved = value;
-                    &resolved
+
+                    match db::parse_jwks_set(&value) {
+                        Ok(set) => set,
+                        Err(e) => {
+                            tracing::warn!(
+                                "JWKS parse failed for HTTP signature verification: {e}"
+                            );
+                            return None;
+                        }
+                    }
                 }
             };
-            let keys = jwks_value.get("keys")?.as_array()?;
 
-            for jwk in keys {
-                let Some(kid) = jwk.get("kid").and_then(|v| v.as_str()) else {
-                    continue; // skip JWKs without kid
-                };
-                if kid == keyid {
-                    let public_key = jwk_to_p256_public_key(jwk)?;
-                    let verifier = EcdsaP256Verifier::new(&public_key);
-                    let arc: Arc<dyn VerifyingAlgorithm> = Arc::new(verifier);
-                    return Some(arc);
+            for key in &jwks.keys {
+                if key.kid.as_deref() != Some(keyid.as_str()) {
+                    continue; // skip JWKs whose kid doesn't match the signature keyid
                 }
+                // The shared rule (`JwkEntry::decoding_key_for`) the JWT-bearer
+                // search and write-time checks use: a key for encryption, for
+                // another algorithm, or not a valid P-256 point is skipped, and
+                // the scan continues, since RFC 7517 §4.5 makes `kid` uniqueness
+                // a SHOULD and a later key with the same `kid` may verify.
+                if !key.is_usable_for(JwsAlgorithm::Es256) {
+                    continue;
+                }
+                let Some(public_key) = serde_json::to_value(key)
+                    .ok()
+                    .and_then(|v| jwk_to_p256_public_key(&v))
+                else {
+                    continue;
+                };
+                let verifier = EcdsaP256Verifier::new(&public_key);
+                let arc: Arc<dyn VerifyingAlgorithm> = Arc::new(verifier);
+                return Some(arc);
             }
 
             None
@@ -138,33 +163,44 @@ impl KeyResolver for OAuthClientKeyResolver {
     }
 
     async fn generate_nonce(&self) -> Option<String> {
-        crate::db::generate_dpop_nonce(&self.state.store, NONCE_VALIDITY_SECONDS)
+        db::generate_signature_nonce(&self.state.store, NONCE_VALIDITY_SECONDS)
             .await
             .ok()
     }
 
     /// Validate and consume a signature nonce against the shared nonce store.
     ///
-    /// HTTP signature nonces deliberately share the DPoP nonce store and
-    /// issuance path (`generate_dpop_nonce`): both are opaque random
-    /// single-use values with the same validity window, and the atomic
-    /// delete-if-not-expired gives single-use semantics on every backend.
+    /// A signature nonce is single-use: the signature carries no `jti`, so
+    /// the nonce is its only replay defense, and the atomic
+    /// delete-if-not-expired gives that on every backend. It has its own
+    /// document type, so consuming one cannot retire a DPoP nonce, which is
+    /// accepted until it expires because a DPoP proof's `jti` prevents replay
+    /// there.
+    ///
+    /// Unlike the DPoP path, the expiry comparison here reads an ambient
+    /// clock: `vouch_httpsig`'s `NonceValidator` trait passes only the nonce,
+    /// so there is no request instant to anchor to. Threading one would mean
+    /// widening a trait in a crate that has no concept of an Axum request.
     fn validate_nonce(
         &self,
         nonce: &str,
-    ) -> impl std::future::Future<Output = vouch_httpsig::middleware::NonceValidation> + Send + '_
-    {
+    ) -> impl std::future::Future<Output = NonceValidation> + Send + '_ {
         use vouch_httpsig::middleware::NonceValidation;
 
         // Own the nonce: the returned future may only borrow `self`.
         let nonce = nonce.to_string();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the httpsig nonce validator trait carries no request instant"
+        )]
+        let now = jiff::Timestamp::now();
         async move {
-            match crate::db::validate_and_consume_dpop_nonce(&self.state.store, &nonce).await {
+            match db::validate_and_consume_signature_nonce(&self.state.store, &nonce, &now).await {
                 Ok(()) => NonceValidation::Valid,
-                Err(
-                    crate::db::ClaimError::AlreadyConsumed | crate::db::ClaimError::InvalidInput(_),
-                ) => NonceValidation::Invalid,
-                Err(crate::db::ClaimError::Database(msg)) => {
+                Err(ClaimError::AlreadyConsumed | ClaimError::InvalidInput(_)) => {
+                    NonceValidation::Invalid
+                }
+                Err(ClaimError::Database(msg)) => {
                     tracing::error!("signature nonce validation DB failure: {msg}");
                     NonceValidation::Error
                 }
@@ -184,16 +220,14 @@ fn extract_client_id(headers: &http::HeaderMap, _state: &AppState) -> Option<Str
 
     // Accepts the same schemes as `extract_token_from_request` — both go
     // through the shared matcher, so they cannot drift.
-    let token = crate::http::strip_auth_scheme(auth_header, protocol::AUTH_SCHEME_DPOP)
-        .or_else(|| crate::http::strip_auth_scheme(auth_header, protocol::AUTH_SCHEME_BEARER))?;
+    let token = strip_auth_scheme(auth_header, protocol::AUTH_SCHEME_DPOP)
+        .or_else(|| strip_auth_scheme(auth_header, protocol::AUTH_SCHEME_BEARER))?;
 
     // Parse the JWT payload without verification. Going through `Jws` keeps
     // this pre-parse on the same splitting and decoding as every other JWS
     // path — including the RFC 7515 Section 4.1.11 `crit` refusal, so a token
     // the verifying paths would reject never resolves a signing key here.
-    let claims: serde_json::Value = crate::crypto::jwt::Jws::parse(token)
-        .and_then(|jws| jws.claims_as())
-        .ok()?;
+    let claims: serde_json::Value = Jws::parse(token).and_then(|jws| jws.claims_as()).ok()?;
     claims.get("client_id")?.as_str().map(String::from)
 }
 
@@ -223,8 +257,11 @@ fn jwk_to_p256_public_key(jwk: &serde_json::Value) -> Option<Vec<u8>> {
 )]
 mod tests {
     use super::*;
+    use crate::test_utils;
     use base64::Engine as _;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use vouch_httpsig::algorithm::SigningAlgorithm as _;
+    use vouch_httpsig::algorithm::ecdsa_p256::EcdsaP256Signer;
 
     fn auth_headers(value: &str) -> http::HeaderMap {
         let mut headers = http::HeaderMap::new();
@@ -246,7 +283,7 @@ mod tests {
     /// signature key resolution on signature-required `/v1/*` routes.
     #[tokio::test]
     async fn extract_client_id_accepts_scheme_case_variants() {
-        let state = crate::test_utils::test_app_state().await;
+        let state = test_utils::test_app_state().await;
         let token = jwt_with_client_id("client-123");
 
         for scheme in ["Bearer", "BEARER", "bearer", "DPoP", "DPOP", "dpop"] {
@@ -261,7 +298,7 @@ mod tests {
 
     #[tokio::test]
     async fn extract_client_id_rejects_unrecognized_scheme() {
-        let state = crate::test_utils::test_app_state().await;
+        let state = test_utils::test_app_state().await;
         let token = jwt_with_client_id("client-123");
 
         for value in [format!("Basic {token}"), "Bearer".to_string()] {
@@ -357,7 +394,7 @@ mod tests {
     async fn test_validate_nonce_single_use() {
         use vouch_httpsig::middleware::{KeyResolver, NonceValidation};
 
-        let state = crate::test_utils::test_app_state().await;
+        let state = test_utils::test_app_state().await;
         let resolver = OAuthClientKeyResolver::new(state.clone());
 
         let nonce = resolver.generate_nonce().await.expect("issue nonce");
@@ -375,6 +412,233 @@ mod tests {
             resolver.validate_nonce("never-issued-nonce").await,
             NonceValidation::Invalid,
             "an unknown nonce must be rejected"
+        );
+    }
+
+    // ===================================================================
+    // OAuthClientKeyResolver::resolve — `use`/`alg` selection parity
+    //
+    // The resolver selects a P-256 verification key from the client's JWKS by
+    // `kid`. It must enforce the same `use`/`alg`/`kty` selection rules as the
+    // JWT-bearer (`services/oidc/jwt_bearer/jwks::find_matching_key`) and SAML
+    // (`KeyDescriptor`) paths, via the shared `JwkEntry::is_usable_for`
+    // predicate: a key declared `use="enc"` (encryption) is never a
+    // signature-verification key, even when its `kid` matches.
+    // ===================================================================
+
+    /// A single P-256 public JWK built from `signer`'s public key, with the
+    /// given `kid` and optional `use`/`alg` members (omitted when `None`, the
+    /// realistic shape — vouch-cli's `PublicEcJwk` emits neither).
+    fn p256_public_jwk(
+        signer: &EcdsaP256Signer,
+        kid: &str,
+        use_: Option<&str>,
+        alg: Option<&str>,
+    ) -> serde_json::Value {
+        let pk = signer.public_key_bytes();
+        let x = URL_SAFE_NO_PAD.encode(pk.get(1..33).expect("x coordinate"));
+        let y = URL_SAFE_NO_PAD.encode(pk.get(33..65).expect("y coordinate"));
+        let mut key = serde_json::json!({
+            "kty": "EC",
+            "crv": "P-256",
+            "x": x,
+            "y": y,
+            "kid": kid,
+        });
+        if let Some(u) = use_ {
+            key.as_object_mut()
+                .expect("key is a JSON object")
+                .insert("use".to_string(), serde_json::Value::String(u.to_string()));
+        }
+        if let Some(a) = alg {
+            key.as_object_mut()
+                .expect("key is a JSON object")
+                .insert("alg".to_string(), serde_json::Value::String(a.to_string()));
+        }
+        key
+    }
+
+    /// Register a test OAuth client whose inline JWKS is `jwks` and return the
+    /// app state plus the registered `client_id`. The client's access token
+    /// carries this `client_id`, which `extract_client_id` reads to map a
+    /// signature's `keyid` to the client's JWKS.
+    async fn client_with_inline_jwks(
+        jwks: serde_json::Value,
+        email: &str,
+    ) -> (Arc<crate::AppState>, String) {
+        use crate::test_utils::{TestClientSpec, TestJwks, create_test_client, create_test_user};
+
+        let state = test_utils::test_app_state().await;
+        let user = create_test_user(&state.store, email).await;
+        let client = create_test_client(
+            &state.store,
+            &user.id,
+            TestClientSpec {
+                jwks: TestJwks::Custom(jwks),
+                ..Default::default()
+            },
+        )
+        .await;
+        (state, client.client_id)
+    }
+
+    /// `Authorization: Bearer <unsigned-jwt-with-client_id>` headers — the shape
+    /// `extract_client_id` reads inside `resolve` to find the client.
+    fn bearer_headers(client_id: &str) -> http::HeaderMap {
+        auth_headers(&format!("Bearer {}", jwt_with_client_id(client_id)))
+    }
+
+    // RFC 7517 §4.2: a key declared `use="enc"` is an encryption key, not a
+    // signature-verification key. The resolver must reject it even when its
+    // `kid` matches the signature's `keyid` — the same rule the JWT-bearer
+    // path (`test_find_matching_key_kid_match_skips_enc_use`) and the SAML
+    // `KeyDescriptor` path enforce. Before the fix, the resolver returned a
+    // verifier for such a key.
+    #[tokio::test]
+    async fn test_resolve_rejects_enc_key_for_signature_verification() {
+        let signer = EcdsaP256Signer::generate("enc-1").expect("generate enc key");
+        let jwks =
+            serde_json::json!({ "keys": [p256_public_jwk(&signer, "enc-1", Some("enc"), None)] });
+        let (state, client_id) = client_with_inline_jwks(jwks, "httpsig-enc@example.com").await;
+
+        let resolver = OAuthClientKeyResolver::new(state.clone());
+        let headers = bearer_headers(&client_id);
+        let result = resolver.resolve("enc-1", &headers).await;
+        assert!(
+            result.is_none(),
+            "a use=\"enc\" key must not be selected for HTTP signature verification"
+        );
+    }
+
+    // RFC 7517 §4.2: a key declared `use="sig"` is a signature key and must
+    // resolve. This is the positive control for the enc-key rejection above:
+    // the same key coordinates with `use="sig"` are accepted, and the returned
+    // verifier actually verifies a signature made with the key's private half
+    // (and rejects one from a different key).
+    #[tokio::test]
+    async fn test_resolve_accepts_sig_key_and_verifies() {
+        let signer = EcdsaP256Signer::generate("sig-1").expect("generate sig key");
+        let jwks =
+            serde_json::json!({ "keys": [p256_public_jwk(&signer, "sig-1", Some("sig"), None)] });
+        let (state, client_id) = client_with_inline_jwks(jwks, "httpsig-sig@example.com").await;
+
+        let resolver = OAuthClientKeyResolver::new(state.clone());
+        let headers = bearer_headers(&client_id);
+        let verifier = resolver
+            .resolve("sig-1", &headers)
+            .await
+            .expect("a use=\"sig\" key must resolve a verifier");
+
+        let base = b"@method: GET\n@path: /v1/credentials/ssh";
+        let sig = signer.sign(base).expect("sign base");
+        assert!(
+            verifier.verify(base, &sig).is_ok(),
+            "the resolved verifier must verify a signature from the sig key's private half"
+        );
+
+        // Control: a signature from a different key must not verify.
+        let other = EcdsaP256Signer::generate("other").expect("generate other key");
+        let bad_sig = other.sign(base).expect("sign with other key");
+        assert!(
+            verifier.verify(base, &bad_sig).is_err(),
+            "the verifier must reject a signature from a different key"
+        );
+    }
+
+    // The common case (vouch-cli's `PublicEcJwk` emits no `use`): an absent
+    // `use` means the key is valid for signature verification, so it resolves.
+    // This guards against the fix over-rejecting the overwhelmingly common
+    // production keyset.
+    #[tokio::test]
+    async fn test_resolve_accepts_absent_use() {
+        let signer = EcdsaP256Signer::generate("no-use").expect("generate key");
+        let jwks = serde_json::json!({ "keys": [p256_public_jwk(&signer, "no-use", None, None)] });
+        let (state, client_id) = client_with_inline_jwks(jwks, "httpsig-nouse@example.com").await;
+
+        let resolver = OAuthClientKeyResolver::new(state.clone());
+        let headers = bearer_headers(&client_id);
+        let result = resolver.resolve("no-use", &headers).await;
+        assert!(result.is_some(), "a key with no use field must resolve");
+    }
+
+    // RFC 7517 §4.5 makes `kid` uniqueness a SHOULD, not a MUST. When two keys
+    // share a `kid` and the first is `use="enc"`, the resolver must skip it and
+    // select the later `use="sig"` sibling — the same candidate-skip rule the
+    // JWT-bearer path (`test_find_matching_key_kid_match_skips_enc_use`) and
+    // the unbuildable-key scan
+    // (`test_find_matching_key_kid_match_skips_unbuildable_sibling`) enforce.
+    // The resolved verifier must be keyed to the `sig` sibling, not the
+    // skipped `enc` key.
+    #[tokio::test]
+    async fn test_resolve_skips_enc_and_continues_to_sig_sibling() {
+        let enc_signer = EcdsaP256Signer::generate("dup").expect("generate enc key");
+        let sig_signer = EcdsaP256Signer::generate("dup").expect("generate sig key");
+        let jwks = serde_json::json!({
+            "keys": [
+                p256_public_jwk(&enc_signer, "dup", Some("enc"), None),
+                p256_public_jwk(&sig_signer, "dup", Some("sig"), None),
+            ]
+        });
+        let (state, client_id) = client_with_inline_jwks(jwks, "httpsig-dup@example.com").await;
+
+        let resolver = OAuthClientKeyResolver::new(state.clone());
+        let headers = bearer_headers(&client_id);
+        let verifier = resolver
+            .resolve("dup", &headers)
+            .await
+            .expect("the use=\"sig\" sibling must be selected after skipping the enc key");
+
+        let base = b"signature base";
+        let sig = sig_signer.sign(base).expect("sign with sig key");
+        assert!(
+            verifier.verify(base, &sig).is_ok(),
+            "the verifier must accept the sig sibling's signature"
+        );
+        let enc_sig = enc_signer.sign(base).expect("sign with enc key");
+        assert!(
+            verifier.verify(base, &enc_sig).is_err(),
+            "the verifier must be keyed to the sig sibling, not the skipped enc key"
+        );
+    }
+
+    // `is_usable_for` also enforces `alg`: a key declared `alg="ES384"` is not
+    // an `ecdsa-p256-sha256` (ES256) key and must not verify an HTTP signature,
+    // matching the JWT-bearer path
+    // (`test_find_matching_key_kid_match_skips_wrong_alg_field`). Even with
+    // `use="sig"`, the declared algorithm disqualifies it.
+    #[tokio::test]
+    async fn test_resolve_rejects_wrong_alg_field() {
+        let signer = EcdsaP256Signer::generate("es384").expect("generate key");
+        let jwks = serde_json::json!({
+            "keys": [p256_public_jwk(&signer, "es384", Some("sig"), Some("ES384"))]
+        });
+        let (state, client_id) = client_with_inline_jwks(jwks, "httpsig-alg@example.com").await;
+
+        let resolver = OAuthClientKeyResolver::new(state.clone());
+        let headers = bearer_headers(&client_id);
+        let result = resolver.resolve("es384", &headers).await;
+        assert!(
+            result.is_none(),
+            "a key declared alg=\"ES384\" must not verify an ecdsa-p256-sha256 (ES256) signature"
+        );
+    }
+
+    // A `kid` that matches nothing in the JWKS resolves no verifier, as before.
+    // Guards against the selection predicate accidentally loosening the
+    // kid-mismatch path.
+    #[tokio::test]
+    async fn test_resolve_unknown_kid_resolves_none() {
+        let signer = EcdsaP256Signer::generate("known").expect("generate key");
+        let jwks =
+            serde_json::json!({ "keys": [p256_public_jwk(&signer, "known", Some("sig"), None)] });
+        let (state, client_id) = client_with_inline_jwks(jwks, "httpsig-unknown@example.com").await;
+
+        let resolver = OAuthClientKeyResolver::new(state.clone());
+        let headers = bearer_headers(&client_id);
+        let result = resolver.resolve("not-registered", &headers).await;
+        assert!(
+            result.is_none(),
+            "an unknown keyid must resolve no verifier"
         );
     }
 }

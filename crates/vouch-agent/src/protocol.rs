@@ -88,11 +88,6 @@ impl Response {
         Self::error(id, NOT_AUTHENTICATED, "not authenticated")
     }
 
-    /// Create a "session expired" error response.
-    pub fn session_expired(id: u64) -> Self {
-        Self::error(id, SESSION_EXPIRED, "session expired")
-    }
-
     /// Create an "invalid params" error response.
     pub fn invalid_params(id: u64, detail: &str) -> Self {
         Self::error(id, INVALID_PARAMS, &format!("invalid params: {detail}"))
@@ -168,7 +163,11 @@ pub struct StoreSshCredentialsParams {
     /// Session expiration timestamp (ISO 8601).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_expires_at: Option<String>,
-    /// Server URL for certificate refresh.
+    /// Server URL the CLI obtained the certificate from.
+    ///
+    /// Accepted for wire compatibility and not used: the agent pairs a
+    /// certificate only with the server URL of the session it was stored
+    /// with, never one supplied beside it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_url: Option<String>,
 }

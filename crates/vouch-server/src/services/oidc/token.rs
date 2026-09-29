@@ -10,31 +10,38 @@ use super::authorization_details::AuthorizationDetails;
 use super::dpop::{self, CnfClaim, DpopError, ValidatedDpopProof};
 use super::scope::{OAuthScope, ScopeSet};
 use crate::AppState;
+use crate::arrival::ArrivalTime;
+use crate::assurance::{ACR_AAL3, AuthMethod, HardwareVerification};
 use crate::crypto::hash_token;
-use crate::db::{self, Authenticator, OAuthClient, Session, User};
+use crate::db::{self, Authenticator, OAuthClient, User};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use crate::infra::jwks::JwksOrigin;
 use crate::redact_email;
 use crate::services::auth::{
-    AuthMethod, ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof,
-    TokenBinding, TokenIssuanceProof, create_oauth_access_token, decode_token,
+    ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenBinding,
+    TokenIssuanceProof, create_oauth_access_token, decode_token,
 };
 use aws_lc_rs::digest::{self, SHA256};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use jiff::Timestamp;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
 
 use super::authorization::{AuthorizationCode, decode_authorization_code};
+use super::validated_client::ValidatedOAuthClient;
+use crate::db::documents::jwks_cache::JwksCacheDoc;
+use crate::db::{AuthCodeClaim, ClientKeys, ClientType, TokenEndpointAuthMethod};
+use crate::infra::jwks;
+use crate::services::auth::DecodedToken;
+use crate::services::oidc::mtls::{self, ClientCertificate};
 
 /// Parameters for exchanging an authorization code for tokens (RFC 6749 Section 4.1.3).
 ///
 /// The handler runs all client authentication (JWT, mTLS, secret, public-client
 /// validation) BEFORE calling `exchange_authorization_code`, then passes the
-/// fully-resolved [`AuthenticatedClient`] here. The exchange function only
+/// [`ValidatedOAuthClient`] here. The exchange function only
 /// re-checks that the authenticated client matches the auth code's recorded
 /// client_id — it never runs an authentication step of its own.
 #[derive(Debug)]
@@ -48,21 +55,20 @@ pub struct AuthCodeExchangeParams<'a> {
     /// authentication method (`client_secret_basic`/`client_secret_post`,
     /// `private_key_jwt`, `tls_client_auth`/`self_signed_tls_client_auth`,
     /// or public-client validation) succeeded. The handler runs all
-    /// authentication so that `exchange_authorization_code` receives a
-    /// fully-resolved `AuthenticatedClient` and never re-runs an auth
-    /// step. `None` only when the handler was unable to determine the
-    /// client — exchange treats that as invalid_client.
-    pub authenticated_client: Option<&'a AuthenticatedClient>,
+    /// authentication and the grant check so that `exchange_authorization_code`
+    /// never re-runs either.
+    pub client: &'a ValidatedOAuthClient,
     /// RFC 7636 Section 4.5: The PKCE code verifier.
     pub code_verifier: Option<&'a str>,
     /// RFC 9449 §6 / RFC 8705 §3: how the issued token is bound.
     pub binding: TokenBinding<'a>,
-    /// RFC 8725 §3.9: Client ID for audience validation of the authorization code.
-    pub client_id: &'a str,
     /// RFC 8707 Section 2: Target resource indicator (OPTIONAL).
     pub resource: Option<&'a str>,
     /// RFC 9396 Section 6: Authorization details for downscoping.
     pub authorization_details: Option<&'a str>,
+    /// Transport metadata of the token request, for the `OauthTokenIssued`
+    /// audit row.
+    pub client_info: &'a db::ClientInfo,
 }
 
 /// Client credentials for authentication (RFC 6749 Section 2.3).
@@ -110,15 +116,6 @@ impl std::fmt::Debug for AuthCodeExchangeResult {
             .field("authorization_details", &self.authorization_details)
             .finish()
     }
-}
-
-/// Authenticated client information.
-#[derive(Debug)]
-pub struct AuthenticatedClient {
-    /// The OAuth client record.
-    pub client: OAuthClient,
-    /// Whether this is a public client (no secret required).
-    pub is_public: bool,
 }
 
 /// Witness that an OAuth client successfully authenticated via
@@ -179,10 +176,22 @@ pub enum ClientAuthError {
     InvalidCredentials,
     /// Client requires secret but none provided.
     SecretRequired,
+    /// A FAPI 2.0 client presented a client secret. FAPI clients authenticate
+    /// only with `private_key_jwt` or mTLS, so a secret — which can only be a
+    /// row minted before secret minting was blocked for FAPI profiles — is
+    /// never a valid credential for them.
+    FapiSecretRejected,
+    /// Secret-based (or no) client authentication for a client whose
+    /// registered method is `private_key_jwt`: it must present the assertion
+    /// it registered for, and a secret row it holds is never its credential.
+    SecretNotRegistered,
     /// Database error.
     DatabaseError(String),
     /// mTLS certificate verification failed.
     MtlsVerificationFailed(String),
+    /// The client is registered for `tls_client_auth` or
+    /// `self_signed_tls_client_auth` and presented no certificate.
+    MtlsCertificateRequired,
 }
 
 /// A failed database call is a server fault, never a statement about the
@@ -212,9 +221,15 @@ impl ClientAuthError {
             Self::InvalidClient
             | Self::InvalidCredentials
             | Self::SecretRequired
+            | Self::FapiSecretRejected
+            | Self::SecretNotRegistered
             | Self::MtlsVerificationFailed(_) => ServiceError::oauth(
                 OAuthErrorCode::InvalidClient,
                 "Client authentication failed",
+            ),
+            Self::MtlsCertificateRequired => ServiceError::oauth(
+                OAuthErrorCode::InvalidClient,
+                "mTLS client certificate required",
             ),
             Self::DatabaseError(msg) => ServiceError::Internal(msg),
         }
@@ -306,9 +321,11 @@ pub(crate) async fn exchange_authorization_code(
     params: AuthCodeExchangeParams<'_>,
     client_auth: ClientAuthProof,
     sender_constraint: SenderConstraintProof,
+    arrival: ArrivalTime,
 ) -> ServiceResult<AuthCodeExchangeResult> {
     // Decode and validate the authorization code
-    let auth_code = decode_authorization_code(state, params.code, params.client_id).await?;
+    let auth_code =
+        decode_authorization_code(state, params.code, &params.client.client_id, arrival).await?;
 
     // RFC 6749 Section 10.5: Enforce single-use authorization codes.
     // This MUST happen before any other validation to ensure codes are always
@@ -316,12 +333,12 @@ pub(crate) async fn exchange_authorization_code(
     // The returned witness is the structural proof threaded into the
     // TokenIssuanceProof below — the only path to `GrantProof::AuthorizationCode`.
     let code_hash = hash_token(params.code);
-    let auth_code_claim = enforce_single_use_code(state, &code_hash, &auth_code).await?;
+    let auth_code_claim = enforce_single_use_code(state, &code_hash, &auth_code, arrival).await?;
 
     let user = load_and_validate_grant_subject(state, &auth_code).await?;
 
-    let authenticated_client = params.authenticated_client;
-    verify_client_matches_code(authenticated_client, &auth_code)?;
+    let client = params.client;
+    verify_client_matches_code(client, &auth_code)?;
 
     // Validate redirect_uri, PKCE, DPoP binding, and ACR
     validate_code_bindings(
@@ -341,14 +358,14 @@ pub(crate) async fn exchange_authorization_code(
     )
     .await?;
 
-    // Snapshot org domain at session creation so federation claims survive
-    // later changes to the user's organization membership.
-    let org_domain = if let Some(ref org_id) = user.org_id {
-        db::get_organization_domain(&state.store, org_id)
-            .await
-            .map_err(|e| ServiceError::Internal(e.to_string()))?
-    } else {
-        None
+    // Org domain, read once at session creation for the federation claims.
+    let org_domain = match user.org_id.as_deref() {
+        Some(org_id) => {
+            db::get_user_org_domain(&state.store, &user.id, org_id, user.org_domain.as_deref())
+                .await
+                .map_err(|e| ServiceError::Internal(e.to_string()))?
+        }
+        None => None,
     };
 
     // Generate access token as an RFC 9068 JWT (ES256, verifiable via JWKS).
@@ -371,25 +388,69 @@ pub(crate) async fn exchange_authorization_code(
             binding: params.binding,
             act: None,
             audience: grants.audience.as_deref(),
-            auth_time: Some(auth_code.auth_time.unwrap_or(auth_code.iat)),
-            hardware_verification: crate::services::auth::HardwareVerification::Verified,
+            max_lifetime_secs: None,
+            hardware_verification: HardwareVerification::Verified {
+                auth_time: auth_code.authenticated_at,
+            },
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: grants.authorization_details_value.as_ref(),
             hardware_aaguid: auth_code.aaguid.as_deref(),
             org_domain: org_domain.as_deref(),
+            // Link this session to the consumed authorization code so replay
+            // detection (enforce_single_use_code above) can revoke only this
+            // code's tokens per RFC 6749 Section 10.5.
+            source_code_hash: Some(&code_hash),
         },
         proof,
+        arrival,
     )
     .await?;
     let access_token = session_result.token;
     let expires_in = session_result.expires_in;
 
-    // Extract the per-client ID token signing algorithm.
-    // Public/unauthenticated clients fall back to "RS256" per OIDC Core default.
-    let id_token_alg =
-        authenticated_client.map_or("RS256", |c| c.client.id_token_signed_response_alg.as_str());
+    // Record usage event for registered clients. The session is committed,
+    // so this is written before the fallible ID-token signing below: a
+    // signing failure must not leave a persisted access token with no
+    // `TokenIssued` event.
+    {
+        let auth_client = client;
+        // The user-org half of `resolve_event_org_domain`'s "prefer user,
+        // fall back to client" rule was already resolved above for the
+        // session claims, so it's reused here rather than re-derived; the
+        // client-org fallback still runs its own lookup when the user has no
+        // org, using the client already in scope instead of re-fetching it
+        // by id.
+        let audit_org_domain = db::resolve_event_org_domain(
+            &state.store,
+            org_domain.as_deref(),
+            auth_client.org_id.as_deref(),
+        )
+        .await;
+        db::record_oauth_event(
+            &state.audit,
+            &state.store,
+            &db::RecordOAuthEventParams {
+                oauth_client_id: &auth_client.id,
+                event_type: db::OAuthEventType::TokenIssued,
+                user_id: Some(&auth_code.user_id),
+                client: params.client_info,
+                details: params
+                    .binding
+                    .dpop_proof()
+                    .map(|p| format!("dpop_jkt={}", p.jkt))
+                    .as_deref(),
+                org_domain: db::RecordedOrgDomain::Known(audit_org_domain.as_deref()),
+            },
+        )
+        .await;
+    }
 
-    // Generate ID token (with at_hash computed from the access token)
+    let id_token_alg = client.id_token_signed_response_alg.as_str();
+
+    // Generate ID token (with at_hash computed from the access token).
+    // `arrival` is threaded here so the ID token's `exp`/`iat` share the
+    // same instant as the access token's `exp` and the session's `expires_at`
+    // — see `arrival.rs` for why request-scoped temporal claims read one clock.
     let id_token = generate_id_token(
         state,
         IdTokenParams {
@@ -400,34 +461,15 @@ pub(crate) async fn exchange_authorization_code(
             expires_in,
             binding: params.binding,
             scope: &auth_code.scope,
-            auth_time: Some(auth_code.auth_time.unwrap_or(auth_code.iat)),
-            hardware_verification: crate::services::auth::HardwareVerification::Verified,
+            hardware_verification: HardwareVerification::Verified {
+                auth_time: auth_code.authenticated_at,
+            },
             access_token: Some(access_token.expose_secret()),
             id_token_alg,
         },
+        arrival,
     )
     .await?;
-
-    // Record usage event for registered clients
-    if let Some(auth_client) = authenticated_client {
-        db::record_oauth_event(
-            &state.audit,
-            &state.store,
-            &db::RecordOAuthEventParams {
-                oauth_client_id: &auth_client.client.id,
-                event_type: db::OAuthEventType::TokenIssued,
-                user_id: Some(&auth_code.user_id),
-                ip_address: None,
-                user_agent: None,
-                details: params
-                    .binding
-                    .dpop_proof()
-                    .map(|p| format!("dpop_jkt={}", p.jkt))
-                    .as_deref(),
-            },
-        )
-        .await;
-    }
 
     if let Some(proof) = params.binding.dpop_proof() {
         tracing::info!(
@@ -495,15 +537,13 @@ async fn load_and_validate_grant_subject(
 /// Returns `invalid_grant` on client mismatch and `invalid_request` when a
 /// required PKCE challenge is absent.
 fn verify_client_matches_code(
-    authenticated_client: Option<&AuthenticatedClient>,
+    client: &ValidatedOAuthClient,
     auth_code: &AuthorizationCode,
 ) -> ServiceResult<()> {
-    if let Some(client) = authenticated_client
-        && client.client.client_id != auth_code.client_id
-    {
+    if client.client_id != auth_code.client_id {
         tracing::warn!(
             "Client ID mismatch: token request from {} but code was issued to {}",
-            client.client.client_id,
+            client.client_id,
             auth_code.client_id
         );
         return Err(ServiceError::oauth(
@@ -511,18 +551,17 @@ fn verify_client_matches_code(
             "Client ID mismatch",
         ));
     }
-    if let Some(client) = authenticated_client {
-        let pkce_required = client.is_public || client.client.application_type.requires_pkce();
-        if pkce_required && auth_code.code_challenge.is_none() {
-            tracing::warn!(
-                "Client {} requires PKCE but no code_challenge was present",
-                client.client.client_id
-            );
-            return Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidRequest,
-                "PKCE required for this client type",
-            ));
-        }
+    let pkce_required =
+        client.client_type() == ClientType::Public || client.application_type.requires_pkce();
+    if pkce_required && auth_code.code_challenge.is_none() {
+        tracing::warn!(
+            "Client {} requires PKCE but no code_challenge was present",
+            client.client_id
+        );
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidRequest,
+            "PKCE required for this client type",
+        ));
     }
     Ok(())
 }
@@ -537,39 +576,57 @@ struct ResolvedGrants {
 /// RFC 6749 Section 10.5: Enforce single-use authorization codes.
 ///
 /// Atomically consumes the code; on success returns an [`crate::db::AuthCodeClaim`]
-/// witness. On a replay (`ClaimError::AlreadyConsumed`), revokes all tokens
-/// for the user the original code was issued to before returning the OAuth
-/// `invalid_grant` error.
+/// witness. On a replay (`ClaimError::AlreadyConsumed`), revokes only the tokens
+/// issued from **that** authorization code (RFC 6749 Section 10.5) before
+/// returning the OAuth `invalid_grant` error.
+///
+/// The consume here and the session insert in
+/// [`exchange_authorization_code`] are separate writes, so a replay arriving
+/// between them finds no session carrying the code hash and revokes nothing —
+/// the legitimate exchange then completes and its token survives. Closing the
+/// window means issuing the session in the same transaction that consumes the
+/// code, which DSQL's optimistic concurrency cannot express across the two
+/// document types. Section 10.5 states the revocation as a SHOULD ("the
+/// authorization server SHOULD attempt to revoke"), and the MUST — denying the
+/// replayed request — holds regardless, since the deny is driven by the
+/// consume, not by the revocation.
 async fn enforce_single_use_code(
     state: &Arc<AppState>,
     code_hash: &str,
     auth_code: &AuthorizationCode,
-) -> ServiceResult<crate::db::AuthCodeClaim> {
-    match db::try_consume_authorization_code(&state.store, code_hash).await {
+    arrival: ArrivalTime,
+) -> ServiceResult<AuthCodeClaim> {
+    match db::try_consume_authorization_code(&state.store, code_hash, arrival.timestamp()).await {
         Ok(claim) => Ok(claim),
         Err(db::claim::ClaimError::AlreadyConsumed) => {
-            if let Ok(Some((user_id, _client_id))) =
-                db::get_consumed_code_owner(&state.store, code_hash).await
-            {
-                tracing::warn!(
-                    target: "security",
-                    client_id = %auth_code.client_id,
-                    "Authorization code replay detected — code already consumed"
-                );
-                match db::delete_oauth_sessions_for_user(&state.store, &user_id).await {
-                    Ok(count) if count > 0 => {
-                        state.session_cache.invalidate_for_user(&user_id);
-                        tracing::warn!(
-                            target: "security",
-                            user_id = %user_id,
-                            revoked_count = count,
-                            "Revoked OAuth tokens due to authorization code replay"
-                        );
+            tracing::warn!(
+                target: "security",
+                client_id = %auth_code.client_id,
+                user_id = %auth_code.user_id,
+                "Authorization code replay detected — code already consumed"
+            );
+            // RFC 6749 Section 10.5: revoke "all access tokens already granted
+            // based on the compromised authorization code" — which bounds the
+            // revocation to this code rather than widening it to every session
+            // for the user. Sessions store `source_code_hash = code_hash` at
+            // issuance, so this targets exactly the compromised code's tokens
+            // and leaves the user's other sessions (other codes, FIDO2,
+            // browser login, …) intact.
+            match db::delete_sessions_for_code_replay(&state.store, code_hash).await {
+                Ok(token_hashes) if !token_hashes.is_empty() => {
+                    for token_hash in &token_hashes {
+                        state.session_cache.invalidate(token_hash);
                     }
-                    Ok(_) => {}
-                    Err(e) => {
-                        tracing::error!("Failed to revoke tokens during replay detection: {e}");
-                    }
+                    tracing::warn!(
+                        target: "security",
+                        user_id = %auth_code.user_id,
+                        revoked_count = token_hashes.len(),
+                        "Revoked OAuth tokens issued from the replayed authorization code"
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::error!("Failed to revoke tokens during replay detection: {e}");
                 }
             }
             Err(ServiceError::oauth(
@@ -638,9 +695,7 @@ fn validate_code_bindings(
 
     // RFC 9470 Section 4: Defense-in-depth ACR validation
     if let Some(ref acr_values) = auth_code.acr_values {
-        let acr_ok = acr_values
-            .split_whitespace()
-            .any(|v| v == crate::services::auth::ACR_AAL3);
+        let acr_ok = acr_values.split_whitespace().any(|v| v == ACR_AAL3);
         if !acr_ok {
             return Err(ServiceError::oauth(
                 OAuthErrorCode::UnmetAuthenticationRequirements,
@@ -789,7 +844,8 @@ impl AuthorizationCode {
 pub async fn authenticate_client(
     state: &Arc<AppState>,
     credentials: &ClientCredentials,
-) -> Result<(AuthenticatedClient, Option<ClientSecretVerification>), ClientAuthError> {
+    arrival: ArrivalTime,
+) -> Result<(OAuthClient, Option<ClientSecretVerification>), ClientAuthError> {
     // Look up the client
     let client = db::get_oauth_client_by_client_id(&state.store, &credentials.client_id)
         .await?
@@ -800,34 +856,61 @@ pub async fn authenticate_client(
         return Err(ClientAuthError::InvalidClient);
     }
 
-    // Determine if this client type requires a secret
-    let requires_secret = client.application_type.requires_secret();
+    // RFC 6749 §2.1: a confidential client must present the credential it
+    // registered; a public one has none to present.
+    let is_confidential = client.client_type() == ClientType::Confidential;
 
     // RFC 8705: mTLS clients authenticate via certificate, not secret.
     // When a confidential client uses tls_client_auth or self_signed_tls_client_auth,
     // the secret is not required — the certificate is validated separately.
     let is_mtls_auth = matches!(
         client.token_endpoint_auth_method,
-        crate::db::TokenEndpointAuthMethod::TlsClientAuth
-            | crate::db::TokenEndpointAuthMethod::SelfSignedTlsClientAuth
+        TokenEndpointAuthMethod::TlsClientAuth | TokenEndpointAuthMethod::SelfSignedTlsClientAuth
     );
 
-    if requires_secret && is_mtls_auth {
+    if is_confidential && is_mtls_auth {
         // mTLS client — skip secret validation, return as confidential.
         // The certificate will be validated by authenticate_client_mtls().
         if let Err(e) = db::update_oauth_client_last_used(&state.store, &client.id).await {
             tracing::warn!("Failed to update OAuth client last_used: {e}");
         }
-        return Ok((
-            AuthenticatedClient {
-                client,
-                is_public: false,
-            },
-            None,
-        ));
+        return Ok((client, None));
     }
 
-    if requires_secret {
+    if is_confidential {
+        // FAPI 2.0 Security Profile §5.3.2.1 item 6: the authorization server
+        // "shall authenticate clients using one of the following methods:
+        // MTLS as specified in Section 2 of [RFC8705], or private_key_jwt as
+        // specified in Section 9 of [OIDC]". PAR already derives the actual
+        // method from the verification witnesses and refuses anything else
+        // (`validate_fapi_client_auth_method`); this is the same gate for
+        // every endpoint that verifies a shared secret, so a secret row a
+        // FAPI client acquired before minting was blocked for FAPI profiles
+        // cannot authenticate it anywhere. Checked before the hash lookup so
+        // a dead secret is refused without ever being compared.
+        if client.is_fapi() {
+            tracing::warn!(
+                client_id = %client.client_id,
+                "rejected client_secret authentication for a FAPI 2.0 client"
+            );
+            return Err(ClientAuthError::FapiSecretRejected);
+        }
+
+        // OIDC Core 1.0 §3.1.3.1: "If the Client is a Confidential Client,
+        // then it MUST authenticate to the Token Endpoint using the
+        // authentication method registered for its "client_id"". mTLS clients
+        // left through the certificate branch above, so what remains here
+        // without a secret method is `private_key_jwt`; a secret row it holds
+        // is refused before the hash lookup.
+        if !client.token_endpoint_auth_method.uses_client_secret() {
+            tracing::warn!(
+                client_id = %client.client_id,
+                auth_method = %client.token_endpoint_auth_method.as_str(),
+                "rejected secret-based authentication for a client not registered for it"
+            );
+            return Err(ClientAuthError::SecretNotRegistered);
+        }
+
         // Secret is required - validate it
         let secret = credentials
             .client_secret
@@ -842,6 +925,7 @@ pub async fn authenticate_client(
             &state.store,
             &credentials.client_id,
             &secret_hash,
+            arrival.timestamp(),
         )
         .await?;
 
@@ -849,13 +933,12 @@ pub async fn authenticate_client(
             return Err(ClientAuthError::InvalidCredentials);
         }
 
-        Ok((
-            AuthenticatedClient {
-                client,
-                is_public: false,
-            },
-            Some(ClientSecretVerification { _private: () }),
-        ))
+        // Update last used timestamp
+        if let Err(e) = db::update_oauth_client_last_used(&state.store, &client.id).await {
+            tracing::warn!("Failed to update OAuth client last_used: {e}");
+        }
+
+        Ok((client, Some(ClientSecretVerification { _private: () })))
     } else {
         // Public client - no secret required, but PKCE should be used
         // Update last used timestamp
@@ -863,13 +946,7 @@ pub async fn authenticate_client(
             tracing::warn!("Failed to update OAuth client last_used: {e}");
         }
 
-        Ok((
-            AuthenticatedClient {
-                client,
-                is_public: true,
-            },
-            None,
-        ))
+        Ok((client, None))
     }
 }
 
@@ -896,10 +973,9 @@ struct IdTokenParams<'a> {
     /// key receives the same confirmation on both tokens of one response.
     binding: TokenBinding<'a>,
     scope: &'a ScopeSet,
-    /// Time when the user authenticated (FIDO2 session creation time).
-    auth_time: Option<i64>,
-    /// Authentication assurance level — bundles `amr` and `acr`.
-    hardware_verification: crate::services::auth::HardwareVerification,
+    /// Authentication assurance level — bundles `auth_time`, `amr`, and `acr`,
+    /// so the `auth_time` claim cannot outlive the assertion that earned it.
+    hardware_verification: HardwareVerification,
     /// Access token string, used to compute `at_hash` (OIDC Core Section 3.1.3.6).
     access_token: Option<&'a str>,
     /// OIDC Core: Algorithm for signing this ID token.
@@ -907,11 +983,20 @@ struct IdTokenParams<'a> {
 }
 
 /// Generate an OIDC ID token.
+///
+/// `iat`/`exp` are stamped from `arrival` — the same instant
+/// [`create_oauth_access_token`] used for the access token's `exp` and the
+/// session's `expires_at` — so all temporal claims of one token response
+/// share one clock reading per the contract documented in
+/// [`crate::arrival`]. Reading `Timestamp::now()` here instead would let the
+/// ID token's `exp` exceed the access token's `exp` (and the session's
+/// `expires_at`) by the processing latency between the two mints.
 async fn generate_id_token(
     state: &Arc<AppState>,
     params: IdTokenParams<'_>,
+    arrival: ArrivalTime,
 ) -> ServiceResult<String> {
-    let now = Timestamp::now();
+    let now = arrival.timestamp();
     let expires_seconds = i64::try_from(params.expires_in)
         .map_err(|_| ServiceError::Internal("Invalid expires_in value".to_string()))?;
     let exp = now
@@ -932,7 +1017,7 @@ async fn generate_id_token(
         aud: params.client_id.to_string(),
         exp,
         iat: now.as_second(),
-        auth_time: params.auth_time,
+        auth_time: params.hardware_verification.auth_time(),
         nonce: params.nonce.map(String::from),
         email: if has_email {
             Some(params.email.to_string())
@@ -984,23 +1069,23 @@ async fn generate_id_token(
 /// whether it fetched, not re-derived here.
 async fn resolve_self_signed_jwks(
     state: &Arc<AppState>,
-    client: &crate::db::OAuthClient,
-    jwks_cache: Option<&crate::db::documents::jwks_cache::JwksCacheDoc>,
+    client: &OAuthClient,
+    jwks_cache: Option<&JwksCacheDoc>,
 ) -> ServiceResult<(serde_json::Value, JwksOrigin)> {
-    if let Some(jwks) = client.keys.as_ref().and_then(crate::db::ClientKeys::inline) {
+    if let Some(jwks) = client.keys.as_ref().and_then(ClientKeys::inline) {
         return Ok((
             serde_json::to_value(jwks).unwrap_or_default(),
             JwksOrigin::NoFetch,
         ));
     }
-    let Some(uri) = client.keys.as_ref().and_then(crate::db::ClientKeys::uri) else {
+    let Some(uri) = client.keys.as_ref().and_then(ClientKeys::uri) else {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClient,
             "self_signed_tls_client_auth requires jwks or jwks_uri",
         ));
     };
     let allow_loopback = !state.config().tls_configured();
-    crate::infra::jwks::resolve_cached_jwks(
+    jwks::resolve_cached_jwks(
         &state.store,
         &client.id,
         uri,
@@ -1018,116 +1103,149 @@ async fn resolve_self_signed_jwks(
 /// against the client's registered PKI identity fields and never touches a
 /// JWKS. `self_signed_tls_client_auth` resolves its own JWKS cache/fetch —
 /// callers no longer pre-load it.
+///
+/// Returns `Ok(None)` for a client registered with any other method: the
+/// certificate is not its credential and is not checked. RFC 8705 §2: "The
+/// authorization server MUST enforce the binding between client and
+/// certificate", so an mTLS-registered client that presents no certificate
+/// fails with [`ClientAuthError::MtlsCertificateRequired`].
 pub(crate) async fn authenticate_client_mtls(
     state: &Arc<AppState>,
-    client: &crate::db::OAuthClient,
-    cert: &crate::services::oidc::mtls::ClientCertificate,
-) -> Result<MtlsCertVerification, ClientAuthError> {
-    match client.token_endpoint_auth_method {
-        crate::db::TokenEndpointAuthMethod::TlsClientAuth => {
-            crate::services::oidc::mtls::verify_tls_client_auth(
-                cert,
-                client.tls_client_auth_subject_dn.as_deref(),
-                client.tls_client_auth_san_dns.as_deref(),
-                client.tls_client_auth_san_email.as_deref(),
-                client.tls_client_auth_san_uri.as_deref(),
-                client.tls_client_auth_san_ip.as_deref(),
-            )
-            .map(|()| MtlsCertVerification { _private: () })
-            .map_err(|e| ClientAuthError::MtlsVerificationFailed(e.to_string()))
-        }
-        crate::db::TokenEndpointAuthMethod::SelfSignedTlsClientAuth => {
-            // The cache read is only useful for a `jwks_uri` client — an
-            // inline-only client never consults it (matches
-            // `resolve_client_decoding_key`'s same gate for the RFC 7523
-            // path). The cache is an optimization, not a dependency even
-            // when read: a lookup failure degrades to an uncached fetch
-            // rather than failing authentication (same reasoning).
-            let jwks_cache = if client
-                .keys
-                .as_ref()
-                .and_then(crate::db::ClientKeys::uri)
-                .is_none()
-            {
-                None
-            } else {
-                db::get_jwks_cache(&state.store, &client.id)
+    client: &OAuthClient,
+    cert: Option<&ClientCertificate>,
+    arrival: ArrivalTime,
+) -> Result<Option<MtlsCertVerification>, ClientAuthError> {
+    use crate::db::TokenEndpointAuthMethod;
+
+    let Some(cert) = cert else {
+        return match client.token_endpoint_auth_method {
+            TokenEndpointAuthMethod::TlsClientAuth
+            | TokenEndpointAuthMethod::SelfSignedTlsClientAuth => {
+                Err(ClientAuthError::MtlsCertificateRequired)
+            }
+            _ => Ok(None),
+        };
+    };
+    let result = async {
+        match client.token_endpoint_auth_method {
+            TokenEndpointAuthMethod::TlsClientAuth => {
+                // RFC 8705 §2.1: a validated chain first, then the subject match.
+                // With no trust anchors configured nothing can validate, so the
+                // method fails closed rather than falling back to the name alone.
+                let trust = state.client_cert_trust.as_ref().ok_or_else(|| {
+                    ClientAuthError::MtlsVerificationFailed(
+                        "tls_client_auth is not enabled: no client CA is configured".to_string(),
+                    )
+                })?;
+                let chain = trust
+                    .validate(cert, arrival)
+                    .map_err(|e| ClientAuthError::MtlsVerificationFailed(e.to_string()))?;
+                mtls::verify_tls_client_auth(
+                    chain,
+                    client.tls_client_auth_subject_dn.as_deref(),
+                    client.tls_client_auth_san_dns.as_deref(),
+                    client.tls_client_auth_san_email.as_deref(),
+                    client.tls_client_auth_san_uri.as_deref(),
+                    client.tls_client_auth_san_ip.as_deref(),
+                )
+                .map(|()| Some(MtlsCertVerification { _private: () }))
+                .map_err(|e| ClientAuthError::MtlsVerificationFailed(e.to_string()))
+            }
+            TokenEndpointAuthMethod::SelfSignedTlsClientAuth => {
+                // The cache read is only useful for a `jwks_uri` client — an
+                // inline-only client never consults it (matches
+                // `resolve_client_decoding_key`'s same gate for the RFC 7523
+                // path). The cache is an optimization, not a dependency even
+                // when read: a lookup failure degrades to an uncached fetch
+                // rather than failing authentication (same reasoning).
+                let jwks_cache = if client.keys.as_ref().and_then(ClientKeys::uri).is_none() {
+                    None
+                } else {
+                    db::get_jwks_cache(&state.store, &client.id)
+                        .await
+                        .map_err(|e| {
+                            tracing::debug!(
+                                "JWKS cache lookup failed for client {}: {e}",
+                                client.id
+                            );
+                        })
+                        .ok()
+                        .flatten()
+                };
+
+                let (jwks, origin) = resolve_self_signed_jwks(state, client, jwks_cache.as_ref())
                     .await
-                    .map_err(|e| {
-                        tracing::debug!("JWKS cache lookup failed for client {}: {e}", client.id);
-                    })
-                    .ok()
-                    .flatten()
-            };
+                    .map_err(|e| ClientAuthError::MtlsVerificationFailed(e.to_string()))?;
 
-            let (jwks, origin) = resolve_self_signed_jwks(state, client, jwks_cache.as_ref())
-                .await
-                .map_err(|e| ClientAuthError::MtlsVerificationFailed(e.to_string()))?;
-
-            match crate::services::oidc::mtls::verify_self_signed_tls_client_auth(cert, &jwks) {
-                Ok(()) => Ok(MtlsCertVerification { _private: () }),
-                Err(e) => {
-                    // On a certificate miss, force-refresh a `jwks_uri`-backed
-                    // client's JWKS and retry once — mirrors
-                    // `find_matching_key_with_refresh_client`'s kid-miss
-                    // policy for the same reason: the client may have rotated
-                    // its certificate since the cache was last populated.
-                    // Only meaningful when the JWKS just verified against
-                    // came from the cache: if resolution above already
-                    // fetched (`JwksOrigin::Fetched`), a further attempt
-                    // would just repeat it. This bounds every auth attempt
-                    // to at most one fetch, including against a permanently
-                    // unreachable host, whose `cached_at` never advances and
-                    // so cannot drive a freshness-based rate limit. No
-                    // cross-request throttle is applied beyond that bound —
-                    // repeated attempts across requests still cost one fetch
-                    // each, bounded upstream by the per-IP auth rate limiter.
-                    let Some(uri) = client.keys.as_ref().and_then(crate::db::ClientKeys::uri)
-                    else {
-                        return Err(ClientAuthError::MtlsVerificationFailed(e.to_string()));
-                    };
-                    if matches!(origin, JwksOrigin::Fetched) {
-                        return Err(ClientAuthError::MtlsVerificationFailed(e.to_string()));
+                match mtls::verify_self_signed_tls_client_auth(cert, &jwks) {
+                    Ok(()) => Ok(Some(MtlsCertVerification { _private: () })),
+                    Err(e) => {
+                        // On a certificate miss, force-refresh a `jwks_uri`-backed
+                        // client's JWKS and retry once — mirrors
+                        // `find_matching_key_with_refresh_client`'s kid-miss
+                        // policy for the same reason: the client may have rotated
+                        // its certificate since the cache was last populated.
+                        // Only meaningful when the JWKS just verified against
+                        // came from the cache: if resolution above already
+                        // fetched (`JwksOrigin::Fetched`), a further attempt
+                        // would just repeat it. This bounds every auth attempt
+                        // to at most one fetch, including against a permanently
+                        // unreachable host, whose `cached_at` never advances and
+                        // so cannot drive a freshness-based rate limit. No
+                        // cross-request throttle is applied beyond that bound —
+                        // repeated attempts across requests still cost one fetch
+                        // each, bounded upstream by the per-IP auth rate limiter.
+                        let Some(uri) = client.keys.as_ref().and_then(ClientKeys::uri) else {
+                            return Err(ClientAuthError::MtlsVerificationFailed(e.to_string()));
+                        };
+                        if matches!(origin, JwksOrigin::Fetched) {
+                            return Err(ClientAuthError::MtlsVerificationFailed(e.to_string()));
+                        }
+                        // A failed refetch falls back to the original error
+                        // rather than surfacing the fetch failure — same shape
+                        // as `find_matching_key_with_refresh_client`, so the
+                        // caller sees a consistent "certificate not registered"
+                        // rather than a raw network error. A successful refetch
+                        // re-verifies against the fresh JWKS and returns
+                        // whatever that produces, success or a new mismatch.
+                        let allow_loopback = !state.config().tls_configured();
+                        let Ok(fresh_jwks) = jwks::fetch_and_cache(
+                            &state.store,
+                            &client.id,
+                            uri,
+                            allow_loopback,
+                            &state.http_client,
+                        )
+                        .await
+                        .inspect_err(|fetch_err| {
+                            tracing::warn!(
+                                "JWKS force-refresh failed for client {}: {fetch_err}",
+                                client.id
+                            );
+                        }) else {
+                            return Err(ClientAuthError::MtlsVerificationFailed(e.to_string()));
+                        };
+                        mtls::verify_self_signed_tls_client_auth(cert, &fresh_jwks)
+                            .map(|()| Some(MtlsCertVerification { _private: () }))
+                            .map_err(|fresh_err| {
+                                ClientAuthError::MtlsVerificationFailed(fresh_err.to_string())
+                            })
                     }
-                    // A failed refetch falls back to the original error
-                    // rather than surfacing the fetch failure — same shape
-                    // as `find_matching_key_with_refresh_client`, so the
-                    // caller sees a consistent "certificate not registered"
-                    // rather than a raw network error. A successful refetch
-                    // re-verifies against the fresh JWKS and returns
-                    // whatever that produces, success or a new mismatch.
-                    let allow_loopback = !state.config().tls_configured();
-                    let Ok(fresh_jwks) = crate::infra::jwks::fetch_and_cache(
-                        &state.store,
-                        &client.id,
-                        uri,
-                        allow_loopback,
-                        &state.http_client,
-                    )
-                    .await
-                    .inspect_err(|fetch_err| {
-                        tracing::warn!(
-                            "JWKS force-refresh failed for client {}: {fetch_err}",
-                            client.id
-                        );
-                    }) else {
-                        return Err(ClientAuthError::MtlsVerificationFailed(e.to_string()));
-                    };
-                    crate::services::oidc::mtls::verify_self_signed_tls_client_auth(
-                        cert,
-                        &fresh_jwks,
-                    )
-                    .map(|()| MtlsCertVerification { _private: () })
-                    .map_err(|fresh_err| {
-                        ClientAuthError::MtlsVerificationFailed(fresh_err.to_string())
-                    })
                 }
             }
+            _ => Ok(None),
         }
-        _ => Err(ClientAuthError::MtlsVerificationFailed(
-            "client not registered for mTLS authentication".to_string(),
-        )),
     }
+    .await;
+    // The response carries only `invalid_client`; the operator needs the
+    // reason to tell a chain failure from a subject mismatch.
+    if let Err(ClientAuthError::MtlsVerificationFailed(reason)) = &result {
+        tracing::warn!(
+            client_id = %client.client_id,
+            "mTLS client authentication failed: {reason}"
+        );
+    }
+    result
 }
 
 /// Validate DPoP proof if present in the request.
@@ -1148,6 +1266,7 @@ pub async fn validate_dpop_if_present(
     dpop_header: Option<&str>,
     method: &str,
     uri: &str,
+    arrival: ArrivalTime,
 ) -> Result<Option<ValidatedDpopProof>, DpopError> {
     let dpop_proof = match dpop_header {
         Some(proof) => proof,
@@ -1177,6 +1296,7 @@ pub async fn validate_dpop_if_present(
         &accepted_uris,
         &state.store,
         config.dpop_max_age_seconds,
+        arrival,
     )
     .await
     {
@@ -1203,11 +1323,28 @@ pub async fn validate_dpop_if_present(
 pub struct OidcValidatedSession {
     /// The authenticated user.
     pub user: User,
-    /// The database session record.
-    pub session: Session,
     /// The authenticator used to create the session, if any.
     /// `None` for OIDC-only enrollment sessions that lack a hardware key.
+    ///
+    /// Presence means only that the user has a key on record — an enrollment
+    /// bootstrap session for a returning user carries one while no assertion
+    /// has occurred. Read [`Self::hardware_verified`] to learn whether a
+    /// ceremony actually happened.
     pub authenticator: Option<Authenticator>,
+    /// Whether a FIDO2 assertion backs this session, from the access token's
+    /// `hardware_verified` claim.
+    pub hardware_verified: bool,
+    /// When that assertion happened, at full precision, read from the
+    /// server-side session row (the access token's `auth_time` claim is its
+    /// whole second, OIDC Core §2).
+    ///
+    /// Independent of [`Self::hardware_verified`]: a token exchanged under
+    /// RFC 8693 inherits the subject's verification but not its instant, and
+    /// rows written before the instant was recorded carry none. `None`
+    /// means "cannot say when", and nothing may substitute a nearby
+    /// timestamp for it — in particular not the row's creation instant: the
+    /// authorization_code grant mints a new row carrying an older ceremony.
+    pub authenticated_at: Option<jiff::Timestamp>,
     /// Granted OAuth scope from the access token JWT.
     pub scope: Option<ScopeSet>,
     /// The OAuth client_id from the access token (used for signed userinfo lookup).
@@ -1221,6 +1358,7 @@ pub struct OidcValidatedSession {
 pub async fn validate_session_token(
     state: &Arc<AppState>,
     token: &str,
+    arrival: ArrivalTime,
 ) -> ServiceResult<Option<OidcValidatedSession>> {
     // Decode the token as an ES256 RFC 9068 access token
     let config = state.config();
@@ -1233,7 +1371,7 @@ pub async fn validate_session_token(
     let token_hash = hash_token(token);
     let session = match state
         .session_cache
-        .get_session_by_token_hash(&state.store, &token_hash)
+        .get_session_by_token_hash(&state.store, &token_hash, arrival)
         .await
         .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
     {
@@ -1284,16 +1422,19 @@ pub async fn validate_session_token(
         None => None,
     };
 
-    let client_id = match &decoded {
-        crate::services::auth::DecodedToken::AccessToken(c) => Some(c.client_id.clone()),
+    let (client_id, hardware_verified) = match &decoded {
+        DecodedToken::AccessToken(c) => (Some(c.client_id.clone()), c.hardware_verified),
     };
 
     Ok(Some(OidcValidatedSession {
         user,
-        session,
         authenticator,
         scope: decoded.scope().cloned(),
         client_id,
+        hardware_verified,
+        // Only a verified session can carry a ceremony instant; an unverified
+        // token never reports one, whatever its row holds.
+        authenticated_at: session.authenticated_at.filter(|_| hardware_verified),
     }))
 }
 
@@ -1305,8 +1446,15 @@ pub async fn validate_session_token(
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
-    use super::super::authorization::CodeChallengeMethod;
     use super::*;
+    use crate::arrival::ArrivalTime;
+    use crate::crypto::alg::JwsAlgorithm;
+    use crate::db::documents::jwks_cache::JwksCacheDoc;
+    use crate::db::store::DocumentStore;
+    use crate::db::{self, ClientKeys, ClientType, OAuthClient};
+    use crate::services::oidc::authorization::CodeChallengeMethod;
+    use crate::services::oidc::mtls::{self, ClientCertificate};
+    use crate::test_utils::{self, TestClientSpec, TestJwks};
 
     fn assert_oauth_error<T: std::fmt::Debug>(
         result: Result<T, ServiceError>,
@@ -1342,7 +1490,7 @@ mod tests {
             dpop_jkt: None,
             iat: 0,
             exp: i64::MAX,
-            auth_time: None,
+            authenticated_at: None,
         }
     }
 
@@ -1518,7 +1666,7 @@ mod tests {
             dpop_jkt: None,
             iat: 0,
             exp: i64::MAX,
-            auth_time: None,
+            authenticated_at: None,
         };
 
         let result = auth_code.validate_pkce(Some(code_verifier));
@@ -1546,7 +1694,7 @@ mod tests {
             dpop_jkt: None,
             iat: 0,
             exp: i64::MAX,
-            auth_time: None,
+            authenticated_at: None,
         };
 
         let result = auth_code.validate_pkce(Some("wrong_verifier"));
@@ -1574,7 +1722,7 @@ mod tests {
             dpop_jkt: None,
             iat: 0,
             exp: i64::MAX,
-            auth_time: None,
+            authenticated_at: None,
         };
 
         let result = auth_code.validate_pkce(None);
@@ -1605,7 +1753,7 @@ mod tests {
             dpop_jkt: None,
             iat: 0,
             exp: i64::MAX,
-            auth_time: None,
+            authenticated_at: None,
         };
 
         let result = auth_code.validate_pkce(None);
@@ -1746,9 +1894,9 @@ mod tests {
     fn make_mtls_client(
         auth_method: TokenEndpointAuthMethod,
         subject_dn: Option<&str>,
-    ) -> crate::db::OAuthClient {
+    ) -> OAuthClient {
         let now = jiff::Timestamp::now();
-        crate::db::OAuthClient {
+        OAuthClient {
             id: "test-mtls-id".to_string(),
             user_id: Some("test-user".to_string()),
             client_id: "mtls-client-id".to_string(),
@@ -1776,7 +1924,7 @@ mod tests {
             registration_source: None,
             registration_access_token_hash: None,
             registration_metadata: None,
-            id_token_signed_response_alg: crate::crypto::alg::JwsAlgorithm::Rs256,
+            id_token_signed_response_alg: JwsAlgorithm::Rs256,
             tls_client_auth_subject_dn: subject_dn.map(String::from),
             tls_client_auth_san_dns: None,
             tls_client_auth_san_uri: None,
@@ -1791,9 +1939,16 @@ mod tests {
         }
     }
 
-    fn make_cert_with_cn(cn: &str) -> crate::services::oidc::mtls::ClientCertificate {
+    fn make_cert_with_cn(cn: &str) -> ClientCertificate {
         let der = make_self_signed_cert_der(cn);
-        crate::services::oidc::mtls::parse_client_certificate(&der).expect("parse cert")
+        mtls::parse_client_certificate(&der).expect("parse cert")
+    }
+
+    /// A client certificate for `CN=<cn>` issued by the test client CA the
+    /// test `AppState` trusts.
+    fn make_ca_issued_cert(cn: &str) -> ClientCertificate {
+        let der = test_utils::test_client_ca().issue(cn);
+        mtls::parse_client_certificate(&der).expect("parse cert")
     }
 
     /// Generate a self-signed DER certificate with the given CN.
@@ -1848,12 +2003,14 @@ mod tests {
     // RFC 8705 §2.1.2: the certificate subject must match the registered value.
     #[tokio::test]
     async fn test_authenticate_client_mtls_tls_client_auth_matching() {
-        let state = crate::test_utils::test_app_state().await;
-        let cert = make_cert_with_cn("test-mtls-client");
+        let state = test_utils::test_app_state().await;
+        let cert = make_ca_issued_cert("test-mtls-client");
         let subject_dn = cert.subject_dn.as_deref().expect("cert has subject_dn");
         let client = make_mtls_client(TokenEndpointAuthMethod::TlsClientAuth, Some(subject_dn));
 
-        let result = authenticate_client_mtls(&state, &client, &cert).await;
+        let result =
+            authenticate_client_mtls(&state, &client, Some(&cert), test_utils::test_arrival())
+                .await;
         assert!(
             result.is_ok(),
             "matching subject_dn must authenticate successfully, got: {result:?}"
@@ -1864,14 +2021,16 @@ mod tests {
     // RFC 8705 §2.1.2: a certificate naming another subject does not authenticate.
     #[tokio::test]
     async fn test_authenticate_client_mtls_tls_client_auth_mismatch() {
-        let state = crate::test_utils::test_app_state().await;
-        let cert = make_cert_with_cn("actual-client");
+        let state = test_utils::test_app_state().await;
+        let cert = make_ca_issued_cert("actual-client");
         let client = make_mtls_client(
             TokenEndpointAuthMethod::TlsClientAuth,
             Some("CN=expected-different-client"),
         );
 
-        let result = authenticate_client_mtls(&state, &client, &cert).await;
+        let result =
+            authenticate_client_mtls(&state, &client, Some(&cert), test_utils::test_arrival())
+                .await;
         assert!(
             result.is_err(),
             "non-matching subject_dn must fail authentication"
@@ -1882,22 +2041,419 @@ mod tests {
         );
     }
 
-    /// Client with ClientSecretBasic auth method cannot use mTLS authentication.
+    /// Authenticate a `tls_client_auth` client registered for `cert`'s own
+    /// subject DN, so only the chain can decide the outcome.
+    async fn authenticate_tls_client_auth(
+        state: &Arc<AppState>,
+        cert: &ClientCertificate,
+        arrival: ArrivalTime,
+    ) -> Result<Option<MtlsCertVerification>, ClientAuthError> {
+        let subject_dn = cert.subject_dn.as_deref().expect("cert has subject_dn");
+        let client = make_mtls_client(TokenEndpointAuthMethod::TlsClientAuth, Some(subject_dn));
+        authenticate_client_mtls(state, &client, Some(cert), arrival).await
+    }
+
+    // RFC 8705 §2.1: the PKI method "relies on a validated certificate chain
+    // [RFC5280] and a single subject distinguished name (DN) or a single
+    // subject alternative name (SAN) to authenticate the client." A
+    // self-signed certificate carrying the registered DN chains to no trust
+    // anchor, so it does not authenticate.
+    #[tokio::test]
+    async fn test_authenticate_client_mtls_tls_client_auth_rejects_self_signed() {
+        let state = test_utils::test_app_state().await;
+        let cert = make_cert_with_cn("victim.example.com");
+
+        let result = authenticate_tls_client_auth(&state, &cert, test_utils::test_arrival()).await;
+        assert!(
+            matches!(result, Err(ClientAuthError::MtlsVerificationFailed(_))),
+            "a self-signed certificate with the registered DN must not authenticate, got: {result:?}"
+        );
+    }
+
+    // RFC 8705 §2.1: "a validated certificate chain [RFC5280]". A leaf issued
+    // by an intermediate validates when the client sends the intermediate,
+    // and not when it is missing.
+    #[tokio::test]
+    async fn test_authenticate_client_mtls_tls_client_auth_validates_intermediates() {
+        let state = test_utils::test_app_state().await;
+        let (leaf, intermediate) =
+            test_utils::test_client_ca().issue_via_intermediate("chained-client");
+        let mut cert = mtls::parse_client_certificate(&leaf).expect("parse cert");
+
+        let result = authenticate_tls_client_auth(&state, &cert, test_utils::test_arrival()).await;
+        assert!(
+            matches!(result, Err(ClientAuthError::MtlsVerificationFailed(_))),
+            "without its intermediate the chain must not validate, got: {result:?}"
+        );
+
+        cert.intermediates = vec![intermediate];
+        let result = authenticate_tls_client_auth(&state, &cert, test_utils::test_arrival()).await;
+        assert!(
+            matches!(result, Ok(Some(_))),
+            "with its intermediate the chain must validate, got: {result:?}"
+        );
+    }
+
+    // RFC 5280 §4.2.1.12: "If the extension is present, then the certificate
+    // MUST only be used for one of the purposes indicated." A serverAuth-only
+    // certificate does not authenticate a client.
+    #[tokio::test]
+    async fn test_authenticate_client_mtls_tls_client_auth_rejects_server_only_eku() {
+        let state = test_utils::test_app_state().await;
+        let der = test_utils::test_client_ca().issue_with_eku(
+            "server-only",
+            // id-kp-serverAuth (RFC 5280 §4.2.1.12)
+            &[der::oid::ObjectIdentifier::new_unwrap("1.3.6.1.5.5.7.3.1")],
+        );
+        let cert = mtls::parse_client_certificate(&der).expect("parse cert");
+
+        let result = authenticate_tls_client_auth(&state, &cert, test_utils::test_arrival()).await;
+        assert!(
+            matches!(result, Err(ClientAuthError::MtlsVerificationFailed(_))),
+            "a serverAuth-only certificate must not authenticate a client, got: {result:?}"
+        );
+    }
+
+    // RFC 5280 §6.1.3 (a)(2): "The certificate validity period includes the
+    // current time." The current time is the request's arrival; the test
+    // certificates are valid for one day.
+    #[tokio::test]
+    async fn test_authenticate_client_mtls_tls_client_auth_checks_validity_at_arrival() {
+        let state = test_utils::test_app_state().await;
+        let cert = make_ca_issued_cert("expiring-client");
+        let two_days_later = ArrivalTime::for_test_second(
+            test_utils::test_arrival()
+                .as_second()
+                .saturating_add(2 * 86_400),
+        );
+
+        let result = authenticate_tls_client_auth(&state, &cert, two_days_later).await;
+        assert!(
+            matches!(result, Err(ClientAuthError::MtlsVerificationFailed(_))),
+            "a certificate expired at arrival must not authenticate, got: {result:?}"
+        );
+    }
+
+    // RFC 8705 §2.1 needs trust anchors to validate against. Without
+    // `VOUCH_MTLS_CLIENT_CA_CERTS` nothing validates, so even a CA-issued
+    // certificate fails rather than falling back to the subject match.
+    #[tokio::test]
+    async fn test_authenticate_client_mtls_tls_client_auth_fails_closed_without_client_ca() {
+        let (_app, state) = test_utils::test_app_without_client_ca().await;
+        let cert = make_ca_issued_cert("no-trust-client");
+
+        let result = authenticate_tls_client_auth(&state, &cert, test_utils::test_arrival()).await;
+        assert!(
+            matches!(result, Err(ClientAuthError::MtlsVerificationFailed(_))),
+            "tls_client_auth must fail closed without client CAs, got: {result:?}"
+        );
+    }
+
+    /// A certificate is not the credential of a client registered with a
+    /// non-mTLS method, so it is neither checked nor a verification.
     // RFC 8705 §2.1.2: the registered authentication method decides how the certificate is checked.
     #[tokio::test]
     async fn test_authenticate_client_mtls_wrong_method() {
-        let state = crate::test_utils::test_app_state().await;
+        let state = test_utils::test_app_state().await;
         let cert = make_cert_with_cn("wrong-method-client");
         let client = make_mtls_client(TokenEndpointAuthMethod::ClientSecretBasic, None);
 
-        let result = authenticate_client_mtls(&state, &client, &cert).await;
+        let result =
+            authenticate_client_mtls(&state, &client, Some(&cert), test_utils::test_arrival())
+                .await;
         assert!(
-            result.is_err(),
-            "non-mTLS auth method must fail mTLS authentication"
+            matches!(result, Ok(None)),
+            "a non-mTLS client yields no mTLS verification, got: {result:?}"
+        );
+    }
+
+    /// RFC 8705 §2: "The authorization server MUST enforce the binding between
+    /// client and certificate" — an mTLS-registered client with no certificate
+    /// is refused, while a non-mTLS client without one is simply unverified.
+    #[tokio::test]
+    async fn test_authenticate_client_mtls_missing_certificate() {
+        let state = test_utils::test_app_state().await;
+        for method in [
+            TokenEndpointAuthMethod::TlsClientAuth,
+            TokenEndpointAuthMethod::SelfSignedTlsClientAuth,
+        ] {
+            let client = make_mtls_client(method, Some("CN=registered"));
+            let result =
+                authenticate_client_mtls(&state, &client, None, test_utils::test_arrival()).await;
+            assert!(
+                matches!(result, Err(ClientAuthError::MtlsCertificateRequired)),
+                "{method:?} without a certificate must be refused, got: {result:?}"
+            );
+        }
+        let client = make_mtls_client(TokenEndpointAuthMethod::ClientSecretBasic, None);
+        let result =
+            authenticate_client_mtls(&state, &client, None, test_utils::test_arrival()).await;
+        assert!(
+            matches!(result, Ok(None)),
+            "a non-mTLS client needs no certificate, got: {result:?}"
+        );
+    }
+
+    // ========================================================================
+    // authenticate_client — best-effort last_used_at (regression test)
+    // ========================================================================
+    //
+    // The `last_used_at` timestamp UPDATE is an observational write: it must
+    // never fail an already-authenticated request. Five of the six
+    // `last_used_at` call sites (mTLS, public, private_key_jwt, two SCIM)
+    // keep the write separate from validation and swallow it at the service
+    // layer. The secret-based path was the lone outlier — it bundled the
+    // write into `validate_oauth_client_credentials` via `.await?`, so a
+    // transient `last_used_at` failure surfaced as HTTP 500 / `server_error`
+    // for a fully-authenticated secret-based confidential client while the
+    // other auth methods proceeded. The fix moves the write out of the DB
+    // function and adds the same `if let Err(e) = ... { tracing::warn! }`
+    // swallow the other branches use.
+
+    /// A secret-based confidential client authenticates successfully even
+    /// when the observational `last_used_at` UPDATE fails — the write is
+    /// swallowed at the service layer, matching the public/mTLS/private_key_jwt
+    // RFC 8252 §8.4: a native app may be provisioned a per-instance secret
+    // through dynamic registration; RFC 7591 §2 makes the registered
+    // `token_endpoint_auth_method`, not `application_type`, what says whether
+    // the client is public. A native client registered with a secret is held
+    // to it.
+    #[tokio::test]
+    async fn test_authenticate_client_native_client_with_secret_is_confidential() {
+        use secrecy::SecretString;
+
+        let state = test_utils::test_app_state().await;
+        let user = test_utils::create_test_user(&state.store, "native-secret@example.com").await;
+        let client = test_utils::create_test_client(
+            &state.store,
+            &user.id,
+            TestClientSpec {
+                application_type: OAuthClientType::Native,
+                redirect_uris: vec!["http://127.0.0.1/cb".to_string()],
+                token_endpoint_auth_method: Some(TokenEndpointAuthMethod::ClientSecretPost),
+                with_secret: true,
+                ..Default::default()
+            },
+        )
+        .await;
+        let arrival = ArrivalTime::for_test(jiff::Timestamp::now());
+
+        let without_secret = ClientCredentials {
+            client_id: client.client_id.clone(),
+            client_secret: None,
+        };
+        assert!(
+            matches!(
+                authenticate_client(&state, &without_secret, arrival).await,
+                Err(ClientAuthError::SecretRequired)
+            ),
+            "a native client registered with a secret must present it"
+        );
+
+        let with_secret = ClientCredentials {
+            client_id: client.client_id.clone(),
+            client_secret: Some(SecretString::from(client.client_secret.clone())),
+        };
+        let (auth, verification) = authenticate_client(&state, &with_secret, arrival)
+            .await
+            .expect("the registered secret authenticates the client");
+        assert_eq!(auth.client_type(), ClientType::Confidential);
+        assert!(verification.is_some());
+    }
+
+    /// branches.
+    #[tokio::test]
+    async fn test_authenticate_client_secret_swallows_last_used_failure() {
+        use secrecy::SecretString;
+
+        let state = test_utils::build_test_app_state(Vec::new(), |store| {
+            // Fault every `update_last_used_at` write with a non-retryable
+            // `Err` (not in `RETRYABLE_SQL_STATES`, so it escapes
+            // `with_dsql_retry!` immediately).
+            store.set_last_used_remaining_successes(0);
+        })
+        .await;
+
+        let user = test_utils::create_test_user(&state.store, "last-used-secret@example.com").await;
+        let client = test_utils::create_test_oauth_client(&state.store, &user.id).await;
+
+        let creds = ClientCredentials {
+            client_id: client.client_id.clone(),
+            client_secret: Some(SecretString::from(client.client_secret.clone())),
+        };
+
+        let result = authenticate_client(
+            &state,
+            &creds,
+            ArrivalTime::for_test(jiff::Timestamp::now()),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "secret-based auth must not fail when only the last_used_at write fails: {result:?}"
+        );
+        let (auth, verification) = result.expect("checked Ok above");
+        assert_eq!(
+            auth.client_type(),
+            ClientType::Confidential,
+            "secret-based client is confidential, not public"
         );
         assert!(
-            matches!(result, Err(ClientAuthError::MtlsVerificationFailed(_))),
-            "must return MtlsVerificationFailed for wrong auth method, got: {result:?}"
+            verification.is_some(),
+            "secret verification witness must be present for a secret-authenticated client"
+        );
+    }
+
+    /// A FAPI 2.0 client registered for `private_key_jwt` that still holds a
+    /// secret row (minted before secret minting was blocked for FAPI
+    /// profiles) must not be able to authenticate with it. FAPI 2.0 Security
+    /// Profile §5.3.2.1 item 6: the authorization server "shall authenticate
+    /// clients using one of the following methods: MTLS as specified in
+    /// Section 2 of [RFC8705], or private_key_jwt as specified in Section 9
+    /// of [OIDC]". Without this gate the secret was live at every
+    /// secret-verifying endpoint even though PAR refused it.
+    #[tokio::test]
+    async fn test_authenticate_client_rejects_secret_for_fapi_client() {
+        use secrecy::SecretString;
+
+        let state = test_utils::test_app_state().await;
+        let user = test_utils::create_test_user(&state.store, "fapi-secret-auth@example.com").await;
+        let client = test_utils::create_test_client(
+            &state.store,
+            &user.id,
+            TestClientSpec {
+                token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
+                jwks: TestJwks::Shared,
+                dpop_bound_access_tokens: true,
+                fapi_profile: Some(FapiProfile::Fapi2Security),
+                with_secret: true, // a pre-guard row that would otherwise verify
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let creds = ClientCredentials {
+            client_id: client.client_id.clone(),
+            client_secret: Some(SecretString::from(client.client_secret.clone())),
+        };
+
+        let result = authenticate_client(
+            &state,
+            &creds,
+            ArrivalTime::for_test(jiff::Timestamp::now()),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(ClientAuthError::FapiSecretRejected)),
+            "a FAPI client's secret must be refused, got {result:?}"
+        );
+        assert!(
+            matches!(
+                ClientAuthError::FapiSecretRejected.into_service_error(),
+                ServiceError::OAuth {
+                    code: OAuthErrorCode::InvalidClient,
+                    ..
+                }
+            ),
+            "the refusal must surface as RFC 6749 invalid_client"
+        );
+    }
+
+    /// OIDC Core 1.0 §3.1.3.1: a confidential client "MUST authenticate to the
+    /// Token Endpoint using the authentication method registered for its
+    /// "client_id"". A secret row on a non-FAPI `private_key_jwt` client does
+    /// not authenticate it.
+    #[tokio::test]
+    async fn test_authenticate_client_rejects_secret_for_non_fapi_private_key_jwt_client() {
+        use secrecy::SecretString;
+
+        let state = test_utils::test_app_state().await;
+        let user =
+            test_utils::create_test_user(&state.store, "pkjwt-secret-auth@example.com").await;
+        let client = test_utils::create_test_client(
+            &state.store,
+            &user.id,
+            TestClientSpec {
+                application_type: OAuthClientType::Service,
+                grant_types: Some(vec!["client_credentials".to_string()]),
+                token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
+                jwks: TestJwks::Shared,
+                fapi_profile: None,
+                with_secret: true, // would verify if the method were not checked
+                ..Default::default()
+            },
+        )
+        .await;
+
+        assert!(
+            !client.client_secret.is_empty(),
+            "fixture must seed a stray secret row to exercise the gate"
+        );
+
+        let creds = ClientCredentials {
+            client_id: client.client_id.clone(),
+            client_secret: Some(SecretString::from(client.client_secret.clone())),
+        };
+
+        let result = authenticate_client(
+            &state,
+            &creds,
+            ArrivalTime::for_test(jiff::Timestamp::now()),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(ClientAuthError::SecretNotRegistered)),
+            "a non-FAPI private_key_jwt client's stray secret must be refused, got {result:?}"
+        );
+        assert!(
+            matches!(
+                ClientAuthError::SecretNotRegistered.into_service_error(),
+                ServiceError::OAuth {
+                    code: OAuthErrorCode::InvalidClient,
+                    ..
+                }
+            ),
+            "the refusal must surface as RFC 6749 invalid_client"
+        );
+    }
+
+    /// A public (`none`) client still authenticates with no credential.
+    #[tokio::test]
+    async fn test_authenticate_client_public_client_unaffected_by_registered_method_gate() {
+        let state = test_utils::test_app_state().await;
+        let user = test_utils::create_test_user(&state.store, "public-gate@example.com").await;
+        let client = test_utils::create_test_client(
+            &state.store,
+            &user.id,
+            TestClientSpec {
+                application_type: OAuthClientType::Spa,
+                redirect_uris: vec!["https://example.com/cb".to_string()],
+                token_endpoint_auth_method: Some(TokenEndpointAuthMethod::None),
+                with_secret: false,
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let creds = ClientCredentials {
+            client_id: client.client_id.clone(),
+            client_secret: None,
+        };
+        let (authed, verification) = authenticate_client(
+            &state,
+            &creds,
+            ArrivalTime::for_test(jiff::Timestamp::now()),
+        )
+        .await
+        .expect("a public client authenticates without a secret");
+        assert_eq!(
+            authed.client_type(),
+            ClientType::Public,
+            "a `none`-registered client is public"
+        );
+        assert!(
+            verification.is_none(),
+            "no secret verification witness for a public client"
         );
     }
 
@@ -1908,10 +2464,9 @@ mod tests {
     async fn test_authenticate_client_mtls_self_signed_matching() {
         use base64::Engine;
 
-        let state = crate::test_utils::test_app_state().await;
+        let state = test_utils::test_app_state().await;
         let cert_der = make_self_signed_cert_der("self-signed-client");
-        let cert =
-            crate::services::oidc::mtls::parse_client_certificate(&cert_der).expect("parse cert");
+        let cert = mtls::parse_client_certificate(&cert_der).expect("parse cert");
 
         // Build JWKS with matching x5c (standard base64 per RFC 7517 §4.7)
         let x5c_b64 = base64::engine::general_purpose::STANDARD.encode(&cert_der);
@@ -1920,11 +2475,13 @@ mod tests {
         });
 
         let mut client = make_mtls_client(TokenEndpointAuthMethod::SelfSignedTlsClientAuth, None);
-        client.keys = Some(crate::db::ClientKeys::Inline(
-            crate::db::parse_jwks_set(&jwks).expect("valid test JWKS"),
+        client.keys = Some(ClientKeys::Inline(
+            db::parse_jwks_set(&jwks).expect("valid test JWKS"),
         ));
 
-        let result = authenticate_client_mtls(&state, &client, &cert).await;
+        let result =
+            authenticate_client_mtls(&state, &client, Some(&cert), test_utils::test_arrival())
+                .await;
         assert!(
             result.is_ok(),
             "matching x5c must authenticate successfully: {result:?}"
@@ -1935,12 +2492,14 @@ mod tests {
     // RFC 8705 §2.2: self-signed authentication needs registered keys.
     #[tokio::test]
     async fn test_authenticate_client_mtls_self_signed_no_jwks() {
-        let state = crate::test_utils::test_app_state().await;
+        let state = test_utils::test_app_state().await;
         let cert = make_cert_with_cn("self-signed-no-jwks");
         let client = make_mtls_client(TokenEndpointAuthMethod::SelfSignedTlsClientAuth, None);
         // client.jwks is None (default from make_mtls_client)
 
-        let result = authenticate_client_mtls(&state, &client, &cert).await;
+        let result =
+            authenticate_client_mtls(&state, &client, Some(&cert), test_utils::test_arrival())
+                .await;
         assert!(
             matches!(result, Err(ClientAuthError::MtlsVerificationFailed(_))),
             "missing JWKS must return MtlsVerificationFailed: {result:?}"
@@ -1953,11 +2512,10 @@ mod tests {
     async fn test_authenticate_client_mtls_self_signed_mismatch() {
         use base64::Engine;
 
-        let state = crate::test_utils::test_app_state().await;
+        let state = test_utils::test_app_state().await;
         let cert_der = make_self_signed_cert_der("self-signed-cert");
         let other_der = make_self_signed_cert_der("self-signed-other");
-        let cert =
-            crate::services::oidc::mtls::parse_client_certificate(&cert_der).expect("parse cert");
+        let cert = mtls::parse_client_certificate(&cert_der).expect("parse cert");
 
         // JWKS contains the *other* cert's DER, not the presented cert
         let x5c_b64 = base64::engine::general_purpose::STANDARD.encode(&other_der);
@@ -1966,11 +2524,13 @@ mod tests {
         });
 
         let mut client = make_mtls_client(TokenEndpointAuthMethod::SelfSignedTlsClientAuth, None);
-        client.keys = Some(crate::db::ClientKeys::Inline(
-            crate::db::parse_jwks_set(&jwks).expect("valid test JWKS"),
+        client.keys = Some(ClientKeys::Inline(
+            db::parse_jwks_set(&jwks).expect("valid test JWKS"),
         ));
 
-        let result = authenticate_client_mtls(&state, &client, &cert).await;
+        let result =
+            authenticate_client_mtls(&state, &client, Some(&cert), test_utils::test_arrival())
+                .await;
         assert!(
             matches!(result, Err(ClientAuthError::MtlsVerificationFailed(_))),
             "non-matching x5c must return MtlsVerificationFailed: {result:?}"
@@ -1993,12 +2553,12 @@ mod tests {
     /// `db::upsert_jwks_cache` always stamps `cached_at: now`, so TTL/rate-limit
     /// boundary tests need this instead.
     async fn seed_jwks_cache(
-        store: &crate::db::store::DocumentStore,
+        store: &DocumentStore,
         parent_id: &str,
         value: serde_json::Value,
         age_seconds: i64,
     ) {
-        let doc = crate::db::documents::jwks_cache::JwksCacheDoc {
+        let doc = JwksCacheDoc {
             value,
             cached_at: jiff::Timestamp::now()
                 .checked_sub(jiff::SignedDuration::from_secs(age_seconds))
@@ -2024,19 +2584,20 @@ mod tests {
     {
         use base64::Engine;
 
-        let state = crate::test_utils::test_app_state().await;
+        let state = test_utils::test_app_state().await;
         let cert_der = make_self_signed_cert_der("self-signed-cached");
-        let cert =
-            crate::services::oidc::mtls::parse_client_certificate(&cert_der).expect("parse cert");
+        let cert = mtls::parse_client_certificate(&cert_der).expect("parse cert");
         let x5c_b64 = base64::engine::general_purpose::STANDARD.encode(&cert_der);
         let jwks = serde_json::json!({"keys": [{"kty": "EC", "crv": "P-256", "x5c": [x5c_b64]}]});
 
         let mut client = make_mtls_client(TokenEndpointAuthMethod::SelfSignedTlsClientAuth, None);
-        client.keys = Some(crate::db::ClientKeys::Uri(UNREACHABLE_JWKS_URI.to_string()));
+        client.keys = Some(ClientKeys::Uri(UNREACHABLE_JWKS_URI.to_string()));
         seed_jwks_cache(&state.store, &client.id, jwks, 60).await;
 
         // Success proves the cached JWKS was used — the URI would fail if dialed.
-        let result = authenticate_client_mtls(&state, &client, &cert).await;
+        let result =
+            authenticate_client_mtls(&state, &client, Some(&cert), test_utils::test_arrival())
+                .await;
         assert!(
             result.is_ok(),
             "a fresh cache must authenticate without a fetch: {result:?}"
@@ -2046,15 +2607,17 @@ mod tests {
     // RFC 8705 §2.2: an unreachable key set fails authentication rather than admitting it.
     #[tokio::test]
     async fn test_authenticate_client_mtls_self_signed_jwks_uri_fetch_failure_is_clean() {
-        let state = crate::test_utils::test_app_state().await;
+        let state = test_utils::test_app_state().await;
         let cert = make_cert_with_cn("self-signed-fetch-failure");
 
         let mut client = make_mtls_client(TokenEndpointAuthMethod::SelfSignedTlsClientAuth, None);
-        client.keys = Some(crate::db::ClientKeys::Uri(UNREACHABLE_JWKS_URI.to_string()));
+        client.keys = Some(ClientKeys::Uri(UNREACHABLE_JWKS_URI.to_string()));
         // No cache row: this exercises first-ever resolution, not the
         // post-verification retry path.
 
-        let result = authenticate_client_mtls(&state, &client, &cert).await;
+        let result =
+            authenticate_client_mtls(&state, &client, Some(&cert), test_utils::test_arrival())
+                .await;
         assert!(
             matches!(result, Err(ClientAuthError::MtlsVerificationFailed(_))),
             "a fetch failure must resolve to a clean MtlsVerificationFailed, not a raw \
@@ -2066,18 +2629,20 @@ mod tests {
     #[tokio::test]
     async fn test_authenticate_client_mtls_self_signed_certificate_less_jwks_at_uri_fails_cleanly()
     {
-        let state = crate::test_utils::test_app_state().await;
+        let state = test_utils::test_app_state().await;
         let cert = make_cert_with_cn("self-signed-no-x5c-at-uri");
 
         let mut client = make_mtls_client(TokenEndpointAuthMethod::SelfSignedTlsClientAuth, None);
-        client.keys = Some(crate::db::ClientKeys::Uri(UNREACHABLE_JWKS_URI.to_string()));
+        client.keys = Some(ClientKeys::Uri(UNREACHABLE_JWKS_URI.to_string()));
         // Cached JWKS has key material but no x5c — same "accepted at
         // registration, unusable forever after" class PR 4 closed for the
         // write path, now proven at the runtime verification path too.
         let certificate_less = serde_json::json!({"keys": [{"kty": "RSA", "n": "n", "e": "AQAB"}]});
         seed_jwks_cache(&state.store, &client.id, certificate_less, 60).await;
 
-        let result = authenticate_client_mtls(&state, &client, &cert).await;
+        let result =
+            authenticate_client_mtls(&state, &client, Some(&cert), test_utils::test_arrival())
+                .await;
         assert!(
             matches!(result, Err(ClientAuthError::MtlsVerificationFailed(_))),
             "a certificate-less JWKS resolved via jwks_uri must fail the same way as inline: \
@@ -2089,7 +2654,7 @@ mod tests {
     /// panic — the retry tests below assert on it to distinguish a
     /// fallback-to-original-error from a leaked fetch-failure message.
     fn expect_mtls_verification_failed_text(
-        result: &Result<MtlsCertVerification, ClientAuthError>,
+        result: &Result<Option<MtlsCertVerification>, ClientAuthError>,
     ) -> &str {
         match result {
             Err(ClientAuthError::MtlsVerificationFailed(msg)) => msg,
@@ -2103,14 +2668,13 @@ mod tests {
     {
         use base64::Engine;
 
-        let state = crate::test_utils::test_app_state().await;
+        let state = test_utils::test_app_state().await;
         let cert_der = make_self_signed_cert_der("self-signed-rotated");
         let other_der = make_self_signed_cert_der("self-signed-pre-rotation");
-        let cert =
-            crate::services::oidc::mtls::parse_client_certificate(&cert_der).expect("parse cert");
+        let cert = mtls::parse_client_certificate(&cert_der).expect("parse cert");
 
         let mut client = make_mtls_client(TokenEndpointAuthMethod::SelfSignedTlsClientAuth, None);
-        client.keys = Some(crate::db::ClientKeys::Uri(UNREACHABLE_JWKS_URI.to_string()));
+        client.keys = Some(ClientKeys::Uri(UNREACHABLE_JWKS_URI.to_string()));
         // Cached cert predates a rotation but is well within the 1-hour TTL,
         // so resolution serves it from cache (`JwksOrigin::NoFetch`) and the
         // retry gate lets the force-refresh attempt proceed.
@@ -2123,7 +2687,9 @@ mod tests {
         // to the original certificate-mismatch error — never a panic, a
         // hang, or a leaked "failed to fetch" message (kills the mutation
         // where the fetch error is surfaced instead of the fallback).
-        let result = authenticate_client_mtls(&state, &client, &cert).await;
+        let result =
+            authenticate_client_mtls(&state, &client, Some(&cert), test_utils::test_arrival())
+                .await;
         assert!(
             expect_mtls_verification_failed_text(&result).contains("certificate not registered"),
             "a failed retry must fall back to the original mismatch error: {result:?}"
@@ -2136,14 +2702,13 @@ mod tests {
     {
         use base64::Engine;
 
-        let state = crate::test_utils::test_app_state().await;
+        let state = test_utils::test_app_state().await;
         let cert_der = make_self_signed_cert_der("self-signed-fresh-miss");
         let other_der = make_self_signed_cert_der("self-signed-fresh-other");
-        let cert =
-            crate::services::oidc::mtls::parse_client_certificate(&cert_der).expect("parse cert");
+        let cert = mtls::parse_client_certificate(&cert_der).expect("parse cert");
 
         let mut client = make_mtls_client(TokenEndpointAuthMethod::SelfSignedTlsClientAuth, None);
-        client.keys = Some(crate::db::ClientKeys::Uri(UNREACHABLE_JWKS_URI.to_string()));
+        client.keys = Some(ClientKeys::Uri(UNREACHABLE_JWKS_URI.to_string()));
         // Cache is past the 1-hour TTL but within the 24-hour stale window:
         // resolution attempts a fetch (fails against the unreachable URI)
         // and falls back to serving this stale, mismatched document —
@@ -2162,7 +2727,9 @@ mod tests {
             serde_json::json!({"keys": [{"kty": "EC", "crv": "P-256", "x5c": [other_x5c]}]});
         seed_jwks_cache(&state.store, &client.id, mismatched_jwks, 7200).await;
 
-        let result = authenticate_client_mtls(&state, &client, &cert).await;
+        let result =
+            authenticate_client_mtls(&state, &client, Some(&cert), test_utils::test_arrival())
+                .await;
         assert!(
             expect_mtls_verification_failed_text(&result).contains("certificate not registered"),
             "a stale-fallback certificate miss must still resolve cleanly: {result:?}"
@@ -2171,13 +2738,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_self_signed_jwks_reports_no_fetch_for_fresh_cache() {
-        let state = crate::test_utils::test_app_state().await;
+        let state = test_utils::test_app_state().await;
         let mut client = make_mtls_client(TokenEndpointAuthMethod::SelfSignedTlsClientAuth, None);
-        client.keys = Some(crate::db::ClientKeys::Uri(UNREACHABLE_JWKS_URI.to_string()));
+        client.keys = Some(ClientKeys::Uri(UNREACHABLE_JWKS_URI.to_string()));
         let jwks = serde_json::json!({"keys": [{"kty": "EC", "kid": "k1"}]});
         seed_jwks_cache(&state.store, &client.id, jwks.clone(), 60).await;
 
-        let cache = crate::db::get_jwks_cache(&state.store, &client.id)
+        let cache = db::get_jwks_cache(&state.store, &client.id)
             .await
             .expect("get_jwks_cache failed");
         let (value, origin) = resolve_self_signed_jwks(&state, &client, cache.as_ref())
@@ -2192,16 +2759,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_self_signed_jwks_reports_fetched_for_stale_cache() {
-        let state = crate::test_utils::test_app_state().await;
+        let state = test_utils::test_app_state().await;
         let mut client = make_mtls_client(TokenEndpointAuthMethod::SelfSignedTlsClientAuth, None);
-        client.keys = Some(crate::db::ClientKeys::Uri(UNREACHABLE_JWKS_URI.to_string()));
+        client.keys = Some(ClientKeys::Uri(UNREACHABLE_JWKS_URI.to_string()));
         let jwks = serde_json::json!({"keys": [{"kty": "EC", "kid": "k1"}]});
         // Past the 1-hour TTL, within the 24-hour stale window: resolution
         // attempts a fetch (fails against the unreachable URI) and falls
         // back to this cached value.
         seed_jwks_cache(&state.store, &client.id, jwks.clone(), 7200).await;
 
-        let cache = crate::db::get_jwks_cache(&state.store, &client.id)
+        let cache = db::get_jwks_cache(&state.store, &client.id)
             .await
             .expect("get_jwks_cache failed");
         let (value, origin) = resolve_self_signed_jwks(&state, &client, cache.as_ref())
@@ -2221,11 +2788,11 @@ mod tests {
     /// client. `ClientKeys` cannot hold both, so there is no precedence left to
     /// assert — RFC 7591 §2 says the two "MUST NOT both be present".
     async fn test_resolve_self_signed_jwks_reports_no_fetch_for_inline_jwks() {
-        let state = crate::test_utils::test_app_state().await;
+        let state = test_utils::test_app_state().await;
         let mut client = make_mtls_client(TokenEndpointAuthMethod::SelfSignedTlsClientAuth, None);
         let jwks = serde_json::json!({"keys": [{"kty": "EC", "kid": "inline"}]});
-        client.keys = Some(crate::db::ClientKeys::Inline(
-            crate::db::parse_jwks_set(&jwks.clone()).expect("valid test JWKS"),
+        client.keys = Some(ClientKeys::Inline(
+            db::parse_jwks_set(&jwks.clone()).expect("valid test JWKS"),
         ));
 
         let (value, origin) = resolve_self_signed_jwks(&state, &client, None)
@@ -2238,74 +2805,59 @@ mod tests {
         );
     }
 
-    // =========================================================================
-    // verify_client_matches_code
-    // =========================================================================
-
-    // RFC 6749 §4.1.3: a code issued without a client imposes no client binding.
-    #[test]
-    fn test_verify_client_matches_code_no_client_ok() {
-        let auth_code = make_auth_code("");
-        assert!(verify_client_matches_code(None, &auth_code).is_ok());
-    }
-
     // RFC 6749 §4.1.3: the code must be redeemed by the client it was issued to.
     #[test]
     fn test_verify_client_matches_code_matching_confidential_client_ok() {
-        let client = AuthenticatedClient {
-            client: make_mtls_client(TokenEndpointAuthMethod::ClientSecretBasic, None),
-            is_public: false,
-        };
+        let client = ValidatedOAuthClient::for_test(make_mtls_client(
+            TokenEndpointAuthMethod::ClientSecretBasic,
+            None,
+        ));
         let auth_code = AuthorizationCode {
-            client_id: client.client.client_id.clone(),
+            client_id: client.client_id.clone(),
             ..make_auth_code("")
         };
         // Service client, not public: PKCE is not required.
-        assert!(verify_client_matches_code(Some(&client), &auth_code).is_ok());
+        assert!(verify_client_matches_code(&client, &auth_code).is_ok());
     }
 
     // RFC 6749 §4.1.3: another client may not redeem the code.
     #[test]
     fn test_verify_client_matches_code_rejects_client_id_mismatch() {
-        let client = AuthenticatedClient {
-            client: make_mtls_client(TokenEndpointAuthMethod::ClientSecretBasic, None),
-            is_public: false,
-        };
+        let client = ValidatedOAuthClient::for_test(make_mtls_client(
+            TokenEndpointAuthMethod::ClientSecretBasic,
+            None,
+        ));
         // make_auth_code uses client_id "test", which differs from the client's.
         let auth_code = make_auth_code("");
-        let result = verify_client_matches_code(Some(&client), &auth_code);
+        let result = verify_client_matches_code(&client, &auth_code);
         assert_oauth_error(result, OAuthErrorCode::InvalidGrant);
     }
 
     // RFC 7636 §4.6: a public client's code is redeemed with a verifier.
     #[test]
     fn test_verify_client_matches_code_public_client_requires_pkce() {
-        let client = AuthenticatedClient {
-            client: make_mtls_client(TokenEndpointAuthMethod::ClientSecretBasic, None),
-            is_public: true,
-        };
+        let client =
+            ValidatedOAuthClient::for_test(make_mtls_client(TokenEndpointAuthMethod::None, None));
         let auth_code = AuthorizationCode {
-            client_id: client.client.client_id.clone(),
+            client_id: client.client_id.clone(),
             ..make_auth_code("")
         };
-        let result = verify_client_matches_code(Some(&client), &auth_code);
+        let result = verify_client_matches_code(&client, &auth_code);
         assert_oauth_error(result, OAuthErrorCode::InvalidRequest);
     }
 
     // RFC 7636 §4.6: a public client presenting a verifier may redeem the code.
     #[test]
     fn test_verify_client_matches_code_public_client_with_pkce_ok() {
-        let client = AuthenticatedClient {
-            client: make_mtls_client(TokenEndpointAuthMethod::ClientSecretBasic, None),
-            is_public: true,
-        };
+        let client =
+            ValidatedOAuthClient::for_test(make_mtls_client(TokenEndpointAuthMethod::None, None));
         let auth_code = AuthorizationCode {
-            client_id: client.client.client_id.clone(),
+            client_id: client.client_id.clone(),
             code_challenge: Some("a-code-challenge".to_string()),
             code_challenge_method: Some(CodeChallengeMethod::S256),
             ..make_auth_code("")
         };
-        assert!(verify_client_matches_code(Some(&client), &auth_code).is_ok());
+        assert!(verify_client_matches_code(&client, &auth_code).is_ok());
     }
 
     // =========================================================================
@@ -2398,5 +2950,118 @@ mod tests {
         assert!(debug.contains("Bearer"), "{debug}");
         assert!(debug.contains("3600"), "{debug}");
         assert!(debug.contains("AuthCodeExchangeResult"), "{debug}");
+    }
+
+    // =========================================================================
+    // generate_id_token — arrival anchoring
+    //
+    // Commit addbaecd threaded `arrival` into `create_oauth_access_token` so
+    // the access token's `exp` and the session's `expires_at` share one instant,
+    // but left `generate_id_token` on `Timestamp::now()`. Within one token
+    // response the ID token's `exp` could exceed the access token's `exp` by
+    // the latency between the two mints.
+    //
+    // The test fixes the request `arrival` at a deterministic instant `T`
+    // and asserts the ID token's `iat` == `T` and `exp` == `T + expires_in`.
+    // Before the fix, `generate_id_token` stamped `iat`/`exp` from
+    // `Timestamp::now()`, so `iat` would equal the wall clock, not `T`.
+    // =========================================================================
+
+    /// Decode the middle segment of a JWT into a `serde_json::Value`. Used in
+    /// tests to inspect claims without signature verification.
+    fn decode_jwt_payload(token: &str) -> serde_json::Value {
+        let mut parts = token.split('.');
+        let _header = parts.next().expect("JWT header segment");
+        let payload = parts.next().expect("JWT payload segment");
+        let bytes = URL_SAFE_NO_PAD
+            .decode(payload)
+            .expect("base64url-decoded payload");
+        serde_json::from_slice(&bytes).expect("JSON payload")
+    }
+
+    /// Minimal `TokenBinding::Bearer` — no DPoP proof, no mTLS thumbprint.
+    #[tokio::test]
+    async fn test_generate_id_token_stamps_iat_and_exp_from_arrival() {
+        let state = test_utils::test_app_state().await;
+        let scope = ScopeSet::parse("openid");
+        let expires_in: u64 = 3600;
+        // Fixed-past arrival deliberately far from the wall clock so a drift to
+        // `Timestamp::now()` is observable as a different value, not just a
+        // second-rounding coincidental match.
+        let arrival = ArrivalTime::for_test_second(1_700_000_000);
+
+        let id_token = generate_id_token(
+            &state,
+            IdTokenParams {
+                client_id: "test-client",
+                user_id: "user1",
+                email: "test@example.com",
+                nonce: None,
+                expires_in,
+                binding: TokenBinding::Bearer,
+                scope: &scope,
+                hardware_verification: HardwareVerification::Verified { auth_time: None },
+                access_token: None,
+                id_token_alg: "ES256",
+            },
+            arrival,
+        )
+        .await
+        .expect("ID token signing should succeed");
+
+        let claims = decode_jwt_payload(id_token.as_str());
+        assert_eq!(
+            claims.get("iat").and_then(|v| v.as_i64()),
+            Some(1_700_000_000),
+            "iat must be stamped from `arrival`, not an ambient `Timestamp::now()`"
+        );
+        assert_eq!(
+            claims.get("exp").and_then(|v| v.as_i64()),
+            Some(1_700_000_000 + i64::try_from(expires_in).expect("fits in i64")),
+            "exp must be `arrival.as_second() + expires_in`"
+        );
+    }
+
+    /// Sanity check that `generate_id_token` still produces a well-formed
+    /// token (with `iat` ≤ `exp` and a non-empty signature) when driven via
+    /// `arrival`, the production request-scoped instant.
+    #[tokio::test]
+    async fn test_generate_id_token_iat_not_after_exp() {
+        let state = test_utils::test_app_state().await;
+        let scope = ScopeSet::parse("openid");
+        let arrival = ArrivalTime::for_test_second(1_700_000_000);
+
+        let id_token = generate_id_token(
+            &state,
+            IdTokenParams {
+                client_id: "test-client",
+                user_id: "user1",
+                email: "test@example.com",
+                nonce: None,
+                expires_in: 60,
+                binding: TokenBinding::Bearer,
+                scope: &scope,
+                hardware_verification: HardwareVerification::Verified { auth_time: None },
+                access_token: None,
+                id_token_alg: "ES256",
+            },
+            arrival,
+        )
+        .await
+        .expect("ID token signing should succeed");
+
+        let claims = decode_jwt_payload(id_token.as_str());
+        let iat = claims
+            .get("iat")
+            .and_then(|v| v.as_i64())
+            .expect("iat present");
+        let exp = claims
+            .get("exp")
+            .and_then(|v| v.as_i64())
+            .expect("exp present");
+        assert!(
+            iat <= exp,
+            "iat ({iat}) must not exceed exp ({exp}); the ID token's lifetime window must be non-negative"
+        );
     }
 }

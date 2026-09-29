@@ -12,13 +12,14 @@
 //!   `client_id` alone grants zero access — the client must still authenticate
 //!   with a valid FIDO2 key (hardware-bound) to obtain any token.
 
-use crate::AppState;
+use crate::db::ClientInfo;
 use crate::error::ServiceError;
-use crate::handlers::session::OptionalAuthenticatedToken;
+use crate::handlers::session::{self, OptionalAuthenticatedToken};
 use crate::services::oidc::registration::{
     RegistrationRequest, delete_client_configuration, read_client_configuration, register_client,
     update_client_configuration,
 };
+use crate::{AppState, http};
 use axum::{
     Json,
     extract::{Path, State},
@@ -31,12 +32,13 @@ use vouch_common::protocol;
 /// POST /oauth/register — RFC 7591 Dynamic Client Registration.
 ///
 /// Accepts an optional Bearer token. When present, the authenticated user
-/// becomes the owner of the newly registered client. When absent (open
-/// registration), the client is created without user association.
+/// becomes the owner of the newly registered client, and must be active. When
+/// absent (open registration), the client is created without user association.
 ///
 /// Returns 201 Created with the client information response.
 pub(crate) async fn register(
     State(state): State<Arc<AppState>>,
+    client_info: ClientInfo,
     token: Result<OptionalAuthenticatedToken, ServiceError>,
     Json(request): Json<RegistrationRequest>,
 ) -> Response {
@@ -46,12 +48,33 @@ pub(crate) async fn register(
     // a `WWW-Authenticate` challenge — propagate it rather than falling back to
     // open registration.
     let user_id = match token {
-        Ok(OptionalAuthenticatedToken(token)) => token.map(|t| t.sub),
+        Ok(OptionalAuthenticatedToken(Some(token))) => {
+            // A deactivated account "cannot authenticate anywhere"
+            // (`load_active_user`), so its still-live token is invalid "for
+            // other reasons" (RFC 6750 §3.1 `invalid_token`) and cannot own a
+            // client. A database error stays a 500.
+            match session::load_active_user(&state, &token.sub).await {
+                Ok(user) => Some(user.id),
+                Err(ServiceError::Api {
+                    status: StatusCode::UNAUTHORIZED,
+                    message,
+                    ..
+                }) => {
+                    return into_registration_response(ServiceError::api(
+                        StatusCode::UNAUTHORIZED,
+                        "invalid_token",
+                        message,
+                    ));
+                }
+                Err(e) => return into_registration_response(e),
+            }
+        }
+        Ok(OptionalAuthenticatedToken(None)) => None,
         Err(e) => return into_registration_response(e),
     };
 
     // Delegate to service layer
-    let response = match register_client(&state, request, user_id.as_deref()).await {
+    let response = match register_client(&state, request, user_id.as_deref(), &client_info).await {
         Ok(r) => r,
         Err(e) => return e.into_oauth_response().into_response(),
     };
@@ -74,13 +97,14 @@ pub(crate) async fn register(
 ///
 /// Authenticates via Bearer token (the `registration_access_token` issued
 /// during dynamic registration). Returns 200 with current client metadata
-/// on success, 401 if the token is invalid, 404 if the client does not exist.
+/// on success, 401 if the token is invalid or the client does not exist
+/// (RFC 7592 §2.1/§5 keep these cases indistinguishable).
 pub(crate) async fn read_client(
     State(state): State<Arc<AppState>>,
     Path(client_id): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    let token = match crate::http::bearer_token(&headers) {
+    let token = match http::bearer_token(&headers) {
         Some(t) => t,
         None => return missing_token_response(),
     };
@@ -108,16 +132,17 @@ pub(crate) async fn read_client(
 /// (including a new `registration_access_token`) on success.
 pub(crate) async fn update_client(
     State(state): State<Arc<AppState>>,
+    client_info: ClientInfo,
     Path(client_id): Path<String>,
     headers: HeaderMap,
     Json(request): Json<RegistrationRequest>,
 ) -> Response {
-    let token = match crate::http::bearer_token(&headers) {
+    let token = match http::bearer_token(&headers) {
         Some(t) => t,
         None => return missing_token_response(),
     };
 
-    match update_client_configuration(&state, &client_id, token, request).await {
+    match update_client_configuration(&state, &client_id, token, request, &client_info).await {
         Ok(response) => (
             StatusCode::OK,
             [
@@ -136,18 +161,20 @@ pub(crate) async fn update_client(
 ///
 /// Authenticates via Bearer token (the `registration_access_token` issued
 /// during dynamic registration). Returns 204 No Content on success,
-/// 401 if the token is invalid, 404 if the client does not exist.
+/// 401 if the token is invalid or the client does not exist (RFC 7592
+/// §2.3/§5 keep these cases indistinguishable).
 pub(crate) async fn delete_client(
     State(state): State<Arc<AppState>>,
+    client_info: ClientInfo,
     Path(client_id): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    let token = match crate::http::bearer_token(&headers) {
+    let token = match http::bearer_token(&headers) {
         Some(t) => t,
         None => return missing_token_response(),
     };
 
-    match delete_client_configuration(&state, &client_id, token).await {
+    match delete_client_configuration(&state, &client_id, token, &client_info).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => into_registration_response(e),
     }
@@ -167,7 +194,7 @@ fn missing_token_response() -> Response {
         StatusCode::UNAUTHORIZED,
         [(
             axum::http::header::WWW_AUTHENTICATE,
-            crate::http::bearer_challenge(&[]),
+            http::bearer_challenge(&[]),
         )],
     )
         .into_response()
@@ -185,7 +212,7 @@ fn missing_token_response() -> Response {
 /// `DPoP-Nonce` that `into_oauth_response`'s tuple return type cannot convey.
 /// Those headers are extracted before the error is consumed and reattached to
 /// the built response so the client can retry with a fresh nonce.
-fn into_registration_response(err: crate::error::ServiceError) -> Response {
+fn into_registration_response(err: ServiceError) -> Response {
     let extra_headers = match &err {
         ServiceError::ApiWithHeaders { headers, .. } => Some(headers.clone()),
         _ => None,
@@ -199,7 +226,7 @@ fn into_registration_response(err: crate::error::ServiceError) -> Response {
             .unwrap_or_else(|| "Invalid or expired token".to_string());
         // The `error` and `error_description` parameters mirror the JSON body
         // so OAuth client libraries can rely on either source (RFC 6750 §3.1).
-        let www_auth = crate::http::bearer_challenge(&[
+        let www_auth = http::bearer_challenge(&[
             ("error", json.error.as_str()),
             ("error_description", description.as_str()),
         ]);
@@ -234,7 +261,7 @@ fn into_registration_response(err: crate::error::ServiceError) -> Response {
 )]
 mod tests {
     use super::*;
-    use crate::error::OAuthErrorCode;
+    use crate::error::{OAuthErrorCode, ServiceError};
 
     /// RFC 6750 §3.1: when the request lacks any authentication
     /// information, the `WWW-Authenticate` challenge SHOULD NOT include
@@ -280,7 +307,7 @@ mod tests {
 
         // 401 path: registration-token validation emits a 401 invalid_token
         // API error, which the Api arm of into_oauth_response preserves.
-        let err = crate::error::ServiceError::api(
+        let err = ServiceError::api(
             StatusCode::UNAUTHORIZED,
             "invalid_token",
             "Invalid registration access token",
@@ -307,7 +334,7 @@ mod tests {
     async fn into_registration_response_passes_through_non_401() {
         use axum::body::to_bytes;
 
-        let err = crate::error::ServiceError::oauth(
+        let err = ServiceError::oauth(
             OAuthErrorCode::InvalidClientMetadata,
             "jwks and jwks_uri are mutually exclusive",
         );
@@ -334,7 +361,7 @@ mod tests {
     async fn into_registration_response_preserves_api_with_headers_on_401() {
         use axum::body::to_bytes;
 
-        let err = crate::error::ServiceError::api_with_header(
+        let err = ServiceError::api_with_header(
             StatusCode::UNAUTHORIZED,
             "use_dpop_nonce",
             "Authorization server requires nonce in DPoP proof",

@@ -7,7 +7,10 @@
 )]
 
 use super::*;
+use crate::crypto;
 use crate::crypto::alg::JwsAlgorithm;
+use crate::db::{ClientInfo, FapiProfile, TokenEndpointAuthMethod, credentials};
+use crate::test_utils::test_arrival;
 
 // ========================================================================
 // Cascade Delete Tests
@@ -26,13 +29,13 @@ async fn test_user_cascade_delete() {
         &store,
         &CreateAuthenticatorParams {
             user_id: &user_id,
-            user_email: "cascade@example.com",
             name: "Cascade Key",
             credential_id: &[99u8; 10],
             public_key: &[0u8; 32],
             aaguid: None,
             user_handle: None,
             attestation_verified: false,
+            counter: 0,
         },
     )
     .await
@@ -50,6 +53,9 @@ async fn test_user_cascade_delete() {
             authorization_details: None,
             hardware_aaguid: None,
             org_domain: None,
+            client_id: None,
+            source_code_hash: None,
+            authenticated_at: None,
         },
     )
     .await
@@ -70,7 +76,7 @@ async fn test_user_cascade_delete() {
     );
 
     // Delete user
-    delete_user(&store, &user_id)
+    delete_user(&store, &user_id, LastAdminGuard::Enforce)
         .await
         .expect("Failed to delete user");
 
@@ -104,7 +110,7 @@ async fn test_delete_user_returns_false_when_missing() {
 
     // A valid UUID that was never inserted.
     let missing_id = "00000000-0000-7000-0000-000000000001";
-    let deleted = delete_user(&store, missing_id)
+    let deleted = delete_user(&store, missing_id, LastAdminGuard::Enforce)
         .await
         .expect("delete_user must not error on a missing user");
     assert!(
@@ -116,7 +122,7 @@ async fn test_delete_user_returns_false_when_missing() {
     let (user_id, _) = upsert_user(&store, "delete-bool@example.com", None)
         .await
         .expect("create user");
-    let deleted = delete_user(&store, &user_id)
+    let deleted = delete_user(&store, &user_id, LastAdminGuard::Enforce)
         .await
         .expect("delete_user should succeed");
     assert!(deleted, "delete_user must return true for an existing user");
@@ -129,7 +135,7 @@ async fn test_delete_user_returns_false_when_missing() {
     );
 
     // Deleting the same user again returns false (idempotent miss).
-    let deleted_again = delete_user(&store, &user_id)
+    let deleted_again = delete_user(&store, &user_id, LastAdminGuard::Enforce)
         .await
         .expect("delete_user must not error on a missing user");
     assert!(
@@ -162,7 +168,7 @@ async fn test_user_delete_preserves_ssh_revocations() {
     .await
     .expect("Failed to record issued SSH certificate");
 
-    crate::db::credentials::revoke_all_ssh_certificates_for_user(
+    credentials::revoke_all_ssh_certificates_for_user(
         &store,
         &user_id,
         Some("User deleted by admin"),
@@ -171,7 +177,9 @@ async fn test_user_delete_preserves_ssh_revocations() {
     .await
     .expect("Failed to revoke SSH certificates");
 
-    delete_user(&store, &user_id).await.expect("delete failed");
+    delete_user(&store, &user_id, LastAdminGuard::Enforce)
+        .await
+        .expect("delete failed");
 
     // User should be gone
     assert!(
@@ -251,9 +259,9 @@ async fn test_oauth_client_cascade_delete() {
             oauth_client_id: &client.id,
             event_type: OAuthEventType::TokenIssued,
             user_id: None,
-            ip_address: None,
-            user_agent: None,
+            client: &ClientInfo::default(),
             details: None,
+            org_domain: RecordedOrgDomain::Unresolved,
         },
     )
     .await;
@@ -307,6 +315,204 @@ async fn create_scoped_client(
     .app_id
 }
 
+/// "At least one active admin per organization" applies to deletion, not just
+/// to demote and deactivate: removing an active admin takes them out of the
+/// admin count exactly as demoting one does.
+#[tokio::test]
+async fn test_delete_user_refuses_to_remove_the_last_active_admin() {
+    let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
+
+    let (sole_admin, _) = upsert_user_with_org(
+        &store,
+        "sole-admin@example.com",
+        None,
+        Some(TEST_ORG_ID),
+        true,
+    )
+    .await
+    .expect("create sole admin");
+    let (member, _) = upsert_user_with_org(
+        &store,
+        "plain-member@example.com",
+        None,
+        Some(TEST_ORG_ID),
+        false,
+    )
+    .await
+    .expect("create member");
+
+    assert!(
+        matches!(
+            delete_user(&store, &sole_admin, LastAdminGuard::Enforce).await,
+            Err(DeleteUserError::LastAdmin)
+        ),
+        "the organization's only active admin must not be deletable"
+    );
+    assert!(
+        get_user_by_id(&store, &sole_admin)
+            .await
+            .expect("lookup")
+            .is_some(),
+        "a refused delete must not have removed the user"
+    );
+
+    // A plain member is not part of the count, so the floor does not apply.
+    assert!(
+        delete_user(&store, &member, LastAdminGuard::Enforce)
+            .await
+            .expect("member delete"),
+        "deleting a non-admin must not be blocked by the admin floor"
+    );
+
+    // With a second admin present the first becomes deletable.
+    let (second_admin, _) = upsert_user_with_org(
+        &store,
+        "second-admin@example.com",
+        None,
+        Some(TEST_ORG_ID),
+        true,
+    )
+    .await
+    .expect("create second admin");
+    assert!(
+        delete_user(&store, &sole_admin, LastAdminGuard::Enforce)
+            .await
+            .expect("admin delete"),
+        "an admin with a surviving peer must be deletable"
+    );
+    assert!(
+        matches!(
+            delete_user(&store, &second_admin, LastAdminGuard::Enforce).await,
+            Err(DeleteUserError::LastAdmin)
+        ),
+        "the survivor is now the last admin and must be protected in turn"
+    );
+}
+
+/// A deactivated admin does not count toward the floor, so the last *active*
+/// admin is protected even when the organization has other admin rows.
+#[tokio::test]
+async fn test_delete_user_ignores_deactivated_admins_in_the_floor() {
+    let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
+
+    let (active_admin, _) = upsert_user_with_org(
+        &store,
+        "active-admin@example.com",
+        None,
+        Some(TEST_ORG_ID),
+        true,
+    )
+    .await
+    .expect("create active admin");
+    let (inactive_admin, _) = upsert_user_with_org(
+        &store,
+        "inactive-admin@example.com",
+        None,
+        Some(TEST_ORG_ID),
+        true,
+    )
+    .await
+    .expect("create inactive admin");
+    update_user_active_status(&store, &inactive_admin, false)
+        .await
+        .expect("deactivate");
+
+    assert!(
+        matches!(
+            delete_user(&store, &active_admin, LastAdminGuard::Enforce).await,
+            Err(DeleteUserError::LastAdmin)
+        ),
+        "a deactivated admin must not satisfy the floor"
+    );
+}
+
+/// `LastAdminGuard::Bypass` is what the cascade tests use to reach states the
+/// floor makes unreachable; it must actually skip the check.
+#[tokio::test]
+async fn test_delete_user_bypass_skips_the_admin_floor() {
+    let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
+
+    let (sole_admin, _) = upsert_user_with_org(
+        &store,
+        "bypass-admin@example.com",
+        None,
+        Some(TEST_ORG_ID),
+        true,
+    )
+    .await
+    .expect("create sole admin");
+
+    assert!(
+        delete_user(&store, &sole_admin, LastAdminGuard::Bypass)
+            .await
+            .expect("bypass delete"),
+        "Bypass must delete the last admin without consulting the floor"
+    );
+}
+
+/// Two admins removing each other at the same moment must not empty the
+/// organization.
+///
+/// This is the case the floor exists for on the admin-UI surface. Sequentially
+/// it is unreachable there: the acting admin must themselves be an active
+/// admin to pass authorization, so whenever the target is someone else a
+/// second admin exists, and self-removal is refused by a separate check. Two
+/// concurrent requests each see the other as that second admin — the anomaly a
+/// per-document version guard cannot catch, since the two writes land on
+/// different user rows. Forcing both onto the organization row is what makes
+/// one of them lose.
+#[tokio::test]
+async fn test_concurrent_mutual_admin_removal_leaves_one_admin() {
+    let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
+    let store = std::sync::Arc::new(store);
+
+    let (admin_a, _) = upsert_user_with_org(
+        &store,
+        "mutual-a@example.com",
+        None,
+        Some(TEST_ORG_ID),
+        true,
+    )
+    .await
+    .expect("create admin a");
+    let (admin_b, _) = upsert_user_with_org(
+        &store,
+        "mutual-b@example.com",
+        None,
+        Some(TEST_ORG_ID),
+        true,
+    )
+    .await
+    .expect("create admin b");
+
+    let (r1, r2) = tokio::join!(
+        {
+            let s = std::sync::Arc::clone(&store);
+            let id = admin_a.clone();
+            async move { delete_user(&s, &id, LastAdminGuard::Enforce).await }
+        },
+        {
+            let s = std::sync::Arc::clone(&store);
+            let id = admin_b.clone();
+            async move { delete_user(&s, &id, LastAdminGuard::Enforce).await }
+        },
+    );
+
+    // Whatever order they resolved in, both deleting is the anomaly.
+    let mut any_survivor = false;
+    for id in [&admin_a, &admin_b] {
+        any_survivor |= get_user_by_id(&store, id).await.expect("lookup").is_some();
+    }
+    assert!(
+        any_survivor,
+        "both admins were deleted: r1={r1:?} r2={r2:?}"
+    );
+}
+
 /// Deleting an org-scoped application's creator transfers the application to
 /// an active org admin. Management is creator-only, so leaving `user_id`
 /// empty would strand the application with no one able to manage it.
@@ -352,7 +558,9 @@ async fn test_delete_user_transfers_org_scoped_apps_to_org_admin() {
     .await;
 
     assert!(
-        delete_user(&store, &creator_id).await.expect("delete_user"),
+        delete_user(&store, &creator_id, LastAdminGuard::Enforce)
+            .await
+            .expect("delete_user"),
         "creator must be deleted"
     );
 
@@ -403,7 +611,9 @@ async fn test_delete_user_unlinks_org_app_when_no_admin_remains() {
     .await;
 
     assert!(
-        delete_user(&store, &creator_id).await.expect("delete_user"),
+        delete_user(&store, &creator_id, LastAdminGuard::Bypass)
+            .await
+            .expect("delete_user"),
         "creator must be deleted"
     );
 
@@ -415,6 +625,120 @@ async fn test_delete_user_unlinks_org_app_when_no_admin_remains() {
         org_client.user_id, None,
         "with no successor admin the app is unlinked"
     );
+}
+
+/// A creator and an admin in the test org, and one org-scoped and one personal
+/// application created by the creator. Returns
+/// `(creator_id, admin_id, org_app, personal_app)`.
+async fn creator_with_apps(store: &DocumentStore, admin: bool) -> (String, String, String, String) {
+    seed_test_org(store).await;
+    let (creator_id, _) = upsert_user_with_org(
+        store,
+        "deact-creator@example.com",
+        None,
+        Some(TEST_ORG_ID),
+        false,
+    )
+    .await
+    .expect("create creator");
+    let (admin_id, _) = upsert_user_with_org(
+        store,
+        "deact-admin@example.com",
+        None,
+        Some(TEST_ORG_ID),
+        admin,
+    )
+    .await
+    .expect("create admin");
+    let org_app = create_scoped_client(
+        store,
+        &creator_id,
+        "Org App",
+        AccessScope::Organization,
+        Some(TEST_ORG_ID),
+    )
+    .await;
+    let personal_app = create_scoped_client(
+        store,
+        &creator_id,
+        "Personal App",
+        AccessScope::Personal,
+        Some(TEST_ORG_ID),
+    )
+    .await;
+    (creator_id, admin_id, org_app, personal_app)
+}
+
+async fn owner_of(store: &DocumentStore, client_id: &str) -> Option<String> {
+    get_oauth_client_by_id(store, client_id)
+        .await
+        .expect("lookup client")
+        .expect("client exists")
+        .user_id
+}
+
+/// A deactivated creator cannot sign in, and management is creator-only, so
+/// an admin deactivation moves their org-scoped applications to an active
+/// admin, as a delete does. Personal applications stay with the creator.
+#[tokio::test]
+async fn test_deactivate_member_transfers_org_scoped_apps_to_org_admin() {
+    let (store, _audit) = test_db().await;
+    let (creator_id, admin_id, org_app, personal_app) = creator_with_apps(&store, true).await;
+
+    assert!(
+        demote_or_deactivate_member(&store, &creator_id, MemberDowngrade::Deactivate)
+            .await
+            .expect("deactivate")
+    );
+
+    assert_eq!(owner_of(&store, &org_app).await, Some(admin_id));
+    assert_eq!(owner_of(&store, &personal_app).await, Some(creator_id));
+}
+
+/// SCIM `active: false` transfers the same way, and reactivation does not
+/// move the applications back.
+#[tokio::test]
+async fn test_scim_deactivation_transfers_org_scoped_apps_to_org_admin() {
+    let (store, _audit) = test_db().await;
+    let (creator_id, admin_id, org_app, personal_app) = creator_with_apps(&store, true).await;
+
+    assert!(
+        update_scim_user(&store, &creator_id, TEST_ORG_ID, None, None, false)
+            .await
+            .expect("scim deactivate")
+    );
+    assert_eq!(owner_of(&store, &org_app).await, Some(admin_id.clone()));
+    assert_eq!(
+        owner_of(&store, &personal_app).await,
+        Some(creator_id.clone())
+    );
+
+    assert!(
+        update_scim_user(&store, &creator_id, TEST_ORG_ID, None, None, true)
+            .await
+            .expect("scim reactivate")
+    );
+    assert_eq!(
+        owner_of(&store, &org_app).await,
+        Some(admin_id),
+        "reactivation does not transfer the application back"
+    );
+}
+
+/// With no other active admin, a deactivation leaves the application with its
+/// creator rather than unlinking it: reactivating the creator restores it.
+#[tokio::test]
+async fn test_deactivation_keeps_org_app_when_no_admin_remains() {
+    let (store, _audit) = test_db().await;
+    let (creator_id, _member_id, org_app, _personal_app) = creator_with_apps(&store, false).await;
+
+    assert!(
+        demote_or_deactivate_member(&store, &creator_id, MemberDowngrade::Deactivate)
+            .await
+            .expect("deactivate")
+    );
+
+    assert_eq!(owner_of(&store, &org_app).await, Some(creator_id));
 }
 
 /// A deactivated org admin must not inherit applications — they cannot
@@ -456,7 +780,9 @@ async fn test_delete_user_skips_deactivated_org_admin_as_successor() {
     .await;
 
     assert!(
-        delete_user(&store, &creator_id).await.expect("delete_user"),
+        delete_user(&store, &creator_id, LastAdminGuard::Enforce)
+            .await
+            .expect("delete_user"),
         "creator must be deleted"
     );
 
@@ -532,12 +858,12 @@ async fn test_concurrent_admin_deletes_never_strand_org_apps() {
         {
             let s = std::sync::Arc::clone(&store);
             let id = admin_a.clone();
-            async move { delete_user(&s, &id).await }
+            async move { delete_user(&s, &id, LastAdminGuard::Bypass).await }
         },
         {
             let s = std::sync::Arc::clone(&store);
             let id = admin_b.clone();
-            async move { delete_user(&s, &id).await }
+            async move { delete_user(&s, &id, LastAdminGuard::Bypass).await }
         },
     );
     assert!(r1.expect("delete a"), "admin a must be deleted");
@@ -559,5 +885,702 @@ async fn test_concurrent_admin_deletes_never_strand_org_apps() {
                 "application {app_id} is owned by deleted user {owner}"
             );
         }
+    }
+}
+
+/// Step-6 client reassignment in `delete_user` must write under the OCC
+/// version guard: `OAuthClientDoc`'s version is the serialization point for
+/// all secret-set mutations (`update_oauth_client` /
+/// `update_oauth_client_registration` write via `compare_and_update`), and a
+/// blind `UPDATE ... version = version + 1` between a `find_all` read and
+/// the write would silently overwrite a concurrently-committed client
+/// update with the stale doc — the same lost-update anomaly the
+/// authenticator-deletion cascade had for `DeviceAuthRequestDoc`. The guard
+/// lives in `update_by_index` itself, whose lost write is a retryable
+/// `VersionConflict` that the entry-point `with_dsql_retry!` re-runs from a
+/// fresh read.
+///
+/// This sequential test pins the reassignment against a doc whose version
+/// has already advanced past the initial insert (several prior committed
+/// updates), asserting it lands on the LATEST doc state with every
+/// non-`user_id` field intact. The guard itself is pinned at the store level
+/// by `store::tests::tx_update_by_index_rejects_row_changed_since_read`.
+#[tokio::test]
+async fn test_delete_user_client_reassignment_writes_against_latest_version() {
+    let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
+
+    let (creator_id, _) = upsert_user_with_org(
+        &store,
+        "occ-app-creator@example.com",
+        None,
+        Some(TEST_ORG_ID),
+        false,
+    )
+    .await
+    .expect("create creator");
+    let (admin_id, _) = upsert_user_with_org(
+        &store,
+        "occ-app-admin@example.com",
+        None,
+        Some(TEST_ORG_ID),
+        true,
+    )
+    .await
+    .expect("create admin");
+
+    let org_app = create_scoped_client(
+        &store,
+        &creator_id,
+        "OCC Org App",
+        AccessScope::Organization,
+        Some(TEST_ORG_ID),
+    )
+    .await;
+
+    // Advance the client doc's version with committed OCC updates — the
+    // reassignment must read and re-write the LATEST state, not version 1.
+    let occ_redirects = vec!["https://occ.example.com/callback".to_string()];
+    for name in ["OCC Org App v2", "OCC Org App v3"] {
+        update_oauth_client(
+            &store,
+            &UpdateOAuthClientParams {
+                id: &org_app,
+                name,
+                description: Some("occ regression fixture"),
+                redirect_uris: &occ_redirects,
+                access_scope: None,
+                org_id: None,
+                resource_uris: &[],
+                token_endpoint_auth_method: TokenEndpointAuthMethod::default(),
+                keys: None,
+                fapi_profile: FapiProfile::None,
+                dpop_bound_access_tokens: false,
+                post_logout_redirect_uris: None,
+            },
+        )
+        .await
+        .expect("update client");
+    }
+
+    assert!(
+        delete_user(&store, &creator_id, LastAdminGuard::Enforce)
+            .await
+            .expect("delete_user"),
+        "creator must be deleted"
+    );
+
+    let org_client = get_oauth_client_by_id(&store, &org_app)
+        .await
+        .expect("lookup org app")
+        .expect("org app still exists");
+    assert_eq!(
+        org_client.user_id.as_deref(),
+        Some(admin_id.as_str()),
+        "org-scoped app must transfer to the org admin"
+    );
+    // The reassignment modified ONLY user_id: the latest committed name and
+    // redirect URIs survive. Under the pre-fix blind update a stale doc
+    // (read before a concurrent update committed) would have clobbered them.
+    assert_eq!(
+        org_client.name, "OCC Org App v3",
+        "reassignment must write against the latest doc state"
+    );
+    assert_eq!(
+        org_client.redirect_uris, occ_redirects,
+        "non-user_id fields must be preserved by the reassignment"
+    );
+}
+
+// ========================================================================
+// delete_oauth_client_and_revoke_sessions: cache/DB consistency on partial
+// failure (regression for the (A)-OK / (B)-Err arm)
+// ========================================================================
+
+/// Helper: create an OAuth access-token session with the given keying and a
+/// far-future expiry, so it is live for the duration of the test. Directly
+/// mirrors the `create_oauth_session` helper in `users_and_sessions.rs` but
+/// adds the `client_id` index, which the chokepoint's client-scoped delete
+/// matches on.
+async fn create_client_session(
+    store: &DocumentStore,
+    user_id: &str,
+    email: &str,
+    token_hash: &str,
+    client_id: Option<&str>,
+) {
+    create_session(
+        store,
+        &CreateSessionParams {
+            user_id,
+            user_email: email,
+            token_hash,
+            authenticator_id: None,
+            expires_at: "2099-12-31T23:59:59Z".parse().unwrap(),
+            session_type: SessionPurpose::OAuthAccessToken,
+            authorization_details: None,
+            hardware_aaguid: None,
+            org_domain: None,
+            client_id,
+            source_code_hash: None,
+            authenticated_at: None,
+        },
+    )
+    .await
+    .expect("create session");
+}
+
+/// Regression test for the cache/DB desync in
+/// [`delete_oauth_client_and_revoke_sessions`].
+///
+/// The chokepoint used to run both `delete_by_index` calls (the
+/// `user_id`-indexed M2M delete, then the `client_id`-indexed user-issued
+/// delete) before either cache invalidation. If the second delete surfaced
+/// `Err`, the `?` skipped `invalidate_for_user`/`invalidate_for_client`, so
+/// the M2M rows the first delete already committed remained cached as `Hit`s
+/// — and `SessionCache::get` serves a `Hit` without re-reading the DB, so
+/// those tokens kept authenticating until the cache TTL elapsed.
+///
+/// `set_delete_by_index_remaining_successes(1)` faults the *second*
+/// `delete_by_index` (the client-scoped one) while letting the first
+/// (the `user_id`-scoped M2M delete) commit, exercising the (A)-OK / (B)-Err
+/// arm. With the fix, `invalidate_for_user` runs between the two deletes and
+/// evicts the committed-deleted M2M entry, so a subsequent cache lookup misses
+/// through to the DB and returns `None`. Under the bug both invalidations are
+/// skipped and the lookup returns `Some` from the stale `Hit`.
+#[tokio::test]
+async fn test_delete_client_partial_failure_evicts_committed_m2m_from_cache() {
+    let (mut store, _audit) = test_db().await;
+
+    let (user_id, _) = upsert_user(&store, "partial-cache@example.com", None)
+        .await
+        .expect("create user");
+
+    let client = create_test_client(
+        &store,
+        &user_id,
+        TestClientSpec {
+            name: "Partial Cache App".to_string(),
+            with_secret: false,
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // M2M (client_credentials) session: user_id == client_id (RFC 9068 §2.2),
+    // also tagged with client_id on its own index. This is the half step (A)
+    // commits and must be evicted from the cache before step (B) can fault.
+    create_client_session(
+        &store,
+        &client.client_id,
+        &format!("{}@clients", client.client_id),
+        "m2m-hash",
+        Some(&client.client_id),
+    )
+    .await;
+
+    // User-issued access-token session: keyed by the real resource owner's
+    // user_id, tagged with the issuing client_id. Step (B) would delete this
+    // but faults before committing, so it must survive in DB and cache.
+    create_client_session(
+        &store,
+        &user_id,
+        "partial-cache@example.com",
+        "user-hash",
+        Some(&client.client_id),
+    )
+    .await;
+
+    // Warm the session cache with `Hit`s for both tokens — the precondition
+    // the exploit requires: the attacker used the token against a resource
+    // endpoint within the cache TTL before the admin's delete.
+    let cache = SessionCache::new(100, 30);
+    assert!(
+        cache
+            .get_session_by_token_hash(&store, "m2m-hash", test_arrival())
+            .await
+            .expect("cache lookup m2m")
+            .is_some(),
+        "m2m token must start as a cache Hit"
+    );
+    assert!(
+        cache
+            .get_session_by_token_hash(&store, "user-hash", test_arrival())
+            .await
+            .expect("cache lookup user")
+            .is_some(),
+        "user-issued token must start as a cache Hit"
+    );
+
+    // Fault the *second* `delete_by_index`: the `user_id`-scoped M2M delete
+    // (step A) consumes the single unit and commits; the client-scoped delete
+    // (step B) faults before opening its transaction.
+    store.set_delete_by_index_remaining_successes(1);
+
+    // The chokepoint must surface the (B)-failure as `Err` to the caller (so
+    // the admin sees a 500 and can retry) — the fix changes only *when* the
+    // cache is invalidated, not the error-propagation contract.
+    let result =
+        delete_oauth_client_and_revoke_sessions(&store, &cache, &client.app_id, &client.client_id)
+            .await;
+    assert!(
+        result.is_err(),
+        "chokepoint must surface the (B)-delete failure as Err: {result:?}"
+    );
+
+    // The client row is NOT deleted on this arm: step (E) only runs after
+    // both invalidations succeed, and step (B) faulted before it. Pinning this
+    // confirms the fix preserved the error-propagation contract (the admin
+    // sees the error and retries; the row is still there to retry against).
+    assert!(
+        get_oauth_client_by_id(&store, &client.app_id)
+            .await
+            .expect("lookup client")
+            .is_some(),
+        "the client row must survive when step (E) is unreachable"
+    );
+
+    // The committed-deleted M2M session is gone from the DB; the user-issued
+    // session whose delete faulted is still present.
+    let now = jiff::Timestamp::now();
+    assert!(
+        get_session_by_token_hash(&store, "m2m-hash", now)
+            .await
+            .expect("db lookup m2m")
+            .is_none(),
+        "the committed M2M delete must be gone from the DB"
+    );
+    assert!(
+        get_session_by_token_hash(&store, "user-hash", now)
+            .await
+            .expect("db lookup user")
+            .is_some(),
+        "the session whose delete faulted must remain in the DB"
+    );
+
+    // The distinguishing assertion: a DB-deleted M2M session must NOT be
+    // served from a stale cache `Hit`. With the fix `invalidate_for_user`
+    // evicted it between the two deletes, so this lookup misses through to
+    // the DB and returns `None`. Under the bug both invalidations are skipped
+    // and the stale `Hit` keeps authenticating the revoked M2M token until
+    // the TTL.
+    assert!(
+        cache
+            .get_session_by_token_hash(&store, "m2m-hash", test_arrival())
+            .await
+            .expect("cache re-lookup m2m")
+            .is_none(),
+        "a DB-deleted M2M session must not be served from a stale cache Hit \
+         after the chokepoint returned Err on the second delete"
+    );
+
+    // The user-issued session whose delete faulted stays cached — it is still
+    // a valid row, and `invalidate_for_user` correctly retained it (its
+    // `user_id` is the real user, not the client). `invalidate_for_client`
+    // never ran (step B faulted before it), which is consistent: the row is
+    // still in the DB, so serving it is correct, not a stale `Hit`.
+    assert!(
+        cache
+            .get_session_by_token_hash(&store, "user-hash", test_arrival())
+            .await
+            .expect("cache re-lookup user")
+            .is_some(),
+        "the session whose delete faulted must remain a cache Hit (still in DB)"
+    );
+}
+
+/// The (A)-errors arm: when the *first* `delete_by_index` faults, no DB write
+/// committed and no invalidation is needed — both halves stay consistent
+/// (cache and DB untouched). Pins the contract that faulting step (A) evicts
+/// nothing and leaves both sessions live, so a retry of the whole chokepoint
+/// starts from a clean state.
+#[tokio::test]
+async fn test_delete_client_first_delete_failure_changes_nothing() {
+    let (mut store, _audit) = test_db().await;
+
+    let (user_id, _) = upsert_user(&store, "first-fail-client@example.com", None)
+        .await
+        .expect("create user");
+
+    let client = create_test_client(
+        &store,
+        &user_id,
+        TestClientSpec {
+            name: "First Fail App".to_string(),
+            with_secret: false,
+            ..Default::default()
+        },
+    )
+    .await;
+
+    create_client_session(
+        &store,
+        &client.client_id,
+        &format!("{}@clients", client.client_id),
+        "m2m-f",
+        Some(&client.client_id),
+    )
+    .await;
+    create_client_session(
+        &store,
+        &user_id,
+        "first-fail-client@example.com",
+        "user-f",
+        Some(&client.client_id),
+    )
+    .await;
+
+    let cache = SessionCache::new(100, 30);
+    assert!(
+        cache
+            .get_session_by_token_hash(&store, "m2m-f", test_arrival())
+            .await
+            .expect("warm m2m")
+            .is_some()
+    );
+    assert!(
+        cache
+            .get_session_by_token_hash(&store, "user-f", test_arrival())
+            .await
+            .expect("warm user")
+            .is_some()
+    );
+
+    // Fault every `delete_by_index`: step (A) faults before committing, so
+    // neither delete runs and neither invalidation runs.
+    store.set_delete_by_index_remaining_successes(0);
+
+    let result =
+        delete_oauth_client_and_revoke_sessions(&store, &cache, &client.app_id, &client.client_id)
+            .await;
+    assert!(
+        result.is_err(),
+        "chokepoint must surface the (A)-delete failure as Err: {result:?}"
+    );
+
+    // Nothing committed: both sessions remain in the DB.
+    let now = jiff::Timestamp::now();
+    assert!(
+        get_session_by_token_hash(&store, "m2m-f", now)
+            .await
+            .expect("db m2m")
+            .is_some(),
+        "no delete committed, so the M2M session must remain"
+    );
+    assert!(
+        get_session_by_token_hash(&store, "user-f", now)
+            .await
+            .expect("db user")
+            .is_some(),
+        "no delete committed, so the user-issued session must remain"
+    );
+
+    // No invalidation ran, so both stay cached — consistent with the DB, and
+    // a retry of the chokepoint starts from a clean state.
+    assert!(
+        cache
+            .get_session_by_token_hash(&store, "m2m-f", test_arrival())
+            .await
+            .expect("cache m2m")
+            .is_some(),
+        "no invalidation ran, so the M2M session must stay cached (still valid)"
+    );
+    assert!(
+        cache
+            .get_session_by_token_hash(&store, "user-f", test_arrival())
+            .await
+            .expect("cache user")
+            .is_some(),
+        "no invalidation ran, so the user-issued session must stay cached (still valid)"
+    );
+}
+
+// ========================================================================
+// RFC 7592 registration access tokens across owner offboarding
+// ========================================================================
+//
+// Deleting or deactivating a user ends their authority over every OAuth
+// client they own, so each offboarding write revokes the registration access
+// token on all of those clients in the same transaction. RFC 7592 §5 only asks
+// for this when a *client* is deprovisioned; tying it to the owner is our
+// decision (a client registered by a user is managed on that user's behalf).
+
+/// The three writes that end a user's authority over their clients.
+#[derive(Clone, Copy, Debug)]
+enum Offboard {
+    Delete,
+    AdminDeactivate,
+    ScimDeactivate,
+}
+
+impl Offboard {
+    const ALL: [Self; 3] = [Self::Delete, Self::AdminDeactivate, Self::ScimDeactivate];
+
+    async fn run(self, store: &DocumentStore, user_id: &str) {
+        let done = match self {
+            Self::Delete => delete_user(store, user_id, LastAdminGuard::Enforce)
+                .await
+                .expect("delete_user"),
+            Self::AdminDeactivate => {
+                demote_or_deactivate_member(store, user_id, MemberDowngrade::Deactivate)
+                    .await
+                    .expect("deactivate")
+            }
+            Self::ScimDeactivate => {
+                update_scim_user(store, user_id, TEST_ORG_ID, None, None, false)
+                    .await
+                    .expect("scim deactivate")
+            }
+        };
+        assert!(done, "{self:?} must apply");
+    }
+}
+
+/// A non-admin member of the test org (plus an active admin, so the org has a
+/// successor) who owns one client of `scope` holding `reg_hash`. Returns
+/// `(owner_id, client_doc_id)`.
+async fn owner_with_registered_client(
+    store: &DocumentStore,
+    scope: AccessScope,
+    reg_hash: &str,
+) -> (String, String) {
+    seed_test_org(store).await;
+    let (owner_id, _) = upsert_user_with_org(
+        store,
+        "rfc7592-owner@example.com",
+        None,
+        Some(TEST_ORG_ID),
+        false,
+    )
+    .await
+    .expect("create owner");
+    upsert_user_with_org(
+        store,
+        "rfc7592-admin@example.com",
+        None,
+        Some(TEST_ORG_ID),
+        true,
+    )
+    .await
+    .expect("create admin");
+    let client = create_test_client(
+        store,
+        &owner_id,
+        TestClientSpec {
+            access_scope: scope,
+            org_id: Some(TEST_ORG_ID.to_string()),
+            with_secret: false,
+            registration_access_token_hash: Some(reg_hash.to_string()),
+            ..Default::default()
+        },
+    )
+    .await;
+    (owner_id, client.app_id)
+}
+
+async fn stored_registration_hash(store: &DocumentStore, id: &str) -> Option<String> {
+    get_oauth_client_by_id(store, id)
+        .await
+        .expect("lookup client")
+        .expect("client exists")
+        .registration_access_token_hash
+}
+
+/// Every offboarding path clears the hash on every scope the owner holds,
+/// including `Organization`: a dynamically registered `Personal` client can be
+/// switched to `Organization` through the application API and keeps its token.
+#[tokio::test]
+async fn test_offboarding_revokes_registration_tokens_on_every_scope() {
+    for offboard in Offboard::ALL {
+        for scope in [
+            AccessScope::Personal,
+            AccessScope::Public,
+            AccessScope::Organization,
+        ] {
+            let (store, _audit) = test_db().await;
+            let reg_hash = crypto::hash_token("vouch_reg_offboard");
+            let (owner_id, app) = owner_with_registered_client(&store, scope, &reg_hash).await;
+
+            offboard.run(&store, &owner_id).await;
+
+            assert_eq!(
+                stored_registration_hash(&store, &app).await,
+                None,
+                "{offboard:?} must revoke the registration token of a {scope:?} client"
+            );
+        }
+    }
+}
+
+/// The hook both race tests install: on the client's first `transition`
+/// attempt — after the RFC 7592 write read the row, before it commits —
+/// offboard the owner through a hookless store.
+fn offboard_during_transition(
+    store: &DocumentStore,
+    offboard: Offboard,
+    owner_id: &str,
+    client_doc_id: &str,
+) -> DocumentStore {
+    let writer = store.clone();
+    let owner_id = owner_id.to_string();
+    let client_doc_id = client_doc_id.to_string();
+    let mut hooked = store.clone();
+    hooked.set_modify_test_hook(Arc::new(move |doc_id: &str, attempt: u32| {
+        let writer = writer.clone();
+        let owner_id = owner_id.clone();
+        let fire = attempt == 0 && doc_id == client_doc_id;
+        Box::pin(async move {
+            if fire {
+                offboard.run(&writer, &owner_id).await;
+            }
+        })
+    }));
+    hooked
+}
+
+/// An RFC 7592 PUT that verified the owner as active before the offboarding
+/// committed must not land: the offboarding bumps the client's version, the
+/// PUT's `transition` re-reads, finds no hash, and rejects.
+#[tokio::test]
+async fn test_rfc7592_put_racing_owner_offboarding_is_rejected() {
+    for offboard in Offboard::ALL {
+        let (store, _audit) = test_db().await;
+        let reg_hash = crypto::hash_token("vouch_reg_put_race");
+        let (owner_id, app) =
+            owner_with_registered_client(&store, AccessScope::Personal, &reg_hash).await;
+        let before = get_oauth_client_by_id(&store, &app)
+            .await
+            .expect("lookup")
+            .expect("client exists")
+            .redirect_uris;
+        let hooked = offboard_during_transition(&store, offboard, &owner_id, &app);
+
+        let attacker_uris = vec!["https://attacker.example.com/cb".to_string()];
+        let rotated = crypto::hash_token("vouch_reg_rotated_must_not_land");
+        let outcome = update_oauth_client_registration(
+            &hooked,
+            &app,
+            &reg_hash,
+            &UpdateClientRegistrationParams {
+                redirect_uris: &attacker_uris,
+                grant_types: None,
+                response_types: None,
+                keys: None,
+                registration_access_token_hash: &rotated,
+                registration_metadata: None,
+                userinfo_signed_response_alg: None,
+                request_uris: None,
+                post_logout_redirect_uris: None,
+                client_name: None,
+                software_id: None,
+                software_version: None,
+                id_token_signed_response_alg: JwsAlgorithm::Es256,
+                authorization_signed_response_alg: None,
+                introspection_signed_response_alg: None,
+                request_object_signing_alg: None,
+                require_signed_request_object: None,
+                tls_client_auth_subject_dn: None,
+                tls_client_auth_san_dns: None,
+                tls_client_auth_san_uri: None,
+                tls_client_auth_san_ip: None,
+                tls_client_auth_san_email: None,
+            },
+        )
+        .await
+        .expect("PUT must not error");
+
+        assert!(
+            outcome.is_none(),
+            "a PUT racing {offboard:?} must not commit; got {outcome:?}"
+        );
+        let after = get_oauth_client_by_id(&store, &app)
+            .await
+            .expect("lookup")
+            .expect("client exists");
+        assert_eq!(
+            after.redirect_uris, before,
+            "{offboard:?}: PUT did not land"
+        );
+        assert_eq!(after.registration_access_token_hash, None, "{offboard:?}");
+    }
+}
+
+/// An RFC 7592 DELETE whose consume raced the offboarding loses: the consume
+/// re-reads after the version bump, finds no hash, and does not consume, so
+/// the client is never deleted.
+#[tokio::test]
+async fn test_rfc7592_delete_racing_owner_offboarding_is_rejected() {
+    for offboard in Offboard::ALL {
+        let (store, _audit) = test_db().await;
+        let reg_hash = crypto::hash_token("vouch_reg_delete_race");
+        let (owner_id, app) =
+            owner_with_registered_client(&store, AccessScope::Personal, &reg_hash).await;
+        let hooked = offboard_during_transition(&store, offboard, &owner_id, &app);
+
+        let consumed = consume_registration_access_token(&hooked, &app, &reg_hash)
+            .await
+            .expect("consume must not error");
+
+        assert!(
+            consumed.is_none(),
+            "a DELETE racing {offboard:?} must not consume the token"
+        );
+        assert_eq!(stored_registration_hash(&store, &app).await, None);
+    }
+}
+
+/// A failed RFC 7592 DELETE puts back the token it consumed when nothing else
+/// has touched the client, so the owner can retry.
+#[tokio::test]
+async fn test_restore_registration_token_after_failed_delete() {
+    let (store, _audit) = test_db().await;
+    let reg_hash = crypto::hash_token("vouch_reg_restore");
+    let (_owner_id, app) =
+        owner_with_registered_client(&store, AccessScope::Personal, &reg_hash).await;
+
+    let consumed = consume_registration_access_token(&store, &app, &reg_hash)
+        .await
+        .expect("consume")
+        .expect("token consumed");
+    assert_eq!(stored_registration_hash(&store, &app).await, None);
+
+    assert!(
+        restore_registration_access_token(&store, consumed)
+            .await
+            .expect("restore"),
+        "an untouched client gets its token back"
+    );
+    assert_eq!(stored_registration_hash(&store, &app).await, Some(reg_hash));
+}
+
+/// The restore must not reinstate a token that offboarding revoked between
+/// the consume and the failed delete. "The hash is `None`" is true in both
+/// cases; only the version tells them apart, and every offboarding path
+/// writes the client even though its hash is already `None`.
+#[tokio::test]
+async fn test_restore_does_not_reinstate_token_revoked_by_offboarding() {
+    for offboard in Offboard::ALL {
+        let (store, _audit) = test_db().await;
+        let reg_hash = crypto::hash_token("vouch_reg_restore_race");
+        let (owner_id, app) =
+            owner_with_registered_client(&store, AccessScope::Personal, &reg_hash).await;
+
+        let consumed = consume_registration_access_token(&store, &app, &reg_hash)
+            .await
+            .expect("consume")
+            .expect("token consumed");
+        offboard.run(&store, &owner_id).await;
+
+        assert!(
+            !restore_registration_access_token(&store, consumed)
+                .await
+                .expect("restore"),
+            "{offboard:?} after the consume must win over the restore"
+        );
+        assert_eq!(
+            stored_registration_hash(&store, &app).await,
+            None,
+            "{offboard:?}: the revoked token stays revoked"
+        );
     }
 }

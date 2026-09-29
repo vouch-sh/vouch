@@ -8,7 +8,6 @@
 //! end-to-end through the policy gate in `fido2_grant.rs`.
 
 #![expect(
-    clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
     clippy::indexing_slicing,
@@ -22,14 +21,14 @@ use vouch_tests::{IntegrationMockDevice, TestHarness};
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
+use vouch_server::db::TokenEndpointAuthMethod;
+use vouch_server::infra::metrics;
 /// Build a `private_key_jwt` client assertion (ES256 JWT) for the token endpoint.
 use vouch_server::test_utils::build_client_assertion;
+use vouch_server::test_utils::{self, TestOAuthClient};
 
 /// Create an OAuth client configured for `private_key_jwt` with inline JWKS.
-async fn create_jwt_client(
-    harness: &TestHarness,
-    user_id: &str,
-) -> (vouch_server::test_utils::TestOAuthClient, Vec<u8>) {
+async fn create_jwt_client(harness: &TestHarness, user_id: &str) -> (TestOAuthClient, Vec<u8>) {
     use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, KeyPair};
     use vouch_server::test_utils::{TestClientSpec, TestJwks};
 
@@ -56,15 +55,13 @@ async fn create_jwt_client(
         }]
     });
 
-    let client = vouch_server::test_utils::create_test_client(
+    let client = test_utils::create_test_client(
         &harness.state.store,
         user_id,
         TestClientSpec {
             name: "FIDO2 Grant Test Client".to_string(),
             jwks: TestJwks::Custom(jwks),
-            token_endpoint_auth_method: Some(
-                vouch_server::db::TokenEndpointAuthMethod::PrivateKeyJwt,
-            ),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
             ..Default::default()
         },
     )
@@ -77,7 +74,6 @@ async fn create_jwt_client(
 async fn register_mock_device_in_db(
     harness: &TestHarness,
     user_id: &str,
-    user_email: &str,
     device: &IntegrationMockDevice,
 ) -> String {
     let user_handle = uuid::Uuid::parse_str(user_id)
@@ -89,23 +85,39 @@ async fn register_mock_device_in_db(
         &harness.state.store,
         &CreateAuthenticatorParams {
             user_id,
-            user_email,
             name: "Mock FIDO2 Key",
             credential_id: &device.credential_id(),
             public_key: &device.inner_public_key_cose(),
             aaguid: None,
             user_handle: Some(&user_handle),
             attestation_verified: false,
+            counter: 0,
         },
     )
     .await
     .expect("Failed to create authenticator for mock device")
 }
 
-/// Get a challenge + state JWT from the challenge endpoint.
-async fn get_challenge(harness: &TestHarness) -> (Vec<u8>, String) {
+/// Get a challenge + state JWT from `/oauth/fido2/challenge`, authenticating
+/// as `client` via `private_key_jwt` so the returned state is bound to the
+/// client that will redeem it.
+async fn get_challenge(
+    harness: &TestHarness,
+    client: &TestOAuthClient,
+    pkcs8: &[u8],
+) -> (Vec<u8>, String) {
+    let client_assertion = build_client_assertion(
+        &client.client_id,
+        "https://test.example.com/oauth/token",
+        pkcs8,
+        None,
+    );
+    let body = format!(
+        "client_assertion_type=urn%3Aietf%3Aparams%3Aoauth%3Aclient-assertion-type%3Ajwt-bearer\
+         &client_assertion={client_assertion}"
+    );
     let response = harness
-        .post_form("/oauth/fido2/challenge", "")
+        .post_form("/oauth/fido2/challenge", &body)
         .await
         .expect("Failed to get challenge");
     assert_eq!(response.status, 200, "Challenge endpoint must return 200");
@@ -132,7 +144,7 @@ struct AssertionExchange<'a> {
     challenge: &'a [u8],
     state_jwt: &'a str,
     user_id: &'a str,
-    client: &'a vouch_server::test_utils::TestOAuthClient,
+    client: &'a TestOAuthClient,
     pkcs8: &'a [u8],
     authorization_details: Option<&'a str>,
 }
@@ -201,6 +213,23 @@ async fn exchange_fido2_assertion(
     (status, json)
 }
 
+/// Return the `oauth_token_issued` audit event(s) for `user_id`.
+///
+/// `record_oauth_event` is awaited before `/oauth/token` returns its
+/// response, so the row is already visible by the time the caller queries.
+async fn token_issued_events(harness: &TestHarness, user_id: &str) -> Vec<db::AuditEvent> {
+    harness
+        .state
+        .audit
+        .query_events(&db::AuditEventFilter {
+            event_types: Some(vec!["oauth_token_issued".to_string()]),
+            user_id: Some(user_id.to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("query audit events")
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────
 
 /// Windows 11 24H2 with OsRecency active must successfully obtain a token.
@@ -224,7 +253,7 @@ async fn test_fido2_grant_windows_24h2_os_recency_passes() {
 
     // Register the mock device in the DB
     let device = IntegrationMockDevice::new();
-    let _auth_id = register_mock_device_in_db(&harness, &user.id, &user.email, &device).await;
+    let _auth_id = register_mock_device_in_db(&harness, &user.id, &device).await;
 
     // Activate the OsRecency preconfigured policy for this org
     db::set_preconfigured_active(
@@ -239,7 +268,7 @@ async fn test_fido2_grant_windows_24h2_os_recency_passes() {
     let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
 
     // Get a challenge
-    let (challenge, state) = get_challenge(&harness).await;
+    let (challenge, state) = get_challenge(&harness, &client, &pkcs8).await;
 
     // Build Windows 11 24H2 posture (4-component os_version + os_build)
     let posture_json = serde_json::json!([{
@@ -289,7 +318,7 @@ async fn test_fido2_grant_windows_23h2_os_recency_denied() {
         .expect("Failed to create user");
 
     let device = IntegrationMockDevice::new();
-    let _auth_id = register_mock_device_in_db(&harness, &user.id, &user.email, &device).await;
+    let _auth_id = register_mock_device_in_db(&harness, &user.id, &device).await;
 
     db::set_preconfigured_active(
         &harness.state.store,
@@ -300,7 +329,7 @@ async fn test_fido2_grant_windows_23h2_os_recency_denied() {
     .expect("Failed to activate OsRecency");
 
     let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
-    let (challenge, state) = get_challenge(&harness).await;
+    let (challenge, state) = get_challenge(&harness, &client, &pkcs8).await;
 
     // Windows 11 23H2 (build 22631) — below the 26100 threshold
     let posture_json = serde_json::json!([{
@@ -350,7 +379,7 @@ async fn test_fido2_grant_macos_15_os_recency_passes() {
         .expect("Failed to create user");
 
     let device = IntegrationMockDevice::new();
-    let _auth_id = register_mock_device_in_db(&harness, &user.id, &user.email, &device).await;
+    let _auth_id = register_mock_device_in_db(&harness, &user.id, &device).await;
 
     db::set_preconfigured_active(
         &harness.state.store,
@@ -361,7 +390,7 @@ async fn test_fido2_grant_macos_15_os_recency_passes() {
     .expect("Failed to activate OsRecency");
 
     let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
-    let (challenge, state) = get_challenge(&harness).await;
+    let (challenge, state) = get_challenge(&harness, &client, &pkcs8).await;
 
     // macOS 15.3.1 posture — os_build is absent on macOS (not collected)
     let posture_json = serde_json::json!([{
@@ -410,7 +439,7 @@ async fn test_fido2_grant_os_recency_no_posture_denied() {
         .expect("Failed to create user");
 
     let device = IntegrationMockDevice::new();
-    let _auth_id = register_mock_device_in_db(&harness, &user.id, &user.email, &device).await;
+    let _auth_id = register_mock_device_in_db(&harness, &user.id, &device).await;
 
     db::set_preconfigured_active(
         &harness.state.store,
@@ -421,7 +450,7 @@ async fn test_fido2_grant_os_recency_no_posture_denied() {
     .expect("Failed to activate OsRecency");
 
     let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
-    let (challenge, state) = get_challenge(&harness).await;
+    let (challenge, state) = get_challenge(&harness, &client, &pkcs8).await;
 
     // No authorization_details — posture data is required
     let (status, json) = exchange_fido2_assertion(AssertionExchange {
@@ -458,9 +487,9 @@ async fn test_fido2_grant_records_token_issued_audit_event() {
         .expect("Failed to create user");
 
     let device = IntegrationMockDevice::new();
-    let _auth_id = register_mock_device_in_db(&harness, &user.id, &user.email, &device).await;
+    let _auth_id = register_mock_device_in_db(&harness, &user.id, &device).await;
     let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
-    let (challenge, state) = get_challenge(&harness).await;
+    let (challenge, state) = get_challenge(&harness, &client, &pkcs8).await;
 
     let (status, json) = exchange_fido2_assertion(AssertionExchange {
         harness: &harness,
@@ -475,16 +504,7 @@ async fn test_fido2_grant_records_token_issued_audit_event() {
     .await;
     assert_eq!(status, 200, "FIDO2 grant must succeed: {json}");
 
-    let rows = harness
-        .state
-        .audit
-        .query_events(&db::AuditEventFilter {
-            event_types: Some(vec!["oauth_token_issued".to_string()]),
-            user_id: Some(user.id.clone()),
-            ..Default::default()
-        })
-        .await
-        .expect("query audit events");
+    let rows = token_issued_events(&harness, &user.id).await;
     assert_eq!(
         rows.len(),
         1,
@@ -494,6 +514,222 @@ async fn test_fido2_grant_records_token_issued_audit_event() {
         rows[0].data.contains("fido2-assertion"),
         "the audit payload must carry the grant type: {}",
         rows[0].data
+    );
+
+    // Both audit writes are awaited in flow order, so the UUIDv7 ids must
+    // show the login before the token it authorized.
+    let login_rows = harness
+        .state
+        .audit
+        .query_events(&db::AuditEventFilter {
+            event_types: Some(vec!["login_success".to_string()]),
+            user_id: Some(user.id.clone()),
+            ..Default::default()
+        })
+        .await
+        .expect("query audit events");
+    assert_eq!(
+        login_rows.len(),
+        1,
+        "the grant must record one login_success"
+    );
+    assert!(
+        login_rows[0].id < rows[0].id,
+        "login_success ({}) must precede oauth_token_issued ({})",
+        login_rows[0].id,
+        rows[0].id
+    );
+}
+
+/// The FIDO2 assertion grant must stamp the access-token `auth_time` claim
+/// from the ceremony-receipt instant (`LoginAssertionResult::verified_at`),
+/// not a fresh `Timestamp::now()` captured later in the handler — the
+/// `LoginAssertionResult::verified_at` doc contract the browser-login and
+/// device-code flows already honor.
+///
+/// This is the achievable analog of the device-code grant's
+/// `test_device_grant_auth_time_is_ceremony_instant_not_poll_instant`. The
+/// FIDO2 grant stamps `verified_at` inside `verify_assertion_inner` with no
+/// `for_test`-style injection seam, so the assertion is range-bound to the
+/// request window plus the `iat <= auth_time` ordering invariant, rather
+/// than pinned to an injected instant. It catches regressions where the
+/// claim is omitted, set to epoch, future-dated, or set outside the request
+/// window; pinning the exact ceremony instant requires the test-seam
+/// follow-up noted in the test plan.
+#[tokio::test]
+async fn test_fido2_grant_access_token_auth_time_is_ceremony_instant() {
+    let harness = TestHarness::new().await;
+    let user = harness
+        .create_user("auth-time@example.com")
+        .await
+        .expect("Failed to create user");
+
+    let device = IntegrationMockDevice::new();
+    let _auth_id = register_mock_device_in_db(&harness, &user.id, &device).await;
+    let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
+    let (challenge, state) = get_challenge(&harness, &client, &pkcs8).await;
+
+    // Bracket the exchange with integer-second wall-clock captures.
+    // `iat` is stamped from the request's ArrivalTime (captured at middleware
+    // before assertion verification); `auth_time` is stamped at ceremony
+    // receipt inside `verify_login_assertion`. Both therefore fall inside
+    // `[t_before, t_after]`, and `iat <= auth_time` must hold.
+    let t_before = jiff::Timestamp::now().as_second();
+    let (status, json) = exchange_fido2_assertion(AssertionExchange {
+        harness: &harness,
+        device: &device,
+        challenge: &challenge,
+        state_jwt: &state,
+        user_id: &user.id,
+        client: &client,
+        pkcs8: &pkcs8,
+        authorization_details: None,
+    })
+    .await;
+    let t_after = jiff::Timestamp::now().as_second();
+    assert_eq!(status, 200, "FIDO2 grant must succeed: {json}");
+
+    let access_token = json["access_token"]
+        .as_str()
+        .expect("access_token must be a JWT string");
+
+    // JWT payload is the middle segment, base64url-encoded JSON.
+    let parts: Vec<&str> = access_token.split('.').collect();
+    assert!(
+        parts.len() >= 2,
+        "access_token must be a JWT: {access_token}",
+    );
+    let payload = URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .expect("JWT payload must be valid base64url");
+    let claims: serde_json::Value =
+        serde_json::from_slice(&payload).expect("JWT payload must be valid JSON");
+
+    // OIDC Core §2: `auth_time` is "Time when the End-User authentication
+    // occurred." Must be present and an integer Unix second within the
+    // request window — the ceremony receipt, not a value outside it.
+    let auth_time = claims["auth_time"]
+        .as_i64()
+        .expect("auth_time must be an integer Unix second");
+    assert!(
+        t_before <= auth_time && auth_time <= t_after,
+        "auth_time ({auth_time}) must be within the request window \
+         [{t_before}, {t_after}] — it should be the ceremony-receipt instant"
+    );
+
+    // `iat` is stamped from the request's `ArrivalTime` (captured at the
+    // outermost middleware layer, before assertion verification), so `iat <=
+    // auth_time` must hold — the ceremony-receipt instant cannot precede the
+    // request arrival that triggered it.
+    let iat = claims["iat"]
+        .as_i64()
+        .expect("iat must be an integer Unix second");
+    assert!(
+        iat <= auth_time,
+        "iat ({iat}) must not be later than auth_time ({auth_time})"
+    );
+    assert!(
+        t_before <= iat && iat <= t_after,
+        "iat ({iat}) must be within the request window [{t_before}, {t_after}]"
+    );
+}
+
+/// A successful FIDO2 grant for an org member stamps the org's domain into
+/// the `oauth_token_issued` event's `email_domain` — the hot-path formula
+/// (`fido2_grant.rs`) must reproduce what the full lookup would have done.
+#[tokio::test]
+async fn test_fido2_grant_records_org_email_domain_on_token_issued_event() {
+    let harness = TestHarness::new().await;
+    let org = harness
+        .create_org("login-audit.example.com")
+        .await
+        .expect("Failed to create org");
+    let user = harness
+        .create_user_in_org("member@login-audit.example.com", &org.id, false)
+        .await
+        .expect("Failed to create user");
+
+    let device = IntegrationMockDevice::new();
+    let _auth_id = register_mock_device_in_db(&harness, &user.id, &device).await;
+    let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
+    let (challenge, state) = get_challenge(&harness, &client, &pkcs8).await;
+
+    let (status, json) = exchange_fido2_assertion(AssertionExchange {
+        harness: &harness,
+        device: &device,
+        challenge: &challenge,
+        state_jwt: &state,
+        user_id: &user.id,
+        client: &client,
+        pkcs8: &pkcs8,
+        authorization_details: None,
+    })
+    .await;
+    assert_eq!(status, 200, "FIDO2 grant must succeed: {json}");
+
+    let rows = token_issued_events(&harness, &user.id).await;
+    assert_eq!(
+        rows.len(),
+        1,
+        "the grant must write exactly one oauth_token_issued row"
+    );
+    assert_eq!(
+        rows[0].email_domain.as_deref(),
+        Some("login-audit.example.com"),
+        "org member login must stamp the org's domain onto the audit event"
+    );
+}
+
+/// Same assertion as above, but for a SCIM-provisioned user: `create_scim_user`
+/// sets `org_domain` at creation, unlike `create_user_in_org` (used by
+/// every other test in this file), which leaves it unset and forces the
+/// fallback lookup. Both paths must stamp the same audit `email_domain`.
+#[tokio::test]
+async fn test_fido2_grant_records_org_email_domain_for_scim_provisioned_user() {
+    let harness = TestHarness::new().await;
+    let org = harness
+        .create_org("scim-audit.example.com")
+        .await
+        .expect("Failed to create org");
+    let user = db::create_scim_user(
+        &harness.state.store,
+        Some(&org.id),
+        "scim-member@scim-audit.example.com",
+        Some("SCIM Member"),
+        None,
+        true,
+    )
+    .await
+    .expect("Failed to create SCIM user");
+
+    let device = IntegrationMockDevice::new();
+    let _auth_id = register_mock_device_in_db(&harness, &user.id, &device).await;
+    let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
+    let (challenge, state) = get_challenge(&harness, &client, &pkcs8).await;
+
+    let (status, json) = exchange_fido2_assertion(AssertionExchange {
+        harness: &harness,
+        device: &device,
+        challenge: &challenge,
+        state_jwt: &state,
+        user_id: &user.id,
+        client: &client,
+        pkcs8: &pkcs8,
+        authorization_details: None,
+    })
+    .await;
+    assert_eq!(status, 200, "FIDO2 grant must succeed: {json}");
+
+    let rows = token_issued_events(&harness, &user.id).await;
+    assert_eq!(
+        rows.len(),
+        1,
+        "the grant must write exactly one oauth_token_issued row"
+    );
+    assert_eq!(
+        rows[0].email_domain.as_deref(),
+        Some("scim-audit.example.com"),
+        "a stored org_domain must produce the same audit stamp as the fallback path"
     );
 }
 
@@ -513,7 +749,7 @@ async fn test_posture_denied_grant_records_login_failed_not_success() {
         .await
         .expect("Failed to create user");
     let device = IntegrationMockDevice::new();
-    let _auth_id = register_mock_device_in_db(&harness, &user.id, &user.email, &device).await;
+    let _auth_id = register_mock_device_in_db(&harness, &user.id, &device).await;
     db::set_preconfigured_active(
         &harness.state.store,
         &org.id,
@@ -522,7 +758,7 @@ async fn test_posture_denied_grant_records_login_failed_not_success() {
     .await
     .expect("Failed to activate OsRecency");
     let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
-    let (challenge, state) = get_challenge(&harness).await;
+    let (challenge, state) = get_challenge(&harness, &client, &pkcs8).await;
 
     // Windows 23H2 fails the os_recency floor (build < 26100).
     let posture_json = serde_json::json!([{
@@ -546,7 +782,7 @@ async fn test_posture_denied_grant_records_login_failed_not_success() {
     .await;
     assert_eq!(status, 400, "grant must be denied: {json}");
 
-    // The audit write is spawned; poll briefly for it to land.
+    // The audit write is awaited before the grant responds.
     let query = |kind: &'static str| {
         let audit = harness.state.audit.clone();
         let user_id = user.id.clone();
@@ -561,14 +797,7 @@ async fn test_posture_denied_grant_records_login_failed_not_success() {
                 .expect("query audit events")
         }
     };
-    let mut failed_rows = Vec::new();
-    for _ in 0..40 {
-        failed_rows = query("login_failed").await;
-        if !failed_rows.is_empty() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
+    let failed_rows = query("login_failed").await;
     assert_eq!(
         failed_rows.len(),
         1,
@@ -586,25 +815,22 @@ async fn test_posture_denied_grant_records_login_failed_not_success() {
     );
 }
 
-/// it should be visible immediately, but we poll briefly for safety.
-async fn poll_policy_denied_audit(harness: &TestHarness, user_id: &str) -> db::AuditEvent {
-    for _ in 0..40 {
-        let rows = harness
-            .state
-            .audit
-            .query_events(&db::AuditEventFilter {
-                event_types: Some(vec!["policy_denied".to_string()]),
-                user_id: Some(user_id.to_string()),
-                ..Default::default()
-            })
-            .await
-            .expect("query audit events");
-        if !rows.is_empty() {
-            return rows.into_iter().next().unwrap();
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-    panic!("no policy_denied audit event found for user {user_id}");
+/// Fetch the `policy_denied` audit event for the user; the write is
+/// awaited by the policy gate, so it is visible immediately.
+async fn policy_denied_audit(harness: &TestHarness, user_id: &str) -> db::AuditEvent {
+    let rows = harness
+        .state
+        .audit
+        .query_events(&db::AuditEventFilter {
+            event_types: Some(vec!["policy_denied".to_string()]),
+            user_id: Some(user_id.to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("query audit events");
+    rows.into_iter()
+        .next()
+        .unwrap_or_else(|| panic!("no policy_denied audit event found for user {user_id}"))
 }
 
 /// A custom posture policy deny through the full HTTP router must record the
@@ -624,7 +850,7 @@ async fn custom_policy_denial_records_name_in_audit_and_error() {
         .expect("Failed to create user");
 
     let device = IntegrationMockDevice::new();
-    register_mock_device_in_db(&harness, &user.id, &user.email, &device).await;
+    register_mock_device_in_db(&harness, &user.id, &device).await;
 
     // Create and activate a custom posture policy with a distinctive name.
     let policy = db::create_custom_policy(
@@ -655,7 +881,7 @@ async fn custom_policy_denial_records_name_in_audit_and_error() {
     .expect("Failed to activate custom policy");
 
     let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
-    let (challenge, state) = get_challenge(&harness).await;
+    let (challenge, state) = get_challenge(&harness, &client, &pkcs8).await;
 
     // Posture without disk encryption → denied by the custom policy.
     let posture_json = serde_json::json!([{
@@ -689,7 +915,7 @@ async fn custom_policy_denial_records_name_in_audit_and_error() {
     );
 
     // Step 4: Verify the audit record carries the actual policy name.
-    let audit_row = poll_policy_denied_audit(&harness, &user.id).await;
+    let audit_row = policy_denied_audit(&harness, &user.id).await;
     let audit_data: serde_json::Value =
         serde_json::from_str(&audit_row.data).expect("audit data is valid JSON");
     assert_eq!(
@@ -713,7 +939,7 @@ async fn custom_policy_denial_records_name_in_audit_and_error() {
     );
 
     // Step 6: Verify Prometheus metrics used the generic "custom" label.
-    let handle = vouch_server::infra::metrics::install_recorder().expect("prometheus recorder");
+    let handle = metrics::install_recorder().expect("prometheus recorder");
     let metrics_text = handle.render();
     assert!(
         metrics_text.contains("vouch_policy_decisions_total"),
@@ -741,7 +967,7 @@ async fn preconfigured_policy_denial_records_slug_in_audit_and_metrics() {
         .expect("Failed to create user");
 
     let device = IntegrationMockDevice::new();
-    register_mock_device_in_db(&harness, &user.id, &user.email, &device).await;
+    register_mock_device_in_db(&harness, &user.id, &device).await;
 
     db::set_preconfigured_active(
         &harness.state.store,
@@ -752,7 +978,7 @@ async fn preconfigured_policy_denial_records_slug_in_audit_and_metrics() {
     .expect("Failed to activate disk_encryption");
 
     let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
-    let (challenge, state) = get_challenge(&harness).await;
+    let (challenge, state) = get_challenge(&harness, &client, &pkcs8).await;
 
     // Posture without disk encryption → denied by the preconfigured policy.
     let posture_json = serde_json::json!([{
@@ -782,7 +1008,7 @@ async fn preconfigured_policy_denial_records_slug_in_audit_and_metrics() {
     );
 
     // Verify the audit record carries the slug.
-    let audit_row = poll_policy_denied_audit(&harness, &user.id).await;
+    let audit_row = policy_denied_audit(&harness, &user.id).await;
     let audit_data: serde_json::Value =
         serde_json::from_str(&audit_row.data).expect("audit data is valid JSON");
     assert_eq!(
@@ -793,7 +1019,7 @@ async fn preconfigured_policy_denial_records_slug_in_audit_and_metrics() {
     );
 
     // Verify metrics use the slug too.
-    let handle = vouch_server::infra::metrics::install_recorder().expect("prometheus recorder");
+    let handle = metrics::install_recorder().expect("prometheus recorder");
     let metrics_text = handle.render();
     assert!(
         metrics_text.contains(r#"outcome="deny""#)

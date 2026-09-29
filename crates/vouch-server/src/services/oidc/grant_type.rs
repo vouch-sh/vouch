@@ -62,8 +62,8 @@ impl OAuthGrantType {
     #[must_use]
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
-            Self::AuthorizationCode => "authorization_code",
-            Self::ClientCredentials => "client_credentials",
+            Self::AuthorizationCode => protocol::GRANT_TYPE_AUTHORIZATION_CODE,
+            Self::ClientCredentials => protocol::GRANT_TYPE_CLIENT_CREDENTIALS,
             Self::DeviceCode => protocol::GRANT_TYPE_DEVICE_CODE,
             Self::TokenExchange => protocol::GRANT_TYPE_TOKEN_EXCHANGE,
             Self::Fido2Assertion => protocol::GRANT_TYPE_FIDO2_ASSERTION,

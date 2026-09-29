@@ -2,6 +2,7 @@
 #![expect(
     clippy::indexing_slicing,
     clippy::unwrap_used,
+    clippy::expect_used,
     reason = "test code: panic on assertion failure is acceptable"
 )]
 
@@ -65,7 +66,23 @@ fn make_registration_auth_data(
     credential_id: &[u8],
     cose_key: &[u8],
 ) -> Vec<u8> {
-    let mut auth_data = make_auth_data(rp_id, 0x45, 0); // UP + UV + AT
+    make_registration_auth_data_with_counter(rp_id, aaguid, credential_id, cose_key, 0)
+}
+
+/// Same as [`make_registration_auth_data`] but with an explicit
+/// registration `signCount` (WebAuthn L2 §6.1 authData layout:
+/// `rpIdHash(32) + flags(1) + signCount(4) + attestedCredentialData`). Used
+/// to drive registration flows through fixtures that report a non-zero
+/// `signCount` at makeCredential — the global-counter authenticator
+/// class (§6.3.2 step 10 first branch).
+fn make_registration_auth_data_with_counter(
+    rp_id: &str,
+    aaguid: [u8; 16],
+    credential_id: &[u8],
+    cose_key: &[u8],
+    counter: u32,
+) -> Vec<u8> {
+    let mut auth_data = make_auth_data(rp_id, 0x45, counter); // UP + UV + AT
     auth_data.extend_from_slice(&aaguid);
     let cred_id_len = u16::try_from(credential_id.len()).unwrap();
     auth_data.extend_from_slice(&cred_id_len.to_be_bytes());
@@ -635,6 +652,40 @@ fn test_counter_decrease_rejected() {
         &verifier,
     );
     assert!(matches!(result, Err(VerifyError::CounterNotIncreasing)));
+}
+
+// WebAuthn L2 §7.2 orders signature verification (step 20) before the
+// signCount check (step 21). A counter regression reported before the
+// signature verified would be unsigned bytes, so an assertion with both a
+// bad signature and a low counter must fail as a signature failure.
+#[test]
+fn test_bad_signature_with_low_counter_fails_as_signature_invalid() {
+    let verifier = TestCoseVerifier::always_fail();
+    let rp_id = "example.com";
+    let auth_data = make_auth_data(rp_id, 0x05, 3); // counter = 3
+    let client_data =
+        make_client_data_json("webauthn.get", "test-challenge", "https://example.com");
+    let cose_key = make_eddsa_cose_key(&[0u8; 32]);
+
+    let result = verify_assertion_with_verifier(
+        &AssertionParams {
+            authenticator_data: &auth_data,
+            client_data_json: &client_data,
+            signature: &[0u8; 64],
+            public_key_cose: &cose_key,
+            expected_rp_id: rp_id,
+            expected_challenge: "test-challenge",
+            expected_origin: "https://example.com",
+            stored_counter: 5, // would be a regression if the signature held
+            require_user_verification: false,
+            origin_policy: OriginPolicy::AllowLoopbackVariations,
+        },
+        &verifier,
+    );
+    assert!(
+        matches!(result, Err(VerifyError::SignatureInvalid)),
+        "the signature is checked before the counter: {result:?}"
+    );
 }
 
 // WebAuthn L2 §6.1.1: an authenticator that implements no counter reports zero throughout.
@@ -1330,6 +1381,340 @@ fn test_registration_localhost_origin_relaxation_rejected_when_disabled() {
 }
 
 // =========================================================================
+// Registration signature counter — extract_sign_count and end-to-end
+// clone-detection coverage (WebAuthn L2 §7.1 step 23)
+// =========================================================================
+//
+// §7.1 step 23: "Associate the credentialId with a new stored signature
+// counter value initialized to the value of `authData.signCount`."
+// `extract_sign_count` is the helper `handlers/enroll.rs` uses to recover
+// that value from the same CBOR attestation object
+// `finish_passkey_registration` already verified (the `webauthn-rs` 0.5.5
+// `Passkey` API hides the registration counter behind a `pub(crate)`
+// field). The CLI path (`handlers/keys.rs`) reads it directly off
+// `RegistrationVerificationResult::counter`; the two paths share
+// `extract_counter_from_auth_data`, so they agree by construction — the
+// parity test below pins that contract.
+
+// §6.3.2 step 10 first branch: a global-counter authenticator with prior
+// use reports a non-zero signCount at makeCredential.
+#[test]
+fn test_extract_sign_count_returns_nonzero_counter_from_attestation_object() {
+    let rp_id = "example.com";
+    let cose_key = make_eddsa_cose_key(&[0u8; 32]);
+    let auth_data =
+        make_registration_auth_data_with_counter(rp_id, [1; 16], b"cred-id", &cose_key, 42);
+    let attestation = make_attestation_object_none(&auth_data);
+
+    let counter = extract_sign_count(&attestation).expect("extract_sign_count should succeed");
+    assert_eq!(counter, 42);
+}
+
+// §6.3.2 step 10 third branch: a counter-less authenticator reports
+// signCount = 0 at make; the spec-correct stored value for that class is 0.
+#[test]
+fn test_extract_sign_count_returns_zero_for_counter_less_authenticator() {
+    let rp_id = "example.com";
+    let cose_key = make_eddsa_cose_key(&[0u8; 32]);
+    let auth_data = make_registration_auth_data(rp_id, [1; 16], b"cred-id", &cose_key);
+    let attestation = make_attestation_object_none(&auth_data);
+
+    let counter = extract_sign_count(&attestation).expect("extract_sign_count should succeed");
+    assert_eq!(counter, 0);
+}
+
+// §6.1 authData is at least 37 bytes (rpIdHash(32) + flags(1) + signCount(4))
+// before any attested credential data. A short authData has no signCount.
+#[test]
+fn test_extract_sign_count_rejects_short_authdata() {
+    let mut buf = Vec::new();
+    let value = ciborium::Value::Map(vec![(
+        ciborium::Value::Text("authData".to_string()),
+        ciborium::Value::Bytes(vec![0u8; 36]), // 1 byte short of 37
+    )]);
+    ciborium::into_writer(&value, &mut buf).unwrap();
+    let err = extract_sign_count(&buf).unwrap_err();
+    assert!(
+        matches!(err, VerifyError::InvalidAuthDataLength),
+        "got {err:?}"
+    );
+}
+
+// The attestation object CBOR top-level must be a map. A bare integer /
+// array / text is not a conforming attestation object.
+#[test]
+fn test_extract_sign_count_rejects_non_map_cbor() {
+    let mut buf = Vec::new();
+    ciborium::into_writer(&ciborium::Value::Integer(42.into()), &mut buf).unwrap();
+    let err = extract_sign_count(&buf).unwrap_err();
+    assert!(
+        matches!(err, VerifyError::InvalidClientData(_)),
+        "got {err:?}"
+    );
+}
+
+// A map missing the `authData` byte-string field is not a conforming
+// attestation object.
+#[test]
+fn test_extract_sign_count_rejects_missing_authdata_key() {
+    let mut buf = Vec::new();
+    let value = ciborium::Value::Map(vec![
+        (
+            ciborium::Value::Text("fmt".to_string()),
+            ciborium::Value::Text("none".to_string()),
+        ),
+        (
+            ciborium::Value::Text("attStmt".to_string()),
+            ciborium::Value::Map(vec![]),
+        ),
+    ]);
+    ciborium::into_writer(&value, &mut buf).unwrap();
+    let err = extract_sign_count(&buf).unwrap_err();
+    assert!(
+        matches!(err, VerifyError::InvalidClientData(_)),
+        "got {err:?}"
+    );
+}
+
+// A non-byte-string `authData` value is rejected (the CDDL types every
+// authData as `bytes`); mirrors the strict path `verify_registration` takes.
+#[test]
+fn test_extract_sign_count_rejects_non_bytes_authdata_value() {
+    let mut buf = Vec::new();
+    let value = ciborium::Value::Map(vec![(
+        ciborium::Value::Text("authData".to_string()),
+        ciborium::Value::Integer(0.into()),
+    )]);
+    ciborium::into_writer(&value, &mut buf).unwrap();
+    let err = extract_sign_count(&buf).unwrap_err();
+    assert!(
+        matches!(err, VerifyError::InvalidClientData(_)),
+        "got {err:?}"
+    );
+}
+
+// `verify_registration_with_verifier` surfaces the verified authData.signCount
+// on `RegistrationVerificationResult::counter`, so the CLI registration path
+// (`handlers/keys.rs`) can thread the value directly to `create_authenticator`
+// without re-parsing.
+#[test]
+fn test_verify_registration_returns_nonzero_counter_from_authdata() {
+    let rp_id = "example.com";
+    let challenge = "challenge-bytes";
+    let origin = "https://example.com";
+    let cose_key = make_eddsa_cose_key(&[0u8; 32]);
+    let auth_data =
+        make_registration_auth_data_with_counter(rp_id, [1; 16], b"cred-id", &cose_key, 5);
+    let attestation = make_attestation_object_none(&auth_data);
+    let client_data = make_client_data_json("webauthn.create", challenge, origin);
+
+    let result = verify_registration_with_verifier(
+        &RegistrationParams {
+            attestation_object: &attestation,
+            client_data_json: &client_data,
+            expected_rp_id: rp_id,
+            expected_challenge: challenge,
+            expected_origin: origin,
+            require_user_verification: true,
+            origin_policy: OriginPolicy::AllowLoopbackVariations,
+        },
+        &TestCoseVerifier::always_succeed(),
+    )
+    .expect("verify_registration should succeed");
+
+    assert_eq!(
+        result.counter, 5,
+        "verify_registration must surface the authData.signCount on the result"
+    );
+}
+
+// Parity between `extract_sign_count` and `verify_registration_with_verifier`
+// is the contract `handlers/enroll.rs` relies on when it re-parses authData
+// (its `Passkey` has no public counter accessor) instead of reading
+// `RegistrationVerificationResult::counter`. Both paths share
+// `extract_counter_from_auth_data`, so they must agree on the same bytes.
+#[test]
+fn test_extract_sign_count_agrees_with_verify_registration() {
+    let rp_id = "example.com";
+    let challenge = "challenge-bytes";
+    let origin = "https://example.com";
+    let cose_key = make_eddsa_cose_key(&[0u8; 32]);
+    for sign_count in [0_u32, 1, 7, 42, 1_000, u32::MAX] {
+        let auth_data = make_registration_auth_data_with_counter(
+            rp_id, [1; 16], b"cred-id", &cose_key, sign_count,
+        );
+        let attestation = make_attestation_object_none(&auth_data);
+        let client_data = make_client_data_json("webauthn.create", challenge, origin);
+
+        let verified = verify_registration_with_verifier(
+            &RegistrationParams {
+                attestation_object: &attestation,
+                client_data_json: &client_data,
+                expected_rp_id: rp_id,
+                expected_challenge: challenge,
+                expected_origin: origin,
+                require_user_verification: true,
+                origin_policy: OriginPolicy::AllowLoopbackVariations,
+            },
+            &TestCoseVerifier::always_succeed(),
+        )
+        .expect("verify_registration should succeed");
+
+        let extracted = extract_sign_count(&attestation).expect("extract_sign_count");
+        assert_eq!(verified.counter, extracted, "verifier and helper disagree");
+        assert_eq!(
+            verified.counter, sign_count,
+            "verifier returned wrong counter"
+        );
+    }
+}
+
+// End-to-end clone-detection coverage for the §7.1 step 23 fix. A
+// global-counter authenticator registers with signCount = N (N > 0). The
+// handler threads `verified.counter` → `create_authenticator`, and the
+// stored counter becomes `N`. The first assertion's clone-detection guard
+// (`stored_counter != 0 && counter <= stored_counter`) then runs against
+// the spec-correct baseline:
+//   * a clone's first assertion at counter M ≤ N is rejected with
+//     `CounterNotIncreasing` — the early detection tripwire the bug
+//     suppresses by writing `0` (the bug's behavior is asserted in the
+//     `buggy_stored_counter` block to document the regression the fix
+//     closes);
+//   * the legitimate user's first assertion at counter N+1 is accepted
+//     and the stored counter advances.
+//
+// The DB hop is exercised separately by
+// `db::tests::authenticators::test_create_authenticator_persists_nonzero_registration_counter`;
+// here the stored counter is fed directly from the verifier's result to
+// mirror the value the handler would persist.
+#[test]
+fn test_first_assertion_clone_detection_uses_registration_counter() {
+    let rp_id = "example.com";
+    let challenge = "challenge-bytes";
+    let origin = "https://example.com";
+    let cose_key = make_eddsa_cose_key(&[0u8; 32]);
+
+    // Registration: global-counter authenticator with prior use reports
+    // signCount = 5 at makeCredential (§6.3.2 step 10 first branch).
+    let registration_sign_count: u32 = 5;
+    let reg_auth_data = make_registration_auth_data_with_counter(
+        rp_id,
+        [1; 16],
+        b"cred-id",
+        &cose_key,
+        registration_sign_count,
+    );
+    let reg_attestation = make_attestation_object_none(&reg_auth_data);
+    let reg_client_data = make_client_data_json("webauthn.create", challenge, origin);
+
+    let verified = verify_registration_with_verifier(
+        &RegistrationParams {
+            attestation_object: &reg_attestation,
+            client_data_json: &reg_client_data,
+            expected_rp_id: rp_id,
+            expected_challenge: challenge,
+            expected_origin: origin,
+            require_user_verification: true,
+            origin_policy: OriginPolicy::AllowLoopbackVariations,
+        },
+        &TestCoseVerifier::always_succeed(),
+    )
+    .expect("verify_registration should succeed");
+    assert_eq!(verified.counter, registration_sign_count);
+
+    // Mirror the value `handlers/keys.rs` would persist via
+    // `create_authenticator` (and that `fido2_grant.rs`/`browser_login.rs`
+    // would later read back as the assertion's `stored_counter`).
+    let stored_counter = verified.counter;
+
+    // First assertion from a clone whose counter starts at M ≤ N (the
+    // clone has performed fewer operations than the original had at the
+    // moment of registration).
+    let clone_counter: u32 = 3;
+    let clone_auth_data = make_auth_data(rp_id, 0x05, clone_counter);
+    let clone_client_data = make_client_data_json("webauthn.get", challenge, origin);
+
+    let clone_result = verify_assertion_with_verifier(
+        &AssertionParams {
+            authenticator_data: &clone_auth_data,
+            client_data_json: &clone_client_data,
+            signature: &[0u8; 64],
+            public_key_cose: &cose_key,
+            expected_rp_id: rp_id,
+            expected_challenge: challenge,
+            expected_origin: origin,
+            stored_counter,
+            require_user_verification: false,
+            origin_policy: OriginPolicy::AllowLoopbackVariations,
+        },
+        &TestCoseVerifier::always_succeed(),
+    );
+    assert!(
+        matches!(clone_result, Err(VerifyError::CounterNotIncreasing)),
+        "the first assertion with clone_counter ({clone_counter}) <= stored \
+         ({stored_counter}) must be rejected as a possible clone — got \
+         {clone_result:?}"
+    );
+
+    // The bug: under a hardcoded-`0` stored counter, the guard short-circuits
+    // on `stored_counter == 0` and the same first-assertion clone is
+    // accepted — the regression this fix closes. Pinned here so a future
+    // edit that re-introduces the `0` initialization must update this
+    // block to keep the test green, surfacing the regression review.
+    let buggy_stored_counter: u32 = 0;
+    let buggy_result = verify_assertion_with_verifier(
+        &AssertionParams {
+            authenticator_data: &clone_auth_data,
+            client_data_json: &clone_client_data,
+            signature: &[0u8; 64],
+            public_key_cose: &cose_key,
+            expected_rp_id: rp_id,
+            expected_challenge: challenge,
+            expected_origin: origin,
+            stored_counter: buggy_stored_counter,
+            require_user_verification: false,
+            origin_policy: OriginPolicy::AllowLoopbackVariations,
+        },
+        &TestCoseVerifier::always_succeed(),
+    );
+    assert!(
+        buggy_result.is_ok(),
+        "under the bug (stored = 0), the first assertion must be accepted \
+         because the guard short-circuits on stored_counter == 0; got \
+         {buggy_result:?}"
+    );
+
+    // The legitimate user's first assertion at counter = N+1 (strictly
+    // greater than stored) is accepted, and the assertion result carries
+    // the new counter that the handler persists via
+    // `update_authenticator_counter`.
+    let legit_counter: u32 = 6;
+    let legit_auth_data = make_auth_data(rp_id, 0x05, legit_counter);
+    let legit_client_data = make_client_data_json("webauthn.get", challenge, origin);
+
+    let legit_result = verify_assertion_with_verifier(
+        &AssertionParams {
+            authenticator_data: &legit_auth_data,
+            client_data_json: &legit_client_data,
+            signature: &[0u8; 64],
+            public_key_cose: &cose_key,
+            expected_rp_id: rp_id,
+            expected_challenge: challenge,
+            expected_origin: origin,
+            stored_counter,
+            require_user_verification: false,
+            origin_policy: OriginPolicy::AllowLoopbackVariations,
+        },
+        &TestCoseVerifier::always_succeed(),
+    )
+    .expect("the legitimate first assertion must be accepted");
+    assert_eq!(
+        legit_result.counter, legit_counter,
+        "the assertion result carries the new counter the handler will persist"
+    );
+}
+
+// =========================================================================
 // ES256 signature encoding (WebAuthn Level 2 Section 6.5.5)
 // =========================================================================
 
@@ -1698,4 +2083,943 @@ fn test_attestation_format_identifiers_match_case_sensitively() {
         verify_self_attestation("Packed", Some(-7)).is_ok(),
         "a case variant must not be treated as the packed format"
     );
+}
+
+/// The §8.2 CDDL types every x5c element as `bytes`
+/// (`x5c: [ attestnCert: bytes, * (caCert: bytes) ]`), and step 1 of the
+/// verification procedure requires "that attStmt is valid CBOR conforming to
+/// the syntax defined above". A packed x5c carrying a non-byte-string element
+/// is malformed and must be rejected, not repaired by dropping the element —
+/// webauthn-rs rejects the same input on the browser path.
+#[test]
+fn test_packed_rejects_x5c_with_non_byte_string_element() {
+    // The genuine fixture, with junk appended to its otherwise-valid chain.
+    let raw = real_packed_attestation();
+    let mut value: ciborium::Value =
+        ciborium::from_reader(raw.as_slice()).expect("fixture is CBOR");
+    if let ciborium::Value::Map(ref mut entries) = value {
+        for (k, v) in entries.iter_mut() {
+            if k.as_text() == Some("attStmt")
+                && let ciborium::Value::Map(ref mut stmt) = *v
+            {
+                for (sk, sv) in stmt.iter_mut() {
+                    if sk.as_text() == Some("x5c")
+                        && let ciborium::Value::Array(ref mut arr) = *sv
+                    {
+                        arr.push(ciborium::Value::Text("junk".to_string()));
+                    }
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    ciborium::into_writer(&value, &mut out).expect("CBOR serialization");
+
+    let err = verify_registration_with_verifier(
+        &RegistrationParams {
+            attestation_object: &out,
+            client_data_json: &fixture_client_data(),
+            expected_rp_id: "localhost",
+            expected_challenge: "test-challenge",
+            expected_origin: "http://localhost",
+            require_user_verification: true,
+            origin_policy: OriginPolicy::AllowLoopbackVariations,
+        },
+        &RealCoseVerifier::new(),
+    )
+    .expect_err("a packed x5c with a non-byte-string element must be rejected");
+    assert!(
+        matches!(err, VerifyError::AttestationChainInvalid(ref m) if m.contains("non-byte-string")),
+        "expected a non-byte-string extraction error, got {err:?}"
+    );
+}
+
+/// §8.2 step 3 keys self attestation to absence: "If x5c is not present, self
+/// attestation is in use." An x5c that is present but empty is neither a
+/// conforming chain nor absence, so it is rejected as malformed rather than
+/// silently downgraded to the self-attestation path.
+#[test]
+fn test_packed_rejects_empty_x5c_array() {
+    let rp_id = "example.com";
+    let challenge = "test-challenge";
+    let origin = "https://example.com";
+    let cose_key = make_eddsa_cose_key(&[0u8; 32]);
+    let auth_data = make_registration_auth_data(rp_id, [1; 16], b"cred-id", &cose_key);
+    let mut att_stmt = self_att_stmt(Some(-8));
+    att_stmt.push((
+        ciborium::Value::Text("x5c".to_string()),
+        ciborium::Value::Array(vec![]),
+    ));
+    let attestation = make_attestation_object("packed", att_stmt, &auth_data);
+    let client_data = make_client_data_json("webauthn.create", challenge, origin);
+
+    let err = verify_registration_with_verifier(
+        &RegistrationParams {
+            attestation_object: &attestation,
+            client_data_json: &client_data,
+            expected_rp_id: rp_id,
+            expected_challenge: challenge,
+            expected_origin: origin,
+            require_user_verification: true,
+            origin_policy: OriginPolicy::AllowLoopbackVariations,
+        },
+        &TestCoseVerifier::always_succeed(),
+    )
+    .expect_err("a present-but-empty x5c must not fall back to self attestation");
+    assert!(
+        matches!(err, VerifyError::AttestationChainInvalid(ref m) if m.contains("empty")),
+        "expected an empty-x5c extraction error, got {err:?}"
+    );
+}
+
+// =========================================================================
+// Unverified attestation formats do not convey an AAGUID
+// =========================================================================
+
+/// Run registration over an attestation of `fmt` whose authData carries
+/// `aaguid`, and return the AAGUID the verifier reports.
+fn aaguid_reported_for(fmt: &str, aaguid: [u8; 16]) -> Option<String> {
+    let rp_id = "example.com";
+    let challenge = "test-challenge";
+    let origin = "https://example.com";
+    let cose_key = make_eddsa_cose_key(&[0u8; 32]);
+    let auth_data = make_registration_auth_data(rp_id, aaguid, b"cred-id", &cose_key);
+    let attestation = make_attestation_object(fmt, self_att_stmt(Some(-8)), &auth_data);
+    let client_data = make_client_data_json("webauthn.create", challenge, origin);
+
+    verify_registration_with_verifier(
+        &RegistrationParams {
+            attestation_object: &attestation,
+            client_data_json: &client_data,
+            expected_rp_id: rp_id,
+            expected_challenge: challenge,
+            expected_origin: origin,
+            require_user_verification: true,
+            origin_policy: OriginPolicy::AllowLoopbackVariations,
+        },
+        &TestCoseVerifier::always_succeed(),
+    )
+    .unwrap()
+    .aaguid
+}
+
+/// Formats without a verification procedure here (the `other` arm) discard the
+/// authData AAGUID, so it cannot be reported as the authenticator's identity.
+/// `fido-u2f` no longer reaches this arm — it has its own verifying arm now
+/// (see the fido-u2f tests below) — so a platform format (`tpm`) stands in
+/// here for any format the `other` arm still accepts. The registration
+/// chokepoint rejects these formats afterwards; this is the defense-in-depth
+/// AAGUID suppression the `other` arm provides.
+#[test]
+fn test_unverified_format_does_not_convey_an_aaguid() {
+    let forged = [
+        0x28, 0x96, 0x9c, 0x24, 0x04, 0x87, 0x4a, 0x46, 0xbe, 0x39, 0x37, 0xbc, 0x63, 0x37, 0xa2,
+        0x4f,
+    ];
+    assert_eq!(
+        aaguid_reported_for("tpm", forged),
+        None,
+        "an AAGUID from an attestation format with no verification procedure must be discarded"
+    );
+}
+
+/// The packed path still reports its AAGUID: §8.2 step 3 verifies the
+/// self-attestation signature, so the value is at least bound to the
+/// credential key. Guards against the suppression above being applied too
+/// broadly.
+#[test]
+fn test_packed_still_conveys_its_aaguid() {
+    assert_eq!(
+        aaguid_reported_for("packed", [1; 16]),
+        Some("01010101-0101-0101-0101-010101010101".to_string())
+    );
+}
+
+// =========================================================================
+// WebAuthn L2 §8.3 — fido-u2f attestation statement format
+//
+// The `other` arm used to admit `fido-u2f` without ever reading `attStmt.sig`,
+// so a captured chain (whose x5c validates against a pinned Yubico root)
+// could be replayed under `fmt = "fido-u2f"` with any credential public key
+// and a non-verifying signature. The chokepoint then stamped the certificate's
+// AAGUID onto the authenticator row — re-opening the issue #1111 AAGUID
+// forgery against the `fido-u2f` format (the browser path was safe: webauthn-rs
+// verifies this signature). The arm now verifies `attStmt.sig` over
+// `0x00 || rpIdHash || clientDataHash || credentialId || publicKeyU2F` with the
+// leaf cert's public key, mirroring `verify_fidou2f_attestation`.
+// =========================================================================
+
+/// AAGUID of the YubiKey 5C Nano FIPS (Enterprise) the fixture was captured
+/// from — the value a forged registration would stamp onto the authenticator
+/// row.
+const FIPS_FIXTURE_AAGUID: [u8; 16] = [
+    0x28, 0x96, 0x9c, 0x24, 0x04, 0x87, 0x4a, 0x46, 0xbe, 0x39, 0x37, 0xbc, 0x63, 0x37, 0xa2, 0x4f,
+];
+
+/// The genuine captured `packed` fixture, whose x5c chain validates against a
+/// pinned Yubico root and whose leaf carries the FIPS AAGUID. See
+/// `crypto/attestation_chain/fixtures/README.md`. Synthetic certificates cannot
+/// chain to `PINNED_ROOTS`, so this is the only input that exercises the arm
+/// against a chain the chokepoint would accept.
+fn real_packed_attestation() -> Vec<u8> {
+    use base64::Engine as _;
+    let b64 = include_str!(
+        "../attestation_chain/fixtures/yubikey-5c-nano-fips-enterprise.attestation.b64"
+    );
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(b64.trim())
+        .expect("fixture is valid base64url")
+}
+
+/// Pull the fixture's `authData` and `x5c` leaf certificate out as borrowed
+/// views, for re-encoding under a different `fmt`.
+fn fixture_auth_data_and_x5c() -> (Vec<u8>, Vec<u8>) {
+    let raw = real_packed_attestation();
+    let value: ciborium::Value = ciborium::from_reader(raw.as_slice()).expect("fixture is CBOR");
+    let map = value.as_map().expect("attestation object is a CBOR map");
+    let auth_data = map
+        .iter()
+        .find(|(k, _)| k.as_text() == Some("authData"))
+        .and_then(|(_, v)| v.as_bytes())
+        .expect("fixture has authData")
+        .to_vec();
+    let x5c = map
+        .iter()
+        .find(|(k, _)| k.as_text() == Some("attStmt"))
+        .and_then(|(_, v)| v.as_map())
+        .expect("fixture has attStmt")
+        .iter()
+        .find(|(k, _)| k.as_text() == Some("x5c"))
+        .and_then(|(_, v)| v.as_array())
+        .expect("fixture has x5c")
+        .first()
+        .and_then(|c| c.as_bytes())
+        .expect("fixture x5c[0] is a byte string")
+        .to_vec();
+    (auth_data, x5c)
+}
+
+/// Encode a `fmt = "fido-u2f"` attestation object that reuses the fixture's
+/// genuine `authData` and `x5c` leaf certificate, with `attStmt.sig` set to
+/// `sig`. The fixture's original `alg` member is dropped: fido-u2f carries
+/// only `x5c` and `sig` (WebAuthn L2 §8.3).
+fn fixture_rewrapped_as_fido_u2f(sig: Vec<u8>) -> Vec<u8> {
+    let (auth_data, x5c) = fixture_auth_data_and_x5c();
+    let att_stmt = ciborium::Value::Map(vec![
+        (
+            ciborium::Value::Text("x5c".to_string()),
+            ciborium::Value::Array(vec![ciborium::Value::Bytes(x5c)]),
+        ),
+        (
+            ciborium::Value::Text("sig".to_string()),
+            ciborium::Value::Bytes(sig),
+        ),
+    ]);
+    let value = ciborium::Value::Map(vec![
+        (
+            ciborium::Value::Text("fmt".to_string()),
+            ciborium::Value::Text("fido-u2f".to_string()),
+        ),
+        (ciborium::Value::Text("attStmt".to_string()), att_stmt),
+        (
+            ciborium::Value::Text("authData".to_string()),
+            ciborium::Value::Bytes(auth_data),
+        ),
+    ]);
+    let mut out = Vec::new();
+    ciborium::into_writer(&value, &mut out).expect("CBOR serialization");
+    out
+}
+
+/// The fixture's original `packed` attStmt signature (a real DER ECDSA sig,
+/// but over `authData || clientDataHash`, not the fido-u2f verification data).
+fn fixture_original_packed_sig() -> Vec<u8> {
+    let raw = real_packed_attestation();
+    let value: ciborium::Value = ciborium::from_reader(raw.as_slice()).expect("fixture is CBOR");
+    let map = value.as_map().expect("attestation object is a CBOR map");
+    map.iter()
+        .find(|(k, _)| k.as_text() == Some("attStmt"))
+        .and_then(|(_, v)| v.as_map())
+        .expect("fixture has attStmt")
+        .iter()
+        .find(|(k, _)| k.as_text() == Some("sig"))
+        .and_then(|(_, v)| v.as_bytes())
+        .expect("fixture attStmt has sig")
+        .to_vec()
+}
+
+/// Client-data JSON for the fixture, whose `rpIdHash` is SHA-256 of
+/// `localhost`. The challenge and origin are chosen to satisfy the verifier's
+/// client-data checks under loopback relaxation; the attestation signature is
+/// verified over `clientDataHash`, so the specific values do not have to match
+/// the original capture.
+fn fixture_client_data() -> Vec<u8> {
+    make_client_data_json("webauthn.create", "test-challenge", "http://localhost")
+}
+
+/// Verify a fido-u2f registration built from the fixture, with loopback origin
+/// relaxation and `rp_id = "localhost"` (the fixture's `rpIdHash`).
+fn verify_fixture_fido_u2f(
+    attestation: &[u8],
+) -> Result<RegistrationVerificationResult, VerifyError> {
+    verify_registration_with_verifier(
+        &RegistrationParams {
+            attestation_object: attestation,
+            client_data_json: &fixture_client_data(),
+            expected_rp_id: "localhost",
+            expected_challenge: "test-challenge",
+            expected_origin: "http://localhost",
+            require_user_verification: true,
+            origin_policy: OriginPolicy::AllowLoopbackVariations,
+        },
+        &RealCoseVerifier::new(),
+    )
+}
+
+/// WebAuthn L2 §8.3, verification procedure step 2: `attStmt.sig` must verify
+/// over `0x00 || rpIdHash || clientDataHash || credentialId || publicKeyU2F`
+/// using the leaf certificate's public key. A fido-u2f statement with bytes
+/// that are not a valid signature over that data must be rejected — the
+/// issue #1111 forgery against the `fido-u2f` format. The old `other` arm
+/// accepted this input; the verifying arm must not.
+#[test]
+fn test_fido_u2f_rejects_non_verifying_sig() {
+    let forged = fixture_rewrapped_as_fido_u2f(vec![0xDE, 0xAD, 0xBE, 0xEF]);
+    let err = verify_fixture_fido_u2f(&forged)
+        .expect_err("a non-verifying fido-u2f sig must be rejected");
+    assert!(
+        matches!(err, VerifyError::SignatureInvalid),
+        "expected SignatureInvalid, got {err:?}"
+    );
+}
+
+/// The fixture's real `packed` signature is a well-formed DER ECDSA sig, but
+/// it was computed over `authData || clientDataHash` (the packed verification
+/// data), not the fido-u2f verification data. It must still fail verification
+/// — proving the arm runs the fido-u2f signature check (under the old `other`
+/// arm, this input was accepted, signature unread).
+#[test]
+fn test_fido_u2f_rejects_packed_sig_replayed_over_fido_u2f_data() {
+    let forged = fixture_rewrapped_as_fido_u2f(fixture_original_packed_sig());
+    let err = verify_fixture_fido_u2f(&forged)
+        .expect_err("a packed sig replayed under fido-u2f must not verify over the U2F data");
+    assert!(
+        matches!(err, VerifyError::SignatureInvalid),
+        "expected SignatureInvalid, got {err:?}"
+    );
+}
+
+/// WebAuthn L2 §8.3 requires `attStmt` to be present with `x5c` and `sig`.
+/// A fido-u2f statement with no `x5c` array is rejected before any signature
+/// work — it cannot bind the credential to a certificate at all.
+#[test]
+fn test_fido_u2f_rejects_missing_x5c() {
+    let (auth_data, _) = fixture_auth_data_and_x5c();
+    let att_stmt = ciborium::Value::Map(vec![(
+        ciborium::Value::Text("sig".to_string()),
+        ciborium::Value::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+    )]);
+    let value = ciborium::Value::Map(vec![
+        (
+            ciborium::Value::Text("fmt".to_string()),
+            ciborium::Value::Text("fido-u2f".to_string()),
+        ),
+        (ciborium::Value::Text("attStmt".to_string()), att_stmt),
+        (
+            ciborium::Value::Text("authData".to_string()),
+            ciborium::Value::Bytes(auth_data),
+        ),
+    ]);
+    let mut out = Vec::new();
+    ciborium::into_writer(&value, &mut out).expect("CBOR serialization");
+
+    let err = verify_fixture_fido_u2f(&out).expect_err("fido-u2f without x5c must be rejected");
+    assert!(
+        matches!(err, VerifyError::AttestationChainInvalid(ref m) if m.contains("x5c")),
+        "expected an x5c-related chain error, got {err:?}"
+    );
+}
+
+/// A fido-u2f statement with `x5c` but no `sig` cannot prove the credential
+/// is bound to the certificate and is rejected.
+#[test]
+fn test_fido_u2f_rejects_missing_sig() {
+    let (auth_data, x5c) = fixture_auth_data_and_x5c();
+    let att_stmt = ciborium::Value::Map(vec![(
+        ciborium::Value::Text("x5c".to_string()),
+        ciborium::Value::Array(vec![ciborium::Value::Bytes(x5c)]),
+    )]);
+    let value = ciborium::Value::Map(vec![
+        (
+            ciborium::Value::Text("fmt".to_string()),
+            ciborium::Value::Text("fido-u2f".to_string()),
+        ),
+        (ciborium::Value::Text("attStmt".to_string()), att_stmt),
+        (
+            ciborium::Value::Text("authData".to_string()),
+            ciborium::Value::Bytes(auth_data),
+        ),
+    ]);
+    let mut out = Vec::new();
+    ciborium::into_writer(&value, &mut out).expect("CBOR serialization");
+
+    let err = verify_fixture_fido_u2f(&out).expect_err("fido-u2f without sig must be rejected");
+    assert!(
+        matches!(err, VerifyError::InvalidClientData(ref m) if m.contains("sig")),
+        "expected a missing-sig error, got {err:?}"
+    );
+}
+
+/// WebAuthn L2 §8.3 step 2: "Check that x5c has exactly one element and let
+/// attCert be that element." A fido-u2f statement that carries a chain rather
+/// than the lone leaf certificate is not a conforming U2F statement and is
+/// rejected here, before the signature is inspected.
+#[test]
+fn test_fido_u2f_rejects_multi_element_x5c() {
+    let (auth_data, x5c) = fixture_auth_data_and_x5c();
+    let att_stmt = ciborium::Value::Map(vec![
+        (
+            ciborium::Value::Text("x5c".to_string()),
+            // Two copies of the leaf; not a conforming U2F statement.
+            ciborium::Value::Array(vec![
+                ciborium::Value::Bytes(x5c.clone()),
+                ciborium::Value::Bytes(x5c),
+            ]),
+        ),
+        (
+            ciborium::Value::Text("sig".to_string()),
+            ciborium::Value::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+        ),
+    ]);
+    let value = ciborium::Value::Map(vec![
+        (
+            ciborium::Value::Text("fmt".to_string()),
+            ciborium::Value::Text("fido-u2f".to_string()),
+        ),
+        (ciborium::Value::Text("attStmt".to_string()), att_stmt),
+        (
+            ciborium::Value::Text("authData".to_string()),
+            ciborium::Value::Bytes(auth_data),
+        ),
+    ]);
+    let mut out = Vec::new();
+    ciborium::into_writer(&value, &mut out).expect("CBOR serialization");
+
+    let err =
+        verify_fixture_fido_u2f(&out).expect_err("a multi-element fido-u2f x5c must be rejected");
+    assert!(
+        matches!(err, VerifyError::AttestationChainInvalid(ref m) if m.contains("exactly one")),
+        "expected an exactly-one-element error, got {err:?}"
+    );
+}
+
+/// The §8.3 CDDL types x5c as `[ attestnCert: bytes ]`, so every element must
+/// be a byte string. An `x5c` of `[leaf, "junk"]` must be rejected as
+/// malformed rather than filtered down to the lone leaf, which would let it
+/// satisfy step 2's exactly-one-element check on an array that actually
+/// carries two (issue #1167).
+#[test]
+fn test_fido_u2f_rejects_x5c_with_non_byte_string_element() {
+    let (auth_data, x5c) = fixture_auth_data_and_x5c();
+    let att_stmt = ciborium::Value::Map(vec![
+        (
+            ciborium::Value::Text("x5c".to_string()),
+            ciborium::Value::Array(vec![
+                ciborium::Value::Bytes(x5c),
+                ciborium::Value::Text("junk".to_string()),
+            ]),
+        ),
+        (
+            ciborium::Value::Text("sig".to_string()),
+            ciborium::Value::Bytes(fixture_original_packed_sig()),
+        ),
+    ]);
+    let value = ciborium::Value::Map(vec![
+        (
+            ciborium::Value::Text("fmt".to_string()),
+            ciborium::Value::Text("fido-u2f".to_string()),
+        ),
+        (ciborium::Value::Text("attStmt".to_string()), att_stmt),
+        (
+            ciborium::Value::Text("authData".to_string()),
+            ciborium::Value::Bytes(auth_data),
+        ),
+    ]);
+    let mut out = Vec::new();
+    ciborium::into_writer(&value, &mut out).expect("CBOR serialization");
+
+    let err = verify_fixture_fido_u2f(&out)
+        .expect_err("an x5c with a non-byte-string element must be rejected");
+    assert!(
+        matches!(err, VerifyError::AttestationChainInvalid(ref m) if m.contains("non-byte-string")),
+        "expected a non-byte-string extraction error, got {err:?}"
+    );
+}
+
+/// An `x5c` member that is not an array at all does not conform to the §8.3
+/// CDDL and is rejected as malformed, not treated as an absent chain.
+#[test]
+fn test_fido_u2f_rejects_non_array_x5c() {
+    let (auth_data, x5c) = fixture_auth_data_and_x5c();
+    let att_stmt = ciborium::Value::Map(vec![
+        (
+            ciborium::Value::Text("x5c".to_string()),
+            ciborium::Value::Bytes(x5c),
+        ),
+        (
+            ciborium::Value::Text("sig".to_string()),
+            ciborium::Value::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+        ),
+    ]);
+    let value = ciborium::Value::Map(vec![
+        (
+            ciborium::Value::Text("fmt".to_string()),
+            ciborium::Value::Text("fido-u2f".to_string()),
+        ),
+        (ciborium::Value::Text("attStmt".to_string()), att_stmt),
+        (
+            ciborium::Value::Text("authData".to_string()),
+            ciborium::Value::Bytes(auth_data),
+        ),
+    ]);
+    let mut out = Vec::new();
+    ciborium::into_writer(&value, &mut out).expect("CBOR serialization");
+
+    let err = verify_fixture_fido_u2f(&out).expect_err("a non-array x5c must be rejected");
+    assert!(
+        matches!(err, VerifyError::AttestationChainInvalid(ref m) if m.contains("not an array")),
+        "expected a not-an-array extraction error, got {err:?}"
+    );
+}
+
+/// A fido-u2f attestation object with no `attStmt` at all is rejected: the
+/// format has no "none" equivalent.
+#[test]
+fn test_fido_u2f_rejects_missing_att_stmt() {
+    let (auth_data, _) = fixture_auth_data_and_x5c();
+    let value = ciborium::Value::Map(vec![
+        (
+            ciborium::Value::Text("fmt".to_string()),
+            ciborium::Value::Text("fido-u2f".to_string()),
+        ),
+        (
+            ciborium::Value::Text("attStmt".to_string()),
+            ciborium::Value::Map(vec![]),
+        ),
+        (
+            ciborium::Value::Text("authData".to_string()),
+            ciborium::Value::Bytes(auth_data),
+        ),
+    ]);
+    let mut out = Vec::new();
+    ciborium::into_writer(&value, &mut out).expect("CBOR serialization");
+
+    let err =
+        verify_fixture_fido_u2f(&out).expect_err("fido-u2f with an empty attStmt must be rejected");
+    assert!(
+        matches!(err, VerifyError::AttestationChainInvalid(ref m) if m.contains("x5c")),
+        "expected an x5c-related error for an empty attStmt, got {err:?}"
+    );
+}
+
+/// `publicKeyU2F` is the credential public key in SEC1 uncompressed form, and
+/// U2F authenticators register EC2/P-256 keys exclusively. An EdDSA (OKP)
+/// credential key has no SEC1 uncompressed encoding and must be rejected
+/// rather than fed to the verifier.
+#[test]
+fn test_fido_u2f_rejects_non_ec2_credential_key() {
+    let rp_id = "localhost";
+    let cose_key = make_eddsa_cose_key(&[1u8; 32]); // OKP/Ed25519, not EC2
+    let auth_data = make_registration_auth_data(rp_id, FIPS_FIXTURE_AAGUID, b"cred-id", &cose_key);
+    let att_stmt = ciborium::Value::Map(vec![
+        (
+            ciborium::Value::Text("x5c".to_string()),
+            ciborium::Value::Array(vec![ciborium::Value::Bytes(fixture_auth_data_and_x5c().1)]),
+        ),
+        (
+            ciborium::Value::Text("sig".to_string()),
+            ciborium::Value::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+        ),
+    ]);
+    let value = ciborium::Value::Map(vec![
+        (
+            ciborium::Value::Text("fmt".to_string()),
+            ciborium::Value::Text("fido-u2f".to_string()),
+        ),
+        (ciborium::Value::Text("attStmt".to_string()), att_stmt),
+        (
+            ciborium::Value::Text("authData".to_string()),
+            ciborium::Value::Bytes(auth_data),
+        ),
+    ]);
+    let mut out = Vec::new();
+    ciborium::into_writer(&value, &mut out).expect("CBOR serialization");
+
+    let err = verify_fixture_fido_u2f(&out)
+        .expect_err("a non-EC2 credential key must not be accepted as a U2F publicKeyU2F");
+    assert!(
+        matches!(err, VerifyError::InvalidCoseKey(ref m) if m.contains("EC2")),
+        "expected an EC2 key-type error, got {err:?}"
+    );
+}
+
+/// An EC2 key on the wrong curve (P-384) is also not a U2F `publicKeyU2F` and
+/// must be rejected for the curve, not passed to a P-256 verifier.
+#[test]
+fn test_fido_u2f_rejects_non_p256_credential_key() {
+    let rp_id = "localhost";
+    // EC2 but crv = P-384 (2).
+    let cose_key = make_ec2_cose_key_with(-7, 2, &[1u8; 32], &[2u8; 32]);
+    let auth_data = make_registration_auth_data(rp_id, FIPS_FIXTURE_AAGUID, b"cred-id", &cose_key);
+    let att_stmt = ciborium::Value::Map(vec![
+        (
+            ciborium::Value::Text("x5c".to_string()),
+            ciborium::Value::Array(vec![ciborium::Value::Bytes(fixture_auth_data_and_x5c().1)]),
+        ),
+        (
+            ciborium::Value::Text("sig".to_string()),
+            ciborium::Value::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+        ),
+    ]);
+    let value = ciborium::Value::Map(vec![
+        (
+            ciborium::Value::Text("fmt".to_string()),
+            ciborium::Value::Text("fido-u2f".to_string()),
+        ),
+        (ciborium::Value::Text("attStmt".to_string()), att_stmt),
+        (
+            ciborium::Value::Text("authData".to_string()),
+            ciborium::Value::Bytes(auth_data),
+        ),
+    ]);
+    let mut out = Vec::new();
+    ciborium::into_writer(&value, &mut out).expect("CBOR serialization");
+
+    let err = verify_fixture_fido_u2f(&out)
+        .expect_err("a non-P-256 credential key must not be accepted as a U2F publicKeyU2F");
+    assert!(
+        matches!(err, VerifyError::InvalidCoseKey(ref m) if m.contains("P-256")),
+        "expected a P-256 curve error, got {err:?}"
+    );
+}
+
+/// `build_fido_u2f_verification_data` must produce exactly
+/// `0x00 || rpIdHash || clientDataHash || credentialId || publicKeyU2F` per
+/// WebAuthn L2 §8.3.
+#[test]
+fn test_build_fido_u2f_verification_data_layout() {
+    let rp_id_hash = [0x11u8; 32];
+    let client_data_hash = [0x22u8; 32];
+    let credential_id = [0x33u8; 4];
+    let public_key_u2f = [0x04u8; 65];
+
+    let data = build_fido_u2f_verification_data(
+        &rp_id_hash,
+        &client_data_hash,
+        &credential_id,
+        &public_key_u2f,
+    );
+
+    assert_eq!(data.len(), 1 + 32 + 32 + 4 + 65);
+    assert_eq!(data[0], 0x00);
+    assert_eq!(&data[1..33], &rp_id_hash);
+    assert_eq!(&data[33..65], &client_data_hash);
+    assert_eq!(&data[65..69], &credential_id);
+    assert_eq!(&data[69..134], &public_key_u2f);
+}
+
+/// `cose_key_to_sec1_uncompressed` converts an EC2/P-256 COSE key to the SEC1
+/// uncompressed point `0x04 || x || y` (65 bytes).
+#[test]
+fn test_cose_key_to_sec1_uncompressed_roundtrip() {
+    let (cose_key, _der, _raw) = es256_fixture(b"irrelevant - only the key is read");
+    // `es256_fixture` builds a P-256 key from a fixed seed; reuse its COSE key.
+    let point = cose_key_to_sec1_uncompressed(&cose_key).expect("EC2/P-256 key converts to SEC1");
+    assert_eq!(point.len(), 65);
+    assert_eq!(point[0], 0x04);
+}
+
+/// A non-EC2 COSE key (OKP/Ed25519) has no SEC1 uncompressed form for U2F and
+/// must be rejected.
+#[test]
+fn test_cose_key_to_sec1_rejects_okp() {
+    let cose_key = make_eddsa_cose_key(&[1u8; 32]);
+    let err = cose_key_to_sec1_uncompressed(&cose_key).expect_err("OKP is not EC2");
+    assert!(matches!(err, VerifyError::InvalidCoseKey(_)), "got {err:?}");
+}
+
+/// A fido-u2f registration that verifies end-to-end — a leaf certificate whose
+/// private key is held, signing the U2F verification data over an
+/// attacker-chosen credential key — must be accepted by the arm. The fixture's
+/// captured chain pins to a Yubico root whose private key is unavailable, so
+/// the positive path is exercised against a freshly generated self-signed EC
+/// P-256 certificate. The chain itself is not checked here (the chokepoint owns
+/// chain policy); only the signature that binds the credential to the
+/// certificate is.
+#[test]
+fn test_fido_u2f_accepts_valid_signature() {
+    use p256::ecdsa::{Signature, SigningKey, signature::Signer};
+
+    // The U2F signing key (the leaf attestation certificate's private key).
+    let u2f_signing_key = SigningKey::from_bytes(&[7u8; 32].into()).unwrap();
+    let point = u2f_signing_key.verifying_key().to_encoded_point(false);
+    let x = point.x().unwrap();
+    let y = point.y().unwrap();
+    let leaf_cert = build_ec_p256_cert(&u2f_signing_key);
+
+    // The credential key being registered (EC2/P-256, the only shape U2F uses).
+    let cose_key = make_es256_cose_key(x.as_slice(), y.as_slice());
+
+    let rp_id = "localhost";
+    let credential_id: Vec<u8> = (0..32u8).collect();
+    let auth_data = make_registration_auth_data(rp_id, [0u8; 16], &credential_id, &cose_key);
+
+    let rp_id_hash = digest::digest(&SHA256, rp_id.as_bytes());
+    let client_data =
+        make_client_data_json("webauthn.create", "test-challenge", "http://localhost");
+    let client_data_hash = digest::digest(&SHA256, &client_data);
+    let public_key_u2f = cose_key_to_sec1_uncompressed(&cose_key).unwrap();
+    let verification_data = build_fido_u2f_verification_data(
+        rp_id_hash.as_ref(),
+        client_data_hash.as_ref(),
+        &credential_id,
+        &public_key_u2f,
+    );
+    let sig: Signature = u2f_signing_key.sign(&verification_data);
+    let sig_der = sig.to_der();
+
+    let att_stmt = ciborium::Value::Map(vec![
+        (
+            ciborium::Value::Text("x5c".to_string()),
+            ciborium::Value::Array(vec![ciborium::Value::Bytes(leaf_cert)]),
+        ),
+        (
+            ciborium::Value::Text("sig".to_string()),
+            ciborium::Value::Bytes(sig_der.as_bytes().to_vec()),
+        ),
+    ]);
+    let value = ciborium::Value::Map(vec![
+        (
+            ciborium::Value::Text("fmt".to_string()),
+            ciborium::Value::Text("fido-u2f".to_string()),
+        ),
+        (ciborium::Value::Text("attStmt".to_string()), att_stmt),
+        (
+            ciborium::Value::Text("authData".to_string()),
+            ciborium::Value::Bytes(auth_data),
+        ),
+    ]);
+    let mut out = Vec::new();
+    ciborium::into_writer(&value, &mut out).expect("CBOR serialization");
+
+    let result = verify_registration_with_verifier(
+        &RegistrationParams {
+            attestation_object: &out,
+            client_data_json: &client_data,
+            expected_rp_id: rp_id,
+            expected_challenge: "test-challenge",
+            expected_origin: "http://localhost",
+            require_user_verification: true,
+            origin_policy: OriginPolicy::AllowLoopbackVariations,
+        },
+        &RealCoseVerifier::new(),
+    )
+    .expect("a fido-u2f attestation with a valid signature must be accepted");
+
+    // The authData AAGUID is not signed by a fido-u2f statement, so it is
+    // discarded; the model identity comes from the certificate via the
+    // chokepoint.
+    assert_eq!(result.aaguid, None);
+    assert_eq!(result.credential_id, credential_id);
+}
+
+/// Tampering with a valid fido-u2f signature must flip the result from
+/// accepted to rejected — the security-relevant half of the positive test
+/// above.
+#[test]
+fn test_fido_u2f_rejects_tampered_valid_signature() {
+    use p256::ecdsa::{Signature, SigningKey, signature::Signer};
+
+    let u2f_signing_key = SigningKey::from_bytes(&[7u8; 32].into()).unwrap();
+    let point = u2f_signing_key.verifying_key().to_encoded_point(false);
+    let x = point.x().unwrap();
+    let y = point.y().unwrap();
+    let leaf_cert = build_ec_p256_cert(&u2f_signing_key);
+    let cose_key = make_es256_cose_key(x.as_slice(), y.as_slice());
+
+    let rp_id = "localhost";
+    let credential_id: Vec<u8> = (0..32u8).collect();
+    let auth_data = make_registration_auth_data(rp_id, [0u8; 16], &credential_id, &cose_key);
+
+    let rp_id_hash = digest::digest(&SHA256, rp_id.as_bytes());
+    let client_data =
+        make_client_data_json("webauthn.create", "test-challenge", "http://localhost");
+    let client_data_hash = digest::digest(&SHA256, &client_data);
+    let public_key_u2f = cose_key_to_sec1_uncompressed(&cose_key).unwrap();
+    let verification_data = build_fido_u2f_verification_data(
+        rp_id_hash.as_ref(),
+        client_data_hash.as_ref(),
+        &credential_id,
+        &public_key_u2f,
+    );
+    let sig: Signature = u2f_signing_key.sign(&verification_data);
+    let mut sig_bytes = sig.to_der().as_bytes().to_vec();
+    // Tamper with the signature: flip the first byte so it no longer verifies.
+    sig_bytes[0] ^= 0xFF;
+
+    let att_stmt = ciborium::Value::Map(vec![
+        (
+            ciborium::Value::Text("x5c".to_string()),
+            ciborium::Value::Array(vec![ciborium::Value::Bytes(leaf_cert)]),
+        ),
+        (
+            ciborium::Value::Text("sig".to_string()),
+            ciborium::Value::Bytes(sig_bytes),
+        ),
+    ]);
+    let value = ciborium::Value::Map(vec![
+        (
+            ciborium::Value::Text("fmt".to_string()),
+            ciborium::Value::Text("fido-u2f".to_string()),
+        ),
+        (ciborium::Value::Text("attStmt".to_string()), att_stmt),
+        (
+            ciborium::Value::Text("authData".to_string()),
+            ciborium::Value::Bytes(auth_data),
+        ),
+    ]);
+    let mut out = Vec::new();
+    ciborium::into_writer(&value, &mut out).expect("CBOR serialization");
+
+    let err = verify_registration_with_verifier(
+        &RegistrationParams {
+            attestation_object: &out,
+            client_data_json: &client_data,
+            expected_rp_id: rp_id,
+            expected_challenge: "test-challenge",
+            expected_origin: "http://localhost",
+            require_user_verification: true,
+            origin_policy: OriginPolicy::AllowLoopbackVariations,
+        },
+        &RealCoseVerifier::new(),
+    )
+    .expect_err("a tampered fido-u2f signature must be rejected");
+    assert!(
+        matches!(err, VerifyError::SignatureInvalid),
+        "expected SignatureInvalid, got {err:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Minimal DER helpers and an EC P-256 self-signed certificate builder, for the
+// fido-u2f positive tests. The certificate is not chained to a pinned root —
+// the fido-u2f arm checks the signature, not the chain (the chokepoint owns
+// chain policy) — so a self-signed cert with a held key is sufficient.
+// ---------------------------------------------------------------------------
+
+/// DER length-prefix `content` with `tag`.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "test-only DER helper; lengths here are small"
+)]
+fn u2f_der_wrap(tag: u8, content: &[u8]) -> Vec<u8> {
+    let len = content.len();
+    let mut out = vec![tag];
+    if len < 0x80 {
+        out.push(len as u8);
+    } else if len < 0x100 {
+        out.push(0x81);
+        out.push(len as u8);
+    } else {
+        out.push(0x82);
+        out.push((len >> 8) as u8);
+        out.push((len & 0xff) as u8);
+    }
+    out.extend_from_slice(content);
+    out
+}
+
+fn u2f_der_seq(items: &[&[u8]]) -> Vec<u8> {
+    let mut content = Vec::new();
+    for item in items {
+        content.extend_from_slice(item);
+    }
+    u2f_der_wrap(0x30, &content)
+}
+
+fn u2f_der_int(value: &[u8]) -> Vec<u8> {
+    u2f_der_wrap(0x02, value)
+}
+
+fn u2f_der_bitstring(value: &[u8]) -> Vec<u8> {
+    let mut content = vec![0x00]; // no unused bits
+    content.extend_from_slice(value);
+    u2f_der_wrap(0x03, &content)
+}
+
+fn u2f_der_set(items: &[&[u8]]) -> Vec<u8> {
+    let mut content = Vec::new();
+    for item in items {
+        content.extend_from_slice(item);
+    }
+    u2f_der_wrap(0x31, &content)
+}
+
+/// Build a self-signed X.509 v3 DER certificate with an EC P-256 public key,
+/// signed with ECDSA P-256 SHA-256.
+fn build_ec_p256_cert(signing_key: &p256::ecdsa::SigningKey) -> Vec<u8> {
+    use p256::ecdsa::signature::Signer;
+
+    let verifying_key = signing_key.verifying_key();
+    let point = verifying_key.to_encoded_point(false);
+    let x = point.x().unwrap();
+    let y = point.y().unwrap();
+
+    // AlgorithmIdentifier for id-ecPublicKey with params prime256v1.
+    let ec_pk_oid: &[u8] = &[0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01];
+    let p256_oid: &[u8] = &[0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
+    let pk_alg_id = u2f_der_seq(&[ec_pk_oid, p256_oid]);
+
+    // SubjectPublicKeyInfo: the BIT STRING holds 0x04 || x || y.
+    let mut sec1 = vec![0x04];
+    sec1.extend_from_slice(x.as_slice());
+    sec1.extend_from_slice(y.as_slice());
+    let spki = u2f_der_seq(&[&pk_alg_id, &u2f_der_bitstring(&sec1)]);
+
+    // signatureAlgorithm: ecdsa-with-SHA256 (used for both the TBS signature
+    // field and the certificate's signatureAlgorithm).
+    let sig_alg_oid: &[u8] = &[0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02];
+    let sig_alg_id = u2f_der_seq(&[sig_alg_oid]);
+
+    // Version v3 (explicit [0] wrapping INTEGER 2).
+    let version: &[u8] = &[0xa0, 0x03, 0x02, 0x01, 0x02];
+    let serial = u2f_der_int(&[0x01]);
+
+    // Issuer/Subject: CN=U2F.
+    // Name ::= SEQUENCE { RDNSequence }, RDNSequence ::= SEQUENCE OF SET OF SEQUENCE { OID, value }.
+    let cn_oid: &[u8] = &[0x06, 0x03, 0x55, 0x04, 0x03];
+    let cn_value: &[u8] = &[0x0c, 0x03, b'U', b'2', b'F'];
+    let attr = u2f_der_seq(&[cn_oid, cn_value]); // SEQUENCE { OID, UTF8String }
+    let rdn = u2f_der_set(&[&attr]); // SET { attr }
+    let name = u2f_der_seq(&[&rdn]); // SEQUENCE { rdn }
+
+    // Validity (UTCTime): valid 2024-2049.
+    let not_before: &[u8] = b"\x17\x0d240101000000Z";
+    let not_after: &[u8] = b"\x17\x0d490101000000Z";
+    let validity = u2f_der_seq(&[not_before, not_after]);
+
+    let tbs = u2f_der_seq(&[
+        version,
+        &serial,
+        &sig_alg_id,
+        &name,
+        &validity,
+        &name,
+        &spki,
+    ]);
+
+    let sig: p256::ecdsa::Signature = signing_key.sign(&tbs);
+    let sig_der = sig.to_der();
+
+    u2f_der_seq(&[&tbs, &sig_alg_id, &u2f_der_bitstring(sig_der.as_bytes())])
 }

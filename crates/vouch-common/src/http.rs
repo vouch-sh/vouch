@@ -23,9 +23,21 @@ pub mod timeouts {
     pub const AGENT_CONNECT: Duration = Duration::from_secs(3);
 
     /// Total timeout for server-side API calls.
-    pub const SERVER_TOTAL: Duration = Duration::from_secs(15);
+    ///
+    /// Shorter than [`CREDENTIAL_TOTAL`]: the CLI waits on the server, which
+    /// waits on this call, so a slow upstream must fail on the server in time
+    /// for the CLI to receive the server's error rather than its own timeout.
+    pub const SERVER_TOTAL: Duration = Duration::from_secs(5);
     /// Connection timeout for server-side API calls.
-    pub const SERVER_CONNECT: Duration = Duration::from_secs(5);
+    pub const SERVER_CONNECT: Duration = Duration::from_secs(3);
+    /// Idle gap allowed between reads on a server-side response body.
+    ///
+    /// [`SERVER_TOTAL`] already caps how long a hostile host can hold a
+    /// connection, but it lets one that has gone silent sit on the slot for the
+    /// full budget. This bounds the gap between frames instead, so a stalled
+    /// peer is dropped promptly rather than at the total deadline — the outbound
+    /// counterpart to refusing a client that dribbles a request.
+    pub const SERVER_READ: Duration = Duration::from_secs(3);
 }
 
 /// Apply the process-wide DoH resolver to a builder, if one is installed.
@@ -90,8 +102,9 @@ pub fn agent_client(user_agent: &str) -> Result<reqwest::Client, reqwest::Error>
 
 /// Create an HTTP client for server-side API calls.
 ///
-/// Uses moderate timeouts (15s total, 5s connect) since external
-/// APIs may be slower but we still want to fail reasonably fast.
+/// Uses short timeouts (5s total, 3s connect) so a slow upstream fails
+/// well inside the server's request timeout, and the caller gets the
+/// upstream error rather than a 408.
 /// Redirects are disabled to prevent SSRF attacks where an HTTPS
 /// URL redirects to an internal HTTP endpoint.
 ///
@@ -114,7 +127,8 @@ pub fn server_client(
         .user_agent(user_agent)
         .redirect(reqwest::redirect::Policy::none())
         .timeout(timeouts::SERVER_TOTAL)
-        .connect_timeout(timeouts::SERVER_CONNECT);
+        .connect_timeout(timeouts::SERVER_CONNECT)
+        .read_timeout(timeouts::SERVER_READ);
 
     if let Some(pem_data) = extra_ca_certs {
         let certs = reqwest::Certificate::from_pem_bundle(pem_data)
@@ -155,8 +169,11 @@ mod tests {
         assert!(timeouts::AGENT_CONNECT < timeouts::AGENT_TOTAL);
         assert!(timeouts::SERVER_CONNECT < timeouts::SERVER_TOTAL);
 
+        assert!(timeouts::SERVER_READ < timeouts::SERVER_TOTAL);
+
         // Agent should be fastest
         assert!(timeouts::AGENT_TOTAL < timeouts::CREDENTIAL_TOTAL);
-        assert!(timeouts::CREDENTIAL_TOTAL < timeouts::SERVER_TOTAL);
+        // The server's upstream calls finish before the CLI stops waiting.
+        assert!(timeouts::SERVER_TOTAL < timeouts::CREDENTIAL_TOTAL);
     }
 }

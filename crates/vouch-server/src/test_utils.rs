@@ -8,7 +8,6 @@
     clippy::expect_used,
     reason = "test code: panic on assertion failure is acceptable"
 )]
-
 use arc_swap::ArcSwap;
 use axum::{
     Router,
@@ -25,16 +24,43 @@ use crate::crypto::alg::JwsAlgorithm;
 use crate::crypto::document_crypto::{HpkeDocumentCrypto, PlaintextDocumentCrypto};
 use crate::db::audit::AuditStore;
 use crate::db::store::DocumentStore;
-use crate::db::{CreateOAuthClientParams, Pool, RegistrationSource};
+use crate::db::{CreateOAuthClientParams, Domain, Pool, RegistrationSource};
 use crate::infra::router::build_app;
 
-use crate::AppState;
-use crate::config::{IdpConfig, OidcProviderConfig, ServerConfig};
+use crate::arrival::ArrivalTime;
+use crate::config::{
+    BaseUrl, IdpConfig, LogFormat, NonEmptySecret, OidcProviderConfig, ServerConfig,
+};
+use crate::crypto::document_crypto::DocumentCrypto;
+use crate::crypto::jwt::StateTokenSigner;
 use crate::crypto::keys::OidcSigningKey;
+use crate::db::CreateAuthenticatorParams;
+use crate::db::CreatePendingOAuthParams;
+use crate::db::CreateScimTokenParams;
+use crate::db::CreateSessionParams;
+use crate::db::documents::oauth::ResponseMode;
+use crate::db::documents::organization::OrganizationDoc;
+use crate::db::pool::PoolConfig;
+use crate::db::{
+    self, AccessScope, AuditEventFilter, ClientKeys, FapiProfile, OAuthClientType, Organization,
+    ScimScope, ScimScopeSet, SessionCache, SessionPurpose, TokenEndpointAuthMethod, User,
+};
+use crate::infra::conn_caps::ConnCapConfig;
+use crate::services::auth::NoClientAuth;
+use crate::services::idp::ConfiguredIdp;
+use crate::services::oidc::ScopeSet;
+use crate::services::oidc::grant_type::OAuthGrantType;
+use crate::services::oidc::mtls::{CertThumbprint, ClientCertTrust};
+use crate::services::policy;
+use crate::{AppState, crypto, handlers};
+use vouch_common::AaguidPolicy;
+use vouch_httpsig::SignatureBuilder;
+use vouch_httpsig::algorithm::ecdsa_p256::EcdsaP256Signer;
+use vouch_httpsig::digest;
 
 /// Create an in-memory SQLite database with migrations for testing.
 pub async fn test_db() -> Pool {
-    let pool = Pool::connect("sqlite::memory:", &crate::db::pool::PoolConfig::default())
+    let pool = Pool::connect("sqlite::memory:", &PoolConfig::default())
         .await
         .expect("Failed to create test database");
 
@@ -68,7 +94,7 @@ pub fn test_config() -> ServerConfig {
             client_id: "test-client-id".to_string(),
             client_secret: SecretString::from("test-client-secret"),
         })],
-        base_url: crate::config::BaseUrl::new("https://test.example.com"),
+        base_url: BaseUrl::new("https://test.example.com"),
         device_code_expires_seconds: 600,
         device_poll_interval_seconds: 5,
         allowed_domains: Some(vec!["example.com".to_string()]),
@@ -113,17 +139,33 @@ pub fn test_config() -> ServerConfig {
         aws_partition: None,
         aws_use_fips_endpoint: None,
         jwt_assertion_max_lifetime_seconds: 300,
-        allowed_aaguids: vouch_common::AaguidPolicy::Any,
-        require_attestation_cert: false,
-        log_format: crate::config::LogFormat::Text,
+        allowed_aaguids: AaguidPolicy::Any,
+        log_format: LogFormat::Text,
         trusted_proxies: Vec::new(),
+        proxy_protocol: false,
+        connection_caps: ConnCapConfig::DEFAULT,
         metrics_bearer_token: None,
         certification_test_token: None,
         extra_ca_certs: None,
-        pool_config: crate::db::pool::PoolConfig::default(),
+        mtls_client_ca_certs: None,
+        pool_config: PoolConfig::default(),
         session_cache_max_capacity: 10_000,
         session_cache_ttl_secs: 30,
     }
+}
+
+/// The arrival stamp for a test that drives a service function directly,
+/// standing in for the router middleware that would supply one.
+///
+/// Use [`crate::arrival::ArrivalTime::for_test`] with an explicit instant
+/// instead whenever the test is *about* a time boundary.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test fixtures construct their own instants"
+)]
+#[must_use]
+pub fn test_arrival() -> ArrivalTime {
+    ArrivalTime::for_test(jiff::Timestamp::now())
 }
 
 /// Create a test AppState with in-memory database.
@@ -135,9 +177,7 @@ pub async fn test_app_state() -> Arc<AppState> {
 ///
 /// Used by tests that exercise multi-IdP code paths (chooser rendering,
 /// provider slug validation, etc.) without standing up real IdP metadata.
-pub async fn test_app_state_with_idps(
-    idps: Vec<crate::services::idp::ConfiguredIdp>,
-) -> Arc<AppState> {
+pub async fn test_app_state_with_idps(idps: Vec<ConfiguredIdp>) -> Arc<AppState> {
     build_test_app_state(idps, |_| {}).await
 }
 
@@ -148,9 +188,24 @@ pub async fn test_app_state_with_idps(
 /// ([`DocumentStore::set_modify_test_hook`]) to deterministically reproduce
 /// OCC races through the full axum router, without each test reconstructing
 /// the entire state by hand.
-pub async fn build_test_app_state<F>(
-    idps: Vec<crate::services::idp::ConfiguredIdp>,
+pub async fn build_test_app_state<F>(idps: Vec<ConfiguredIdp>, configure_store: F) -> Arc<AppState>
+where
+    F: FnOnce(&mut DocumentStore),
+{
+    build_test_app_state_with_http_client(idps, configure_store, reqwest::Client::new()).await
+}
+
+/// Build an [`AppState`] for tests with a custom outbound HTTP client.
+///
+/// Used by tests that exercise server-side fetches of client-controlled URLs
+/// (e.g. an OIDC Core §6.2 `request_uri` HTTPS fetch) against an in-process TLS
+/// mock: the test injects a `reqwest::Client` that trusts the mock's
+/// self-signed certificate, while the rest of the state is built exactly as
+/// [`build_test_app_state`] builds it.
+pub async fn build_test_app_state_with_http_client<F>(
+    idps: Vec<ConfiguredIdp>,
     configure_store: F,
+    http_client: reqwest::Client,
 ) -> Arc<AppState>
 where
     F: FnOnce(&mut DocumentStore),
@@ -168,8 +223,7 @@ where
     // Generate OIDC signing key for tests
     let oidc_key = OidcSigningKey::generate().expect("Failed to generate test OIDC key");
 
-    let crypto: Arc<dyn crate::crypto::document_crypto::DocumentCrypto> =
-        Arc::new(PlaintextDocumentCrypto);
+    let crypto: Arc<dyn DocumentCrypto> = Arc::new(PlaintextDocumentCrypto);
     let mut store = DocumentStore::new(pool.clone(), crypto.clone());
     configure_store(&mut store);
     let audit = AuditStore::new(pool.clone(), crypto);
@@ -187,15 +241,16 @@ where
         ssh_ca: None,
         oidc_key,
         oidc_rsa_key: None,
-        state_signer: crate::crypto::jwt::StateTokenSigner::local(
+        state_signer: StateTokenSigner::local(
             b"test_jwt_secret_must_be_at_least_32_characters_long".to_vec(),
         ),
         github_app: None,
-        http_client: reqwest::Client::new(),
-        session_cache: crate::db::SessionCache::new(10_000, 30),
+        http_client,
+        session_cache: SessionCache::new(10_000, 30),
         org_keys_cache: Default::default(),
         policy: Default::default(),
         idps,
+        client_cert_trust: Some(test_client_ca().trust()),
     })
 }
 
@@ -220,8 +275,7 @@ pub async fn test_app_state_with_rsa_key() -> Arc<AppState> {
     let oidc_key = OidcSigningKey::generate().expect("Failed to generate test OIDC key");
     let oidc_rsa_key = OidcRsaSigningKey::generate().expect("Failed to generate test RSA key");
 
-    let crypto: Arc<dyn crate::crypto::document_crypto::DocumentCrypto> =
-        Arc::new(PlaintextDocumentCrypto);
+    let crypto: Arc<dyn DocumentCrypto> = Arc::new(PlaintextDocumentCrypto);
     let store = DocumentStore::new(pool.clone(), crypto.clone());
     let audit = AuditStore::new(pool.clone(), crypto);
 
@@ -236,15 +290,111 @@ pub async fn test_app_state_with_rsa_key() -> Arc<AppState> {
         ssh_ca: None,
         oidc_key,
         oidc_rsa_key: Some(oidc_rsa_key),
-        state_signer: crate::crypto::jwt::StateTokenSigner::local(
+        state_signer: StateTokenSigner::local(
             b"test_jwt_secret_must_be_at_least_32_characters_long".to_vec(),
         ),
         github_app: None,
         http_client: reqwest::Client::new(),
-        session_cache: crate::db::SessionCache::new(10_000, 30),
+        session_cache: SessionCache::new(10_000, 30),
         org_keys_cache: Default::default(),
         policy: Default::default(),
         idps: Vec::new(),
+        client_cert_trust: Some(test_client_ca().trust()),
+    })
+}
+
+/// Throwaway RSA-2048 private key in PKCS#1 PEM (`BEGIN RSA PRIVATE KEY`), the
+/// format GitHub provides for App private keys. Used only to stand up a
+/// `GitHubApp` in tests; the key never signs anything a real GitHub API sees
+/// (outbound installation-token calls are intercepted by an in-process TLS
+/// mock that ignores the `Authorization` header).
+pub const TEST_GITHUB_APP_PRIVATE_KEY_PEM: &str = r#"-----BEGIN RSA PRIVATE KEY-----
+MIIEpAIBAAKCAQEAq+Yjk+Vhue6aIzehO/jfoxzc9shrMLZ0T2+Xx5ohsMZJYULo
+DRHUpgWuLaQeXL9pF3vmwG3yZkHAN1bFs7uWpwNcvzIO6Oz7Yym6dRb3cmBCiC5N
+PIPR0nwgH/ZcmPx0KpDmhNeqx2iWl035J0rGQpAK9CfeM4GdzXporoBct9AJxoFH
+34tZ4Ja6R2cLPxH6c/IAp82fMl9k6ji01p5DBwoY6DW0vZk+3q/t0muJHutmXCNO
+rZrH+u+h8lz4ridD3+tuvsjOOmMUX107AKl5zXfFaP5dAsrTqZ2qne09CNrMP0M9
+F/36VkJurwxR0y15umwikM6xnf02xFOCa+6PawIDAQABAoIBAFSmBTIQvFGTmiqq
+e8btFK+diIAsDIDV8Cun372mfF2xHzR6fovlEmrZFD8ceOkiRu2OEYEEA2Bwk2eM
+3tlVkGfZA4SRcX8pJ9falhuPvjWACnNGHbmljh8RCb7DkjCx7MCDT0jubQY6TiHe
+/0jmjP/9L6+wrD5/3wXu9/qqcj3/LxNxXfNI+0JaY0GKo24vZHGYj5mCBUvQHC+4
+rElwlFygaZfnnSchPSCWssFdgMDblkbGpkylje2wSvxvoTTAfkrTsNsr7wZYnKuK
+6Pza3/78OP0w5gS93YDOWNG1WTrxsxR2bMH6MZHH3h/w/EPCFXdztYumcafyYFBC
+SgZjeSUCgYEA8Wy1K8iH+nbVJIy1qTyd/a3t+MvsT1vBYkOxkLXSU2O7zFp68NtX
+FGkrxtEw+r4XEee3UBrLNQF2vmqrNxrYNEncRp5hLUHqnDmHQvC/OlyutPL2FSgN
++rR7/QTMF9MSGsZYtuNAaOVW3maX7ioj1vRY2+zUDQxtUS2FyIW0c60CgYEAtkbk
+COuAEQaknV1kayEcA/fkF9WVs4jiSPL/cdFQhUgt/g0000ZZ2aD1rMXufrNrXNkw
+OAafLn4Cgu5KsE6zEaNcr+M5NeNikljyqxl0c72FrqumDzYwF5c/i/jZWWc+S6yF
+R9eEy5MCp90eqmdn3x6bpIi7L03WqwfZIHbpMncCgYEA58bbsCsXEMhhHHPSO6Ws
+cE049/Ce8BlA8VvX7vv/7nsDYs9C1FVfpoLJulg/U5qHf3McNFVk3YCIRYsW0RJ+
+msSGK24GEXMFD/LS/tsuW5N7TtEqm2kW8qevmVuvrPfAm9/sb7iAr7Pt0Bpipg3i
+1o1DefBGLDjQAm1X0Qk8EwkCgYAAjmbTwCQ76RFHialsykUTngYMLJKwYZKPNm6h
+IkpknbvGMrQekPBlQaB+TnxT1qhVODR1d0+1DJ1lWOTRdOwG+cCmqMLb7z21xJ+4
+9fLtB38I8W0oTroG2GdRPgkrxKzj/jrJ5VZ6aJBxgrM9QeOHQsimz+QCWPJ2wyde
+ef5sMQKBgQDgdb3fIhYhwL4pqD16vDxWrEmKW4UTufkTSHeuXaQvELlMaE01Xcvn
+4E6YbvnQ536ej8Y75DAxPheNxwSORCpg9ZnFZF3HifT5G5h45OvPkZNrR0KVCB0u
+eyYRskrWOAtu0DuWJARLn74r5B4ze8s4DvUdPe781neRB1hMbXte6g==
+-----END RSA PRIVATE KEY-----"#;
+
+/// Create a test AppState with a `GitHubApp` loaded from
+/// [`TEST_GITHUB_APP_PRIVATE_KEY_PEM`] and the given outbound HTTP client.
+///
+/// The `http_client` is used both for `AppState.http_client` and for the
+/// `GitHubApp`'s own client, matching production wiring. Tests that exercise
+/// `get_github_token` pass a client whose `api.github.com` resolution is
+/// redirected to an in-process TLS mock so no real egress occurs.
+pub async fn test_app_state_with_github_app(http_client: reqwest::Client) -> Arc<AppState> {
+    use crate::services::integrations::github::GitHubApp;
+    use secrecy::SecretString;
+
+    let pool = test_db().await;
+    let mut config = test_config();
+    config.github_app_id = Some(1);
+    config.github_app_key = Some(SecretString::from(
+        TEST_GITHUB_APP_PRIVATE_KEY_PEM.to_string(),
+    ));
+    config.github_app_name = Some("vouch-test".to_string());
+    config.github_app_client_id = Some("Iv1.test-client".to_string());
+    config.github_app_client_secret = NonEmptySecret::new(SecretString::from("test-client-secret"));
+
+    let rp_origin = url::Url::parse(&config.base_url).expect("Invalid RP origin");
+    let webauthn = webauthn_rs::WebauthnBuilder::new(&config.rp_id, &rp_origin)
+        .expect("Failed to create WebauthnBuilder")
+        .rp_name(&config.rp_name)
+        .build()
+        .expect("Failed to build Webauthn");
+
+    let oidc_key = OidcSigningKey::generate().expect("Failed to generate test OIDC key");
+
+    let crypto: Arc<dyn DocumentCrypto> = Arc::new(PlaintextDocumentCrypto);
+    let store = DocumentStore::new(pool.clone(), crypto.clone());
+    let audit = AuditStore::new(pool.clone(), crypto);
+
+    register_test_httpsig_client(&store, &config.base_url).await;
+
+    let github_app = GitHubApp::load(&config, http_client.clone())
+        .expect("load GitHub App")
+        .expect("GitHubApp::load returns Some when app_id + key are set");
+
+    Arc::new(AppState {
+        db: pool,
+        store,
+        audit,
+        config: Arc::new(ArcSwap::from_pointee(config)),
+        webauthn,
+        ssh_ca: None,
+        oidc_key,
+        oidc_rsa_key: None,
+        state_signer: StateTokenSigner::local(
+            b"test_jwt_secret_must_be_at_least_32_characters_long".to_vec(),
+        ),
+        github_app: Some(Arc::new(github_app)),
+        http_client,
+        session_cache: SessionCache::new(10_000, 30),
+        org_keys_cache: Default::default(),
+        policy: Default::default(),
+        idps: Vec::new(),
+        client_cert_trust: Some(test_client_ca().trust()),
     })
 }
 
@@ -270,8 +420,7 @@ pub async fn test_app_state_encrypted() -> Arc<AppState> {
     let oidc_key = OidcSigningKey::generate().expect("Failed to generate test OIDC key");
     let oidc_rsa_key = OidcRsaSigningKey::generate().expect("Failed to generate test RSA key");
 
-    let crypto: Arc<dyn crate::crypto::document_crypto::DocumentCrypto> =
-        Arc::new(HpkeDocumentCrypto::generate_for_test());
+    let crypto: Arc<dyn DocumentCrypto> = Arc::new(HpkeDocumentCrypto::generate_for_test());
     let store = DocumentStore::new(pool.clone(), crypto.clone());
     let audit = AuditStore::new(pool.clone(), crypto);
 
@@ -286,15 +435,16 @@ pub async fn test_app_state_encrypted() -> Arc<AppState> {
         ssh_ca: None,
         oidc_key,
         oidc_rsa_key: Some(oidc_rsa_key),
-        state_signer: crate::crypto::jwt::StateTokenSigner::local(
+        state_signer: StateTokenSigner::local(
             b"test_jwt_secret_must_be_at_least_32_characters_long".to_vec(),
         ),
         github_app: None,
         http_client: reqwest::Client::new(),
-        session_cache: crate::db::SessionCache::new(10_000, 30),
+        session_cache: SessionCache::new(10_000, 30),
         org_keys_cache: Default::default(),
         policy: Default::default(),
         idps: Vec::new(),
+        client_cert_trust: Some(test_client_ca().trust()),
     })
 }
 
@@ -322,10 +472,35 @@ where
 }
 
 /// Create test app (router + state) with the given upstream IdPs seeded.
-pub async fn test_app_with_idps(
-    idps: Vec<crate::services::idp::ConfiguredIdp>,
-) -> (Router, Arc<AppState>) {
+pub async fn test_app_with_idps(idps: Vec<ConfiguredIdp>) -> (Router, Arc<AppState>) {
     let state = test_app_state_with_idps(idps).await;
+    let config = state.config();
+    let router = build_app(state.clone(), &config).expect("Failed to build test app router");
+    (router, state)
+}
+
+/// Create a test app (router + state) whose outbound [`AppState::http_client`]
+/// is the supplied one.
+///
+/// For tests that drive server-side HTTPS fetches of client-controlled URLs
+/// (e.g. an OIDC Core §6.2 `request_uri`) against an in-process TLS mock: pass
+/// a client built with `danger_accept_invalid_certs(true)` (or a custom CA) so
+/// the fetch reaches the handler's fetch-and-validate logic rather than
+/// failing at the TLS handshake.
+pub async fn test_app_with_http_client(http_client: reqwest::Client) -> (Router, Arc<AppState>) {
+    let state = build_test_app_state_with_http_client(Vec::new(), |_| {}, http_client).await;
+    let config = state.config();
+    let router = build_app(state.clone(), &config).expect("Failed to build test app router");
+    (router, state)
+}
+
+/// Create a test app with no `tls_client_auth` client CA, as a server
+/// started without `VOUCH_MTLS_CLIENT_CA_CERTS`.
+pub async fn test_app_without_client_ca() -> (Router, Arc<AppState>) {
+    let mut state = test_app_state().await;
+    Arc::get_mut(&mut state)
+        .expect("a fresh test state has one owner")
+        .client_cert_trust = None;
     let config = state.config();
     let router = build_app(state.clone(), &config).expect("Failed to build test app router");
     (router, state)
@@ -335,11 +510,13 @@ pub async fn test_app_with_idps(
 ///
 /// The certification token is set to a fixed value for testing.
 pub async fn test_app_with_certification() -> (Router, Arc<AppState>) {
+    use crate::config::NonEmptySecret;
     use secrecy::SecretString;
     let state = test_app_state().await;
     // Override config with certification token set
     let mut config = (**state.config()).clone();
-    config.certification_test_token = Some(SecretString::from("test-cert-token-32bytes-padding!!"));
+    config.certification_test_token =
+        NonEmptySecret::new(SecretString::from("test-cert-token-32bytes-padding!!"));
     state.config.store(Arc::new(config.clone()));
     let router = build_app(state.clone(), &config).expect("Failed to build test app router");
     (router, state)
@@ -351,7 +528,7 @@ const TEST_HTTPSIG_KID: &str = "vouch-test-httpsig-key";
 /// Process-wide P-256 key used to sign `/v1/*` test requests, plus the JWKS
 /// document registered for the first-party test client.
 struct TestHttpSig {
-    signer: vouch_httpsig::algorithm::ecdsa_p256::EcdsaP256Signer,
+    signer: EcdsaP256Signer,
     jwks: serde_json::Value,
 }
 
@@ -373,8 +550,8 @@ static TEST_HTTPSIG: std::sync::LazyLock<TestHttpSig> = std::sync::LazyLock::new
 
 /// Register the first-party OAuth client used by test sessions.
 ///
-/// `create_test_session*` mint tokens whose `client_id` is the server
-/// `base_url`. The `/v1/*` routes now require an RFC 9421 signature, and the
+/// [`create_test_session_with`] mints tokens whose `client_id` is the server
+/// `base_url` unless the spec names one. The `/v1/*` routes require an RFC 9421 signature, and the
 /// server resolves the verifying key from the token client's registered JWKS.
 /// Registering a client keyed to `base_url` with the shared test signing key
 /// lets [`build_test_request`] transparently sign `/v1/*` requests so existing
@@ -392,7 +569,7 @@ async fn register_test_httpsig_client(store: &DocumentStore, base_url: &str) {
         application_type: OAuthClientType::Native,
         redirect_uris: Vec::new(),
         active: true,
-        access_scope: crate::db::AccessScope::Public,
+        access_scope: AccessScope::Public,
         org_id: None,
         resource_uris: Vec::new(),
         jwks: Some(TEST_HTTPSIG.jwks.clone()),
@@ -464,7 +641,7 @@ pub fn test_signature_headers(
         .expect("build signing request");
 
     if has_body {
-        vouch_httpsig::digest::set_content_digest(
+        digest::set_content_digest(
             req.headers_mut(),
             body_bytes,
             vouch_httpsig::DigestAlgorithm::Sha256,
@@ -472,10 +649,7 @@ pub fn test_signature_headers(
         .expect("set content-digest");
     }
 
-    let mut sig_builder = vouch_httpsig::SignatureBuilder::new("sig1")
-        .method()
-        .path()
-        .created_now();
+    let mut sig_builder = SignatureBuilder::new("sig1").method().path().created_now();
     if has_body {
         sig_builder = sig_builder.field("content-digest");
     }
@@ -523,9 +697,288 @@ fn build_test_request(
     Request::from_parts(parts, body)
 }
 
-/// Build a request with an injected mTLS client certificate DER.
+/// A single-RDN `CN=<cn>` name.
+fn test_cert_name(cn: &str) -> x509_cert::name::RdnSequence {
+    use der::asn1::Utf8StringRef;
+
+    let atv = x509_cert::attr::AttributeTypeAndValue {
+        oid: der::oid::ObjectIdentifier::new_unwrap("2.5.4.3"),
+        value: der::asn1::Any::from(Utf8StringRef::new(cn).expect("valid CN")),
+    };
+    let mut rdn_set = der::asn1::SetOfVec::new();
+    rdn_set.insert(atv).expect("insert RDN");
+    x509_cert::name::RdnSequence(vec![x509_cert::name::RelativeDistinguishedName(rdn_set)])
+}
+
+/// Build a certificate for `subject_key` under `profile`, signed by `signer`,
+/// valid for one day from now. `extra` extensions are added after the
+/// profile's own.
+fn build_test_cert(
+    profile: x509_cert::builder::Profile,
+    subject: x509_cert::name::RdnSequence,
+    subject_key: &p256::ecdsa::SigningKey,
+    signer: &p256::ecdsa::SigningKey,
+    extra: &[x509_cert::ext::pkix::ExtendedKeyUsage],
+) -> Vec<u8> {
+    use der::{Decode as _, Encode};
+    use spki::EncodePublicKey as _;
+    use x509_cert::builder::{Builder as _, CertificateBuilder};
+    use x509_cert::serial_number::SerialNumber;
+    use x509_cert::time::Validity;
+
+    let validity = Validity::from_now(core::time::Duration::from_secs(86400)).expect("validity");
+    let serial = SerialNumber::new(&[1u8]).expect("serial");
+    let spki_der = subject_key
+        .verifying_key()
+        .to_public_key_der()
+        .expect("spki DER");
+    let spki = spki::SubjectPublicKeyInfoOwned::from_der(spki_der.as_ref()).expect("parse spki");
+
+    let mut builder = CertificateBuilder::new(profile, serial, validity, subject, spki, signer)
+        .expect("cert builder");
+    for ext in extra {
+        builder.add_extension(ext).expect("add extension");
+    }
+    builder
+        .build::<p256::ecdsa::DerSignature>()
+        .expect("build cert")
+        .to_der()
+        .expect("DER encode")
+}
+
+fn random_test_key() -> p256::ecdsa::SigningKey {
+    p256::ecdsa::SigningKey::random(&mut p256::elliptic_curve::rand_core::OsRng)
+}
+
+fn leaf_profile(issuer: x509_cert::name::RdnSequence) -> x509_cert::builder::Profile {
+    x509_cert::builder::Profile::Leaf {
+        issuer,
+        enable_key_agreement: false,
+        enable_key_encipherment: false,
+    }
+}
+
+/// Generate a self-signed P-256 certificate DER for testing.
 ///
-/// Injects `ConnectInfo<PeerClientCert>` so `OptionalClientCert` extracts it.
+/// It chains to no trust anchor, so it suits `self_signed_tls_client_auth`
+/// (RFC 8705 §2.2) and certificate-bound tokens (§3), and is refused by
+/// `tls_client_auth` (§2.1). Use [`TestClientCa::issue`] for the latter.
+pub fn make_test_cert_der(cn: &str) -> Vec<u8> {
+    let key = random_test_key();
+    let name = test_cert_name(cn);
+    build_test_cert(leaf_profile(name.clone()), name, &key, &key, &[])
+}
+
+/// An in-process TLS server standing in for `api.github.com` and
+/// `github.com`. Each connection carries one request; `route` maps its request
+/// line (`"GET /user/installations?per_page=100&page=1 HTTP/1.1"`) to a status
+/// and JSON body.
+pub struct GitHubMock {
+    addr: SocketAddr,
+    requests: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl GitHubMock {
+    pub async fn spawn<F, Fut>(route: F) -> Self
+    where
+        F: Fn(String) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = (u16, serde_json::Value)> + Send + 'static,
+    {
+        use p256::pkcs8::EncodePrivateKey as _;
+
+        let key = random_test_key();
+        let name = test_cert_name("localhost");
+        let cert = build_test_cert(leaf_profile(name.clone()), name, &key, &key, &[]);
+        let key_der = key.to_pkcs8_der().expect("PKCS#8 key");
+        let server_config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![rustls::pki_types::CertificateDer::from(cert)],
+                rustls::pki_types::PrivateKeyDer::Pkcs8(key_der.as_bytes().to_vec().into()),
+            )
+            .expect("mock server config");
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock listener");
+        let addr = listener.local_addr().expect("mock addr");
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let route = Arc::new(route);
+        let seen = requests.clone();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let acceptor = acceptor.clone();
+                let route = route.clone();
+                let seen = seen.clone();
+                tokio::spawn(async move {
+                    let Ok(mut tls) = acceptor.accept(stream).await else {
+                        return;
+                    };
+                    let Some(line) = read_mock_request_line(&mut tls).await else {
+                        return;
+                    };
+                    seen.lock().expect("mock request log").push(line.clone());
+                    let (status, body) = route(line).await;
+                    let body = body.to_string();
+                    let head = format!(
+                        "HTTP/1.1 {status} Mock\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    use tokio::io::AsyncWriteExt as _;
+                    drop(tls.write_all(head.as_bytes()).await);
+                    drop(tls.write_all(body.as_bytes()).await);
+                    drop(tls.shutdown().await);
+                });
+            }
+        });
+        Self { addr, requests }
+    }
+
+    /// An outbound client that sends both GitHub hosts to this mock.
+    pub fn client(&self) -> reqwest::Client {
+        reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .no_proxy()
+            .resolve("api.github.com", self.addr)
+            .resolve("github.com", self.addr)
+            .build()
+            .expect("build mock http client")
+    }
+
+    /// Request lines received so far, in arrival order.
+    pub fn requests(&self) -> Vec<String> {
+        self.requests.lock().expect("mock request log").clone()
+    }
+}
+
+/// Read one HTTP/1.1 request (headers plus `Content-Length` body) and return
+/// its request line.
+async fn read_mock_request_line(
+    tls: &mut tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
+) -> Option<String> {
+    use tokio::io::AsyncReadExt as _;
+
+    let mut buf: Vec<u8> = Vec::with_capacity(8192);
+    let mut tmp = [0u8; 4096];
+    loop {
+        let n = tls.read(&mut tmp).await.ok()?;
+        if n == 0 {
+            return None;
+        }
+        buf.extend_from_slice(tmp.get(..n)?);
+        let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+            continue;
+        };
+        let head = std::str::from_utf8(buf.get(..end)?).ok()?;
+        let content_length = head
+            .split("\r\n")
+            .filter_map(|l| l.split_once(':'))
+            .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+            .and_then(|(_, v)| v.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        if buf.len() >= end.saturating_add(4).saturating_add(content_length) {
+            return head.lines().next().map(str::to_string);
+        }
+    }
+}
+
+/// Test CA that issues `tls_client_auth` client certificates. Every test
+/// `AppState` trusts it, as a deployment trusts the CAs in
+/// `VOUCH_MTLS_CLIENT_CA_CERTS`.
+pub struct TestClientCa {
+    key: p256::ecdsa::SigningKey,
+    name: x509_cert::name::RdnSequence,
+    der: Vec<u8>,
+}
+
+/// The process-wide test client CA.
+pub fn test_client_ca() -> &'static TestClientCa {
+    static CA: std::sync::OnceLock<TestClientCa> = std::sync::OnceLock::new();
+    CA.get_or_init(|| {
+        let key = random_test_key();
+        let name = test_cert_name("Vouch Test Client CA");
+        let der = build_test_cert(
+            x509_cert::builder::Profile::Root,
+            name.clone(),
+            &key,
+            &key,
+            &[],
+        );
+        TestClientCa { key, name, der }
+    })
+}
+
+impl TestClientCa {
+    /// Issue a client certificate for `CN=<cn>`, signed by this CA.
+    pub fn issue(&self, cn: &str) -> Vec<u8> {
+        self.issue_with_eku(cn, &[])
+    }
+
+    /// Issue a client certificate for `CN=<cn>` carrying `eku` as its
+    /// extended key usage.
+    pub fn issue_with_eku(&self, cn: &str, eku: &[der::oid::ObjectIdentifier]) -> Vec<u8> {
+        let extra: Vec<_> = if eku.is_empty() {
+            Vec::new()
+        } else {
+            vec![x509_cert::ext::pkix::ExtendedKeyUsage(eku.to_vec())]
+        };
+        build_test_cert(
+            leaf_profile(self.name.clone()),
+            test_cert_name(cn),
+            &random_test_key(),
+            &self.key,
+            &extra,
+        )
+    }
+
+    /// Issue an intermediate CA and a client certificate for `CN=<cn>` under
+    /// it. Returns `(leaf_der, intermediate_der)`.
+    pub fn issue_via_intermediate(&self, cn: &str) -> (Vec<u8>, Vec<u8>) {
+        let intermediate_key = random_test_key();
+        let intermediate_name = test_cert_name("Vouch Test Intermediate CA");
+        let intermediate = build_test_cert(
+            x509_cert::builder::Profile::SubCA {
+                issuer: self.name.clone(),
+                path_len_constraint: Some(0),
+            },
+            intermediate_name.clone(),
+            &intermediate_key,
+            &self.key,
+            &[],
+        );
+        let leaf = build_test_cert(
+            leaf_profile(intermediate_name),
+            test_cert_name(cn),
+            &random_test_key(),
+            &intermediate_key,
+            &[],
+        );
+        (leaf, intermediate)
+    }
+
+    /// The CA certificate as a PEM bundle, the form
+    /// `VOUCH_MTLS_CLIENT_CA_CERTS` holds.
+    pub fn pem(&self) -> String {
+        der::pem::encode_string("CERTIFICATE", der::pem::LineEnding::LF, &self.der)
+            .expect("PEM encode")
+    }
+
+    /// Trust anchors holding only this CA.
+    pub(crate) fn trust(&self) -> ClientCertTrust {
+        ClientCertTrust::from_pem(self.pem().as_bytes()).expect("test CA is a valid trust anchor")
+    }
+}
+
+/// Build a request that simulates the real mTLS port.
+///
+/// Injects only `ConnectInfo<PeerClientCert>` (carrying the peer `SocketAddr`)
+/// — the single connection extension axum's
+/// `into_make_service_with_connect_info::<PeerClientCert>()` inserts on the
+/// mTLS port — so `OptionalClientCert` extracts the cert and the rate limiter
+/// / `ClientInfo` extractors resolve the peer IP through `PeerClientCert`
+/// (`connection_peer`'s fallback path). Pass `None` for `cert_der` to
+/// simulate a connection where no client certificate was presented.
 fn build_test_request_with_cert(
     method: &str,
     uri: &str,
@@ -545,12 +998,18 @@ fn build_test_request_with_cert(
     };
     let request = req_builder.body(body).expect("Failed to build request");
     let (mut parts, body) = request.into_parts();
-    parts
-        .extensions
-        .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 0))));
-    parts
-        .extensions
-        .insert(ConnectInfo(PeerClientCert(cert_der)));
+    // Simulate the real mTLS port. axum's
+    // `into_make_service_with_connect_info::<PeerClientCert>()` injects exactly
+    // one `ConnectInfo<T>` per connection — `ConnectInfo<PeerClientCert>` — so
+    // the mTLS port has no separate `ConnectInfo<SocketAddr>`. The peer address
+    // rides on `PeerClientCert.peer_addr`, and the rate limiter / `ClientInfo`
+    // extractors resolve it via `connection_peer`. Injecting
+    // `ConnectInfo<SocketAddr>` here would mask the production mTLS condition
+    // (the prior harness did, hiding the `client_ip: null` / 500 regression).
+    parts.extensions.insert(ConnectInfo(PeerClientCert {
+        peer_chain_der: cert_der.into_iter().collect(),
+        peer_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+    }));
     Request::from_parts(parts, body)
 }
 
@@ -797,19 +1256,30 @@ pub async fn http_get_with_cert(
 }
 
 /// Create a test user in the database.
-pub async fn create_test_user(store: &DocumentStore, email: &str) -> crate::db::User {
-    let (user_id, _created) = crate::db::upsert_user(store, email, Some("Test User"))
+pub async fn create_test_user(store: &DocumentStore, email: &str) -> User {
+    let (user_id, _created) = db::upsert_user(store, email, Some("Test User"))
         .await
         .expect("Failed to create test user");
-    crate::db::get_user_by_id(store, &user_id)
+    db::get_user_by_id(store, &user_id)
         .await
         .expect("Failed to fetch test user")
         .expect("Test user not found after creation")
 }
 
+/// Parse a domain literal for a fixture.
+///
+/// Panics on a literal that is not a valid domain: a test that needs a
+/// malformed one belongs at the layer that parses the domain (the OIDC
+/// `hd` claim, the SAML `domain_attribute`, or the admin add-domain form),
+/// because nothing downstream of those can hold one.
+#[must_use]
+pub fn test_domain(domain: &str) -> Domain {
+    Domain::parse(domain).expect("test fixture domain must be valid")
+}
+
 /// Create a test organization in the database.
-pub async fn create_test_org(store: &DocumentStore, domain: &str) -> crate::db::Organization {
-    crate::db::create_organization(store, domain, Some("Test Org"), None)
+pub async fn create_test_org(store: &DocumentStore, domain: &str) -> Organization {
+    db::create_organization(store, domain, Some("Test Org"), None)
         .await
         .expect("Failed to create test org")
 }
@@ -820,34 +1290,64 @@ pub async fn create_test_user_in_org(
     email: &str,
     org_id: &str,
     is_admin: bool,
-) -> crate::db::User {
+) -> User {
     let (user_id, _created) =
-        crate::db::upsert_user_with_org(store, email, Some("Test User"), Some(org_id), is_admin)
+        db::upsert_user_with_org(store, email, Some("Test User"), Some(org_id), is_admin)
             .await
             .expect("Failed to create test user in org");
-    crate::db::get_user_by_id(store, &user_id)
+    db::get_user_by_id(store, &user_id)
         .await
         .expect("Failed to fetch test user")
         .expect("Test user not found after creation")
 }
 
+/// Delete a test authenticator, cascading to its sessions.
+///
+/// `db::delete_authenticator` takes a transaction so its cascade cannot land
+/// half-applied; tests that just need a key gone go through here rather than
+/// repeating begin/commit at each call site.
+pub async fn remove_test_authenticator(store: &DocumentStore, authenticator_id: &str) {
+    let mut tx = store.begin().await.expect("Failed to start transaction");
+    db::delete_authenticator(&mut tx, authenticator_id)
+        .await
+        .expect("Failed to delete authenticator");
+    tx.commit().await.expect("Failed to commit deletion");
+}
+
 /// Create a test authenticator for a user.
 pub async fn create_test_authenticator(store: &DocumentStore, user_id: &str) -> String {
-    crate::db::create_authenticator(
+    db::create_authenticator(
         store,
-        &crate::db::CreateAuthenticatorParams {
+        &CreateAuthenticatorParams {
             user_id,
-            user_email: "test@example.com",
             name: "Test Key",
             credential_id: format!("test-cred-{}", uuid::Uuid::now_v7()).as_bytes(),
             public_key: &[0u8; 32],
             aaguid: None,
             user_handle: Some(user_id.as_bytes()),
             attestation_verified: false,
+            counter: 0,
         },
     )
     .await
     .expect("Failed to create authenticator")
+}
+
+/// Overwrite a document's stored body with text that does not decode, so the
+/// next read of that document fails at the storage layer.
+pub async fn corrupt_document(store: &DocumentStore, id: &str) {
+    let pool = match store.pool() {
+        Pool::Sqlite(p) => Some(p),
+        Pool::Postgres(_) => None,
+    }
+    .expect("the test database is SQLite");
+    let rows = sqlx::query("UPDATE documents SET data = 'not-json' WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await
+        .expect("corrupt document")
+        .rows_affected();
+    assert_eq!(rows, 1, "no document with id {id}");
 }
 
 /// Resolve the session-time `hardware_aaguid` / `org_domain` snapshot the way
@@ -860,359 +1360,158 @@ async fn resolve_session_snapshot(
     auth_id: Option<&str>,
 ) -> (Option<String>, Option<String>) {
     let hardware_aaguid = match auth_id {
-        Some(id) => crate::db::get_authenticator_by_id(&state.store, id)
+        Some(id) => db::get_authenticator_by_id(&state.store, id)
             .await
             .ok()
             .flatten()
             .and_then(|a| a.aaguid),
         None => None,
     };
-    let org_domain = match crate::db::get_user_by_id(&state.store, user_id).await {
-        Ok(Some(u)) => match u.org_id {
-            Some(org_id) => crate::db::get_organization_domain(&state.store, &org_id)
+    // Read-only, no `get_user_org_domain`: its lazy-backfill write would
+    // fire first for any test that installs a `modify` hook to intercept a
+    // specific document.
+    let org_domain = match db::get_user_by_id(&state.store, user_id).await {
+        Ok(Some(u)) => match (u.org_domain, u.org_id) {
+            (Some(domain), _) => Some(domain),
+            (None, Some(org_id)) => db::get_organization_domain(&state.store, &org_id)
                 .await
                 .unwrap_or(None),
-            None => None,
+            (None, None) => None,
         },
         _ => None,
     };
     (hardware_aaguid, org_domain)
 }
 
+/// How a test session's access token is bound to the party that may present
+/// it, named the way a fixture site knows it: by thumbprint.
+///
+/// The production `TokenBinding` takes a
+/// `ValidatedDpopProof` witness rather than a bare `jkt`, so a sender-constrained
+/// token cannot be minted from a string that never passed proof validation.
+/// [`create_test_session_with`] stands that witness up.
+pub enum TestBinding<'a> {
+    /// A bearer token: whoever holds it may present it.
+    Bearer,
+    /// RFC 9449 §6: `cnf.jkt` set to this JWK thumbprint.
+    Dpop(&'a str),
+    /// RFC 8705 §3.1: `cnf.x5t#S256` set to this certificate thumbprint.
+    Mtls(&'a CertThumbprint),
+}
+
+/// The authentication assurance a test session's token claims.
+///
+/// The first two variants map onto `HardwareVerification` and travel the
+/// ordinary issuance path. The third does not — see its docs.
+pub enum TestVerification {
+    /// A FIDO2 assertion happened: `hardware_verified: true`, `amr: [hwk, pin,
+    /// user]`, `acr: aal3`. `auth_time` is when it happened; `None` models
+    /// verification inherited from another token (RFC 8693 token exchange runs
+    /// no ceremony of its own).
+    Verified {
+        /// When the assertion happened, at full precision. The token's
+        /// `auth_time` claim is its whole second; the session row records
+        /// the full instant.
+        auth_time: Option<jiff::Timestamp>,
+    },
+    /// No FIDO2 assertion: `hardware_verified: false`, no `auth_time`, no
+    /// `amr`/`acr`. The enrollment-bootstrap shape in `handlers/enroll.rs` —
+    /// a real user and a persisted session minted right after upstream IdP
+    /// sign-in.
+    NotVerified,
+    /// A token this deployment's issuer cannot produce: `hardware_verified`
+    /// false alongside an `auth_time` a freshness gate would read as recent
+    /// FIDO2. `HardwareVerification::NotVerified` has nowhere to put a
+    /// timestamp, so the combination is unrepresentable by design (issue
+    /// #1114) and this variant reaches it by mutating a minted token's claims
+    /// and re-signing.
+    ///
+    /// That is the point: it produces what an older server's token, or a
+    /// future regression, would put in front of the key handlers. Every claim
+    /// other than `auth_time` and `jti` is whatever the production issuer
+    /// produced, so a claim added later travels here automatically instead of
+    /// silently diverging.
+    ///
+    /// Leaves two session rows for the user: the base token's and the mutated
+    /// one's. [`create_test_session_with`] returns the mutated token.
+    NotVerifiedForgedAuthTime {
+        /// The `auth_time` to stamp on a session that ran no ceremony.
+        auth_time: i64,
+    },
+}
+
+/// Knobs that test-session fixture sites actually vary.
+///
+/// The canonical way to build a session; [`create_test_session_with`] is the
+/// only place a `CreateOAuthTokenParams` literal is spelled out for tests.
+/// `Default` supplies the ordinary hardware-verified bearer session, so a test
+/// names only the axis it is about:
+///
+/// ```rust,ignore
+/// let token = create_test_session_with(&state, TestSessionSpec {
+///     user_id: &user.id,
+///     email: &user.email,
+///     auth_id: Some(&auth_id),
+///     binding: TestBinding::Dpop(&jkt),
+///     ..Default::default()
+/// })
+/// .await;
+/// ```
+pub struct TestSessionSpec<'a> {
+    /// Subject of the token. Required — the default is empty and rejected.
+    pub user_id: &'a str,
+    /// Email claim and session-row email. Required — the default is empty and
+    /// rejected.
+    pub email: &'a str,
+    /// Authenticator establishing the session, recorded server-side on the
+    /// session row and used to resolve the `hardware_aaguid` snapshot.
+    /// Default: `None`, the shape of a session minted before any key exists.
+    pub auth_id: Option<&'a str>,
+    /// OAuth client the token is issued to. Default: `None`, meaning this
+    /// deployment's own `base_url` (first-party CLI/UI sessions).
+    pub client_id: Option<&'a str>,
+    /// RFC 8707 resource / RFC 8693 audience narrowing. Default: `None`,
+    /// meaning `aud == client_id`.
+    pub audience: Option<&'a str>,
+    /// Sender-constraining. Default: [`TestBinding::Bearer`].
+    pub binding: TestBinding<'a>,
+    /// Authentication assurance. Default: [`TestVerification::Verified`] with
+    /// `auth_time` now.
+    pub verification: TestVerification,
+    /// Granted scope. Default: `None`, meaning every scope. A scope without
+    /// `email` mints a token with no `email` claim.
+    pub scope: Option<ScopeSet>,
+}
+
+impl Default for TestSessionSpec<'_> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test fixtures construct their own instants"
+    )]
+    fn default() -> Self {
+        Self {
+            user_id: "",
+            email: "",
+            auth_id: Option::None,
+            client_id: Option::None,
+            audience: Option::None,
+            binding: TestBinding::Bearer,
+            verification: TestVerification::Verified {
+                auth_time: Some(jiff::Timestamp::now()),
+            },
+            scope: Option::None,
+        }
+    }
+}
+
 /// Create a test session with an OAuth access token stored in the database.
 ///
 /// Returns the raw access token string. Uses the real `create_oauth_access_token`
 /// service function with ES256 signing so the token validates through the full
-/// token validation pipeline.
-pub async fn create_test_session(
-    state: &AppState,
-    user_id: &str,
-    email: &str,
-    auth_id: &str,
-) -> String {
-    use crate::services::auth::{
-        ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenBinding,
-        TokenIssuanceProof, create_oauth_access_token,
-    };
-    use crate::services::oidc::ScopeSet;
-    use secrecy::ExposeSecret;
-
-    let (hardware_aaguid, org_domain) =
-        resolve_session_snapshot(state, user_id, Some(auth_id)).await;
-
-    let result = create_oauth_access_token(
-        state,
-        CreateOAuthTokenParams {
-            user_id,
-            email,
-            authenticator_id: Some(auth_id),
-            client_id: &state.config().base_url,
-            scope: Some(ScopeSet::all()),
-            binding: TokenBinding::Bearer,
-            act: None,
-            audience: None,
-            auth_time: Some(jiff::Timestamp::now().as_second()),
-            hardware_verification: crate::services::auth::HardwareVerification::Verified,
-            session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
-            authorization_details: None,
-            hardware_aaguid: hardware_aaguid.as_deref(),
-            org_domain: org_domain.as_deref(),
-        },
-        TokenIssuanceProof {
-            grant: GrantProof::TestingOnly,
-            client_auth: ClientAuthProof::NoAuth(
-                crate::services::auth::NoClientAuth::internal_endpoint(),
-            ),
-            sender_constraint: SenderConstraintProof::no_registered_client(),
-        },
-    )
-    .await
-    .expect("Failed to create test session");
-
-    result.token.expose_secret().to_string()
-}
-
-/// Create a test session whose access token is narrowed to an explicit
-/// audience (RFC 8707 resource / RFC 8693 audience).
-///
-/// Mirrors [`create_test_session`] but passes `audience: Some(..)`, so the
-/// minted token has `aud != client_id` and exercises the audience-coverage
-/// enforcement in `extract_resource_token` without driving the full
-/// authorization-code flow. `client_id` is explicit so tests can bind the
-/// token to a registered OAuth client (e.g. for the introspection
-/// cross-client check); pass `&state.config().base_url` to mirror
-/// [`create_test_session`].
-pub async fn create_test_session_with_audience(
-    state: &AppState,
-    user_id: &str,
-    email: &str,
-    auth_id: &str,
-    client_id: &str,
-    audience: &str,
-) -> String {
-    use crate::services::auth::{
-        ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenBinding,
-        TokenIssuanceProof, create_oauth_access_token,
-    };
-    use crate::services::oidc::ScopeSet;
-    use secrecy::ExposeSecret;
-
-    let (hardware_aaguid, org_domain) =
-        resolve_session_snapshot(state, user_id, Some(auth_id)).await;
-
-    let result = create_oauth_access_token(
-        state,
-        CreateOAuthTokenParams {
-            user_id,
-            email,
-            authenticator_id: Some(auth_id),
-            client_id,
-            scope: Some(ScopeSet::all()),
-            binding: TokenBinding::Bearer,
-            act: None,
-            audience: Some(audience),
-            auth_time: Some(jiff::Timestamp::now().as_second()),
-            hardware_verification: crate::services::auth::HardwareVerification::Verified,
-            session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
-            authorization_details: None,
-            hardware_aaguid: hardware_aaguid.as_deref(),
-            org_domain: org_domain.as_deref(),
-        },
-        TokenIssuanceProof {
-            grant: GrantProof::TestingOnly,
-            client_auth: ClientAuthProof::NoAuth(
-                crate::services::auth::NoClientAuth::internal_endpoint(),
-            ),
-            sender_constraint: SenderConstraintProof::no_registered_client(),
-        },
-    )
-    .await
-    .expect("Failed to create audience-narrowed test session");
-
-    result.token.expose_secret().to_string()
-}
-
-/// Create a test session backed by a non-hardware-verified access token.
-///
-/// Mirrors the enrollment-bootstrap shape in `handlers/enroll.rs`: a real
-/// user, a persisted session, but `HardwareVerification::NotVerified`.
-/// Used to verify that paths gated on hardware attestation reject these
-/// sessions (e.g., the RFC 8693 ID-token fork).
-pub async fn create_test_bootstrap_session(state: &AppState, user_id: &str, email: &str) -> String {
-    use crate::services::auth::{
-        ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenBinding,
-        TokenIssuanceProof, create_oauth_access_token,
-    };
-    use crate::services::oidc::ScopeSet;
-    use secrecy::ExposeSecret;
-
-    let (_, org_domain) = resolve_session_snapshot(state, user_id, None).await;
-
-    let result = create_oauth_access_token(
-        state,
-        CreateOAuthTokenParams {
-            user_id,
-            email,
-            authenticator_id: None,
-            client_id: &state.config().base_url,
-            scope: Some(ScopeSet::all()),
-            binding: TokenBinding::Bearer,
-            act: None,
-            audience: None,
-            auth_time: Some(jiff::Timestamp::now().as_second()),
-            hardware_verification: crate::services::auth::HardwareVerification::NotVerified,
-            session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
-            authorization_details: None,
-            hardware_aaguid: None,
-            org_domain: org_domain.as_deref(),
-        },
-        TokenIssuanceProof {
-            grant: GrantProof::TestingOnly,
-            client_auth: ClientAuthProof::NoAuth(
-                crate::services::auth::NoClientAuth::internal_endpoint(),
-            ),
-            sender_constraint: SenderConstraintProof::no_registered_client(),
-        },
-    )
-    .await
-    .expect("Failed to create bootstrap test session");
-
-    result.token.expose_secret().to_string()
-}
-
-/// Like [`create_test_bootstrap_session`], but with an `authenticator_id`
-/// attached so the access token's `hardware_verified` claim is `false`
-/// while the session record still references a key.
-///
-/// This reproduces the #451 token-laundering scenario: a re-enrollment
-/// bootstrap session for a user who already has a registered security
-/// key has `authenticator_id = Some(_)` and `hardware_verified = false`.
-/// Hardware-gated handlers must reject it.
-pub async fn create_test_bootstrap_session_with_authenticator(
-    state: &AppState,
-    user_id: &str,
-    email: &str,
-    auth_id: &str,
-) -> String {
-    use crate::services::auth::{
-        ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenBinding,
-        TokenIssuanceProof, create_oauth_access_token,
-    };
-    use crate::services::oidc::ScopeSet;
-    use secrecy::ExposeSecret;
-
-    let (hardware_aaguid, org_domain) =
-        resolve_session_snapshot(state, user_id, Some(auth_id)).await;
-
-    let result = create_oauth_access_token(
-        state,
-        CreateOAuthTokenParams {
-            user_id,
-            email,
-            authenticator_id: Some(auth_id),
-            client_id: &state.config().base_url,
-            scope: Some(ScopeSet::all()),
-            binding: TokenBinding::Bearer,
-            act: None,
-            audience: None,
-            auth_time: Some(jiff::Timestamp::now().as_second()),
-            hardware_verification: crate::services::auth::HardwareVerification::NotVerified,
-            session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
-            authorization_details: None,
-            hardware_aaguid: hardware_aaguid.as_deref(),
-            org_domain: org_domain.as_deref(),
-        },
-        TokenIssuanceProof {
-            grant: GrantProof::TestingOnly,
-            client_auth: ClientAuthProof::NoAuth(
-                crate::services::auth::NoClientAuth::internal_endpoint(),
-            ),
-            sender_constraint: SenderConstraintProof::no_registered_client(),
-        },
-    )
-    .await
-    .expect("Failed to create bootstrap test session with authenticator");
-
-    result.token.expose_secret().to_string()
-}
-
-/// Create a test session with a custom `iat`-equivalent auth_time.
-///
-/// Used for step-up authentication tests (RFC 9470) where the auth_time
-/// relative to now determines whether the operation is allowed.
-pub async fn create_test_session_with_iat(
-    state: &AppState,
-    user_id: &str,
-    email: &str,
-    auth_id: &str,
-    iat: i64,
-) -> String {
-    use crate::services::auth::{
-        ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenBinding,
-        TokenIssuanceProof, create_oauth_access_token,
-    };
-    use crate::services::oidc::ScopeSet;
-    use secrecy::ExposeSecret;
-
-    let (hardware_aaguid, org_domain) =
-        resolve_session_snapshot(state, user_id, Some(auth_id)).await;
-
-    let result = create_oauth_access_token(
-        state,
-        CreateOAuthTokenParams {
-            user_id,
-            email,
-            authenticator_id: Some(auth_id),
-            client_id: &state.config().base_url,
-            scope: Some(ScopeSet::all()),
-            binding: TokenBinding::Bearer,
-            act: None,
-            audience: None,
-            auth_time: Some(iat),
-            hardware_verification: crate::services::auth::HardwareVerification::Verified,
-            session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
-            authorization_details: None,
-            hardware_aaguid: hardware_aaguid.as_deref(),
-            org_domain: org_domain.as_deref(),
-        },
-        TokenIssuanceProof {
-            grant: GrantProof::TestingOnly,
-            client_auth: ClientAuthProof::NoAuth(
-                crate::services::auth::NoClientAuth::internal_endpoint(),
-            ),
-            sender_constraint: SenderConstraintProof::no_registered_client(),
-        },
-    )
-    .await
-    .expect("Failed to create test session");
-
-    result.token.expose_secret().to_string()
-}
-
-/// Create a test session bound to a specific OAuth client.
-///
-/// Used for tests that require the token's `client_id` to match a specific
-/// OAuth client (e.g., introspection cross-client checks).
-pub async fn create_test_session_for_client(
-    state: &AppState,
-    user_id: &str,
-    email: &str,
-    auth_id: &str,
-    client_id: &str,
-) -> String {
-    use crate::services::auth::{
-        ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenBinding,
-        TokenIssuanceProof, create_oauth_access_token,
-    };
-    use crate::services::oidc::ScopeSet;
-    use secrecy::ExposeSecret;
-
-    let (hardware_aaguid, org_domain) =
-        resolve_session_snapshot(state, user_id, Some(auth_id)).await;
-
-    let result = create_oauth_access_token(
-        state,
-        CreateOAuthTokenParams {
-            user_id,
-            email,
-            authenticator_id: Some(auth_id),
-            client_id,
-            scope: Some(ScopeSet::all()),
-            binding: TokenBinding::Bearer,
-            act: None,
-            audience: None,
-            auth_time: Some(jiff::Timestamp::now().as_second()),
-            hardware_verification: crate::services::auth::HardwareVerification::Verified,
-            session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
-            authorization_details: None,
-            hardware_aaguid: hardware_aaguid.as_deref(),
-            org_domain: org_domain.as_deref(),
-        },
-        TokenIssuanceProof {
-            grant: GrantProof::TestingOnly,
-            client_auth: ClientAuthProof::NoAuth(
-                crate::services::auth::NoClientAuth::internal_endpoint(),
-            ),
-            sender_constraint: SenderConstraintProof::no_registered_client(),
-        },
-    )
-    .await
-    .expect("Failed to create test session");
-
-    result.token.expose_secret().to_string()
-}
-
-/// Create a test session with a DPoP binding (sender-constrained token).
-///
-/// The token will have a `cnf.jkt` claim, making it a sender-constrained
-/// token that requires DPoP proof for validation.
-pub async fn create_test_session_with_dpop(
-    state: &AppState,
-    user_id: &str,
-    email: &str,
-    auth_id: &str,
-    dpop_jkt: &str,
-) -> String {
+/// token validation pipeline, and resolves the `hardware_aaguid` / `org_domain`
+/// snapshot the way production call sites do.
+pub async fn create_test_session_with(state: &AppState, spec: TestSessionSpec<'_>) -> String {
+    use crate::assurance::HardwareVerification;
     use crate::services::auth::{
         ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenBinding,
         TokenIssuanceProof, create_oauth_access_token,
@@ -1220,98 +1519,333 @@ pub async fn create_test_session_with_dpop(
     use crate::services::oidc::{ScopeSet, ValidatedDpopProof};
     use secrecy::ExposeSecret;
 
-    let (hardware_aaguid, org_domain) =
-        resolve_session_snapshot(state, user_id, Some(auth_id)).await;
+    assert!(
+        !spec.user_id.is_empty() && !spec.email.is_empty(),
+        "TestSessionSpec requires user_id and email; struct-update syntax defaults them to empty"
+    );
 
-    // Fixtures name the binding by thumbprint, so stand up the witness the
-    // issuance path now requires. Only reachable under `cfg(test)` /
+    let (hardware_aaguid, org_domain) =
+        resolve_session_snapshot(state, spec.user_id, spec.auth_id).await;
+
+    let config = state.config();
+    let client_id = spec.client_id.unwrap_or(&config.base_url);
+
+    // Fixtures name a DPoP binding by thumbprint, so stand up the witness the
+    // issuance path requires. Only reachable under `cfg(test)` /
     // `feature = "test-utils"`.
-    let dpop_proof =
-        ValidatedDpopProof::for_testing(dpop_jkt.to_string(), format!("test-jti-{dpop_jkt}"), None);
+    let dpop_witness = match spec.binding {
+        TestBinding::Dpop(jkt) => Some(ValidatedDpopProof::for_testing(
+            jkt.to_string(),
+            format!("test-jti-{jkt}"),
+            Option::None,
+        )),
+        TestBinding::Bearer | TestBinding::Mtls(_) => Option::None,
+    };
+    let mtls_thumbprint = match spec.binding {
+        TestBinding::Mtls(thumbprint) => Some(thumbprint),
+        TestBinding::Bearer | TestBinding::Dpop(_) => Option::None,
+    };
+
+    let hardware_verification = match spec.verification {
+        TestVerification::Verified { auth_time } => HardwareVerification::Verified { auth_time },
+        // The forged variant mints an unverified token and mutates it below;
+        // the issuer has no way to stamp the `auth_time` it wants.
+        TestVerification::NotVerified | TestVerification::NotVerifiedForgedAuthTime { .. } => {
+            HardwareVerification::NotVerified
+        }
+    };
 
     let result = create_oauth_access_token(
         state,
         CreateOAuthTokenParams {
-            user_id,
-            email,
-            authenticator_id: Some(auth_id),
-            client_id: &state.config().base_url,
-            scope: Some(ScopeSet::all()),
-            binding: TokenBinding::new(Some(&dpop_proof), None),
-            act: None,
-            audience: None,
-            auth_time: Some(jiff::Timestamp::now().as_second()),
-            hardware_verification: crate::services::auth::HardwareVerification::Verified,
-            session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
-            authorization_details: None,
+            user_id: spec.user_id,
+            email: spec.email,
+            authenticator_id: spec.auth_id,
+            client_id,
+            scope: Some(spec.scope.clone().unwrap_or_else(ScopeSet::all)),
+            binding: TokenBinding::new(dpop_witness.as_ref(), mtls_thumbprint),
+            act: Option::None,
+            audience: spec.audience,
+            max_lifetime_secs: Option::None,
+            hardware_verification,
+            session_purpose: SessionPurpose::OAuthAccessToken,
+            authorization_details: Option::None,
             hardware_aaguid: hardware_aaguid.as_deref(),
             org_domain: org_domain.as_deref(),
+            source_code_hash: Option::None,
         },
         TokenIssuanceProof {
             grant: GrantProof::TestingOnly,
-            client_auth: ClientAuthProof::NoAuth(
-                crate::services::auth::NoClientAuth::internal_endpoint(),
-            ),
+            client_auth: ClientAuthProof::NoAuth(NoClientAuth::internal_endpoint()),
             sender_constraint: SenderConstraintProof::no_registered_client(),
+        },
+        test_arrival(),
+    )
+    .await
+    .expect("Failed to create test session");
+
+    let token = result.token.expose_secret().to_string();
+
+    let TestVerification::NotVerifiedForgedAuthTime { auth_time } = spec.verification else {
+        return token;
+    };
+    forge_auth_time(state, &spec, &token, auth_time).await
+}
+
+/// Re-sign `base` with `auth_time` stamped onto claims the issuer produced
+/// without one, and persist a session row for the result.
+///
+/// Split out because it is the whole of
+/// [`TestVerification::NotVerifiedForgedAuthTime`]: derive from a real token,
+/// change the single field under test, leave everything else alone.
+async fn forge_auth_time(
+    state: &AppState,
+    spec: &TestSessionSpec<'_>,
+    base: &str,
+    auth_time: i64,
+) -> String {
+    use crate::services::auth::{DecodedToken, decode_token};
+
+    let DecodedToken::AccessToken(mut claims) =
+        decode_token(base, &state.oidc_key, &state.config().base_url)
+            .expect("the token this deployment just minted must decode");
+
+    assert!(
+        !claims.hardware_verified,
+        "the base token must be unverified for this fixture to mean anything"
+    );
+    claims.auth_time = Some(auth_time);
+    claims.jti = uuid::Uuid::now_v7().to_string();
+
+    let token = state
+        .oidc_key
+        .sign_access_token_jwt(&claims)
+        .await
+        .expect("Failed to sign the forged-auth_time access token");
+
+    let (hardware_aaguid, org_domain) =
+        resolve_session_snapshot(state, spec.user_id, spec.auth_id).await;
+    let expires_at = jiff::Timestamp::from_second(claims.exp).expect("valid expiry");
+    db::create_session(
+        &state.store,
+        &CreateSessionParams {
+            user_id: spec.user_id,
+            user_email: spec.email,
+            token_hash: &crypto::hash_token(&token),
+            authenticator_id: Option::None,
+            expires_at,
+            session_type: SessionPurpose::OAuthAccessToken,
+            authorization_details: Option::None,
+            hardware_aaguid: hardware_aaguid.as_deref(),
+            org_domain: org_domain.as_deref(),
+            client_id: Some(&claims.client_id),
+            source_code_hash: Option::None,
+            authenticated_at: None,
         },
     )
     .await
-    .expect("Failed to create DPoP-bound test session");
+    .expect("Failed to persist the forged-auth_time session");
 
-    result.token.expose_secret().to_string()
+    token
 }
 
-/// Create an mTLS certificate-bound access token for testing.
+/// Re-sign `base` with a custom `exp` claim stamped onto its claims and
+/// persist a session row for the new token.
 ///
-/// The token includes `cnf.x5t#S256` set to `mtls_cert_thumbprint`, binding it to
-/// the certificate identified by that thumbprint per RFC 8705 Section 3.1.
-pub async fn create_test_session_with_mtls(
+/// The base token is minted by [`create_test_session_with`] (with its full
+/// `session_hours` lifetime), so this is the way a test produces a
+/// still-decodable (non-expired), session-backed access token with a
+/// shorter-than-default remaining TTL — the exact shape an RFC 8693
+/// `subject_token` must have to exercise the subject-TTL cap. The returned
+/// token is signed with this server's key, decodes via
+/// [`crate::services::auth::decode_token`], and its `sessions` row is found
+/// by the exchange path's `get_session_by_token_hash` lookup, so a token
+/// exchange request submitted with it as `subject_token` walks the whole
+/// production validation path.
+///
+/// `exp_seconds_from_now` must be positive; the resulting token must still
+/// be valid at the time `decode_token` runs in `exchange_token` (no leeway,
+/// see `crypto::jwt`).
+///
+/// Takes `user_id`/`email`/`auth_id` directly rather than a
+/// [`TestSessionSpec`] so a test that has already moved a `spec` into
+/// [`create_test_session_with`] to mint `base` can still call this helper
+/// without rebuilding or cloning the struct.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test fixtures construct their own instants"
+)]
+pub async fn forge_short_lived_access_token(
     state: &AppState,
     user_id: &str,
     email: &str,
-    auth_id: &str,
-    mtls_cert_thumbprint: &crate::services::oidc::mtls::CertThumbprint,
+    auth_id: Option<&str>,
+    base: &str,
+    exp_seconds_from_now: i64,
 ) -> String {
-    use crate::services::auth::{
-        ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenBinding,
-        TokenIssuanceProof, create_oauth_access_token,
-    };
-    use crate::services::oidc::ScopeSet;
-    use secrecy::ExposeSecret;
+    use crate::services::auth::{DecodedToken, decode_token};
 
-    let (hardware_aaguid, org_domain) =
-        resolve_session_snapshot(state, user_id, Some(auth_id)).await;
+    assert!(
+        exp_seconds_from_now > 0,
+        "exp_seconds_from_now must be positive so the forged subject token is still valid"
+    );
 
-    let result = create_oauth_access_token(
-        state,
-        CreateOAuthTokenParams {
+    let DecodedToken::AccessToken(mut claims) =
+        decode_token(base, &state.oidc_key, &state.config().base_url)
+            .expect("the token this deployment just minted must decode");
+
+    let now = jiff::Timestamp::now().as_second();
+    claims.exp = now
+        .checked_add(exp_seconds_from_now)
+        .expect("exp_seconds_from_now fits in i64");
+    // Keep `nbf`/`iat` honest so nothing else about the token contradicts
+    // the shortened lifetime; `jti` must change so the new token's hash is
+    // distinct from the base token's.
+    claims.iat = now;
+    claims.nbf = Some(now);
+    claims.jti = uuid::Uuid::now_v7().to_string();
+
+    let token = state
+        .oidc_key
+        .sign_access_token_jwt(&claims)
+        .await
+        .expect("Failed to sign the short-lived access token");
+
+    let (hardware_aaguid, org_domain) = resolve_session_snapshot(state, user_id, auth_id).await;
+    let expires_at =
+        jiff::Timestamp::from_second(claims.exp).expect("the forged exp is a valid Unix second");
+    db::create_session(
+        &state.store,
+        &CreateSessionParams {
             user_id,
-            email,
-            authenticator_id: Some(auth_id),
-            client_id: &state.config().base_url,
-            scope: Some(ScopeSet::all()),
-            binding: TokenBinding::new(None, Some(mtls_cert_thumbprint)),
-            act: None,
-            audience: None,
-            auth_time: Some(jiff::Timestamp::now().as_second()),
-            hardware_verification: crate::services::auth::HardwareVerification::Verified,
-            session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
-            authorization_details: None,
+            user_email: email,
+            token_hash: &crypto::hash_token(&token),
+            authenticator_id: Option::None,
+            expires_at,
+            session_type: SessionPurpose::OAuthAccessToken,
+            authorization_details: Option::None,
             hardware_aaguid: hardware_aaguid.as_deref(),
             org_domain: org_domain.as_deref(),
-        },
-        TokenIssuanceProof {
-            grant: GrantProof::TestingOnly,
-            client_auth: ClientAuthProof::NoAuth(
-                crate::services::auth::NoClientAuth::internal_endpoint(),
-            ),
-            sender_constraint: SenderConstraintProof::no_registered_client(),
+            source_code_hash: Option::None,
+            authenticated_at: None,
+            client_id: Some(&claims.client_id),
         },
     )
     .await
-    .expect("Failed to create mTLS-bound test session");
+    .expect("Failed to persist the short-lived session");
 
-    result.token.expose_secret().to_string()
+    token
+}
+
+/// Seed an already-expired session row for `user_id`/`email` keyed to an
+/// opaque cookie value, and return `(cookie, token_hash)`.
+///
+/// The logout handlers hash the cookie and match rows by `token_hash`; they
+/// never decode a JWT, so an opaque cookie is the faithful fixture. The row's
+/// `expires_at` is one second in the past, which is the expired-but-not-yet-
+/// reaped window: the expiry-filtering `get_session_by_token_hash` answers
+/// `None` while the row still exists. `client_id` is the OAuth client the row
+/// records it was issued to, and `purpose` is the row's session purpose.
+///
+/// For a `client_credentials` (M2M) row pass `SessionPurpose::M2MAccessToken`
+/// with `user_id` set to the client's `client_id` and an empty `email`: that is
+/// the shape `client_credentials.rs` persists, since there is no user. The
+/// equality is Vouch's own storage choice. RFC 9068 §2.2 constrains only the
+/// token's `sub` claim, which "SHOULD correspond to an identifier the
+/// authorization server uses to indicate the client application"; it says
+/// nothing about how the authorization server stores the session.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test fixtures construct their own instants"
+)]
+pub async fn create_test_expired_session_row(
+    state: &AppState,
+    user_id: &str,
+    email: &str,
+    client_id: Option<&str>,
+    purpose: SessionPurpose,
+) -> (String, String) {
+    let token = format!("expired-cookie-{}", uuid::Uuid::now_v7());
+    let token_hash = crypto::hash_token(&token);
+    let expires_at = jiff::Timestamp::now()
+        .checked_sub(jiff::Span::new().seconds(1))
+        .expect("backdate session row by 1s");
+    db::create_session(
+        &state.store,
+        &CreateSessionParams {
+            user_id,
+            user_email: email,
+            token_hash: &token_hash,
+            authenticator_id: Option::None,
+            expires_at,
+            session_type: purpose,
+            authorization_details: Option::None,
+            hardware_aaguid: Option::None,
+            org_domain: Option::None,
+            client_id,
+            source_code_hash: Option::None,
+            authenticated_at: None,
+        },
+    )
+    .await
+    .expect("create expired session row");
+    (token, token_hash)
+}
+
+/// Assert that every audit row of `event_type` records the test harness's
+/// peer IP and the given `User-Agent`, and that at least one such row exists.
+///
+/// The `http_*` helpers inject `ConnectInfo(127.0.0.1)` and `test_config()`
+/// sets no `trusted_proxies`, so the `ClientInfo` extractor resolves
+/// `127.0.0.1`. A row with a null `client_ip` or `user_agent` means the writer
+/// dropped the request's transport metadata.
+pub async fn assert_audit_rows_record_transport(
+    state: &AppState,
+    event_type: &str,
+    user_agent: &str,
+) {
+    let events = state
+        .audit
+        .query_events(&AuditEventFilter {
+            event_types: Some(vec![event_type.to_string()]),
+            ..Default::default()
+        })
+        .await
+        .expect("query audit events");
+    assert!(!events.is_empty(), "expected at least one {event_type} row");
+    for event in &events {
+        let data: serde_json::Value =
+            serde_json::from_str(&event.data).expect("audit row data is valid JSON");
+        assert_eq!(
+            data.get("client_ip").and_then(|v| v.as_str()),
+            Some("127.0.0.1"),
+            "{event_type} row must record the requester's IP: {data}"
+        );
+        assert_eq!(
+            data.get("user_agent").and_then(|v| v.as_str()),
+            Some(user_agent),
+            "{event_type} row must record the requester's User-Agent: {data}"
+        );
+    }
+}
+
+/// Create an org with an admin user, a FIDO2-verified session, and return
+/// the admin plus the session's raw access token.
+pub async fn create_test_org_admin(state: &AppState) -> (User, String) {
+    let org = create_test_org(&state.store, "example.com").await;
+    let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
+    let auth_id = create_test_authenticator(&state.store, &admin.id).await;
+    let token = create_test_session_with(
+        state,
+        TestSessionSpec {
+            user_id: &admin.id,
+            email: &admin.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    (admin, token)
 }
 
 /// Create an organization API token for testing, bound to the given org,
@@ -1326,7 +1860,20 @@ pub async fn create_test_org_token_with_scope(
     store: &DocumentStore,
     description: &str,
     org_id: &str,
-    scope: crate::db::ScimScopeSet,
+    scope: ScimScopeSet,
+) -> String {
+    create_test_org_token_with_scope_expiring(store, description, org_id, scope, None).await
+}
+
+/// [`create_test_org_token_with_scope`] with an explicit expiry, for tests
+/// about the active-token cap: `Some(past)` seeds an expired-but-present row,
+/// `Some(future)` a live one.
+pub async fn create_test_org_token_with_scope_expiring(
+    store: &DocumentStore,
+    description: &str,
+    org_id: &str,
+    scope: ScimScopeSet,
+    expires_at: Option<jiff::Timestamp>,
 ) -> String {
     use aws_lc_rs::digest::{self, SHA256};
     use aws_lc_rs::rand as aws_rand;
@@ -1345,7 +1892,7 @@ pub async fn create_test_org_token_with_scope(
     // the org must exist. Tests pass opaque ids like "test-org" rather than
     // building an org first, so seed one on demand.
     if store
-        .get::<crate::db::documents::organization::OrganizationDoc>(org_id)
+        .get::<OrganizationDoc>(org_id)
         .await
         .expect("look up test org")
         .is_none()
@@ -1353,9 +1900,9 @@ pub async fn create_test_org_token_with_scope(
         store
             .insert_with_id(
                 org_id,
-                &crate::db::documents::organization::OrganizationDoc {
+                &OrganizationDoc {
                     // ".example" alone is a reserved TLD (RESERVED_TLDS) and
-                    // is rejected by `normalize_domain`, which SCIM user
+                    // is rejected by `Domain::parse`, which SCIM user
                     // creation now runs the candidate email's domain
                     // through — use the RFC 2606 second-level reservation
                     // instead so per-org_id domains stay both valid and
@@ -1372,13 +1919,13 @@ pub async fn create_test_org_token_with_scope(
     }
 
     // Store in database with org_id so authenticate_scim accepts it
-    crate::db::create_scim_token(
+    db::create_scim_token(
         store,
-        &crate::db::CreateScimTokenParams {
+        &CreateScimTokenParams {
             org_id,
             token_hash: &token_hash,
             description: Some(description),
-            expires_at: None,
+            expires_at,
             scope,
         },
     )
@@ -1395,11 +1942,22 @@ pub async fn create_test_scim_token(
     description: &str,
     org_id: &str,
 ) -> String {
-    create_test_org_token_with_scope(
+    create_test_org_token_with_scope(store, description, org_id, ScimScopeSet::default()).await
+}
+
+/// [`create_test_scim_token`] with an explicit expiry.
+pub async fn create_test_scim_token_expiring(
+    store: &DocumentStore,
+    description: &str,
+    org_id: &str,
+    expires_at: Option<jiff::Timestamp>,
+) -> String {
+    create_test_org_token_with_scope_expiring(
         store,
         description,
         org_id,
-        crate::db::ScimScopeSet::default(),
+        ScimScopeSet::default(),
+        expires_at,
     )
     .await
 }
@@ -1416,7 +1974,7 @@ pub async fn create_test_audit_token(
         store,
         description,
         org_id,
-        crate::db::ScimScopeSet::from_scopes(vec![crate::db::ScimScope::AuditRead]),
+        ScimScopeSet::from_scopes(vec![ScimScope::AuditRead]),
     )
     .await
 }
@@ -1456,17 +2014,17 @@ pub struct TestClientSpec {
     /// OAuth client display name. Default: `"Test App"`.
     pub name: String,
     /// Client application type. Default: `OAuthClientType::Web`.
-    pub application_type: crate::db::OAuthClientType,
+    pub application_type: OAuthClientType,
     /// Registered redirect URIs. Default: `["https://example.com/callback"]`.
     pub redirect_uris: Vec<String>,
     /// Access scope (Personal vs Public). Default: `AccessScope::Public`.
-    pub access_scope: crate::db::AccessScope,
+    pub access_scope: AccessScope,
     /// Organisation the client belongs to. Default: `None`.
     pub org_id: Option<String>,
     /// Permitted resource URIs (RAR). Default: empty.
     pub resource_uris: Vec<String>,
     /// Token endpoint auth method override. Default: `None` (→ ClientSecretBasic).
-    pub token_endpoint_auth_method: Option<crate::db::TokenEndpointAuthMethod>,
+    pub token_endpoint_auth_method: Option<TokenEndpointAuthMethod>,
     /// JWKS to register with the client. Default: `TestJwks::None`.
     pub jwks: TestJwks,
     /// Remote JWKS URI to register. Default: `None`. Required for clients whose
@@ -1477,47 +2035,76 @@ pub struct TestClientSpec {
     pub dpop_bound_access_tokens: bool,
     /// Allowed grant types override. Default: `None`.
     pub grant_types: Option<Vec<String>>,
+    /// Registered `response_types`. Default: `None` (the authorization
+    /// endpoint treats an absent list as "defaults apply").
+    pub response_types: Option<Vec<String>>,
     /// FAPI security profile. Default: `None` (→ FapiProfile::None).
-    pub fapi_profile: Option<crate::db::FapiProfile>,
+    pub fapi_profile: Option<FapiProfile>,
     /// ID-token signing algorithm. Default: `JwsAlgorithm::Rs256`.
-    pub id_token_signed_response_alg: crate::crypto::alg::JwsAlgorithm,
+    pub id_token_signed_response_alg: JwsAlgorithm,
     /// mTLS subject DN for `tls_client_auth`. Default: `None`.
     pub tls_client_auth_subject_dn: Option<String>,
     /// Bind issued tokens to the mTLS certificate. Default: `false`.
     pub tls_client_certificate_bound_access_tokens: bool,
     /// UserInfo JWT signing algorithm override. Default: `None`.
-    pub userinfo_signed_response_alg: Option<crate::crypto::alg::JwsAlgorithm>,
+    pub userinfo_signed_response_alg: Option<JwsAlgorithm>,
     /// Introspection JWT signing algorithm override. Default: `None`.
-    pub introspection_signed_response_alg: Option<crate::crypto::alg::JwsAlgorithm>,
+    pub introspection_signed_response_alg: Option<JwsAlgorithm>,
     /// JARM response signing algorithm override. Default: `None` (ES256).
-    pub authorization_signed_response_alg: Option<crate::crypto::alg::JwsAlgorithm>,
+    pub authorization_signed_response_alg: Option<JwsAlgorithm>,
     /// Whether to mint a client secret. `false` for public/SPA clients. Default: `true`.
     pub with_secret: bool,
     /// Restrict request-object signing algorithm. Default: `None`.
-    pub request_object_signing_alg: Option<crate::crypto::alg::JwsAlgorithm>,
+    pub request_object_signing_alg: Option<JwsAlgorithm>,
     /// Require a signed request object (JAR). Default: `None`.
     pub require_signed_request_object: Option<bool>,
     /// Registered post-logout redirect URIs (RP-Initiated Logout). Default: empty.
     pub post_logout_redirect_uris: Vec<String>,
+    /// RFC 7592 registration access token hash. Default: `None` (no RFC 7592
+    /// management access — `lookup_and_verify_registration_token` treats a
+    /// client with no stored hash as `invalid_token`). Set this to exercise
+    /// the RFC 7592 GET/PUT/DELETE endpoints against a client built through
+    /// this factory rather than through `/oauth/register`.
+    pub registration_access_token_hash: Option<String>,
+}
+
+/// Every `grant_type` the token endpoint dispatches (`OAuthGrantType`), as the
+/// wire strings registration stores in `grant_types`. Test clients default to
+/// being authorized for *all* supported grants so a test that exercises, say,
+/// the token-exchange or fido2-assertion grant does not first have to opt into
+/// it — the grant_types authorization check (`is_authorized_for_grant`,
+/// RFC 6749 §5.2 `unauthorized_client`) would otherwise reject a client whose
+/// `grant_types` was left `None`. Tests that *verify* the authorization check
+/// restrict the client explicitly (e.g. `enable_grant_types(&["authorization_code"])`).
+#[must_use]
+pub fn all_supported_grant_types() -> Vec<String> {
+    OAuthGrantType::supported_wire_values()
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect()
 }
 
 impl Default for TestClientSpec {
     fn default() -> Self {
         Self {
             name: "Test App".to_string(),
-            application_type: crate::db::OAuthClientType::Web,
+            application_type: OAuthClientType::Web,
             redirect_uris: vec!["https://example.com/callback".to_string()],
             // Intentionally Public, not AccessScope::default() which is Personal.
-            access_scope: crate::db::AccessScope::Public,
+            access_scope: AccessScope::Public,
             org_id: Option::None,
             resource_uris: vec![],
             token_endpoint_auth_method: Option::None,
             jwks: TestJwks::None,
             jwks_uri: Option::None,
             dpop_bound_access_tokens: false,
-            grant_types: Option::None,
+            // Authorized for every grant by default (see `all_supported_grant_types`)
+            // so grant-exercising tests do not silently hit the §5.2
+            // `unauthorized_client` check. Restrict explicitly to test denial.
+            grant_types: Some(all_supported_grant_types()),
+            response_types: Option::None,
             fapi_profile: Option::None,
-            id_token_signed_response_alg: crate::crypto::alg::JwsAlgorithm::Rs256,
+            id_token_signed_response_alg: JwsAlgorithm::Rs256,
             tls_client_auth_subject_dn: Option::None,
             tls_client_certificate_bound_access_tokens: false,
             userinfo_signed_response_alg: Option::None,
@@ -1527,6 +2114,7 @@ impl Default for TestClientSpec {
             request_object_signing_alg: Option::None,
             require_signed_request_object: Option::None,
             post_logout_redirect_uris: vec![],
+            registration_access_token_hash: Option::None,
         }
     }
 }
@@ -1573,10 +2161,10 @@ pub async fn create_test_client(
 
     // `TestClientSpec` still offers the two knobs separately; pairing them here
     // is what a caller setting both would trip on, which mirrors the endpoints.
-    let client_keys = crate::db::ClientKeys::from_stored(jwks_value, spec.jwks_uri.clone())
+    let client_keys = ClientKeys::from_stored(jwks_value, spec.jwks_uri.clone())
         .expect("test spec sets jwks or jwks_uri, never both");
 
-    let (client, client_id) = crate::db::create_oauth_client(
+    let (client, client_id) = db::create_oauth_client(
         store,
         &CreateOAuthClientParams {
             user_id: Some(user_id),
@@ -1596,11 +2184,11 @@ pub async fn create_test_client(
                 Option::None
             },
             grant_types: spec.grant_types.as_deref(),
-            response_types: Option::None,
+            response_types: spec.response_types.as_deref(),
             software_id: Option::None,
             software_version: Option::None,
             registration_source: RegistrationSource::Manual,
-            registration_access_token_hash: Option::None,
+            registration_access_token_hash: spec.registration_access_token_hash.as_deref(),
             registration_metadata: Option::None,
             id_token_signed_response_alg: spec.id_token_signed_response_alg,
             tls_client_auth_subject_dn: spec.tls_client_auth_subject_dn.as_deref(),
@@ -1636,8 +2224,8 @@ pub async fn create_test_client(
         let mut secret_bytes = [0u8; 32];
         aws_rand::fill(&mut secret_bytes).expect("RNG failure");
         let raw = URL_SAFE_NO_PAD.encode(secret_bytes);
-        let secret_hash = crate::handlers::hash_token(&raw);
-        crate::db::create_oauth_client_secret(store, &client.id, &secret_hash, Some("test"), None)
+        let secret_hash = handlers::hash_token(&raw);
+        db::create_oauth_client_secret(store, &client.id, &secret_hash, Some("test"), None)
             .await
             .expect("Failed to create test OAuth client secret");
         raw
@@ -1657,6 +2245,54 @@ pub async fn create_test_oauth_client(store: &DocumentStore, user_id: &str) -> T
     create_test_client(store, user_id, TestClientSpec::default()).await
 }
 
+/// Spec for a pending OAuth authorization — the record the deferred authorize
+/// flow parks between the first `/oauth/authorize` leg and `/login`. The
+/// default is the ordinary case: `openid` scope, query response mode, no
+/// forced re-auth.
+#[derive(Default)]
+pub struct TestPendingAuthSpec<'a> {
+    /// Client the authorization belongs to. Required — the default is empty.
+    pub client_id: &'a str,
+    /// Space-delimited OIDC prompt set stored on the request. Default: `None`.
+    pub prompt: Option<&'a str>,
+    /// RFC 9470 maximum authentication age. Default: `None`.
+    pub max_age: Option<i64>,
+    /// Response mode stored on the request. Default: `query`.
+    pub response_mode: ResponseMode,
+    /// `state` stored on the request. Default: `None`.
+    pub state: Option<&'a str>,
+}
+
+/// Store a pending OAuth authorization and return its id.
+pub async fn create_test_pending_auth(
+    store: &DocumentStore,
+    spec: TestPendingAuthSpec<'_>,
+) -> String {
+    db::create_pending_oauth_authorization(
+        store,
+        CreatePendingOAuthParams {
+            client_id: spec.client_id,
+            redirect_uri: "https://example.com/callback",
+            response_type: "code",
+            state: spec.state,
+            scope: Some("openid"),
+            nonce: None,
+            code_challenge: None,
+            code_challenge_method: None,
+            resource: None,
+            acr_values: None,
+            max_age: spec.max_age,
+            prompt: spec.prompt,
+            dpop_jkt: None,
+            authorization_details: None,
+            response_mode: spec.response_mode,
+            par_request_uri: None,
+        },
+    )
+    .await
+    .expect("create pending oauth authorization")
+}
+
 /// Create a public OAuth client (no client secret, `token_endpoint_auth_method=none`).
 pub async fn create_test_public_oauth_client(
     store: &DocumentStore,
@@ -1667,8 +2303,8 @@ pub async fn create_test_public_oauth_client(
         user_id,
         TestClientSpec {
             name: "Public Test App".to_string(),
-            application_type: crate::db::OAuthClientType::Spa,
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::None),
+            application_type: OAuthClientType::Spa,
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::None),
             with_secret: false,
             ..Default::default()
         },
@@ -1686,13 +2322,23 @@ pub const TEST_JWT_SECRET: &[u8] = b"test-jwt-secret-for-unit-tests-only";
 /// Issuer URL for unit tests.
 pub const TEST_ISSUER: &str = "https://example.com";
 
+/// P-256 public key coordinates from RFC 7517 Appendix A.1, a point on the
+/// curve, for JWK fixtures that must pass `JwkEntry::decoding_key_for`.
+pub const TEST_JWK_EC_X: &str = "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU";
+/// See [`TEST_JWK_EC_X`].
+pub const TEST_JWK_EC_Y: &str = "x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0";
+/// RSA modulus from RFC 7517 Appendix A.1.
+pub const TEST_JWK_RSA_N: &str = "0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4cbbfAAtVT86zwu1RK7aPFFxuhDR1L6tSoc_BJECPebWKRXjBZCiFV4n3oknjhMstn64tZ_2W-5JsGY4Hc5n9yBXArwl93lqt7_RN5w6Cf0h4QyQ5v-65YGjQR0_FDW2QvzqY368QQMicAtaSqzs8KJZgnYb9c7d0zgdAZHzu6qMQvRL5hajrn1n91CbOpbISD08qNLyrdkt-bFTWhAI4vMQFh6WeZu0fM4lFd2NcRwr3XPksINHaQ-G_xBniIqbw0Ls1jF44-csFCur-kEgU8awapJzKnqDKgw";
+/// Ed25519 public key from RFC 8037 Appendix A.2.
+pub const TEST_JWK_ED25519_X: &str = "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo";
+
 /// Generate a fresh OIDC signing key for tests.
 /// Fuzzing entry: run arbitrary policy text through the production
 /// validation path (compose + lower + validate against the embedded Vouch
 /// schema). Must never panic — admin-supplied policy text reaches this
 /// path, and the release profile is `panic = "abort"`.
 pub fn fuzz_validate_policy_text(text: &str) {
-    let _result = crate::services::policy::validate_policy_text(text);
+    let _result = policy::validate_policy_text(text);
 }
 
 /// Fuzzing entry: run arbitrary history-event shapes through the runtime
@@ -1705,7 +2351,7 @@ pub fn fuzz_validate_policy_text(text: &str) {
 /// `rows` are `(event_type, user_id, data_json, secs_offset)` tuples, mapped
 /// through the same ingestion the production path uses.
 pub fn fuzz_evaluate_history(rows: &[(String, String, String, i64)]) {
-    crate::services::policy::fuzz_evaluate_history(rows);
+    policy::fuzz_evaluate_history(rows);
 }
 
 pub fn make_test_oidc_key() -> OidcSigningKey {
@@ -1744,6 +2390,10 @@ pub async fn make_test_access_token(key: &OidcSigningKey) -> String {
 ///
 /// `jti: None` generates a fresh UUID so repeated calls do not trip replay
 /// protection; pass `Some(..)` to exercise replay handling deliberately.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test fixtures construct their own instants"
+)]
 #[must_use]
 pub fn build_client_assertion(
     client_id: &str,
@@ -1780,4 +2430,47 @@ pub fn build_client_assertion(
     let sig_b64 = URL_SAFE_NO_PAD.encode(sig.as_ref());
 
     format!("{header_b64}.{claims_b64}.{sig_b64}")
+}
+
+/// Throwaway self-signed P-256 server certificate, generated for tests only.
+pub const TEST_TLS_CERT_PEM: &str = "-----BEGIN CERTIFICATE-----\n\
+MIIBiDCCAS2gAwIBAgIUAzsi4KkqvGaw6UTFs4DrQEe2KWwwCgYIKoZIzj0EAwIw\n\
+GTEXMBUGA1UEAwwOdm91Y2gtdGxzLXRlc3QwHhcNMjYwNjEwMTYxMjM3WhcNMzYw\n\
+NjA3MTYxMjM3WjAZMRcwFQYDVQQDDA52b3VjaC10bHMtdGVzdDBZMBMGByqGSM49\n\
+AgEGCCqGSM49AwEHA0IABAOqxc9YgMgXu2BGQ3KOgFNtVxG7pdencd5TOnjrr6zJ\n\
+nPi66MVoVlQ9bi3ydlRJ1ce7HHOEui/G0U0aoDJtgVmjUzBRMB0GA1UdDgQWBBQW\n\
+yEA6dBvaxTzloNCzXuJLG5z9/DAfBgNVHSMEGDAWgBQWyEA6dBvaxTzloNCzXuJL\n\
+G5z9/DAPBgNVHRMBAf8EBTADAQH/MAoGCCqGSM49BAMCA0kAMEYCIQC9cwWPeNND\n\
+WFbJkO8dqEVE69Xzdj+NMgenQFOJsOW2yAIhAISz7zP/KDBC6jVhH7qJTR9E7Rnr\n\
+3wT8S2AL3BFHW6+2\n\
+-----END CERTIFICATE-----\n";
+
+/// PKCS#8 private key for [`TEST_TLS_CERT_PEM`].
+pub const TEST_TLS_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQghUolejGt3e2SfwZJ\n\
+BRRya1VbXh8fYhiJfLvrVBbs/lqhRANCAAQDqsXPWIDIF7tgRkNyjoBTbVcRu6XX\n\
+p3HeUzp466+syZz4uujFaFZUPW4t8nZUSdXHuxxzhLovxtFNGqAybYFZ\n\
+-----END PRIVATE KEY-----\n";
+
+/// A TLS acceptor serving [`TEST_TLS_CERT_PEM`], for in-process HTTPS test
+/// servers. The provider is explicit, so a test does not rely on a
+/// process-default provider being installed. The certificate names no IP, so a
+/// client connecting to `127.0.0.1` must skip verification.
+#[must_use]
+pub fn test_tls_acceptor() -> tokio_rustls::TlsAcceptor {
+    use rustls::pki_types::pem::PemObject as _;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+    let certs = CertificateDer::pem_slice_iter(TEST_TLS_CERT_PEM.as_bytes())
+        .collect::<Result<Vec<_>, _>>()
+        .expect("parse test certificate");
+    let key = PrivateKeyDer::from_pem_slice(TEST_TLS_KEY_PEM.as_bytes()).expect("parse test key");
+    let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+    .expect("configure TLS versions")
+    .with_no_client_auth()
+    .with_single_cert(certs, key)
+    .expect("build server config");
+    tokio_rustls::TlsAcceptor::from(Arc::new(config))
 }

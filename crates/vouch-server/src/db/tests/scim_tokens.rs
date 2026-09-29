@@ -7,6 +7,7 @@
 )]
 
 use super::*;
+use crate::error::ServiceError;
 
 // ========================================================================
 // SCIM Token Tests
@@ -40,7 +41,7 @@ async fn test_scim_token_management() {
     assert!(!token_id.is_empty());
 
     // Get by hash
-    let token = get_scim_token_by_hash(&store, token_hash)
+    let token = get_scim_token_by_hash(&store, token_hash, jiff::Timestamp::now())
         .await
         .expect("Failed to get token")
         .expect("Token should exist");
@@ -53,7 +54,7 @@ async fn test_scim_token_management() {
         .await
         .expect("Failed to update last used");
 
-    let token = get_scim_token_by_hash(&store, token_hash)
+    let token = get_scim_token_by_hash(&store, token_hash, jiff::Timestamp::now())
         .await
         .expect("Failed to get token")
         .expect("Token should exist");
@@ -77,7 +78,7 @@ async fn test_scim_token_management() {
     );
 
     // Verify token still exists
-    let token = get_scim_token_by_hash(&store, token_hash)
+    let token = get_scim_token_by_hash(&store, token_hash, jiff::Timestamp::now())
         .await
         .expect("Query should succeed");
     assert!(
@@ -91,7 +92,7 @@ async fn test_scim_token_management() {
         .expect("Failed to delete token");
     assert!(deleted, "Should delete token belonging to correct org");
 
-    let token = get_scim_token_by_hash(&store, token_hash)
+    let token = get_scim_token_by_hash(&store, token_hash, jiff::Timestamp::now())
         .await
         .expect("Query should succeed");
 
@@ -140,14 +141,14 @@ async fn test_expired_scim_tokens_excluded_from_active_count() {
 
     // An expired token cannot authenticate...
     assert!(
-        get_scim_token_by_hash(&store, "expired-1")
+        get_scim_token_by_hash(&store, "expired-1", jiff::Timestamp::now())
             .await
             .expect("lookup expired token")
             .is_none(),
         "an expired token must not authenticate"
     );
     assert!(
-        get_scim_token_by_hash(&store, "active-1")
+        get_scim_token_by_hash(&store, "active-1", jiff::Timestamp::now())
             .await
             .expect("lookup active token")
             .is_some(),
@@ -182,7 +183,7 @@ async fn test_expired_scim_tokens_excluded_from_active_count() {
     )
     .await
     {
-        Err(crate::error::ServiceError::Api { ref code, .. }) if code == "token_limit_reached" => {}
+        Err(ServiceError::Api { ref code, .. }) if code == "token_limit_reached" => {}
         other => panic!("a third active token must hit the cap; got {other:?}"),
     }
 

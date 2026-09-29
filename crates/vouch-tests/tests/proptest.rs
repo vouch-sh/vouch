@@ -19,10 +19,12 @@
 )]
 
 use proptest::prelude::*;
+use vouch_agent::wire;
 use vouch_common::encoding::{Base64Url, ConvertEncoding, Raw};
 use vouch_common::fido2_types::{Challenge, CoseKey, CredentialId, Signature};
 use vouch_common::{RegisterCompleteRequest, RegisterStartResponse};
 use vouch_server::crypto::ber::{DerParser, MAX_BER_DEPTH};
+use vouch_server::services::oidc::registration::RegistrationRequest;
 
 /// Append a DER definite-length field, short form or one/two-byte long form.
 ///
@@ -865,7 +867,7 @@ proptest! {
     #[test]
     fn prop_registration_request_deserialize_no_panic(s in "\\PC*") {
         // Must not panic — errors are expected for most random strings
-        let _: Result<vouch_server::services::oidc::registration::RegistrationRequest, _> =
+        let _: Result<RegistrationRequest, _> =
             serde_json::from_str(&s);
     }
 
@@ -880,7 +882,7 @@ proptest! {
         let json = serde_json::json!({ key: value });
         let json_str = json.to_string();
         // Must not panic regardless of key/value content
-        let _: Result<vouch_server::services::oidc::registration::RegistrationRequest, _> =
+        let _: Result<RegistrationRequest, _> =
             serde_json::from_str(&json_str);
     }
 }
@@ -1057,11 +1059,11 @@ proptest! {
     /// encode_string round-trip preserves data.
     #[test]
     fn prop_wire_encode_string_roundtrip(s: String) {
-        let encoded = vouch_agent::wire::encode_string(&s).unwrap();
+        let encoded = wire::encode_string(&s).unwrap();
 
         // Verify length prefix
         let mut offset = 0;
-        let len = vouch_agent::wire::read_u32(&encoded, &mut offset).unwrap();
+        let len = wire::read_u32(&encoded, &mut offset).unwrap();
         prop_assert_eq!(len as usize, s.len());
 
         // Verify payload
@@ -1072,10 +1074,10 @@ proptest! {
     /// encode_bytes round-trip preserves data.
     #[test]
     fn prop_wire_encode_bytes_roundtrip(data: Vec<u8>) {
-        let encoded = vouch_agent::wire::encode_bytes(&data).unwrap();
+        let encoded = wire::encode_bytes(&data).unwrap();
 
         let mut offset = 0;
-        let len = vouch_agent::wire::read_u32(&encoded, &mut offset).unwrap();
+        let len = wire::read_u32(&encoded, &mut offset).unwrap();
         prop_assert_eq!(len as usize, data.len());
 
         let payload = &encoded[offset..];
@@ -1088,7 +1090,7 @@ proptest! {
         data in prop::collection::vec(any::<u8>(), 0..3),
     ) {
         let mut offset = 0;
-        let result = vouch_agent::wire::read_u32(&data, &mut offset);
+        let result = wire::read_u32(&data, &mut offset);
         prop_assert!(result.is_err());
     }
 
@@ -1100,7 +1102,7 @@ proptest! {
     ) {
         let mut offset = data.len().saturating_add(offset_add);
         if offset.saturating_add(4) > data.len() {
-            let result = vouch_agent::wire::read_u32(&data, &mut offset);
+            let result = wire::read_u32(&data, &mut offset);
             prop_assert!(result.is_err());
         }
     }

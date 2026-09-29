@@ -8,6 +8,7 @@
 )]
 
 use super::*;
+use crate::test_utils;
 
 // ========================================================================
 // Authenticator Tests
@@ -21,7 +22,7 @@ async fn test_authenticator_crud() {
         .await
         .expect("Failed to create user");
 
-    // Create authenticator (with user_email parameter)
+    // Create authenticator
     let credential_id = vec![1u8, 2, 3, 4, 5];
     let public_key = vec![10u8; 65];
     let user_handle = vec![20u8; 32];
@@ -30,13 +31,13 @@ async fn test_authenticator_crud() {
         &store,
         &CreateAuthenticatorParams {
             user_id: &user_id,
-            user_email: "auth@example.com",
             name: "YubiKey 5C",
             credential_id: &credential_id,
             public_key: &public_key,
             aaguid: Some("2fc0579f-8113-47ea-b116-bb5a8db9202a"),
             user_handle: Some(&user_handle),
             attestation_verified: false,
+            counter: 0,
         },
     )
     .await
@@ -82,11 +83,7 @@ async fn test_authenticator_crud() {
     assert_eq!(auth.counter, 42);
 
     // Delete authenticator
-    let deleted = delete_authenticator(&store, &auth_id)
-        .await
-        .expect("Failed to delete authenticator");
-
-    assert_eq!(deleted, 1);
+    test_utils::remove_test_authenticator(&store, &auth_id).await;
 
     // Verify deleted
     let auth = get_authenticator_by_id(&store, &auth_id)
@@ -110,19 +107,19 @@ async fn test_authenticator_count() {
         .expect("Failed to count");
     assert_eq!(count, 0);
 
-    // Add authenticators (with user_email parameter)
+    // Add authenticators
     for i in 0..3 {
         create_authenticator(
             &store,
             &CreateAuthenticatorParams {
                 user_id: &user_id,
-                user_email: "count@example.com",
                 name: &format!("Key {}", i),
                 credential_id: &[i as u8; 10],
                 public_key: &[0u8; 32],
                 aaguid: None,
                 user_handle: None,
                 attestation_verified: false,
+                counter: 0,
             },
         )
         .await
@@ -133,4 +130,179 @@ async fn test_authenticator_count() {
         .await
         .expect("Failed to count");
     assert_eq!(count, 3);
+}
+
+// ========================================================================
+// Registration counter persistence (WebAuthn L2 §7.1 step 23)
+// ========================================================================
+
+// WebAuthn L2 §7.1 step 23: "Associate the credentialId with a new stored
+// signature counter value initialized to the value of authData.signCount."
+// `create_authenticator` persists `CreateAuthenticatorParams::counter` (via
+// `cast_signed`) rather than a hardcoded `0`, so a global-counter
+// authenticator that reports a non-zero signCount at registration is stored
+// with that value.
+#[tokio::test]
+async fn test_create_authenticator_persists_nonzero_registration_counter() {
+    let (store, _audit) = test_db().await;
+
+    let (user_id, _) = upsert_user(&store, "reg-counter@example.com", None)
+        .await
+        .expect("Failed to create user");
+
+    // Simulate a global-counter authenticator that has performed prior
+    // operations and reports signCount = 42 at makeCredential (WebAuthn L2
+    // §6.3.2 step 10 first branch).
+    let credential_id = vec![1u8, 2, 3, 4, 5];
+    let public_key = vec![10u8; 65];
+    let auth_id = create_authenticator(
+        &store,
+        &CreateAuthenticatorParams {
+            user_id: &user_id,
+            name: "YubiKey 5C",
+            credential_id: &credential_id,
+            public_key: &public_key,
+            aaguid: Some("2fc0579f-8113-47ea-b116-bb5a8db9202a"),
+            user_handle: None,
+            attestation_verified: true,
+            counter: 42,
+        },
+    )
+    .await
+    .expect("Failed to create authenticator");
+
+    let auth = get_authenticator_by_id(&store, &auth_id)
+        .await
+        .expect("Failed to get authenticator")
+        .expect("Authenticator should exist");
+
+    // The stored counter must equal the registration signCount, not 0.
+    assert_eq!(
+        auth.counter, 42,
+        "stored counter must initialize to the registration authData.signCount"
+    );
+
+    test_utils::remove_test_authenticator(&store, &auth_id).await;
+}
+
+// `cast_signed` reinterprets the u32 registration counter bit-identically as
+// i32 (the column type). A registration signCount above i32::MAX, while
+// unrealistic for a personal hardware key (the §6.1.1 counter increments by
+// one per credential operation), must round-trip bit-identically so
+// `update_authenticator_counter`'s max-based monotonicity comparison stays
+// consistent on the same bit pattern written here.
+#[tokio::test]
+async fn test_create_authenticator_preserves_high_bit_counter_via_cast_signed() {
+    let (store, _audit) = test_db().await;
+
+    let (user_id, _) = upsert_user(&store, "highbit@example.com", None)
+        .await
+        .expect("Failed to create user");
+
+    // 0x8000_0001u32 has the high bit set. `cast_signed` reinterprets to
+    // i32::MIN + 1, preserving the bit pattern for monotonic comparisons.
+    let high_bit_counter: u32 = 0x8000_0001;
+    let credential_id = vec![9u8, 8, 7, 6, 5];
+    let auth_id = create_authenticator(
+        &store,
+        &CreateAuthenticatorParams {
+            user_id: &user_id,
+            name: "YubiKey",
+            credential_id: &credential_id,
+            public_key: &[10u8; 65],
+            aaguid: None,
+            user_handle: None,
+            attestation_verified: false,
+            counter: high_bit_counter,
+        },
+    )
+    .await
+    .expect("Failed to create authenticator");
+
+    let auth = get_authenticator_by_id(&store, &auth_id)
+        .await
+        .expect("Failed to get authenticator")
+        .expect("Authenticator should exist");
+
+    assert_eq!(
+        auth.counter,
+        high_bit_counter.cast_signed(),
+        "high-bit-set u32 counter must round-trip bit-identically as i32"
+    );
+    assert_eq!(auth.counter, i32::MIN.wrapping_add(1));
+
+    test_utils::remove_test_authenticator(&store, &auth_id).await;
+}
+
+// The monotonic max in `update_authenticator_counter` runs in u32 space.
+// WebAuthn signCount is a u32 (WebAuthn L2 §6.1) held bit-identically in an
+// i32 column, so a signed comparison inverts the order across 2^31: the
+// counter would stop advancing there, and a high-bit baseline would be
+// overwritten by any low value. Both directions are pinned here.
+
+/// Seed an authenticator at `counter` and return its id.
+async fn seed_authenticator_at(store: &DocumentStore, email: &str, counter: u32) -> String {
+    let (user_id, _) = upsert_user(store, email, None)
+        .await
+        .expect("Failed to create user");
+    create_authenticator(
+        store,
+        &CreateAuthenticatorParams {
+            user_id: &user_id,
+            name: "YubiKey",
+            credential_id: email.as_bytes(),
+            public_key: &[10u8; 65],
+            aaguid: None,
+            user_handle: None,
+            attestation_verified: false,
+            counter,
+        },
+    )
+    .await
+    .expect("Failed to create authenticator")
+}
+
+#[tokio::test]
+async fn test_counter_advances_across_the_high_bit_boundary() {
+    let (store, _audit) = test_db().await;
+    let auth_id = seed_authenticator_at(&store, "boundary-up@example.com", 0x7FFF_FFFF).await;
+
+    // The next signCount a real authenticator would emit after i32::MAX.
+    let next: u32 = 0x8000_0000;
+    update_authenticator_counter(&store, &auth_id, next.cast_signed())
+        .await
+        .expect("counter update");
+
+    let auth = get_authenticator_by_id(&store, &auth_id)
+        .await
+        .expect("db lookup")
+        .expect("authenticator exists");
+    assert_eq!(
+        auth.counter.cast_unsigned(),
+        next,
+        "a signed max would keep 0x7FFF_FFFF and freeze the counter at 2^31-1 forever"
+    );
+}
+
+#[tokio::test]
+async fn test_high_bit_counter_is_not_regressed_by_a_lower_value() {
+    let (store, _audit) = test_db().await;
+    let high: u32 = 0x8000_0001;
+    let auth_id = seed_authenticator_at(&store, "boundary-down@example.com", high).await;
+
+    // A replayed or cloned assertion carrying a far lower count must not win.
+    update_authenticator_counter(&store, &auth_id, 5i32)
+        .await
+        .expect("counter update");
+
+    let auth = get_authenticator_by_id(&store, &auth_id)
+        .await
+        .expect("db lookup")
+        .expect("authenticator exists");
+    assert_eq!(
+        auth.counter.cast_unsigned(),
+        high,
+        "a signed max would pick the positive 5 over a negative i32 and regress \
+         the clone-detection baseline"
+    );
 }

@@ -6,11 +6,9 @@
 //! - RFC 7636 - PKCE (Proof Key for Code Exchange)
 
 use crate::AppState;
+use crate::arrival::ArrivalTime;
 use crate::crypto::jwt::JwtType;
-use crate::db::{
-    AccessScope, Authenticator, OAuthClient, ParConsumptionProof, Session, TokenEndpointAuthMethod,
-    User,
-};
+use crate::db::{AccessScope, Authenticator, OAuthClient, ParConsumptionProof, ResponseMode, User};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use crate::services::oidc::ScopeSet;
 use jiff::{Span, Timestamp};
@@ -19,6 +17,9 @@ use std::fmt;
 use std::sync::Arc;
 
 use super::token::validate_session_token;
+use crate::crypto;
+use crate::crypto::jwt::{StateTokenError, StateTokenSigner};
+use crate::db::{self, ClientType};
 
 /// PKCE code challenge method (RFC 7636 Section 4.2).
 ///
@@ -84,35 +85,36 @@ pub enum Prompt {
 }
 
 impl Prompt {
-    /// Every accepted `prompt` value, in the order shown to clients.
+    /// Every value OIDC Core Section 3.1.2.1 defines, paired with the
+    /// behavior Vouch offers for it.
     ///
-    /// [`parse`](Self::parse) and [`supported_values`](Self::supported_values)
-    /// both read this table, so an accepted value cannot be missing from the
+    /// `select_account` is defined by the specification but has no `Prompt`
+    /// variant: Vouch authenticates a single identity per session and has no
+    /// account chooser, so it can never obtain the account selection the
+    /// value asks for. Section 3.1.2.1 covers exactly that case — "If it
+    /// cannot obtain an account selection choice made by the End-User, it
+    /// MUST return an error, typically `account_selection_required`" — which
+    /// is why it is listed here as defined-but-unhonored rather than left out
+    /// to be reported as an unrecognized value.
+    ///
+    /// [`PromptSet::parse`] and [`supported_values`](Self::supported_values)
+    /// both read this table, so an honored value cannot be missing from the
     /// error message that lists them and a listed value cannot be
     /// unparseable. Keeping them as separate literals is how the message came
     /// to advertise fewer values than the parser accepted.
-    const ACCEPTED: &'static [(&'static str, Self)] = &[
-        ("login", Self::Login),
-        ("none", Self::Silent),
-        ("consent", Self::Consent),
+    const DEFINED: &'static [(&'static str, Option<Self>)] = &[
+        ("login", Some(Self::Login)),
+        ("none", Some(Self::Silent)),
+        ("consent", Some(Self::Consent)),
+        ("select_account", None),
     ];
 
-    /// Parse a prompt value from a string.
-    ///
-    /// Returns `None` for unsupported values (e.g., `select_account`).
-    #[must_use]
-    pub fn parse(s: &str) -> Option<Self> {
-        Self::ACCEPTED
-            .iter()
-            .find(|(value, _)| *value == s)
-            .map(|(_, prompt)| *prompt)
-    }
-
-    /// Comma-separated list of accepted values, for error messages.
+    /// Comma-separated list of the honored values, for error messages.
     #[must_use]
     pub fn supported_values() -> String {
-        Self::ACCEPTED
+        Self::DEFINED
             .iter()
+            .filter(|(_, prompt)| prompt.is_some())
             .map(|(value, _)| *value)
             .collect::<Vec<_>>()
             .join(", ")
@@ -133,6 +135,163 @@ impl fmt::Display for Prompt {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
+}
+
+/// The set of values carried by one `prompt` parameter.
+///
+/// OIDC Core Section 3.1.2.1 defines `prompt` as a "Space-delimited,
+/// case-sensitive list of ASCII string values", so `prompt=login consent` is
+/// a single request for two behaviors rather than an unrecognized value. The
+/// set is the parsed form of that list; [`parse`](Self::parse) is the only
+/// way to build one, so a `PromptSet` in hand has already been checked
+/// against every rule the section states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PromptSet {
+    login: bool,
+    silent: bool,
+    consent: bool,
+}
+
+impl PromptSet {
+    /// Parse the `prompt` request parameter.
+    ///
+    /// # Errors
+    ///
+    /// - `account_selection_required` when `select_account` is requested, per
+    ///   the OIDC Core Section 3.1.2.1 sentence quoted on [`Prompt::DEFINED`].
+    ///   Callers that cannot return a user-interaction error code — the PAR
+    ///   endpoint, per RFC 9126 Section 2.3 — translate it at their boundary.
+    /// - `invalid_request` when `none` appears alongside another value:
+    ///   "If this parameter contains `none` with any other value, an error is
+    ///   returned."
+    /// - `invalid_request` for a value outside the defined set. The same
+    ///   section permits either answer — "it MAY return an error or it MAY
+    ///   ignore it" — and Vouch returns one so that a client learns its
+    ///   request was not understood.
+    pub fn parse(raw: &str) -> ServiceResult<Self> {
+        let mut set = Self::default();
+        let mut others = false;
+
+        for token in raw.split_whitespace() {
+            match Prompt::DEFINED.iter().find(|(value, _)| *value == token) {
+                Some((_, Some(Prompt::Login))) => {
+                    set.login = true;
+                    others = true;
+                }
+                Some((_, Some(Prompt::Silent))) => set.silent = true,
+                Some((_, Some(Prompt::Consent))) => {
+                    set.consent = true;
+                    others = true;
+                }
+                Some((_, None)) => {
+                    return Err(ServiceError::oauth(
+                        OAuthErrorCode::AccountSelectionRequired,
+                        "prompt=select_account is not supported: this authorization server \
+                         authenticates a single account per session",
+                    ));
+                }
+                None => {
+                    return Err(ServiceError::oauth(
+                        OAuthErrorCode::InvalidRequest,
+                        format!(
+                            "Unsupported prompt value. Supported values: {}",
+                            Prompt::supported_values()
+                        ),
+                    ));
+                }
+            }
+        }
+
+        if set.silent && others {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidRequest,
+                "prompt=none must not be combined with other prompt values",
+            ));
+        }
+
+        Ok(set)
+    }
+
+    /// A set holding exactly one value.
+    #[must_use]
+    pub fn of(prompt: Prompt) -> Self {
+        let mut set = Self::default();
+        match prompt {
+            Prompt::Login => set.login = true,
+            Prompt::Silent => set.silent = true,
+            Prompt::Consent => set.consent = true,
+        }
+        set
+    }
+
+    /// Whether the request asked for this behavior.
+    #[must_use]
+    pub fn contains(self, prompt: Prompt) -> bool {
+        match prompt {
+            Prompt::Login => self.login,
+            Prompt::Silent => self.silent,
+            Prompt::Consent => self.consent,
+        }
+    }
+
+    /// Whether the parameter carried no values at all.
+    #[must_use]
+    pub fn is_empty(self) -> bool {
+        !self.login && !self.silent && !self.consent
+    }
+
+    /// The set in the wire form `prompt` uses, for storage and re-parsing.
+    #[must_use]
+    pub fn to_space_separated(self) -> String {
+        let mut values = Vec::new();
+        for (value, prompt) in Prompt::DEFINED {
+            if prompt.is_some_and(|p| self.contains(p)) {
+                values.push(*value);
+            }
+        }
+        values.join(" ")
+    }
+}
+
+impl fmt::Display for PromptSet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.to_space_separated())
+    }
+}
+
+/// Resolve the `response_mode` request parameter into the mode the
+/// authorization response will use.
+///
+/// An absent parameter yields the default for the `code` response type
+/// (OAuth 2.0 Multiple Response Type Encoding Practices Section 2.1: "For
+/// purposes of this specification, the default Response Mode for the OAuth
+/// 2.0 `code` Response Type is the `query` encoding").
+///
+/// Every entry point that turns a client-supplied `response_mode` into a
+/// [`ResponseMode`] goes through here, because the alternative — reading
+/// [`ResponseMode::parse`] and substituting the default when it returns
+/// `None` — silently answers a `form_post` or `jwt` request with a bare query
+/// redirect, delivering the authorization code by a mechanism the client is
+/// not listening on. The specification says nothing about unrecognized
+/// values, so rejecting one is our decision rather than a requirement; it is
+/// the one answer that cannot hand a client a response it will not see.
+///
+/// # Errors
+///
+/// Returns `invalid_request` when the value is not a supported mode.
+pub fn parse_response_mode(value: Option<&str>) -> ServiceResult<ResponseMode> {
+    let Some(value) = value else {
+        return Ok(ResponseMode::Query);
+    };
+    ResponseMode::parse(value).ok_or_else(|| {
+        ServiceError::oauth(
+            OAuthErrorCode::InvalidRequest,
+            format!(
+                "Unsupported response_mode. Supported values: {}",
+                ResponseMode::supported_values()
+            ),
+        )
+    })
 }
 
 /// Parameters for creating an authorization code.
@@ -174,12 +333,13 @@ pub struct AuthorizationCodeParams<'a> {
     pub auth_code_lifetime_seconds: i64,
     /// RFC 9396: Rich authorization details (JSON value for server-side storage).
     pub authorization_details: Option<&'a serde_json::Value>,
-    /// OIDC Core Section 2: Time when the End-User authentication occurred.
-    ///
-    /// This should be the session's `created_at` timestamp so that `auth_time`
-    /// in the id_token reflects the actual authentication event, not code issuance.
-    /// When `None`, falls back to the code's `iat`.
-    pub auth_time: Option<i64>,
+    /// OIDC Core Section 2: Time when the End-User authentication occurred,
+    /// at full precision — the session's ceremony instant, never the row's
+    /// creation or code issuance. The token endpoint copies it verbatim onto
+    /// the session row it mints and reports its whole second as `auth_time`.
+    /// `None` when the session cannot say when it authenticated; the issued
+    /// tokens then carry no `auth_time`.
+    pub authenticated_at: Option<Timestamp>,
     /// RFC 9126: proof that the pushed authorization request backing this
     /// authorization was consumed, or that the request was never pushed.
     ///
@@ -216,8 +376,10 @@ pub struct AuthorizeRequestParams {
     pub acr_values: Option<String>,
     /// RFC 9470 / OIDC Core Section 3.1.2.1: Maximum authentication age in seconds.
     pub max_age: Option<u64>,
-    /// OIDC Core Section 3.1.2.1: Requested prompt behavior.
-    pub prompt: Option<Prompt>,
+    /// OIDC Core Section 3.1.2.1: Requested prompt behavior (raw
+    /// space-delimited string from the request, validated into a
+    /// [`PromptSet`]).
+    pub prompt: Option<String>,
     /// RFC 9449 Section 10: DPoP JWK thumbprint for authorization code binding.
     pub dpop_jkt: Option<String>,
     /// RFC 9396: Rich authorization details (raw JSON string from request).
@@ -246,7 +408,7 @@ pub struct ValidatedAuthRequest {
     /// RFC 9470: Maximum authentication age in seconds.
     max_age: Option<u64>,
     /// OIDC Core: Requested prompt behavior.
-    prompt: Option<Prompt>,
+    prompt: Option<PromptSet>,
     /// RFC 9449 Section 10: DPoP JWK thumbprint for authorization code binding.
     dpop_jkt: Option<String>,
     /// RFC 9396: Validated authorization details.
@@ -316,8 +478,18 @@ impl ValidatedAuthRequest {
 
     /// OIDC Core: Requested prompt behavior.
     #[must_use]
-    pub fn prompt(&self) -> Option<Prompt> {
+    pub fn prompt(&self) -> Option<PromptSet> {
         self.prompt
+    }
+
+    /// Whether the request asked for a particular prompt behavior.
+    ///
+    /// `prompt` is a list, so asking whether it *equals* one value is the
+    /// wrong question: `prompt=login consent` asks for `login` just as much
+    /// as `prompt=login` does.
+    #[must_use]
+    pub fn has_prompt(&self, prompt: Prompt) -> bool {
+        self.prompt.is_some_and(|set| set.contains(prompt))
     }
 
     /// RFC 9449 Section 10: DPoP JWK thumbprint.
@@ -349,10 +521,20 @@ pub enum AuthorizationSessionState {
     Authenticated {
         /// The authenticated user.
         user: Box<User>,
-        /// The session.
-        session: Box<Session>,
         /// The authenticator used.
         authenticator: Box<Authenticator>,
+        /// When the session's FIDO2 ceremony happened, at full precision,
+        /// from the session row. Its whole second is the `auth_time` the
+        /// issued code reports; the `max_age` decision measures from it; and
+        /// the pending-auth resume path treats the session as fresh for a
+        /// `max_age` / `prompt=login` request only when it is strictly after
+        /// the pending record's creation.
+        ///
+        /// `None` for a session whose verification was inherited rather than
+        /// observed (RFC 8693 token exchange) or written before the instant
+        /// was recorded. It stays `None` all the way to the claim: row
+        /// creation and code issuance are not authentication.
+        authenticated_at: Option<Timestamp>,
     },
     /// User needs to authenticate.
     NeedsAuth,
@@ -395,17 +577,16 @@ pub struct AuthorizationCode {
     pub dpop_jkt: Option<String>,
     pub iat: i64,
     pub exp: i64,
-    /// OIDC Core Section 2: Time when the End-User authentication occurred.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub auth_time: Option<i64>,
+    /// OIDC Core Section 2: Time when the End-User authentication occurred,
+    /// at full precision. The token endpoint copies this original ceremony
+    /// instant onto the session row it mints — it never stamps its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authenticated_at: Option<Timestamp>,
 }
 
 impl AuthorizationCode {
     /// Encode the authorization code as a JWT (RFC 8725 §3.11: explicit typ).
-    pub async fn encode(
-        &self,
-        signer: &crate::crypto::jwt::StateTokenSigner,
-    ) -> Result<String, crate::crypto::jwt::StateTokenError> {
+    pub async fn encode(&self, signer: &StateTokenSigner) -> Result<String, StateTokenError> {
         signer
             .encode_state_token(self, JwtType::AuthorizationCode)
             .await
@@ -416,26 +597,23 @@ impl AuthorizationCode {
     /// Validates `typ`, `iss`, and `aud` per RFC 8725.
     pub async fn decode(
         token: &str,
-        signer: &crate::crypto::jwt::StateTokenSigner,
+        signer: &StateTokenSigner,
         expected_issuer: &str,
         expected_client_id: &str,
-    ) -> Result<Self, crate::crypto::jwt::StateTokenError> {
+        arrival: ArrivalTime,
+    ) -> Result<Self, StateTokenError> {
         let claims: Self = signer
-            .decode_state_token(token, JwtType::AuthorizationCode)
+            .decode_state_token(token, JwtType::AuthorizationCode, arrival.as_second())
             .await?;
 
         // RFC 8725 §3.8: Validate issuer
         if claims.iss != expected_issuer {
-            return Err(crate::crypto::jwt::StateTokenError::Validation(
-                "Issuer mismatch".to_string(),
-            ));
+            return Err(StateTokenError::Validation("Issuer mismatch".to_string()));
         }
 
         // RFC 8725 §3.9: Validate audience (client_id)
         if claims.aud != expected_client_id {
-            return Err(crate::crypto::jwt::StateTokenError::Validation(
-                "Audience mismatch".to_string(),
-            ));
+            return Err(StateTokenError::Validation("Audience mismatch".to_string()));
         }
 
         Ok(claims)
@@ -452,6 +630,16 @@ const MAX_SCOPE_LEN: usize = 512;
 const MAX_NONCE_LEN: usize = 256;
 const MAX_CODE_CHALLENGE_LEN: usize = 128;
 const MAX_ACR_VALUES_LEN: usize = 512;
+/// Maximum allowed length for the `dpop_jkt` parameter.
+///
+/// RFC 9449 Section 10: "The value of the dpop_jkt authorization request
+/// parameter is the JWK Thumbprint [RFC7638] of the proof-of-possession public
+/// key using the SHA-256 hash function", so a conformant value is always the
+/// 43-character unpadded base64url digest. The bound matches the other opaque
+/// string caps in this block rather than the exact width; a non-thumbprint
+/// value that fits is still rejected at the token endpoint, where Section 10
+/// requires the thumbprint of the presented DPoP key to match.
+const MAX_DPOP_JKT_LEN: usize = 256;
 /// Maximum allowed value for the `max_age` parameter (1 year in seconds).
 /// Prevents unreasonable values and ensures safe u64→i64 conversion for storage.
 const MAX_MAX_AGE: u64 = 31_536_000;
@@ -525,6 +713,12 @@ pub fn validate_authorize_request(
             ));
         }
     }
+    // RFC 9449 Section 10: `dpop_jkt` is client-controlled (form param or JAR
+    // Request Object claim) and is persisted verbatim into PAR and pending-OAuth
+    // records, so cap it like every other free-form string parameter.
+    if let Some(ref dpop_jkt) = params.dpop_jkt {
+        validate_param_length("dpop_jkt", dpop_jkt, MAX_DPOP_JKT_LEN)?;
+    }
     if let Some(max_age) = params.max_age
         && max_age > MAX_MAX_AGE
     {
@@ -534,8 +728,19 @@ pub fn validate_authorize_request(
         ));
     }
 
-    // prompt is already validated by Prompt::parse() at the handler level;
-    // the enum type ensures only valid values reach here.
+    // OIDC Core Section 3.1.2.1: validate `prompt` here rather than at each
+    // handler. RFC 9101 Section 6.3 has a Request Object's parameters
+    // "validated ... as specified in OAuth 2.0", i.e. the same way a plain
+    // request's are, so a plain body, a pushed request, and a signed Request
+    // Object all reach this one check and answer alike. An empty list is the
+    // same as no parameter at all.
+    let prompt = match params.prompt.as_deref() {
+        Some(raw) => {
+            let set = PromptSet::parse(raw)?;
+            (!set.is_empty()).then_some(set)
+        }
+        None => None,
+    };
 
     // RFC 9700 Section 2.1.1: PKCE with S256 is required for all clients.
     let parsed_method = if let Some(ref method_str) = params.code_challenge_method {
@@ -595,7 +800,7 @@ pub fn validate_authorize_request(
         resource: params.resource,
         acr_values: params.acr_values,
         max_age: params.max_age,
-        prompt: params.prompt,
+        prompt,
         dpop_jkt: params.dpop_jkt,
         authorization_details: parsed_authorization_details,
     })
@@ -616,9 +821,10 @@ pub fn require_pkce_for_client(
     validated: &ValidatedAuthRequest,
     client: &OAuthClient,
 ) -> ServiceResult<()> {
-    let is_public = client.token_endpoint_auth_method == TokenEndpointAuthMethod::None;
     // FAPI 2.0 Section 5.3.2.1: PKCE is required for all FAPI clients.
-    let pkce_required = is_public || client.application_type.requires_pkce() || client.is_fapi();
+    let pkce_required = client.client_type() == ClientType::Public
+        || client.application_type.requires_pkce()
+        || client.is_fapi();
     if pkce_required && validated.code_challenge().is_none() {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidRequest,
@@ -650,21 +856,46 @@ fn validate_param_length(name: &str, value: &str, max_len: usize) -> ServiceResu
 pub async fn check_session_for_authorization(
     state: &Arc<AppState>,
     session_token: Option<&str>,
+    arrival: ArrivalTime,
 ) -> ServiceResult<AuthorizationSessionState> {
     let Some(token) = session_token else {
         return Ok(AuthorizationSessionState::NeedsAuth);
     };
 
-    match validate_session_token(state, token).await? {
+    match validate_session_token(state, token, arrival).await? {
         Some(validated) => {
-            // Authorization flow requires an authenticator (hardware verification)
+            // Two separate facts, and the authorization flow needs both.
+            //
+            // `authenticator` says the user has a key on record. That alone
+            // used to gate this path, but an enrollment bootstrap session —
+            // upstream IdP sign-in, no ceremony — carries an authenticator for
+            // any returning user while `hardware_verified` is false. Issuing a
+            // code from one produced tokens claiming `acr: aal3` and
+            // `amr: [hwk, pin, user]` to the relying party for an
+            // authentication where no key was touched, because
+            // `exchange_authorization_code` stamps the grant as `Verified`
+            // unconditionally.
+            //
+            // This is the same unsound inference as issue #1114, which read a
+            // fresh `auth_time` as evidence of a ceremony. Ask directly.
+            // Sending the user to `/login` to assert is what PAR/FAPI clients
+            // already get from `ReauthPolicy::Always`; this extends it to the
+            // flows that use `ReauthPolicy::OnDemand`.
+            if !validated.hardware_verified {
+                tracing::info!(
+                    target: "security",
+                    user_id = %validated.user.id,
+                    "authorization requires an assertion: session is not hardware-verified"
+                );
+                return Ok(AuthorizationSessionState::NeedsAuth);
+            }
             let Some(authenticator) = validated.authenticator else {
                 return Ok(AuthorizationSessionState::NeedsAuth);
             };
             Ok(AuthorizationSessionState::Authenticated {
                 user: Box::new(validated.user),
-                session: Box::new(validated.session),
                 authenticator: Box::new(authenticator),
+                authenticated_at: validated.authenticated_at,
             })
         }
         None => Ok(AuthorizationSessionState::NeedsAuth),
@@ -689,6 +920,10 @@ pub async fn check_session_for_authorization(
 ///
 /// # Errors
 /// Returns `ServiceError` if encoding fails or database storage fails.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "mints the authorization code's expiry"
+)]
 pub async fn issue_authorization_code(
     state: &Arc<AppState>,
     params: AuthorizationCodeParams<'_>,
@@ -725,7 +960,7 @@ pub async fn issue_authorization_code(
         dpop_jkt: params.dpop_jkt.map(String::from),
         iat: now.as_second(),
         exp,
-        auth_time: params.auth_time,
+        authenticated_at: params.authenticated_at,
     };
 
     let code = auth_code.encode(&state.state_signer).await.map_err(|e| {
@@ -734,10 +969,10 @@ pub async fn issue_authorization_code(
     })?;
 
     // RFC 6749 Section 10.5: Store code hash for single-use enforcement.
-    let code_hash = crate::crypto::hash_token(&code);
+    let code_hash = crypto::hash_token(&code);
     let expires_at = Timestamp::from_second(exp).unwrap_or(now);
 
-    if let Err(e) = crate::db::store_authorization_code(
+    if let Err(e) = db::store_authorization_code(
         &state.store,
         &code_hash,
         params.client_id,
@@ -772,12 +1007,14 @@ pub async fn decode_authorization_code(
     state: &Arc<AppState>,
     code: &str,
     client_id: &str,
+    arrival: ArrivalTime,
 ) -> ServiceResult<AuthorizationCode> {
     let auth_code = AuthorizationCode::decode(
         code,
         &state.state_signer,
         &state.config().base_url,
         client_id,
+        arrival,
     )
     .await
     .map_err(|_| {
@@ -787,8 +1024,9 @@ pub async fn decode_authorization_code(
         )
     })?;
 
-    // Check expiration
-    let now = Timestamp::now().as_second();
+    // Check expiration against the request's arrival, so this gate and the
+    // issued token's lifetime downstream are measured from one instant.
+    let now = arrival.as_second();
     if auth_code.exp < now {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidGrant,
@@ -873,12 +1111,15 @@ pub fn check_client_access(client: &OAuthClient, user: &User) -> ServiceResult<(
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
+    clippy::panic,
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
     use super::*;
     use crate::crypto::alg::JwsAlgorithm;
+    use crate::crypto::jwt::{StateTokenError, StateTokenSigner};
     use crate::db::{FapiProfile, OAuthClientType, TokenEndpointAuthMethod};
+    use crate::test_utils::{TEST_JWT_SECRET, test_arrival};
 
     fn assert_oauth_error<T: std::fmt::Debug>(
         result: Result<T, ServiceError>,
@@ -1013,6 +1254,7 @@ mod tests {
             email: format!("{}@example.com", id),
             name: Some("Test User".to_string()),
             org_id: org_id.map(String::from),
+            org_domain: None,
             is_org_admin: false,
             active: true,
             external_id: None,
@@ -1045,21 +1287,25 @@ mod tests {
             dpop_jkt: None,
             iat: 1_000_000_000,
             exp: 9_999_999_999,
-            auth_time: None,
+            authenticated_at: None,
         }
     }
 
     #[tokio::test]
     async fn test_authorization_code_roundtrip() {
-        let signer = crate::crypto::jwt::StateTokenSigner::local(
-            crate::test_utils::TEST_JWT_SECRET.to_vec(),
-        );
+        let signer = StateTokenSigner::local(TEST_JWT_SECRET.to_vec());
         let code = test_auth_code("https://example.com", "client-a");
 
         let token = code.encode(&signer).await.unwrap();
-        let decoded = AuthorizationCode::decode(&token, &signer, "https://example.com", "client-a")
-            .await
-            .unwrap();
+        let decoded = AuthorizationCode::decode(
+            &token,
+            &signer,
+            "https://example.com",
+            "client-a",
+            test_arrival(),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(decoded.iss, "https://example.com");
         assert_eq!(decoded.aud, "client-a");
@@ -1069,31 +1315,33 @@ mod tests {
 
     #[tokio::test]
     async fn test_authorization_code_decode_wrong_issuer() {
-        let signer = crate::crypto::jwt::StateTokenSigner::local(
-            crate::test_utils::TEST_JWT_SECRET.to_vec(),
-        );
+        let signer = StateTokenSigner::local(TEST_JWT_SECRET.to_vec());
         let code = test_auth_code("https://attacker.com", "client-a");
 
         let token = code.encode(&signer).await.unwrap();
-        let result =
-            AuthorizationCode::decode(&token, &signer, "https://example.com", "client-a").await;
+        let result = AuthorizationCode::decode(
+            &token,
+            &signer,
+            "https://example.com",
+            "client-a",
+            test_arrival(),
+        )
+        .await;
 
         assert!(result.is_err(), "Wrong issuer must be rejected");
         let err = result.unwrap_err();
         assert!(
-            matches!(&err, crate::crypto::jwt::StateTokenError::Validation(_)),
+            matches!(&err, StateTokenError::Validation(_)),
             "Expected Validation error, got: {err}",
         );
-        if let crate::crypto::jwt::StateTokenError::Validation(msg) = err {
+        if let StateTokenError::Validation(msg) = err {
             assert!(msg.contains("Issuer"), "Error should mention issuer: {msg}");
         }
     }
 
     #[tokio::test]
     async fn test_authorization_code_decode_wrong_audience() {
-        let signer = crate::crypto::jwt::StateTokenSigner::local(
-            crate::test_utils::TEST_JWT_SECRET.to_vec(),
-        );
+        let signer = StateTokenSigner::local(TEST_JWT_SECRET.to_vec());
         let code = test_auth_code("https://example.com", "client-a");
 
         let token = code.encode(&signer).await.unwrap();
@@ -1102,16 +1350,17 @@ mod tests {
             &signer,
             "https://example.com",
             "client-b", // Different client_id
+            test_arrival(),
         )
         .await;
 
         assert!(result.is_err(), "Wrong audience must be rejected");
         let err = result.unwrap_err();
         assert!(
-            matches!(&err, crate::crypto::jwt::StateTokenError::Validation(_)),
+            matches!(&err, StateTokenError::Validation(_)),
             "Expected Validation error, got: {err}",
         );
-        if let crate::crypto::jwt::StateTokenError::Validation(msg) = err {
+        if let StateTokenError::Validation(msg) = err {
             assert!(
                 msg.contains("Audience"),
                 "Error should mention audience: {msg}"
@@ -1121,17 +1370,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_authorization_code_decode_wrong_secret() {
-        let signer_a = crate::crypto::jwt::StateTokenSigner::local(
-            crate::test_utils::TEST_JWT_SECRET.to_vec(),
-        );
-        let signer_b = crate::crypto::jwt::StateTokenSigner::local(
-            b"different_secret_at_least_32chars_long!!".to_vec(),
-        );
+        let signer_a = StateTokenSigner::local(TEST_JWT_SECRET.to_vec());
+        let signer_b =
+            StateTokenSigner::local(b"different_secret_at_least_32chars_long!!".to_vec());
         let code = test_auth_code("https://example.com", "client-a");
 
         let token = code.encode(&signer_a).await.unwrap();
-        let result =
-            AuthorizationCode::decode(&token, &signer_b, "https://example.com", "client-a").await;
+        let result = AuthorizationCode::decode(
+            &token,
+            &signer_b,
+            "https://example.com",
+            "client-a",
+            test_arrival(),
+        )
+        .await;
 
         assert!(result.is_err(), "Wrong secret must be rejected");
     }
@@ -1508,7 +1760,7 @@ mod tests {
             resource: None,
             acr_values: None,
             max_age: None,
-            prompt: Some(Prompt::Login),
+            prompt: Some("login".to_string()),
             dpop_jkt: None,
             authorization_details: None,
             response_mode: None,
@@ -1517,7 +1769,7 @@ mod tests {
         let result = validate_authorize_request(params);
         assert!(result.is_ok());
         let validated = result.unwrap();
-        assert_eq!(validated.prompt(), Some(Prompt::Login));
+        assert_eq!(validated.prompt(), Some(PromptSet::of(Prompt::Login)));
     }
 
     // OIDC Core §3.1.2.1: prompt=none forbids any user interaction.
@@ -1535,7 +1787,7 @@ mod tests {
             resource: None,
             acr_values: None,
             max_age: None,
-            prompt: Some(Prompt::Silent),
+            prompt: Some("none".to_string()),
             dpop_jkt: None,
             authorization_details: None,
             response_mode: None,
@@ -1544,7 +1796,7 @@ mod tests {
         let result = validate_authorize_request(params);
         assert!(result.is_ok());
         let validated = result.unwrap();
-        assert_eq!(validated.prompt(), Some(Prompt::Silent));
+        assert_eq!(validated.prompt(), Some(PromptSet::of(Prompt::Silent)));
     }
 
     // RFC 9470 §4: the acr_values parameter is bounded.
@@ -1572,14 +1824,196 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // OIDC Core §3.1.2.1: prompt is a space-delimited list of values.
+    // RFC 9449 Section 10: `dpop_jkt` carries the RFC 7638 JWK thumbprint
+    // (base64url(SHA-256(jwk)), 43 chars, no padding) used to bind the
+    // authorization code to a DPoP key. A canonical thumbprint is accepted
+    // unchanged and surfaced on the validated request.
     #[test]
-    fn test_prompt_parse() {
-        assert_eq!(Prompt::parse("login"), Some(Prompt::Login));
-        assert_eq!(Prompt::parse("none"), Some(Prompt::Silent));
-        assert_eq!(Prompt::parse("consent"), Some(Prompt::Consent));
-        assert_eq!(Prompt::parse("select_account"), None);
-        assert_eq!(Prompt::parse(""), None);
+    fn test_validate_authorize_request_with_dpop_jkt() {
+        // RFC 7638 Section 3.2 example thumbprint (43 chars, base64url no-pad).
+        let jkt = "NzbLsXh8uDCcd-6MNwXF4p_7U6d6sWMR0S5Zm-zUhck";
+        let params = AuthorizeRequestParams {
+            response_type: "code".to_string(),
+            client_id: "test-client".to_string(),
+            redirect_uri: "https://example.com/callback".to_string(),
+            scope: Some("openid".to_string()),
+            state: None,
+            nonce: None,
+            code_challenge: Some("challenge".to_string()),
+            code_challenge_method: Some("S256".to_string()),
+            resource: None,
+            acr_values: None,
+            max_age: None,
+            prompt: None,
+            dpop_jkt: Some(jkt.to_string()),
+            authorization_details: None,
+            response_mode: None,
+        };
+
+        let result = validate_authorize_request(params);
+        assert!(result.is_ok());
+        let validated = result.unwrap();
+        assert_eq!(validated.dpop_jkt(), Some(jkt));
+    }
+
+    // RFC 9449 Section 10: `dpop_jkt` is client-controlled and persisted into
+    // PAR and pending-OAuth records, so it must be bounded like every other
+    // free-form string parameter. An oversized value is rejected before any
+    // caller can mint or store an authorization code.
+    #[test]
+    fn test_validate_authorize_request_rejects_long_dpop_jkt() {
+        let params = AuthorizeRequestParams {
+            response_type: "code".to_string(),
+            client_id: "test-client".to_string(),
+            redirect_uri: "https://example.com/callback".to_string(),
+            scope: None,
+            state: None,
+            nonce: None,
+            code_challenge: Some("challenge".to_string()),
+            code_challenge_method: Some("S256".to_string()),
+            resource: None,
+            acr_values: None,
+            max_age: None,
+            prompt: None,
+            dpop_jkt: Some("a".repeat(MAX_DPOP_JKT_LEN + 1)),
+            authorization_details: None,
+            response_mode: None,
+        };
+
+        let result = validate_authorize_request(params);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, ServiceError::OAuth { code, description }
+                if *code == OAuthErrorCode::InvalidRequest
+                    && description.contains("exceeds maximum length")),
+            "Expected OAuth InvalidRequest reporting an exceeded length, got: {err:?}",
+        );
+    }
+
+    // RFC 9449 Section 10: the length cap is an upper bound, not a tight one.
+    // A `dpop_jkt` at exactly the bound is accepted (border case mirrors the
+    // `max_age` boundary test).
+    #[test]
+    fn test_validate_authorize_request_accepts_max_dpop_jkt() {
+        let params = AuthorizeRequestParams {
+            response_type: "code".to_string(),
+            client_id: "test-client".to_string(),
+            redirect_uri: "https://example.com/callback".to_string(),
+            scope: None,
+            state: None,
+            nonce: None,
+            code_challenge: Some("challenge".to_string()),
+            code_challenge_method: Some("S256".to_string()),
+            resource: None,
+            acr_values: None,
+            max_age: None,
+            prompt: None,
+            dpop_jkt: Some("a".repeat(MAX_DPOP_JKT_LEN)),
+            authorization_details: None,
+            response_mode: None,
+        };
+
+        let result = validate_authorize_request(params);
+        assert!(result.is_ok());
+    }
+
+    /// Extract the OAuth error code from a failed [`PromptSet::parse`].
+    fn prompt_error(raw: &str) -> OAuthErrorCode {
+        match PromptSet::parse(raw) {
+            Ok(set) => panic!("{raw:?} should have been rejected, parsed as {set}"),
+            Err(ServiceError::OAuth { code, .. }) => code,
+            Err(e) => panic!("expected an OAuth error for {raw:?}, got {e:?}"),
+        }
+    }
+
+    // OIDC Core §3.1.2.1: each honored value parses on its own.
+    #[test]
+    fn test_prompt_parse_single_values() {
+        for (raw, prompt) in [
+            ("login", Prompt::Login),
+            ("none", Prompt::Silent),
+            ("consent", Prompt::Consent),
+        ] {
+            assert_eq!(
+                PromptSet::parse(raw).unwrap(),
+                PromptSet::of(prompt),
+                "{raw:?} should parse as the {prompt} behavior"
+            );
+        }
+    }
+
+    // OIDC Core §3.1.2.1: prompt is a "Space-delimited, case-sensitive list of
+    // ASCII string values", so more than one value in one parameter is a
+    // request for both behaviors, not an unrecognized value.
+    #[test]
+    fn test_prompt_parse_accepts_multiple_values() {
+        let set = PromptSet::parse("login consent").unwrap();
+        assert!(set.contains(Prompt::Login), "login must be honored");
+        assert!(set.contains(Prompt::Consent), "consent must be honored");
+        assert!(!set.contains(Prompt::Silent));
+
+        // Order is the client's choice; the parsed set is the same either way.
+        assert_eq!(set, PromptSet::parse("consent login").unwrap());
+    }
+
+    // OIDC Core §3.1.2.1: "If this parameter contains none with any other
+    // value, an error is returned."
+    #[test]
+    fn test_prompt_parse_rejects_none_with_other_values() {
+        assert_eq!(prompt_error("none login"), OAuthErrorCode::InvalidRequest);
+        assert_eq!(prompt_error("consent none"), OAuthErrorCode::InvalidRequest);
+    }
+
+    // OIDC Core §3.1.2.1: for select_account, "If it cannot obtain an account
+    // selection choice made by the End-User, it MUST return an error,
+    // typically account_selection_required." Vouch authenticates one account
+    // per session, so it never can.
+    #[test]
+    fn test_prompt_parse_rejects_select_account() {
+        assert_eq!(
+            prompt_error("select_account"),
+            OAuthErrorCode::AccountSelectionRequired
+        );
+        assert_eq!(
+            prompt_error("login select_account"),
+            OAuthErrorCode::AccountSelectionRequired
+        );
+    }
+
+    // OIDC Core §3.1.2.1 permits either answer for a value outside the defined
+    // set — "it MAY return an error or it MAY ignore it". Vouch returns one.
+    #[test]
+    fn test_prompt_parse_rejects_undefined_values() {
+        assert_eq!(prompt_error("x_vendor_ext"), OAuthErrorCode::InvalidRequest);
+        assert_eq!(
+            prompt_error("login x_vendor_ext"),
+            OAuthErrorCode::InvalidRequest
+        );
+        // Case-sensitive: "Login" is not "login".
+        assert_eq!(prompt_error("Login"), OAuthErrorCode::InvalidRequest);
+    }
+
+    // RFC 6749 §3.1: "Parameters sent without a value MUST be treated as if
+    // they were omitted from the request." An empty list carries no values.
+    #[test]
+    fn test_prompt_parse_empty_is_no_values() {
+        assert!(PromptSet::parse("").unwrap().is_empty());
+        assert!(PromptSet::parse("   ").unwrap().is_empty());
+    }
+
+    // The stored form has to survive a round trip: a PAR record's prompt is
+    // re-parsed when the request_uri is redeemed at the authorize endpoint.
+    #[test]
+    fn test_prompt_set_round_trips_through_its_wire_form() {
+        for raw in ["login", "none", "consent", "login consent"] {
+            let set = PromptSet::parse(raw).unwrap();
+            assert_eq!(
+                PromptSet::parse(&set.to_space_separated()).unwrap(),
+                set,
+                "{raw:?} did not survive a round trip"
+            );
+        }
     }
 
     /// Every value the error message advertises must actually parse. This is
@@ -1592,15 +2026,17 @@ mod tests {
         assert!(!advertised.is_empty(), "message must list something");
         for value in advertised.split(", ") {
             assert!(
-                Prompt::parse(value).is_some(),
+                PromptSet::parse(value).is_ok(),
                 "advertised prompt {value:?} does not parse"
             );
         }
-        // And every accepted value is advertised.
-        for (value, _) in Prompt::ACCEPTED {
-            assert!(
+        // And every honored value is advertised. `select_account` is defined
+        // but not honored, so it is deliberately absent from the list.
+        for (value, prompt) in Prompt::DEFINED {
+            assert_eq!(
                 advertised.contains(value),
-                "accepted prompt {value:?} is missing from the advertised list"
+                prompt.is_some(),
+                "advertised list disagrees with the parser about {value:?}"
             );
         }
     }

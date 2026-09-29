@@ -18,16 +18,9 @@ impl DocumentType for JwtAssertionJtiDoc {
     const DOC_TYPE: &'static str = "jwt_assertion_jti";
 
     fn index_entries(&self) -> Vec<IndexEntry> {
-        vec![
-            IndexEntry {
-                field: "jti",
-                value: self.jti.clone(),
-            },
-            IndexEntry {
-                field: "client_id",
-                value: self.client_id.clone(),
-            },
-        ]
+        // No index needed — replay detection uses deterministic document IDs
+        // (PRIMARY KEY collision), not index lookups.
+        Vec::new()
     }
 
     fn expires_at(&self) -> Option<Timestamp> {

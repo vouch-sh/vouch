@@ -1,12 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-//! Key management handlers during enrollment (using cookie-based authentication).
+//! Key management handlers during enrollment (browser UI).
 //!
-//! These endpoints allow users to manage their security keys via browser UI.
-//! Authentication is via the session cookie containing an OAuth access token.
+//! These endpoints let users manage their security keys from the enrollment
+//! pages. `list_keys` and `rename_key_form` read the session cookie only.
+//! `delete_key` takes the `SteppedUpToken` extractor, which consults the
+//! `Authorization` header before falling back to the cookie — so it also
+//! accepts a bearer token. That grants nothing new: `DELETE /v1/keys/{id}`
+//! already accepts the same token and performs the same deletion. Pinning this
+//! route back to cookies would mean special-casing the extractor for one
+//! handler, which is worse than the asymmetry.
 
 use crate::AppState;
+use crate::arrival::ArrivalTime;
 use crate::db;
 use crate::error::ServiceError;
+use crate::infra::i18n::Tr;
 use crate::services::keys as key_svc;
 use axum::{
     Form, Json,
@@ -16,18 +24,20 @@ use axum::{
 use axum_extra::extract::cookie::CookieJar;
 use serde::Deserialize;
 use std::sync::Arc;
-use vouch_common::{DeleteKeyResponse, ListKeysResponse};
+use vouch_common::{DeleteKeyResponse, ListKeysResponse, ResourceLabel, ResourceLabelError};
 
-use super::session::extract_session_from_cookie;
+use super::session::{SteppedUpToken, extract_session_from_cookie};
+use crate::handlers::admin::flash::{self, KEYS_PATH};
 
 /// List all registered keys for the user (during enrollment).
 /// GET /enroll/keys/api
 /// Authentication is via session cookie.
 pub(crate) async fn list_keys(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
 ) -> Result<Json<ListKeysResponse>, ServiceError> {
-    let token = extract_session_from_cookie(&state, &jar).await?;
+    let token = extract_session_from_cookie(&state, &jar, arrival).await?;
 
     let keys =
         key_svc::list_keys_for_user(&state.store, &token.sub, token.authenticator_id.as_deref())
@@ -51,28 +61,63 @@ pub(crate) struct RenameKeyForm {
 /// the list — surfacing any error via a flash message rather than returning a
 /// raw JSON error body. Authentication is via session cookie.
 pub(crate) async fn rename_key_form(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
+    client_info: db::ClientInfo,
     Path(key_id): Path<String>,
     Form(form): Form<RenameKeyForm>,
 ) -> Response {
-    let token = match extract_session_from_cookie(&state, &jar).await {
+    let token = match extract_session_from_cookie(&state, &jar, arrival).await {
         Ok(token) => token,
         Err(_) => return Redirect::to("/enroll/start").into_response(),
     };
 
-    match key_svc::rename_key(&state.store, &token.sub, &key_id, &form.name).await {
-        Ok(_) => Redirect::to("/enroll/keys").into_response(),
+    // Defense-in-depth active-user gate. `extract_session_from_cookie`
+    // validates the session only — it does not load the user record — so a
+    // deactivated user holding a live session would otherwise reach the
+    // state-changing rename below. Mirrors the sibling `delete_key` in this
+    // file and `handlers::keys::rename_key`; see `session::load_active_user`.
+    let Ok(user) = super::session::load_active_user(&state, &token.sub).await else {
+        return Redirect::to("/enroll/start").into_response();
+    };
+
+    let name = match ResourceLabel::parse(&form.name) {
+        Ok(name) => name,
+        Err(err) => {
+            let message = match err {
+                ResourceLabelError::Empty => Tr::new("keys-error-name-empty").to_string(),
+                ResourceLabelError::TooLong => Tr::new("keys-error-name-too-long")
+                    .arg("max", ResourceLabel::MAX_CHARS.to_string())
+                    .to_string(),
+            };
+            let jar = flash::set_err_at(jar, &message, KEYS_PATH);
+            return (jar, Redirect::to("/enroll/keys")).into_response();
+        }
+    };
+
+    match key_svc::rename_key(&state.store, &token.sub, &key_id, &name).await {
+        Ok(_) => {
+            let event = db::AuthEventParams {
+                user_id: db::Principal::Verified(token.sub.clone()),
+                event_type: db::AuthEventType::KeyRenamed,
+                authenticator_id: Some(key_id.clone()),
+                success: true,
+                client: client_info,
+                failure_reason: None,
+                client_id: None,
+                idp_issuer: None,
+            };
+            db::record_auth_event(&state.audit, event, Some(user.email)).await;
+            Redirect::to("/enroll/keys").into_response()
+        }
         Err(err) => {
             tracing::warn!(error = ?err, "rename_key_form: rename failed");
-            // A generic, user-safe message: the common failures (empty / too
-            // long) are also constrained by the form, and we must not surface
-            // internal error detail.
-            let jar = crate::handlers::admin::flash::set_err_at(
-                jar,
-                "Could not rename key. Please choose a name between 1 and 100 characters.",
-                crate::handlers::admin::flash::KEYS_PATH,
-            );
+            // Name-shape failures are handled above with specific messages; the
+            // remaining errors get a generic message that surfaces no internal
+            // detail.
+            let message = Tr::new("keys-error-rename-failed").to_string();
+            let jar = flash::set_err_at(jar, &message, KEYS_PATH);
             (jar, Redirect::to("/enroll/keys")).into_response()
         }
     }
@@ -83,16 +128,18 @@ pub(crate) async fn rename_key_form(
 /// Authentication is via session cookie.
 pub(crate) async fn delete_key(
     State(state): State<Arc<AppState>>,
-    jar: CookieJar,
+    SteppedUpToken(token): SteppedUpToken,
     client_info: db::ClientInfo,
     Path(key_id): Path<String>,
 ) -> Result<Json<DeleteKeyResponse>, ServiceError> {
-    let token = extract_session_from_cookie(&state, &jar).await?;
-
-    // Require a recent authentication for destructive key operations.
-    // Use auth_time (when FIDO2 occurred) if available, otherwise fall back to iat.
-    let auth_timestamp = token.auth_time.unwrap_or(0);
-    key_svc::require_fresh_timestamp(auth_timestamp, key_svc::KEY_DELETE_MAX_AGE_SECS)?;
+    // Defense-in-depth active-user gate. `SteppedUpToken` establishes token
+    // validity and recent hardware verification but does not load the user
+    // record, so a deactivated user holding a live session (e.g. one produced
+    // by a writer that bypasses `services::auth::revoke_then_persist`) would
+    // otherwise reach the destructive delete below. Mirrors the sibling
+    // `handlers::keys::delete_key` and `register_start`; see
+    // `session::load_active_user`.
+    let user = super::session::load_active_user(&state, &token.sub).await?;
 
     // Whether we just deleted the key this very session is bound to (so the
     // browser knows to re-authenticate rather than reload into a dead session).
@@ -105,14 +152,16 @@ pub(crate) async fn delete_key(
     state.session_cache.invalidate_for_user(&token.sub);
 
     let event = db::AuthEventParams {
-        user_id: token.sub.clone(),
+        user_id: db::Principal::Verified(token.sub.clone()),
         event_type: db::AuthEventType::KeyRemoved,
         authenticator_id: Some(key_id.clone()),
         success: true,
         client: client_info,
-        ..Default::default()
+        failure_reason: None,
+        client_id: None,
+        idp_issuer: None,
     };
-    db::spawn_audit_event(&state.audit, event, token.email.clone());
+    db::record_auth_event(&state.audit, event, Some(user.email)).await;
 
     Ok(Json(DeleteKeyResponse {
         message: format!("Key '{}' has been deleted", key_name),

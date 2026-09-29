@@ -9,13 +9,16 @@ use std::collections::BTreeMap;
 use anyhow::{Context, Result};
 use secrecy::ExposeSecret;
 
-use crate::commands::credential::codeartifact::CodeArtifactTarget;
+use crate::commands::credential::codeartifact::{self, CodeArtifactTarget};
 use crate::config::{CodeArtifactProfile, Config};
 use crate::install_path::resolve_install_path;
 use crate::integrations::aws::codeartifact::{CodeArtifactRegistry, parse_codeartifact_url};
 use crate::integrations::aws::sts::parse_role_arn;
 use crate::integrations::aws::{ProfileOverride, resolve_vouch_profile};
 use crate::integrations::cargo::CargoConfig;
+use crate::server_url::ServerUrl;
+use crate::utils;
+use vouch_common::{fs, paths};
 
 /// Supported package manager tools for CodeArtifact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -46,7 +49,7 @@ pub(crate) enum Tool {
 /// * `repository` - CodeArtifact repository name
 /// * `domain_profile` - Named domain profile to save the resolved domain under
 pub(crate) async fn run(
-    server: &str,
+    server: &ServerUrl,
     tool: Tool,
     resolved: &CodeArtifactTarget,
     repository: &str,
@@ -190,11 +193,11 @@ fn setup_pip(ca_host: &str, repository: &str) -> Result<()> {
 /// handle those calls.
 fn install_keyring_wrapper() -> Result<()> {
     let vouch_path = resolve_install_path();
-    let keyring_path = crate::utils::vouch_helper_path("keyring")?;
+    let keyring_path = utils::vouch_helper_path("keyring")?;
 
     // Don't overwrite if it exists and isn't a vouch symlink
     if (keyring_path.exists() || keyring_path.is_symlink())
-        && !crate::utils::is_vouch_symlink(&keyring_path)
+        && !utils::is_vouch_symlink(&keyring_path)
     {
         vouch_cli::tr_println!(
             "setup-ca-keyring-conflict-block",
@@ -208,7 +211,7 @@ fn install_keyring_wrapper() -> Result<()> {
         "@echo off\r\n\"{}\" credential pip %*\r\n",
         vouch_path.display()
     );
-    crate::utils::create_symlink_with_fallback(&vouch_path, &keyring_path, &batch_content)?;
+    utils::create_symlink_with_fallback(&vouch_path, &keyring_path, &batch_content)?;
 
     Ok(())
 }
@@ -218,15 +221,8 @@ fn install_keyring_wrapper() -> Result<()> {
 /// Loads the existing pip.conf (if any), updates the `[global]` section
 /// with `index-url` and `keyring-provider`, preserving any other settings.
 fn write_pip_config(index_url: &str) -> Result<()> {
-    let config_dir = get_pip_config_dir()?;
-    std::fs::create_dir_all(&config_dir).with_context(|| {
-        vouch_cli::tr_args!(
-            "setup-ca-err-create-dir",
-            path = config_dir.display().to_string()
-        )
-    })?;
-
-    let config_path = config_dir.join("pip.conf");
+    let config_path = pip_config_path()?;
+    create_parent_dir(&config_path)?;
 
     // Load existing config or create new
     let mut ini = if config_path.exists() {
@@ -253,7 +249,7 @@ fn write_pip_config(index_url: &str) -> Result<()> {
             path = config_path.display().to_string()
         )
     })?;
-    vouch_common::fs::atomic_write_secure(&config_path, &buf).with_context(|| {
+    fs::atomic_write_secure(&config_path, &buf).with_context(|| {
         vouch_cli::tr_args!(
             "setup-ca-err-write",
             path = config_path.display().to_string()
@@ -268,18 +264,82 @@ fn write_pip_config(index_url: &str) -> Result<()> {
     Ok(())
 }
 
-/// Get the pip config directory path.
-fn get_pip_config_dir() -> Result<std::path::PathBuf> {
-    // Respect PIP_CONFIG_FILE if set
-    if let Ok(pip_config) = std::env::var("PIP_CONFIG_FILE") {
-        let path = std::path::PathBuf::from(pip_config);
-        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            return Ok(parent.to_path_buf());
-        }
+/// Create the directory holding `path`, if it does not already exist.
+fn create_parent_dir(path: &std::path::Path) -> Result<()> {
+    let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) else {
+        return Ok(());
+    };
+    std::fs::create_dir_all(parent).with_context(|| {
+        vouch_cli::tr_args!(
+            "setup-ca-err-create-dir",
+            path = parent.display().to_string()
+        )
+    })
+}
+
+/// Path to pip's user-level configuration file.
+///
+/// Mirrors pip's documented search order, which differs by platform. On macOS
+/// the choice is gated on which directory already exists, so vouch must probe
+/// rather than pick — writing `~/.config/pip/pip.conf` on a Mac that has a
+/// `~/Library/Application Support/pip` directory produces a file pip ignores.
+///
+/// See <https://pip.pypa.io/en/stable/topics/configuration/>.
+fn pip_config_path() -> Result<std::path::PathBuf> {
+    // PIP_CONFIG_FILE names the file itself, not its directory, and pip loads it
+    // last — overriding the user config rather than sitting beside it.
+    if let Some(explicit) = env_path("PIP_CONFIG_FILE") {
+        return Ok(explicit);
     }
 
-    let home = dirs::home_dir().with_context(|| vouch_cli::tr!("setup-err-no-home"))?;
-    Ok(home.join(".config").join("pip"))
+    // `cfg!` rather than `#[cfg]` so every branch is compiled — and its helper
+    // unit-tested — on every platform.
+    if cfg!(windows) {
+        // pip reads %APPDATA%\pip\pip.ini; note the extension differs from Unix.
+        let appdata =
+            env_path("APPDATA").with_context(|| vouch_cli::tr!("setup-err-no-appdata"))?;
+        return Ok(appdata.join("pip").join("pip.ini"));
+    }
+
+    if cfg!(target_os = "macos") {
+        let home = paths::home_dir().with_context(|| vouch_cli::tr!("setup-err-no-home"))?;
+        return Ok(macos_pip_config_path(
+            env_path("XDG_DATA_HOME").as_deref(),
+            &home,
+        ));
+    }
+
+    let base = paths::xdg_config_home().with_context(|| vouch_cli::tr!("setup-err-no-home"))?;
+    Ok(base.join("pip").join("pip.conf"))
+}
+
+/// pip's macOS user-config location: the first candidate directory that exists,
+/// falling back to `~/.config/pip`.
+///
+/// `xdg_data_home` is the raw environment value — pip consults the *data* base
+/// here, not the config base, and only when the variable is set.
+fn macos_pip_config_path(
+    xdg_data_home: Option<&std::path::Path>,
+    home: &std::path::Path,
+) -> std::path::PathBuf {
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(data) = xdg_data_home {
+        candidates.push(data.join("pip"));
+    }
+    candidates.push(home.join("Library").join("Application Support").join("pip"));
+
+    let dir = candidates
+        .into_iter()
+        .find(|d| d.is_dir())
+        .unwrap_or_else(|| home.join(".config").join("pip"));
+    dir.join("pip.conf")
+}
+
+/// Read `var` as a path, treating unset and empty as absent.
+fn env_path(var: &str) -> Option<std::path::PathBuf> {
+    std::env::var_os(var)
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
 }
 
 /// Configure uv for CodeArtifact using the keyring credential helper.
@@ -287,8 +347,8 @@ fn get_pip_config_dir() -> Result<std::path::PathBuf> {
 /// uv supports the same `keyring` subprocess protocol as pip, but does NOT
 /// read `pip.conf`. Instead, it uses its own `uv.toml` configuration file.
 /// This sets up `keyring-provider = "subprocess"` and configures the
-/// CodeArtifact index in `~/.config/uv/uv.toml`, then reuses the same
-/// `~/.local/bin/keyring` wrapper that pip setup installs.
+/// CodeArtifact index in uv's `uv.toml`, then reuses the same `keyring`
+/// wrapper that pip setup installs.
 fn setup_uv(ca_host: &str, repository: &str) -> Result<()> {
     let index_url = format!("https://aws@{ca_host}/pypi/{repository}/simple/");
 
@@ -301,21 +361,14 @@ fn setup_uv(ca_host: &str, repository: &str) -> Result<()> {
     Ok(())
 }
 
-/// Write uv configuration file (`~/.config/uv/uv.toml`).
+/// Write uv's configuration file, at the path [`uv_config_path`] resolves.
 ///
 /// Loads the existing uv.toml (if any) via `toml_edit` to preserve other
 /// settings, then sets `keyring-provider = "subprocess"` and adds (or
 /// updates) a CodeArtifact index entry.
 fn write_uv_config(index_url: &str, repository: &str) -> Result<()> {
-    let config_dir = get_uv_config_dir()?;
-    std::fs::create_dir_all(&config_dir).with_context(|| {
-        vouch_cli::tr_args!(
-            "setup-ca-err-create-dir",
-            path = config_dir.display().to_string()
-        )
-    })?;
-
-    let config_path = config_dir.join("uv.toml");
+    let config_path = uv_config_path()?;
+    create_parent_dir(&config_path)?;
 
     // Load existing config or create new
     let content = if config_path.exists() {
@@ -373,14 +426,12 @@ fn write_uv_config(index_url: &str, repository: &str) -> Result<()> {
     }
 
     let serialized = doc.to_string();
-    vouch_common::fs::atomic_write_secure(&config_path, serialized.as_bytes()).with_context(
-        || {
-            vouch_cli::tr_args!(
-                "setup-ca-err-write",
-                path = config_path.display().to_string()
-            )
-        },
-    )?;
+    fs::atomic_write_secure(&config_path, serialized.as_bytes()).with_context(|| {
+        vouch_cli::tr_args!(
+            "setup-ca-err-write",
+            path = config_path.display().to_string()
+        )
+    })?;
 
     vouch_cli::tr_println!(
         "setup-ca-uv-wrote",
@@ -390,18 +441,24 @@ fn write_uv_config(index_url: &str, repository: &str) -> Result<()> {
     Ok(())
 }
 
-/// Get the uv config directory path.
-fn get_uv_config_dir() -> Result<std::path::PathBuf> {
-    // Respect UV_CONFIG_FILE if set
-    if let Ok(uv_config) = std::env::var("UV_CONFIG_FILE") {
-        let path = std::path::PathBuf::from(uv_config);
-        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            return Ok(parent.to_path_buf());
-        }
+/// Path to uv's user-level configuration file.
+///
+/// uv follows XDG on macOS as well as Linux, so — unlike pip — there is no
+/// Apple-specific location in the chain.
+/// See <https://docs.astral.sh/uv/reference/storage/>.
+fn uv_config_path() -> Result<std::path::PathBuf> {
+    // UV_CONFIG_FILE names the file itself, and replaces discovery entirely.
+    if let Some(explicit) = env_path("UV_CONFIG_FILE") {
+        return Ok(explicit);
     }
 
-    let home = dirs::home_dir().with_context(|| vouch_cli::tr!("setup-err-no-home"))?;
-    Ok(home.join(".config").join("uv"))
+    let base = if cfg!(windows) {
+        env_path("APPDATA").with_context(|| vouch_cli::tr!("setup-err-no-appdata"))?
+    } else {
+        paths::xdg_config_home().with_context(|| vouch_cli::tr!("setup-err-no-home"))?
+    };
+
+    Ok(base.join("uv").join("uv.toml"))
 }
 
 /// Configure npm for CodeArtifact.
@@ -409,12 +466,12 @@ fn get_uv_config_dir() -> Result<std::path::PathBuf> {
 /// Gets a fresh token and writes `~/.npmrc` with the CodeArtifact
 /// npm registry URL and bearer token.
 async fn setup_npm(
-    server: &str,
+    server: &ServerUrl,
     target: &CodeArtifactTarget,
     ca_host: &str,
     repository: &str,
 ) -> Result<()> {
-    let result = crate::commands::credential::codeartifact::get_token(server, target)
+    let result = codeartifact::get_token(server, target)
         .await
         .with_context(|| vouch_cli::tr!("setup-ca-err-fetch-token"))?;
 
@@ -478,7 +535,7 @@ fn warn_npmrc_conflict(existing: &str, ca_host: &str, repository: &str, setting_
 /// Preserves existing entries while updating/adding CodeArtifact-specific lines.
 /// Only lines matching this specific host/repo are replaced.
 fn write_npmrc(ca_host: &str, repository: &str, token: &str) -> Result<()> {
-    let home = dirs::home_dir().with_context(|| vouch_cli::tr!("setup-err-no-home"))?;
+    let home = paths::home_dir().with_context(|| vouch_cli::tr!("setup-err-no-home"))?;
     let npmrc_path = home.join(".npmrc");
 
     let existing = if npmrc_path.exists() {
@@ -492,7 +549,7 @@ fn write_npmrc(ca_host: &str, repository: &str, token: &str) -> Result<()> {
     warn_npmrc_conflict(&existing, ca_host, repository, "npm");
     let content = build_npmrc_content(&existing, ca_host, repository, token);
 
-    vouch_common::fs::atomic_write_secure(&npmrc_path, content.as_bytes()).with_context(|| {
+    fs::atomic_write_secure(&npmrc_path, content.as_bytes()).with_context(|| {
         vouch_cli::tr_args!(
             "setup-ca-err-write",
             path = npmrc_path.display().to_string()
@@ -530,11 +587,10 @@ fn setup_pnpm(ca_host: &str, repository: &str) -> Result<()> {
 /// and dispatch to the codeartifact credential command.
 fn install_pnpm_token_helper() -> Result<std::path::PathBuf> {
     let vouch_path = resolve_install_path();
-    let helper_path = crate::utils::vouch_helper_path("vouch-pnpm-tokenhelper")?;
+    let helper_path = utils::vouch_helper_path("vouch-pnpm-tokenhelper")?;
 
     // Don't overwrite if it exists and isn't a vouch symlink
-    if (helper_path.exists() || helper_path.is_symlink())
-        && !crate::utils::is_vouch_symlink(&helper_path)
+    if (helper_path.exists() || helper_path.is_symlink()) && !utils::is_vouch_symlink(&helper_path)
     {
         vouch_cli::tr_println!(
             "setup-ca-pnpm-conflict-block",
@@ -548,7 +604,7 @@ fn install_pnpm_token_helper() -> Result<std::path::PathBuf> {
         "@echo off\r\n\"{}\" credential codeartifact %*\r\n",
         vouch_path.display()
     );
-    crate::utils::create_symlink_with_fallback(&vouch_path, &helper_path, &batch_content)?;
+    utils::create_symlink_with_fallback(&vouch_path, &helper_path, &batch_content)?;
 
     Ok(helper_path)
 }
@@ -558,7 +614,7 @@ fn install_pnpm_token_helper() -> Result<std::path::PathBuf> {
 /// Preserves existing entries while updating/adding the `tokenHelper`
 /// directive for the given CodeArtifact registry.
 fn write_npmrc_pnpm(ca_host: &str, repository: &str, helper_path: &std::path::Path) -> Result<()> {
-    let home = dirs::home_dir().with_context(|| vouch_cli::tr!("setup-err-no-home"))?;
+    let home = paths::home_dir().with_context(|| vouch_cli::tr!("setup-err-no-home"))?;
     let npmrc_path = home.join(".npmrc");
 
     let existing = if npmrc_path.exists() {
@@ -572,7 +628,7 @@ fn write_npmrc_pnpm(ca_host: &str, repository: &str, helper_path: &std::path::Pa
     warn_npmrc_conflict(&existing, ca_host, repository, "pnpm");
     let content = build_npmrc_pnpm_content(&existing, ca_host, repository, helper_path);
 
-    vouch_common::fs::atomic_write_secure(&npmrc_path, content.as_bytes()).with_context(|| {
+    fs::atomic_write_secure(&npmrc_path, content.as_bytes()).with_context(|| {
         vouch_cli::tr_args!(
             "setup-ca-err-write",
             path = npmrc_path.display().to_string()
@@ -624,7 +680,7 @@ fn parse_npmrc_codeartifact_entries(content: &str) -> Vec<(String, CodeArtifactR
 /// fetches a fresh token for each unique domain, and rewrites the tokens
 /// in place. Best-effort: logs errors via `tracing` but never fails the
 /// login flow.
-pub(crate) async fn auto_refresh_npmrc(server: &str) {
+pub(crate) async fn auto_refresh_npmrc(server: &ServerUrl) {
     if let Err(e) = try_refresh_npmrc(server).await {
         tracing::debug!("CodeArtifact npmrc refresh skipped: {e}");
     }
@@ -632,8 +688,8 @@ pub(crate) async fn auto_refresh_npmrc(server: &str) {
 
 /// Inner implementation for `auto_refresh_npmrc` that returns `Result`
 /// for ergonomic error handling.
-async fn try_refresh_npmrc(server: &str) -> Result<()> {
-    let home = dirs::home_dir().with_context(|| vouch_cli::tr!("setup-err-no-home"))?;
+async fn try_refresh_npmrc(server: &ServerUrl) -> Result<()> {
+    let home = paths::home_dir().with_context(|| vouch_cli::tr!("setup-err-no-home"))?;
     let npmrc_path = home.join(".npmrc");
 
     let content = match std::fs::read_to_string(&npmrc_path) {
@@ -663,7 +719,7 @@ async fn try_refresh_npmrc(server: &str) -> Result<()> {
             registry.domain_owner.clone(),
             registry.region.clone(),
         );
-        match crate::commands::credential::codeartifact::get_token(server, &target).await {
+        match codeartifact::get_token(server, &target).await {
             Ok(token) => {
                 tokens.insert(key, token.authorization_token);
             }
@@ -699,14 +755,12 @@ async fn try_refresh_npmrc(server: &str) -> Result<()> {
     let (new_content, refreshed) = rewrite_npmrc_tokens(&content, &plain_map);
 
     if refreshed {
-        vouch_common::fs::atomic_write_secure(&npmrc_path, new_content.as_bytes()).with_context(
-            || {
-                vouch_cli::tr_args!(
-                    "setup-ca-err-write",
-                    path = npmrc_path.display().to_string()
-                )
-            },
-        )?;
+        fs::atomic_write_secure(&npmrc_path, new_content.as_bytes()).with_context(|| {
+            vouch_cli::tr_args!(
+                "setup-ca-err-write",
+                path = npmrc_path.display().to_string()
+            )
+        })?;
         vouch_cli::tr_println!("setup-ca-refreshed-npmrc");
     }
 
@@ -1153,5 +1207,87 @@ mod tests {
             let map: BTreeMap<&str, &str> = BTreeMap::new();
             let _ = rewrite_npmrc_tokens(&content, &map);
         }
+    }
+
+    // =========================================================================
+    // macos_pip_config_path tests
+    //
+    // pip's macOS search order is existence-gated, so the location depends on
+    // which directories are already on disk. Each case builds that state in a
+    // tempdir rather than mutating the environment. pip documents the order as:
+    // `$XDG_DATA_HOME/pip` (if set and present), then
+    // `~/Library/Application Support/pip` (if present), then `~/.config/pip`.
+    // <https://pip.pypa.io/en/stable/topics/configuration/>
+    // =========================================================================
+
+    /// `~/Library/Application Support/pip` for the given home.
+    fn apple_pip_dir(home: &std::path::Path) -> std::path::PathBuf {
+        home.join("Library").join("Application Support").join("pip")
+    }
+
+    #[test]
+    fn macos_pip_falls_back_to_xdg_config_when_nothing_exists() {
+        let home = tempfile::tempdir().unwrap();
+        let got = macos_pip_config_path(None, home.path());
+        assert_eq!(
+            got,
+            home.path().join(".config").join("pip").join("pip.conf")
+        );
+    }
+
+    #[test]
+    fn macos_pip_prefers_apple_dir_when_it_exists() {
+        let home = tempfile::tempdir().unwrap();
+        let apple = apple_pip_dir(home.path());
+        std::fs::create_dir_all(&apple).unwrap();
+
+        let got = macos_pip_config_path(None, home.path());
+        assert_eq!(got, apple.join("pip.conf"));
+    }
+
+    #[test]
+    fn macos_pip_prefers_xdg_data_home_over_apple_dir() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(apple_pip_dir(home.path())).unwrap();
+        let data_pip = data.path().join("pip");
+        std::fs::create_dir_all(&data_pip).unwrap();
+
+        let got = macos_pip_config_path(Some(data.path()), home.path());
+        assert_eq!(got, data_pip.join("pip.conf"));
+    }
+
+    #[test]
+    fn macos_pip_ignores_xdg_data_home_whose_pip_dir_is_absent() {
+        // pip gates on the directory existing, not merely on the variable
+        // being set — an unconditional write here would be ignored by pip.
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let apple = apple_pip_dir(home.path());
+        std::fs::create_dir_all(&apple).unwrap();
+
+        let got = macos_pip_config_path(Some(data.path()), home.path());
+        assert_eq!(got, apple.join("pip.conf"));
+    }
+
+    #[test]
+    fn macos_pip_ignores_a_pip_path_that_is_a_file() {
+        let home = tempfile::tempdir().unwrap();
+        let apple = apple_pip_dir(home.path());
+        std::fs::create_dir_all(apple.parent().unwrap()).unwrap();
+        std::fs::write(&apple, b"not a directory").unwrap();
+
+        let got = macos_pip_config_path(None, home.path());
+        assert_eq!(
+            got,
+            home.path().join(".config").join("pip").join("pip.conf")
+        );
+    }
+
+    // -- env_path --
+
+    #[test]
+    fn env_path_treats_unset_as_absent() {
+        assert_eq!(env_path("VOUCH_TEST_DEFINITELY_UNSET_VAR"), None);
     }
 }

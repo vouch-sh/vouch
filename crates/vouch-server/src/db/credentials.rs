@@ -164,6 +164,10 @@ pub async fn record_ssh_certificate_issuance(
 }
 
 /// Get all non-expired issued SSH certificates for a user.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "filters a listing, not a request accept/reject"
+)]
 pub async fn get_issued_ssh_certificates_for_user(
     store: &DocumentStore,
     user_id: &str,
@@ -221,6 +225,10 @@ pub async fn is_ssh_certificate_revoked(store: &DocumentStore, serial: &str) -> 
 }
 
 /// Get all revoked SSH certificates (for KRL generation).
+#[expect(
+    clippy::disallowed_methods,
+    reason = "filters a KRL listing, not a request accept/reject"
+)]
 pub async fn get_revoked_ssh_certificates(
     store: &DocumentStore,
 ) -> Result<Vec<RevokedSshCertificate>> {
@@ -235,6 +243,10 @@ pub async fn get_revoked_ssh_certificates(
 
 /// Revoke all SSH certificates for a user by looking up issued certs
 /// and inserting a revocation record for each real serial.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "OCC retry re-reads the clock per attempt to stamp the revocation rows"
+)]
 pub(in crate::db) async fn revoke_all_ssh_certificates_for_user(
     store: &DocumentStore,
     user_id: &str,
@@ -316,14 +328,14 @@ pub async fn revoke_user_credentials(
 )]
 mod tests {
     use super::*;
-    use crate::crypto::document_crypto::PlaintextDocumentCrypto;
-    use crate::db::pool::Pool;
+    use crate::crypto::document_crypto::{DocumentCrypto, PlaintextDocumentCrypto};
+    use crate::db::pool::{Pool, PoolConfig};
     use crate::db::store::DocumentStore;
     use std::sync::Arc;
 
     /// Create an in-memory test store with SQLite migrations applied.
     async fn test_store() -> DocumentStore {
-        let pool = Pool::connect("sqlite::memory:", &crate::db::pool::PoolConfig::default())
+        let pool = Pool::connect("sqlite::memory:", &PoolConfig::default())
             .await
             .expect("connect");
         match &pool {
@@ -333,8 +345,7 @@ mod tests {
                 .expect("migrate"),
             Pool::Postgres(_) => panic!("unexpected pool type in unit tests"),
         }
-        let crypto: Arc<dyn crate::crypto::document_crypto::DocumentCrypto> =
-            Arc::new(PlaintextDocumentCrypto);
+        let crypto: Arc<dyn DocumentCrypto> = Arc::new(PlaintextDocumentCrypto);
         DocumentStore::new(pool, crypto)
     }
 

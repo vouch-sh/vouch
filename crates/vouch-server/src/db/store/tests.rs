@@ -9,6 +9,7 @@
 use super::*;
 use crate::crypto::document_crypto::PlaintextDocumentCrypto;
 use crate::db::document_type::IndexEntry;
+use crate::db::pool::{self, PoolConfig};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -50,7 +51,7 @@ impl DocumentType for ExpiringDoc {
 }
 
 async fn test_store() -> DocumentStore {
-    let pool = Pool::connect("sqlite::memory:", &crate::db::pool::PoolConfig::default())
+    let pool = Pool::connect("sqlite::memory:", &PoolConfig::default())
         .await
         .unwrap();
 
@@ -260,6 +261,88 @@ async fn delete_expired() {
         .await
         .unwrap();
     assert!(found.is_some());
+}
+
+// RFC 3339 text sorts lexically only when both strings render fractional
+// seconds at the same width; jiff trims trailing zeros, so a live row can sort
+// as expired. RFC 9421 leaves nonce lifetime handling to the application
+// (`specs/rfc/rfc9421.txt:2213`, "Enforcing uniqueness of the nonce
+// parameter"); these tests pin our own bound handling.
+#[tokio::test]
+async fn delete_expired_keeps_row_expiring_later_in_the_same_second() {
+    let store = test_store().await;
+    let live = ExpiringDoc {
+        token: "live-same-second".to_string(),
+        expires: "2030-01-01T00:00:16.537239482Z".parse().unwrap(),
+    };
+    store.insert(&live).await.unwrap();
+    let expired = ExpiringDoc {
+        token: "expired-previous-second".to_string(),
+        expires: "2030-01-01T00:00:15.9Z".parse().unwrap(),
+    };
+    store.insert(&expired).await.unwrap();
+
+    let now: Timestamp = "2030-01-01T00:00:16.5Z".parse().unwrap();
+    let deleted = store.delete_expired_before("expiring", &now).await.unwrap();
+    assert_eq!(
+        deleted, 1,
+        "only the row from the previous second is expired"
+    );
+
+    assert!(
+        store
+            .find_one::<ExpiringDoc>("token", "live-same-second")
+            .await
+            .unwrap()
+            .is_some(),
+        "a row expiring later in the cutoff's own second must survive"
+    );
+    assert!(
+        store
+            .find_one::<ExpiringDoc>("token", "expired-previous-second")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn delete_if_not_expired_consumes_row_expiring_later_in_the_same_second() {
+    let store = test_store().await;
+    let live = ExpiringDoc {
+        token: "nonce-live".to_string(),
+        expires: "2030-01-01T00:00:16.537239482Z".parse().unwrap(),
+    };
+    let live = store.insert(&live).await.unwrap();
+    let expired = ExpiringDoc {
+        token: "nonce-expired".to_string(),
+        expires: "2030-01-01T00:00:15.9Z".parse().unwrap(),
+    };
+    let expired = store.insert(&expired).await.unwrap();
+
+    let now: Timestamp = "2030-01-01T00:00:16.5Z".parse().unwrap();
+    let mut tx = store.begin().await.unwrap();
+    assert!(
+        tx.delete_if_not_expired(&live.id, &now).await.unwrap(),
+        "a row expiring 37ms after `now` is live and must be consumed"
+    );
+    assert!(
+        !tx.delete_if_not_expired(&expired.id, &now).await.unwrap(),
+        "a row expired in the previous second must not be consumed"
+    );
+    tx.commit().await.unwrap();
+}
+
+#[test]
+fn timestamp_seconds_truncates_fraction_and_zulu() {
+    let bound = |s: &str| TimestampSeconds::from(&s.parse().unwrap()).0;
+    assert_eq!(
+        bound("2030-01-01T00:00:16.537239482Z"),
+        "2030-01-01T00:00:16"
+    );
+    assert_eq!(bound("2030-01-01T00:00:16Z"), "2030-01-01T00:00:16");
+    // An offset instant renders in UTC, so it compares as the same instant.
+    assert_eq!(bound("2030-01-01T08:00:16-05:00"), "2030-01-01T13:00:16");
 }
 
 #[tokio::test]
@@ -768,4 +851,520 @@ fn index_value_condition_nul_never_binds_raw_value() {
             "NUL must never be bound as a parameter, got: {rendered}"
         );
     }
+}
+
+// ========================================================================
+// StoreTransaction::update_by_index — batched set-based index maintenance.
+//
+// The transactional form powers the credential-revocation cascade
+// (`delete_authenticator` → detach device-auth approvals). It keeps every
+// matching document's update inside the caller's single transaction
+// (atomicity) but rebuilds index entries once per 500-doc batch with
+// set-based SQL (one `DELETE … IN (…)` plus one multi-row `INSERT`) so the
+// transaction's statement count tracks the document count rather than ~5×
+// it — keeping the cascade within DSQL's 3,000-statement-per-transaction
+// budget. These tests pin the functional, atomicity, index-rebuild, and
+// statement-budget properties of that path; there was previously no direct
+// coverage of `StoreTransaction::update_by_index` at all.
+// ========================================================================
+
+#[tokio::test]
+async fn tx_update_by_index_updates_every_document_across_batch_boundary() {
+    // More than one 500-doc batch so the second batch's documents are also
+    // updated, not silently dropped at the batch boundary.
+    let store = test_store().await;
+    let n: usize = 600;
+    for _ in 0..n {
+        let doc = TestDoc {
+            name: "shared".to_string(),
+            value: 0,
+        };
+        store.insert(&doc).await.unwrap();
+    }
+
+    let mut tx = store.begin().await.unwrap();
+    let updated = tx
+        .update_by_index::<TestDoc, _>("name", "shared", |d| {
+            d.value += 100;
+        })
+        .await
+        .unwrap();
+    assert_eq!(updated, n as u64);
+    tx.commit().await.unwrap();
+
+    let docs = store.find_all::<TestDoc>("name", "shared").await.unwrap();
+    assert_eq!(
+        docs.len(),
+        n,
+        "every document must remain reachable by its (unchanged) index"
+    );
+    for doc in &docs {
+        assert_eq!(
+            doc.data.value, 100,
+            "every document across both batches must be updated exactly once"
+        );
+    }
+}
+
+#[tokio::test]
+async fn tx_update_by_index_rebuilds_changed_and_unchanged_indexes() {
+    // `MultiIndexDoc` emits two index entries (`org_id`, `role`). The
+    // modifier changes only `role`, so the batched index rebuild must drop
+    // the old `role` rows, insert the new `role` rows, AND re-insert the
+    // unchanged `org_id` rows — otherwise `find_all` by `org_id` would lose
+    // every document.
+    let store = test_store().await;
+    for _ in 0..3 {
+        let doc = MultiIndexDoc {
+            org_id: "org-A".into(),
+            role: "member".into(),
+        };
+        store.insert(&doc).await.unwrap();
+    }
+
+    let mut tx = store.begin().await.unwrap();
+    let updated = tx
+        .update_by_index::<MultiIndexDoc, _>("org_id", "org-A", |d| {
+            d.role = "senior".to_string();
+        })
+        .await
+        .unwrap();
+    assert_eq!(updated, 3);
+    tx.commit().await.unwrap();
+
+    // Old `role` index is gone; new `role` index is present.
+    assert!(
+        store
+            .find_all::<MultiIndexDoc>("role", "member")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let seniors = store
+        .find_all::<MultiIndexDoc>("role", "senior")
+        .await
+        .unwrap();
+    assert_eq!(seniors.len(), 3);
+
+    // Unchanged `org_id` index was re-inserted and still resolves every doc.
+    let org_docs = store
+        .find_all::<MultiIndexDoc>("org_id", "org-A")
+        .await
+        .unwrap();
+    assert_eq!(
+        org_docs.len(),
+        3,
+        "unchanged index entries must be rebuilt, not dropped"
+    );
+}
+
+#[tokio::test]
+async fn tx_update_by_index_is_atomic_on_nul_index_value() {
+    // A modifier that emits a NUL index value must abort the caller's
+    // transaction and persist nothing — no half-updated documents, no
+    // partially-rewritten index rows.
+    let store = test_store().await;
+    for i in 0..5 {
+        let doc = TestDoc {
+            name: "shared".to_string(),
+            value: i,
+        };
+        store.insert(&doc).await.unwrap();
+    }
+
+    let mut tx = store.begin().await.unwrap();
+    let err = tx
+        .update_by_index::<TestDoc, _>("name", "shared", |d| {
+            d.name = "bad\0name".to_string();
+        })
+        .await
+        .unwrap_err();
+    // Dropping `tx` here rolls the transaction back.
+    drop(tx);
+
+    assert!(
+        err.downcast_ref::<InvalidIndexValue>().is_some(),
+        "error must be InvalidIndexValue, got: {err:?}"
+    );
+
+    // Every document must be untouched: original name and value.
+    let docs = store.find_all::<TestDoc>("name", "shared").await.unwrap();
+    assert_eq!(
+        docs.len(),
+        5,
+        "no document may have its index rewritten to the NUL value"
+    );
+    let mut values: Vec<i32> = docs.iter().map(|d| d.data.value).collect();
+    values.sort();
+    assert_eq!(
+        values,
+        vec![0, 1, 2, 3, 4],
+        "no document's data may be modified"
+    );
+}
+
+#[tokio::test]
+async fn tx_update_by_index_statement_count_scales_with_doc_count_not_per_index_entry() {
+    // The budget-regression test for the revocation cascade. The prior
+    // implementation issued one `UPDATE` plus a per-row index `DELETE` and
+    // one `INSERT` per index entry for every document — ~4 statements/doc for
+    // a 2-index doc, ~5 for a device-auth row — all inside the caller's one
+    // transaction. At 800 matching rows that is ~3,200 statements, already
+    // over DSQL's 3,000-statement-per-transaction budget. The set-based
+    // batched rebuild issues one `UPDATE` per doc plus one `DELETE` and one
+    // multi-row `INSERT` per 500-doc batch, so the count tracks the number
+    // of documents.
+    let store = test_store().await;
+    let n: usize = 800;
+    for _ in 0..n {
+        let doc = MultiIndexDoc {
+            org_id: "org-A".into(),
+            role: "member".into(),
+        };
+        store.insert(&doc).await.unwrap();
+    }
+
+    let mut tx = store.begin().await.unwrap();
+    let updated = tx
+        .update_by_index::<MultiIndexDoc, _>("org_id", "org-A", |d| {
+            d.role = "senior".to_string();
+        })
+        .await
+        .unwrap();
+    assert_eq!(updated, n as u64);
+    let stmts = tx.update_by_index_statement_count();
+    tx.commit().await.unwrap();
+
+    let batches = n.div_ceil(UPDATE_BY_INDEX_BATCH);
+    // Per batch: B `UPDATE`s + 1 set-based `DELETE` + 1 multi-row `INSERT`.
+    let expected = (n + batches * 2) as u64;
+    assert_eq!(
+        stmts, expected,
+        "set-based index maintenance must issue ~1 statement per doc (n + 2 per batch), got {stmts}"
+    );
+    // The prior per-row implementation would have issued ~4 * n = 3,200 at
+    // this scale, exceeding the 3,000-statement budget; the fix keeps the
+    // single transaction well within it.
+    assert!(
+        stmts < 3_000,
+        "transaction must stay within DSQL's 3,000-statement-per-transaction budget, got {stmts}"
+    );
+
+    // And the result is still correct end-to-end.
+    assert!(
+        store
+            .find_all::<MultiIndexDoc>("role", "member")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        store
+            .find_all::<MultiIndexDoc>("role", "senior")
+            .await
+            .unwrap()
+            .len(),
+        n
+    );
+    assert_eq!(
+        store
+            .find_all::<MultiIndexDoc>("org_id", "org-A")
+            .await
+            .unwrap()
+            .len(),
+        n,
+        "unchanged index entries must be rebuilt, not dropped"
+    );
+}
+
+#[tokio::test]
+async fn tx_update_by_index_with_no_matches_issues_no_writes() {
+    let store = test_store().await;
+    store
+        .insert(&TestDoc {
+            name: "only".to_string(),
+            value: 1,
+        })
+        .await
+        .unwrap();
+
+    let mut tx = store.begin().await.unwrap();
+    let updated = tx
+        .update_by_index::<TestDoc, _>("name", "nonexistent", |d| {
+            d.value += 1;
+        })
+        .await
+        .unwrap();
+    assert_eq!(updated, 0);
+    assert_eq!(
+        tx.update_by_index_statement_count(),
+        0,
+        "no matching documents must issue zero write statements"
+    );
+    tx.commit().await.unwrap();
+
+    // The one existing document is untouched.
+    let doc = store
+        .find_one::<TestDoc>("name", "only")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(doc.data.value, 1);
+}
+
+// ========================================================================
+// transition — precondition-gated compare-and-update with retry.
+// ========================================================================
+
+#[tokio::test]
+async fn transition_applies_rejects_and_reports_not_found() {
+    let store = test_store().await;
+    let inserted = store
+        .insert(&TestDoc {
+            name: "gate".to_string(),
+            value: 1,
+        })
+        .await
+        .unwrap();
+
+    // Precondition rejects: nothing is written, not even a version bump.
+    let outcome = store
+        .transition::<TestDoc, (), i32, _>(&inserted.id, |d| {
+            if d.value != 99 {
+                return Err(d.value);
+            }
+            d.value = 100;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, Transition::Rejected(1)),
+        "got {outcome:?}"
+    );
+    let fetched = store.get::<TestDoc>(&inserted.id).await.unwrap().unwrap();
+    assert_eq!(fetched.data.value, 1);
+    assert_eq!(
+        fetched.version, inserted.version,
+        "a rejected transition must not write"
+    );
+
+    // Precondition holds: the mutation commits and the version advances.
+    let outcome = store
+        .transition::<TestDoc, &'static str, (), _>(&inserted.id, |d| {
+            if d.value != 1 {
+                return Err(());
+            }
+            d.value = 2;
+            Ok("applied")
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, Transition::Applied("applied")),
+        "got {outcome:?}"
+    );
+    let fetched = store.get::<TestDoc>(&inserted.id).await.unwrap().unwrap();
+    assert_eq!(fetched.data.value, 2);
+    assert_eq!(fetched.version, inserted.version + 1);
+
+    // Unknown id.
+    let outcome = store
+        .transition::<TestDoc, (), (), _>("no-such-doc", |_| Ok(()))
+        .await
+        .unwrap();
+    assert!(matches!(outcome, Transition::NotFound), "got {outcome:?}");
+}
+
+/// A concurrent write that bumps the version but leaves the precondition
+/// satisfied costs a retry, not a failure — and the precondition is
+/// re-evaluated against the fresh row, so a concurrent write that does
+/// change what it looks at is rejected instead of overwritten.
+#[tokio::test]
+async fn transition_retries_over_benign_bump_and_rejects_real_change() {
+    let mut store = test_store().await;
+    let inserted = store
+        .insert(&TestDoc {
+            name: "bump".to_string(),
+            value: 1,
+        })
+        .await
+        .unwrap();
+    let writer = store.clone();
+    let target = inserted.id.clone();
+    store.set_modify_test_hook(Arc::new(move |doc_id: &str, attempt: u32| {
+        let writer = writer.clone();
+        let is_target = doc_id == target;
+        let target = target.clone();
+        Box::pin(async move {
+            if !is_target || attempt != 0 {
+                return;
+            }
+            // Benign: rename only. `value` — what the precondition gates on —
+            // is untouched, so the retried transition still applies.
+            let found = writer
+                .modify::<TestDoc, _>(&target, |d| d.name = "bumped".to_string())
+                .await
+                .unwrap();
+            assert!(found);
+        })
+    }));
+
+    let outcome = store
+        .transition::<TestDoc, (), (), _>(&inserted.id, |d| {
+            if d.value != 1 {
+                return Err(());
+            }
+            d.value = 2;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, Transition::Applied(())),
+        "got {outcome:?}"
+    );
+    let fetched = store.get::<TestDoc>(&inserted.id).await.unwrap().unwrap();
+    assert_eq!(fetched.data.value, 2);
+    assert_eq!(
+        fetched.data.name, "bumped",
+        "the concurrent write survives the retry"
+    );
+    assert_eq!(fetched.version, inserted.version + 2);
+
+    // Now a concurrent write that changes the gated field: the retry
+    // re-reads it and the precondition rejects instead of clobbering.
+    let writer = store.clone();
+    let target = inserted.id.clone();
+    store.set_modify_test_hook(Arc::new(move |doc_id: &str, attempt: u32| {
+        let writer = writer.clone();
+        let is_target = doc_id == target;
+        let target = target.clone();
+        Box::pin(async move {
+            if !is_target || attempt != 0 {
+                return;
+            }
+            let found = writer
+                .modify::<TestDoc, _>(&target, |d| d.value = 50)
+                .await
+                .unwrap();
+            assert!(found);
+        })
+    }));
+    let outcome = store
+        .transition::<TestDoc, (), i32, _>(&inserted.id, |d| {
+            if d.value != 2 {
+                return Err(d.value);
+            }
+            d.value = 3;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, Transition::Rejected(50)),
+        "got {outcome:?}"
+    );
+    let fetched = store.get::<TestDoc>(&inserted.id).await.unwrap().unwrap();
+    assert_eq!(
+        fetched.data.value, 50,
+        "the winner's write is never overwritten"
+    );
+}
+
+// update_by_index version guard.
+//
+// Every write `update_by_index` issues is guarded by the version read from
+// the index, so a row another writer committed between that read and the
+// write is never overwritten with stale data. This is the lost update that
+// let the authenticator-deletion cascade regress a `Consumed` device-auth
+// row to `Denied` (and with it suppress the replay-revocation sweep): the
+// cascade's blind `UPDATE … version = version + 1` clobbered whatever
+// `try_consume_device_auth` had just committed. The seam bumps the listed
+// rows' versions inside the transaction, after the index read and before
+// the writes — exactly what a concurrent commit in that window looks like
+// to the transaction on PostgreSQL READ COMMITTED.
+// ========================================================================
+
+#[tokio::test]
+async fn tx_update_by_index_rejects_row_changed_since_read() {
+    let mut store = test_store().await;
+    let untouched = store
+        .insert(&TestDoc {
+            name: "guarded".to_string(),
+            value: 1,
+        })
+        .await
+        .unwrap();
+    let raced = store
+        .insert(&TestDoc {
+            name: "guarded".to_string(),
+            value: 2,
+        })
+        .await
+        .unwrap();
+    store.set_update_by_index_stale_once(vec![raced.id.clone()]);
+
+    let mut tx = store.begin().await.unwrap();
+    let err = tx
+        .update_by_index::<TestDoc, _>("name", "guarded", |d| {
+            d.value += 100;
+        })
+        .await
+        .unwrap_err();
+    let conflict = err.downcast_ref::<VersionConflict>().unwrap();
+    assert_eq!(
+        conflict.id, raced.id,
+        "the conflict names the row that moved"
+    );
+    assert_eq!(conflict.expected, raced.version);
+    assert!(
+        pool::is_retryable_db_error(&err),
+        "an enclosing with_dsql_retry! must re-run the operation from a fresh read"
+    );
+    drop(tx);
+
+    // Nothing was overwritten: the transaction rolled back, so the row that
+    // raced keeps the concurrent writer's data and every sibling is as it was.
+    let raced_after = store.get::<TestDoc>(&raced.id).await.unwrap().unwrap();
+    assert_eq!(raced_after.data.value, 2, "the concurrent write survives");
+    let untouched_after = store.get::<TestDoc>(&untouched.id).await.unwrap().unwrap();
+    assert_eq!(untouched_after.data.value, 1);
+    assert_eq!(untouched_after.version, untouched.version);
+}
+
+#[tokio::test]
+async fn update_by_index_retries_from_fresh_read_after_conflict() {
+    // The standalone form wraps the guarded transaction in `with_dsql_retry!`:
+    // the first attempt loses to the injected concurrent write, the retry
+    // reads the row again and applies the modifier to that fresh state —
+    // exactly once.
+    let mut store = test_store().await;
+    let doc = store
+        .insert(&TestDoc {
+            name: "retried".to_string(),
+            value: 1,
+        })
+        .await
+        .unwrap();
+    store.set_update_by_index_stale_once(vec![doc.id.clone()]);
+
+    let updated = store
+        .update_by_index::<TestDoc, _>("name", "retried", |d| {
+            d.value += 100;
+        })
+        .await
+        .unwrap();
+    assert_eq!(updated, 1);
+
+    let after = store.get::<TestDoc>(&doc.id).await.unwrap().unwrap();
+    assert_eq!(
+        after.data.value, 101,
+        "the modifier is applied exactly once, to the re-read row"
+    );
+    assert_eq!(
+        after.version,
+        doc.version + 1,
+        "the failed attempt rolled back its version bump along with everything else"
+    );
 }

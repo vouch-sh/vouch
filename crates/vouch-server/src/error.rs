@@ -6,6 +6,8 @@
 //! - Standard HTTP error responses
 //! - OAuth 2.0 error responses (RFC 6749 Section 5.2)
 
+use crate::db::pool::{self, RetryableError};
+use crate::http;
 use axum::{
     Json,
     http::StatusCode,
@@ -115,7 +117,7 @@ impl From<anyhow::Error> for ServiceError {
     }
 }
 
-impl crate::db::pool::RetryableError for ServiceError {
+impl RetryableError for ServiceError {
     /// Only `OccConflict` triggers a retry.
     ///
     /// Business-logic errors (max_secrets_reached, last_secret, last_key, …)
@@ -139,18 +141,8 @@ pub enum OAuthErrorCode {
     UnauthorizedClient,
     /// RFC 6749 Section 5.2: The authorization grant type is not supported.
     UnsupportedGrantType,
-    /// RFC 6749 Section 5.2: The requested scope is invalid or unknown.
-    InvalidScope,
     /// RFC 6749 Section 4.1.2.1: The authorization server encountered an unexpected condition.
     ServerError,
-    /// RFC 6749 Section 4.1.2.1: The authorization server is temporarily unavailable.
-    TemporarilyUnavailable,
-    /// RFC 8628 Section 3.5: The authorization request is still pending.
-    AuthorizationPending,
-    /// RFC 8628 Section 3.5: Polling too frequently.
-    SlowDown,
-    /// RFC 8628 Section 3.5: The device code has expired.
-    ExpiredToken,
     /// RFC 6749 Section 4.1.2.1: Access denied by the resource owner or authorization server.
     AccessDenied,
     /// RFC 6749 Section 4.1.2.1: The response type is not supported.
@@ -187,6 +179,16 @@ pub enum OAuthErrorCode {
     /// interface for End-User authentication."
     /// <https://openid.net/specs/openid-connect-core-1_0.html#AuthError>
     LoginRequired,
+    /// OIDC Core Section 3.1.2.6: "The End-User is REQUIRED to select a
+    /// session at the Authorization Server. The End-User MAY be authenticated
+    /// at the Authorization Server with different associated accounts, but
+    /// the End-User did not select a session."
+    ///
+    /// Returned for `prompt=select_account`, which Vouch cannot honor.
+    /// RFC 9126 Section 2.3 bars user-interaction codes from the PAR
+    /// endpoint, so that handler translates this one before responding.
+    /// <https://openid.net/specs/openid-connect-core-1_0.html#AuthError>
+    AccountSelectionRequired,
 }
 
 impl std::fmt::Display for OAuthErrorCode {
@@ -201,7 +203,6 @@ impl OAuthErrorCode {
     pub fn status_code(&self) -> StatusCode {
         match self {
             Self::InvalidRequest
-            | Self::InvalidScope
             | Self::InvalidDpopProof
             | Self::InvalidTarget
             | Self::UnmetAuthenticationRequirements
@@ -210,21 +211,24 @@ impl OAuthErrorCode {
             | Self::InvalidClientMetadata
             | Self::InvalidAuthorizationDetails
             | Self::InvalidRequestUri
-            // `login_required` only ever travels as a redirect query
-            // parameter (OIDC Core 3.1.2.6), never as an HTTP status on a
-            // direct response, so this arm is currently unreachable.
-            | Self::LoginRequired => StatusCode::BAD_REQUEST,
-            Self::InvalidClient | Self::UnauthorizedClient => StatusCode::UNAUTHORIZED,
+            // `login_required` and `account_selection_required` travel as
+            // redirect query parameters (OIDC Core 3.1.2.6). The PAR endpoint
+            // translates the latter rather than returning it (RFC 9126 2.3),
+            // so neither reaches a client as an HTTP status.
+            | Self::LoginRequired
+            | Self::AccountSelectionRequired => StatusCode::BAD_REQUEST,
+            Self::InvalidClient => StatusCode::UNAUTHORIZED,
             Self::InsufficientUserAuthentication => StatusCode::UNAUTHORIZED,
             Self::InvalidGrant
             | Self::UnsupportedGrantType
             | Self::UnsupportedResponseType
-            | Self::AuthorizationPending
-            | Self::SlowDown
-            | Self::ExpiredToken
-            | Self::AccessDenied => StatusCode::BAD_REQUEST,
+            | Self::AccessDenied
+            // RFC 6749 §5.2 names 401 only for `invalid_client`: every other
+            // error takes the default, "an HTTP 400 (Bad Request) status code
+            // (unless specified otherwise)".
+            | Self::UnauthorizedClient => StatusCode::BAD_REQUEST,
             Self::InvalidToken => StatusCode::UNAUTHORIZED,
-            Self::ServerError | Self::TemporarilyUnavailable => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::ServerError => StatusCode::INTERNAL_SERVER_ERROR,
             Self::UseDpopNonce => StatusCode::BAD_REQUEST,
         }
     }
@@ -239,12 +243,7 @@ impl OAuthErrorCode {
             Self::UnauthorizedClient => "unauthorized_client",
             Self::UnsupportedGrantType => "unsupported_grant_type",
             Self::UnsupportedResponseType => "unsupported_response_type",
-            Self::InvalidScope => "invalid_scope",
             Self::ServerError => "server_error",
-            Self::TemporarilyUnavailable => "temporarily_unavailable",
-            Self::AuthorizationPending => protocol::ERROR_AUTHORIZATION_PENDING,
-            Self::SlowDown => protocol::ERROR_SLOW_DOWN,
-            Self::ExpiredToken => protocol::ERROR_EXPIRED_TOKEN,
             Self::AccessDenied => protocol::ERROR_ACCESS_DENIED,
             Self::InvalidToken => "invalid_token",
             Self::InvalidDpopProof => "invalid_dpop_proof",
@@ -258,6 +257,7 @@ impl OAuthErrorCode {
             Self::InvalidAuthorizationDetails => "invalid_authorization_details",
             Self::InvalidRequestUri => "invalid_request_uri",
             Self::LoginRequired => "login_required",
+            Self::AccountSelectionRequired => "account_selection_required",
         }
     }
 }
@@ -347,7 +347,7 @@ impl ServiceError {
     /// becomes [`Self::Internal`] and propagates as a 500.
     pub(crate) fn from_db_contention(err: anyhow::Error, msg: &'static str) -> Self {
         tracing::error!("{msg}: {err}");
-        if crate::db::pool::is_retryable_db_error(&err) {
+        if pool::is_retryable_db_error(&err) {
             Self::OccConflict
         } else {
             Self::Internal(msg.to_string())
@@ -471,7 +471,7 @@ impl ServiceError {
             params.push(("max_age", age.to_string()));
         }
         let params: Vec<(&str, &str)> = params.iter().map(|(n, v)| (*n, v.as_str())).collect();
-        crate::http::bearer_challenge(&params)
+        http::bearer_challenge(&params)
     }
 
     /// Convert to a standard API error response.
@@ -564,10 +564,6 @@ mod tests {
     fn test_oauth_error_codes() {
         assert_eq!(OAuthErrorCode::InvalidRequest.as_str(), "invalid_request");
         assert_eq!(OAuthErrorCode::InvalidClient.as_str(), "invalid_client");
-        assert_eq!(
-            OAuthErrorCode::AuthorizationPending.as_str(),
-            "authorization_pending"
-        );
     }
 
     #[test]

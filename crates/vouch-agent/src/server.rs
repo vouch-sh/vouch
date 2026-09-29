@@ -4,12 +4,14 @@
 use crate::audit::{self, AuditEvent};
 use crate::error::Result;
 use crate::protocol::{
-    CacheCredentialParams, GetCachedCredentialParams, JSONRPC_VERSION, Method, Request, Response,
-    StoreSessionParams, StoreSshCredentialsParams,
+    CacheCredentialParams, GetCachedCredentialParams, INTERNAL_ERROR, JSONRPC_VERSION, Method,
+    PARSE_ERROR, Request, Response, StoreSessionParams, StoreSshCredentialsParams,
 };
 use crate::socket::{AuthorizedStream, SocketKind, accept_authorized, bind_socket, socket_path};
 use crate::ssh_agent::SshCredentials;
-use crate::state::{AgentState, CachedCredential, Session, SessionInfo};
+use crate::state::{
+    AgentState, CacheRefusal, CachedCredential, Session, SessionInfo, SshStoreRefusal,
+};
 use crate::wire;
 use serde::de::DeserializeOwned;
 
@@ -21,6 +23,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
+use vouch_common::UrlSecurity;
 
 /// Maximum number of concurrent IPC connections.
 const MAX_CONNECTIONS: usize = 64;
@@ -66,7 +69,7 @@ impl AgentServer {
 
         // Surface the insecure-URL override at boot, not just when an insecure
         // URL is actually stored — a set-but-unused flag is still a misconfiguration.
-        if std::env::var_os("VOUCH_ALLOW_INSECURE").is_some() {
+        if allow_insecure() {
             warn!(
                 "VOUCH_ALLOW_INSECURE is set: insecure (plain HTTP) server URLs will be accepted. Do not use in production."
             );
@@ -194,7 +197,7 @@ async fn handle_connection(
             Ok(req) => req,
             Err(e) => {
                 warn!("Invalid request: {e}");
-                let response = Response::error(0, crate::protocol::PARSE_ERROR, "parse error");
+                let response = Response::error(0, PARSE_ERROR, "parse error");
                 send_response(&mut stream, &response).await?;
                 continue;
             }
@@ -235,7 +238,7 @@ fn success_or_internal_error(
 ) -> Response {
     result.unwrap_or_else(|e| {
         error!("Failed to serialize response: {e}");
-        Response::error(id, crate::protocol::INTERNAL_ERROR, "serialization failed")
+        Response::error(id, INTERNAL_ERROR, "serialization failed")
     })
 }
 
@@ -275,11 +278,20 @@ async fn handle_get_session(request: &Request, state: &Arc<AgentState>) -> Respo
     match state.get_session().await {
         Some(session) => {
             let mut info = SessionInfo::from(&session);
-            info.server_url = state.get_ssh_server_url().await;
+            info.server_url = state.get_server_url().await;
             success_or_internal_error(request.id, Response::success(request.id, info))
         }
         None => Response::not_authenticated(request.id),
     }
+}
+
+/// Whether `VOUCH_ALLOW_INSECURE` allows plain-HTTP server URLs, read with
+/// the parser the CLI uses. An unrecognized value is reported and refused.
+pub(crate) fn allow_insecure() -> bool {
+    vouch_common::allow_insecure_from_env().unwrap_or_else(|e| {
+        warn!("{e}; treating it as off");
+        false
+    })
 }
 
 /// Handle `store_session` request.
@@ -294,43 +306,55 @@ async fn handle_store_session(request: &Request, state: &Arc<AgentState>) -> Res
         Err(e) => return Response::invalid_params(request.id, &format!("invalid expires_at: {e}")),
     };
 
-    let user_email = params.user_email;
-    let session = Session::new(params.token, user_email.clone(), expires_at);
-
-    state.store_session(session).await;
-
-    // Store server URL in SSH agent state for lazy provisioning/refresh
-    if let Some(url) = params.server_url {
-        // Validate: must be a valid URL; reject insecure HTTP for non-localhost
-        if let Ok(parsed) = url::Url::parse(&url) {
-            if parsed.scheme() == "https" || parsed.scheme() == "http" {
+    // The server URL is judged before anything is stored: a session is kept
+    // only together with its own server, never beside a previous session's.
+    let server_url = match params.server_url {
+        Some(url) => match url::Url::parse(&url) {
+            Ok(parsed) if parsed.scheme() == "https" || parsed.scheme() == "http" => {
                 match vouch_common::check_url_security(&url) {
-                    vouch_common::UrlSecurity::Secure => {
-                        state.set_ssh_server_url(url).await;
-                    }
-                    vouch_common::UrlSecurity::InsecureHttp { url: insecure_url } => {
-                        if std::env::var("VOUCH_ALLOW_INSECURE").is_ok() {
+                    UrlSecurity::Secure => Some(url),
+                    UrlSecurity::InsecureHttp { url: insecure_url } => {
+                        if allow_insecure() {
                             warn!(
                                 "Using insecure HTTP server URL: {insecure_url}. VOUCH_ALLOW_INSECURE is set."
                             );
-                            state.set_ssh_server_url(url).await;
+                            Some(url)
                         } else {
+                            // The caller logged in elsewhere, so the previous
+                            // session is no longer the current one either.
+                            state.clear_session().await;
                             warn!(
                                 "Rejecting insecure HTTP server URL: {insecure_url}. Set VOUCH_ALLOW_INSECURE=1 to override."
+                            );
+                            return Response::invalid_params(
+                                request.id,
+                                &format!(
+                                    "insecure HTTP server URL {insecure_url} refused; set \
+                                     VOUCH_ALLOW_INSECURE=1 for the agent to allow it"
+                                ),
                             );
                         }
                     }
                 }
-            } else {
+            }
+            Ok(parsed) => {
                 debug!(
                     "Ignoring server_url with unsupported scheme: {}",
                     parsed.scheme()
                 );
+                None
             }
-        } else {
-            debug!("Ignoring invalid server_url");
-        }
-    }
+            Err(_) => {
+                debug!("Ignoring invalid server_url");
+                None
+            }
+        },
+        None => None,
+    };
+
+    let user_email = params.user_email;
+    let session = Session::new(params.token, user_email.clone(), expires_at);
+    state.store_session(session, server_url).await;
 
     info!("Session stored");
     audit::log_event(AuditEvent::SessionStored { email: user_email });
@@ -370,13 +394,19 @@ async fn handle_store_ssh_credentials(request: &Request, state: &Arc<AgentState>
     match SshCredentials::load(key_path, cert_path) {
         Ok(creds) => {
             // Validity is gated on the live session, so the caller-supplied
-            // expiry is no longer recorded.
-            if !state.store_ssh_credentials(creds, params.server_url).await {
-                return Response::error(
-                    request.id,
-                    crate::protocol::INTERNAL_ERROR,
-                    "no active session",
-                );
+            // expiry is no longer recorded, and the server URL is the
+            // session's own, so the caller-supplied one is not either.
+            match state.store_ssh_credentials(creds).await {
+                Ok(()) => {}
+                Err(SshStoreRefusal::NoSession) => {
+                    return Response::error(request.id, INTERNAL_ERROR, "no active session");
+                }
+                Err(SshStoreRefusal::NotIssuedToSession) => {
+                    return Response::invalid_params(
+                        request.id,
+                        "certificate was not issued to the current session",
+                    );
+                }
             }
 
             info!("SSH credentials stored");
@@ -421,9 +451,18 @@ async fn handle_cache_credential(request: &Request, state: &Arc<AgentState>) -> 
     let credential = CachedCredential::new(params.data, expires_at);
     let credential_type = params.credential_type;
 
-    state
+    match state
         .cache_credential(credential_type.clone(), credential)
-        .await;
+        .await
+    {
+        Ok(()) => {}
+        // Oversized `credential_type` is a caller-supplied value rejected by an
+        // input-length limit — invalid_params (-32602), not INTERNAL_ERROR.
+        Err(CacheRefusal::KeyTooLong) => {
+            return Response::invalid_params(request.id, "credential_type exceeds maximum length");
+        }
+        Err(CacheRefusal::NoSession) => return Response::not_authenticated(request.id),
+    }
 
     info!("Cached credential: {credential_type}");
     audit::log_event(AuditEvent::CredentialCached { credential_type });
@@ -491,12 +530,18 @@ async fn drain_connections(tasks: &mut JoinSet<()>) {
 )]
 mod tests {
     use super::*;
+    use crate::protocol::{INVALID_PARAMS, NOT_AUTHENTICATED};
     use crate::state::AgentState;
     use std::sync::Arc;
     use tempfile::tempdir;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::UnixStream;
     use tokio::sync::watch;
+
+    /// Serialises tests that mutate process environment variables. A
+    /// `tokio::sync::Mutex` so it can be held across `.await` without
+    /// tripping `await_holding_lock`.
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     /// Build an `AgentServer` backed by a temp-dir listener.
     fn make_server(shutdown_rx: watch::Receiver<bool>) -> Arc<AgentServer> {
@@ -543,9 +588,9 @@ mod tests {
         let server = Arc::clone(&server);
         let task = tokio::spawn(async move { server.run_listener(listener).await });
 
-        // Give the listener a moment to enter the accept loop.
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
+        // The listener's receiver is a clone of the one handed to the server,
+        // which has never observed a value, so a signal sent before the task
+        // is first polled is still seen by `changed()`.
         shutdown_tx.send(true).expect("send shutdown");
 
         let result = tokio::time::timeout(Duration::from_secs(5), task)
@@ -673,6 +718,326 @@ mod tests {
         assert!(
             elapsed >= SHUTDOWN_DRAIN_TIMEOUT,
             "drain should have waited for the timeout"
+        );
+    }
+
+    /// An oversized `credential_type` is rejected by the state layer, so the
+    /// IPC handler must surface it as an `invalid_params` (-32602) error and
+    /// must not report success or cache anything. This is the IPC half of the
+    /// fix: before it, the handler returned `{"result": true}` on rejection.
+    #[tokio::test]
+    async fn cache_credential_rejects_oversized_key_as_invalid_params() {
+        let state = AgentState::new();
+
+        let oversized_type = "x".repeat(257);
+        let params = CacheCredentialParams {
+            credential_type: oversized_type.clone(),
+            data: serde_json::json!({"secret": "data"}),
+            expires_at: Timestamp::now()
+                .checked_add(jiff::Span::new().hours(1))
+                .unwrap()
+                .to_string(),
+        };
+        let request = Request {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            id: 42,
+            method: Method::CacheCredential,
+            params: Some(serde_json::to_value(&params).unwrap()),
+        };
+
+        let response = handle_request(&request, &state).await;
+
+        let error = response
+            .error
+            .as_ref()
+            .expect("oversized key should produce an error response");
+        assert_eq!(error.code, INVALID_PARAMS);
+        assert!(
+            response.result.is_none(),
+            "rejected credential must not return a result"
+        );
+        assert!(
+            state.get_cached_credential(&oversized_type).await.is_none(),
+            "rejected credential must not be cached"
+        );
+    }
+
+    /// The audit stream must agree with the actual cache state: a stored
+    /// credential emits `CredentialCached`, while a rejected oversized key
+    /// emits nothing. Before the fix the handler wrote `event:
+    /// "credential_cached"` even when the state layer refused the entry.
+    #[tokio::test]
+    #[expect(
+        unsafe_code,
+        reason = "env mutation to redirect the audit log to a tempdir in an isolated test; the var is restored before assertions"
+    )]
+    async fn cache_credential_audit_reflects_caching_outcome() {
+        let _guard = ENV_LOCK.lock().await;
+
+        let dir = tempdir().expect("tempdir");
+        let prior = std::env::var_os("XDG_STATE_HOME");
+        // SAFETY: `ENV_LOCK` serialises this test against any other env
+        // mutation in the test binary; the var is restored below, before any
+        // assertion can panic, so a failing test cannot leak the redirect.
+        unsafe {
+            std::env::set_var("XDG_STATE_HOME", dir.path());
+        }
+
+        let state = AgentState::new();
+        state.store_session(live_session(), None).await;
+
+        // Accepted key: handler returns success, caches, and audits.
+        let valid_type = "aws:arn:aws:iam::123456789012:role/Example".to_string();
+        let valid_params = CacheCredentialParams {
+            credential_type: valid_type.clone(),
+            data: serde_json::json!({"AccessKeyId": "AKIAEXAMPLE"}),
+            expires_at: Timestamp::now()
+                .checked_add(jiff::Span::new().hours(1))
+                .unwrap()
+                .to_string(),
+        };
+        let valid_request = Request {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            id: 1,
+            method: Method::CacheCredential,
+            params: Some(serde_json::to_value(&valid_params).unwrap()),
+        };
+        let valid_response = handle_request(&valid_request, &state).await;
+        let valid_cached = state.get_cached_credential(&valid_type).await;
+
+        // Rejected key: handler returns invalid_params, caches nothing, and
+        // emits no audit event.
+        let oversized_type = "x".repeat(257);
+        let reject_params = CacheCredentialParams {
+            credential_type: oversized_type.clone(),
+            data: serde_json::json!({"secret": "data"}),
+            expires_at: Timestamp::now()
+                .checked_add(jiff::Span::new().hours(1))
+                .unwrap()
+                .to_string(),
+        };
+        let reject_request = Request {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            id: 2,
+            method: Method::CacheCredential,
+            params: Some(serde_json::to_value(&reject_params).unwrap()),
+        };
+        let reject_response = handle_request(&reject_request, &state).await;
+        let reject_cached = state.get_cached_credential(&oversized_type).await;
+
+        // Restore the env before asserting so a failing assertion cannot leak
+        // the redirect into other tests.
+        // SAFETY: the lock is still held; the prior value (if any) is restored.
+        unsafe {
+            match &prior {
+                Some(v) => std::env::set_var("XDG_STATE_HOME", v),
+                None => std::env::remove_var("XDG_STATE_HOME"),
+            }
+        }
+
+        // Accepted path: success, cached, audited.
+        assert!(valid_response.error.is_none(), "valid key should succeed");
+        assert_eq!(valid_response.result, Some(serde_json::json!(true)));
+        assert!(valid_cached.is_some(), "valid key should be cached");
+
+        // Rejected path: invalid_params, not cached, not audited.
+        let error = reject_response
+            .error
+            .as_ref()
+            .expect("oversized key should produce an error response");
+        assert_eq!(error.code, INVALID_PARAMS);
+        assert!(reject_response.result.is_none());
+        assert!(reject_cached.is_none(), "oversized key must not be cached");
+
+        // Audit discriminator must match reality: the accepted key is recorded
+        // as cached; the rejected key is absent from the audit stream entirely.
+        let audit_path = dir.path().join("vouch").join("audit.log");
+        let audit_text =
+            std::fs::read_to_string(&audit_path).expect("audit log should exist after a cache");
+        assert!(
+            audit_text.contains("\"event\":\"credential_cached\""),
+            "accepted key should emit a credential_cached event: {audit_text}"
+        );
+        assert!(
+            audit_text.contains(valid_type.as_str()),
+            "audit log should record the accepted credential_type: {audit_text}"
+        );
+        assert!(
+            !audit_text.contains(oversized_type.as_str()),
+            "rejected key must not appear in the audit log as cached: {audit_text}"
+        );
+    }
+
+    /// A session for `user@example.com` that expires in an hour.
+    fn live_session() -> Session {
+        Session::new(
+            secrecy::SecretString::from("token"),
+            "user@example.com".to_string(),
+            Timestamp::now()
+                .checked_add(jiff::Span::new().hours(1))
+                .unwrap(),
+        )
+    }
+
+    /// With no session there is no identity to bind a cache entry to, so the
+    /// agent refuses it as unauthenticated and keeps nothing: an entry cached
+    /// here would be served to whoever logs in next.
+    #[tokio::test]
+    async fn cache_credential_without_a_session_is_refused() {
+        let state = AgentState::new();
+        let params = CacheCredentialParams {
+            credential_type: "aws:role".to_string(),
+            data: serde_json::json!({"AccessKeyId": "AKIAEXAMPLE"}),
+            expires_at: Timestamp::now()
+                .checked_add(jiff::Span::new().hours(1))
+                .unwrap()
+                .to_string(),
+        };
+        let request = Request {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            id: 7,
+            method: Method::CacheCredential,
+            params: Some(serde_json::to_value(&params).unwrap()),
+        };
+
+        let response = handle_request(&request, &state).await;
+
+        let error = response.error.expect("refused without a session");
+        assert_eq!(error.code, NOT_AUTHENTICATED);
+        state.store_session(live_session(), None).await;
+        assert!(state.get_cached_credential("aws:role").await.is_none());
+    }
+
+    /// A `store_session` request for `token` with `server_url`.
+    fn store_session_request(id: u64, token: &str, server_url: &str) -> Request {
+        let params = StoreSessionParams {
+            token: secrecy::SecretString::from(token),
+            user_email: format!("{token}@example.com"),
+            expires_at: Timestamp::now()
+                .checked_add(jiff::Span::new().hours(1))
+                .unwrap()
+                .to_string(),
+            server_url: Some(server_url.to_string()),
+        };
+        Request {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            id,
+            method: Method::StoreSession,
+            params: Some(serde_json::to_value(&params).unwrap()),
+        }
+    }
+
+    /// Set (or remove) the env vars the store_session tests read, returning
+    /// the prior values to restore.
+    #[expect(unsafe_code, reason = "test env mutation; callers hold ENV_LOCK")]
+    fn set_env(
+        vars: &[(&'static str, Option<&std::ffi::OsStr>)],
+    ) -> Vec<(&'static str, Option<std::ffi::OsString>)> {
+        let prior = vars
+            .iter()
+            .map(|(k, _)| (*k, std::env::var_os(k)))
+            .collect();
+        for (key, value) in vars {
+            // SAFETY: callers hold ENV_LOCK, and restore the prior values
+            // before asserting.
+            unsafe {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+        prior
+    }
+
+    fn restore_env(prior: Vec<(&'static str, Option<std::ffi::OsString>)>) {
+        let prior: Vec<_> = prior.iter().map(|(k, v)| (*k, v.as_deref())).collect();
+        set_env(&prior);
+    }
+
+    /// A session is stored only with its own server URL. When the agent
+    /// refuses a plain-HTTP URL, the caller gets an error, no session is kept
+    /// (so the new token cannot be paired with the previous session's server),
+    /// and no `session_stored` event is written for it.
+    #[tokio::test]
+    async fn store_session_refused_url_keeps_no_session() {
+        let _guard = ENV_LOCK.lock().await;
+        let dir = tempdir().expect("tempdir");
+        let prior = set_env(&[
+            ("XDG_STATE_HOME", Some(dir.path().as_os_str())),
+            ("VOUCH_ALLOW_INSECURE", None),
+        ]);
+
+        let state = AgentState::new();
+        let prod = handle_request(
+            &store_session_request(1, "prod", "https://prod.example.com"),
+            &state,
+        )
+        .await;
+        let prod_url = state.get_server_url().await;
+        let dev = handle_request(
+            &store_session_request(2, "dev", "http://dev.example.com"),
+            &state,
+        )
+        .await;
+        let session_after = state.get_session().await;
+        let url_after = state.get_server_url().await;
+        let audit_path = dir.path().join("vouch").join("audit.log");
+        let audit_text = std::fs::read_to_string(&audit_path).unwrap_or_default();
+
+        restore_env(prior);
+
+        assert!(prod.error.is_none(), "an https URL is accepted: {prod:?}");
+        assert_eq!(prod_url.as_deref(), Some("https://prod.example.com"));
+        let error = dev
+            .error
+            .expect("a refused URL must be an error, not success");
+        assert_eq!(error.code, INVALID_PARAMS);
+        assert!(
+            session_after.is_none(),
+            "no session is kept after the refusal"
+        );
+        assert!(
+            url_after.is_none(),
+            "no server URL is kept after the refusal"
+        );
+        assert_eq!(
+            audit_text.matches("\"event\":\"session_stored\"").count(),
+            1,
+            "only the accepted session is audited: {audit_text}"
+        );
+    }
+
+    /// `VOUCH_ALLOW_INSECURE` is read with the parser the CLI uses: `false` and
+    /// `0` refuse a plain-HTTP URL, and `1` allows it.
+    #[tokio::test]
+    async fn store_session_reads_allow_insecure_values() {
+        let _guard = ENV_LOCK.lock().await;
+        let dir = tempdir().expect("tempdir");
+        let mut outcomes = Vec::new();
+        for value in ["false", "0", "1"] {
+            let prior = set_env(&[
+                ("XDG_STATE_HOME", Some(dir.path().as_os_str())),
+                ("VOUCH_ALLOW_INSECURE", Some(std::ffi::OsStr::new(value))),
+            ]);
+            let state = AgentState::new();
+            let response = handle_request(
+                &store_session_request(1, "dev", "http://dev.example.com"),
+                &state,
+            )
+            .await;
+            let url = state.get_server_url().await;
+            restore_env(prior);
+            outcomes.push((value, response.error.is_none(), url));
+        }
+
+        assert_eq!(
+            outcomes,
+            vec![
+                ("false", false, None),
+                ("0", false, None),
+                ("1", true, Some("http://dev.example.com".to_string())),
+            ]
         );
     }
 }

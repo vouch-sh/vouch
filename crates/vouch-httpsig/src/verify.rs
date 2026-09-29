@@ -3,6 +3,7 @@
 
 use crate::algorithm::VerifyingAlgorithm;
 use crate::component::ComponentIdentifier;
+use crate::digest;
 use crate::error::HttpSigError;
 use crate::sfv::parse::parse_dictionary;
 use crate::sfv::serialize::serialize_inner_list_to_string;
@@ -130,7 +131,7 @@ impl CoverageChecked {
             .to_str()
             .map_err(|e| HttpSigError::SfvParse(format!("Content-Digest: {e}")))?;
 
-        crate::digest::verify_content_digest(header, body)?;
+        digest::verify_content_digest(header, body)?;
 
         Ok(DigestEnforced {
             params: self.params,
@@ -359,8 +360,9 @@ mod tests {
     use crate::algorithm::ecdsa_p256::EcdsaP256Signer;
     use crate::algorithm::ed25519::Ed25519Signer;
     use crate::algorithm::hmac_sha256::HmacSha256Key;
+    use crate::digest::DigestAlgorithm;
     use crate::sfv::parse::parse_inner_list;
-    use crate::sfv::serialize::serialize_dictionary;
+    use crate::sfv::serialize::{serialize_dictionary, serialize_inner_list_to_string};
     use crate::sfv::types::{SfvDictionary, SfvItem, SfvParams};
     use crate::sign::SignatureBuilder;
     use crate::signature_base::build_request_base_with_params_str;
@@ -584,14 +586,80 @@ mod tests {
         verify_request_signature(&req, "sig1", &key, None).unwrap();
     }
 
+    // RFC 9421 §2 + §2.5 step 2.1, end to end: a request whose Signature-Input
+    // carries two order-equivalent component identifiers (same name, same
+    // parameter set, different parameter order) MUST be rejected before a
+    // signature base is produced. §2 makes `"x-dict";key="a";sf` and
+    // `"x-dict";sf;key="a"` equivalent, so §2.5 step 2.1 forbids both, and §2.5
+    // requires the algorithm to "fail ... immediately, without outputting a
+    // signature base." This drives the public verifier entry point with a
+    // complete, validly signed request and confirms it returns an error rather
+    // than `Ok(CryptoVerified)`. The signature is computed over the exact
+    // duplicated base a pre-fix verifier would have built, so the only thing
+    // the post-fix verifier can reject on is the §2.5 abort, not the crypto.
+    #[test]
+    fn end_to_end_order_equivalent_duplicate_is_rejected_by_verifier() {
+        let key = HmacSha256Key::new(b"shared-secret", "test-key");
+
+        // Two order-permuted but §2-equivalent component identifiers in one
+        // Signature-Input inner list. Replicate the verifier's own params_str
+        // derivation (parse_inner_list -> serialize_inner_list_to_string) so
+        // the signature is over the exact @signature-params line it builds.
+        let si_inner = "(\"x-dict\";key=\"a\";sf \"x-dict\";sf;key=\"a\");created=1618884473;\
+             alg=\"hmac-sha256\"";
+        let list = parse_inner_list(si_inner).unwrap();
+        let params_str = serialize_inner_list_to_string(&list);
+
+        // Build the duplicated signature base by hand: once the fix lands the
+        // verifier refuses to produce one, so this is the only way to obtain
+        // the bytes a pre-fix verifier would have signed and accepted. Both
+        // order-permuted identifiers resolve the same dictionary member
+        // ("a" = 1) to "1", so each covered-component line is "<id>: 1", and
+        // the final line is the @signature-params line with no trailing
+        // newline.
+        let dup_base = format!(
+            "\"x-dict\";key=\"a\";sf: 1\n\
+             \"x-dict\";sf;key=\"a\": 1\n\
+             \"@signature-params\": {params_str}"
+        );
+        let signature_bytes = key.sign(dup_base.as_bytes()).unwrap();
+
+        let mut req = make_request("GET", "https://example.com/p", &[("x-dict", "a=1")]);
+        req.headers_mut().insert(
+            "signature-input",
+            http::HeaderValue::from_str(&format!("sig1={params_str}")).unwrap(),
+        );
+        req.headers_mut().insert(
+            "signature",
+            http::HeaderValue::from_str(&serialize_dictionary(&SfvDictionary {
+                entries: vec![(
+                    "sig1".to_string(),
+                    SfvDictMember::Item(SfvItem {
+                        value: SfvBareItem::ByteSequence(signature_bytes),
+                        params: SfvParams::new(),
+                    }),
+                )],
+            }))
+            .unwrap(),
+        );
+
+        let result = verify_request_signature(&req, "sig1", &key, None);
+        assert!(
+            matches!(result, Err(HttpSigError::BaseConstruction(_))),
+            "RFC 9421 §2 + §2.5 require verify_request_signature to fail (produce \
+             an error, no CryptoVerified) for a request whose Signature-Input \
+             contains an order-equivalent duplicate component identifier; got {result:?}"
+        );
+    }
+
     // RFC 9421 §3.2.1: the verifier enforces its own required-component list.
     #[test]
     fn test_validate_coverage_passes() {
-        let params = crate::SignatureParams {
+        let params = SignatureParams {
             components: vec![
-                crate::ComponentIdentifier::method(),
-                crate::ComponentIdentifier::authority(),
-                crate::ComponentIdentifier::field("content-type"),
+                ComponentIdentifier::method(),
+                ComponentIdentifier::authority(),
+                ComponentIdentifier::field("content-type"),
             ],
             alg: None,
             keyid: None,
@@ -613,8 +681,8 @@ mod tests {
     // RFC 9421 §7.2.1: a signature that omits a required component is insufficient coverage.
     #[test]
     fn test_validate_coverage_rejects_missing() {
-        let params = crate::SignatureParams {
-            components: vec![crate::ComponentIdentifier::method()],
+        let params = SignatureParams {
+            components: vec![ComponentIdentifier::method()],
             alg: None,
             keyid: None,
             created: None,
@@ -635,7 +703,7 @@ mod tests {
     // RFC 9421 §3.2.1: an empty requirement list imposes no coverage constraint.
     #[test]
     fn test_validate_coverage_empty_required() {
-        let params = crate::SignatureParams {
+        let params = SignatureParams {
             components: vec![],
             alg: None,
             keyid: None,
@@ -669,7 +737,7 @@ mod tests {
     }
 
     fn digest_header(body: &[u8]) -> http::HeaderValue {
-        crate::digest::content_digest(body, crate::digest::DigestAlgorithm::Sha256)
+        digest::content_digest(body, DigestAlgorithm::Sha256)
             .parse()
             .unwrap()
     }
@@ -690,8 +758,8 @@ mod tests {
         let mut headers = http::HeaderMap::new();
         headers.insert("content-digest", digest_header(body));
         coverage_checked(vec![
-            crate::ComponentIdentifier::method(),
-            crate::ComponentIdentifier::field("content-digest"),
+            ComponentIdentifier::method(),
+            ComponentIdentifier::field("content-digest"),
         ])
         .enforce_body_digest(&headers, body)
         .unwrap();
@@ -703,7 +771,7 @@ mod tests {
         let body = b"body";
         let headers = http::HeaderMap::new();
         assert!(matches!(
-            coverage_checked(vec![crate::ComponentIdentifier::field("content-digest")])
+            coverage_checked(vec![ComponentIdentifier::field("content-digest")])
                 .enforce_body_digest(&headers, body),
             Err(HttpSigError::MissingDigest)
         ));
@@ -716,7 +784,7 @@ mod tests {
         let mut headers = http::HeaderMap::new();
         headers.insert("content-digest", digest_header(body));
         assert!(matches!(
-            coverage_checked(vec![crate::ComponentIdentifier::method()])
+            coverage_checked(vec![ComponentIdentifier::method()])
                 .enforce_body_digest(&headers, body),
             Err(HttpSigError::MissingDigest)
         ));
@@ -728,7 +796,7 @@ mod tests {
         let mut headers = http::HeaderMap::new();
         headers.insert("content-digest", digest_header(b"other body"));
         assert!(matches!(
-            coverage_checked(vec![crate::ComponentIdentifier::field("content-digest")])
+            coverage_checked(vec![ComponentIdentifier::field("content-digest")])
                 .enforce_body_digest(&headers, b"body"),
             Err(HttpSigError::DigestMismatch(_))
         ));

@@ -452,6 +452,15 @@ fn test_clear_fapi_does_not_clear_token() {
     assert!(config.client_id().is_none());
 }
 
+/// RFC 7592 §5: "As the registration access tokens are relatively long-term
+/// credentials, and since the registration access token is a Bearer Token and
+/// acts as the sole authentication for use at the client configuration
+/// endpoint, it MUST be protected by the developer or client as described in
+/// the OAuth 2.0 Bearer Token Usage specification [RFC6750]."
+///
+/// RFC 6750's bearer-token threat mitigations name keeping tokens out of logs;
+/// the redacting `Debug` is what enforces it for a CLI that prints config
+/// structs. Only that one mitigation is asserted here.
 #[test]
 fn test_registration_access_token_redacted_in_debug() {
     let mut config = Config::default();
@@ -1329,5 +1338,36 @@ fn modify_load_failure_reports_parse_error() {
     assert!(
         !msg.contains("enroll' first"),
         "load-phase error must not suggest enrolling: {msg}"
+    );
+}
+
+// -----------------------------------------------------------------
+// RFC 7592 §5 — client-side protection of the registration access token
+// -----------------------------------------------------------------
+
+/// RFC 7592 §5, applying the same "MUST be protected by the developer or
+/// client" obligation to the token's on-disk copy: it must not be readable by
+/// other users on the machine.
+#[cfg(unix)]
+#[test]
+fn saved_config_holding_a_registration_token_is_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let cfg_path = tmp.path().join("vouch").join("config.json");
+
+    let mut config = Config::default();
+    config.set_server_url("https://vouch.example.com");
+    config.set_registration_access_token("vouch_reg_on_disk_secret");
+    config.save_to(&cfg_path).expect("save config");
+
+    let mode = std::fs::metadata(&cfg_path)
+        .expect("config metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(
+        mode, 0o600,
+        "a config file holding a registration access token must be owner-only, got {mode:o}"
     );
 }

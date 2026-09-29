@@ -7,24 +7,35 @@
 //!
 //! ## Flow
 //!
-//! 1. CLI calls `POST /oauth/fido2/challenge` → receives challenge + state JWT
+//! 1. CLI calls `POST /oauth/fido2/challenge` → receives challenge + state
+//!    JWT. During this staged rollout the CLI authenticates with
+//!    `private_key_jwt`, binding the state JWT to its `client_id`; an
+//!    unauthenticated request is still accepted and mints a state JWT with
+//!    no `client_id` (see `handlers::oidc::fido2_challenge`'s module doc).
 //! 2. CLI performs local CTAP2 assertion (user touches YubiKey)
 //! 3. CLI calls `POST /oauth/token` with `grant_type=urn:ietf:params:oauth:grant-type:fido2-assertion`
 //! 4. Server verifies state JWT, authenticates client via `private_key_jwt`,
-//!    verifies WebAuthn assertion, and issues an OAuth access token.
+//!    and — only when the state JWT carries a `client_id` — confirms the
+//!    presenting client matches the client that initiated the challenge
+//!    (rejecting cross-client replay with `invalid_grant`). It then verifies
+//!    the WebAuthn assertion and issues an OAuth access token.
 
 use crate::AppState;
+use crate::arrival::ArrivalTime;
+use crate::assurance::HardwareVerification;
 use crate::crypto::jwt::JwtType;
-use crate::db::{self, AuthEventParams, AuthEventType};
+use crate::db::{self, AuthEventParams, AuthEventType, ClientInfo, Principal};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use crate::services::auth::{
     AuthenticatorLookupParams, ClientAuthProof, CreateOAuthTokenParams, GrantProof,
-    LoginAssertionParams, SenderConstraintProof, TokenBinding, TokenIssuanceProof,
-    create_oauth_access_token, lookup_and_verify_authenticator, verify_login_assertion,
+    LoginAssertionParams, LookupError, SenderConstraintProof, TokenBinding, TokenIssuanceProof,
+    create_oauth_access_token, lookup_and_verify_authenticator, record_lookup_failure,
+    verify_login_assertion,
 };
 use crate::services::oidc::ScopeSet;
 use crate::services::oidc::authorization_details::AuthorizationDetails;
-use crate::services::oidc::token::AuthenticatedClient;
+use crate::services::oidc::validated_client::ValidatedOAuthClient;
+use crate::services::policy;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
@@ -36,13 +47,43 @@ use vouch_common::{
     AuthData, Base64Url, ClientDataJson, CredentialId, Signature, StateToken, UserHandle,
 };
 
-/// State embedded in the challenge JWT (must match the challenge endpoint).
+/// State embedded in the challenge JWT.
+///
+/// Defined here, in the grant that consumes it, and constructed by the
+/// `/oauth/fido2/challenge` handler that issues it. One definition rather
+/// than a pair kept in step by hand: the two sides are a serialization
+/// contract, and a field added on one side but not the other rejects every
+/// login.
 #[derive(Debug, Serialize, Deserialize)]
-struct Fido2ChallengeState {
-    challenge: Challenge<Raw>,
-    rp_id: String,
-    iat: i64,
-    exp: i64,
+pub(crate) struct Fido2ChallengeState {
+    pub(crate) challenge: Challenge<Raw>,
+    pub(crate) rp_id: String,
+    /// OAuth `client_id` of the client that authenticated at
+    /// `POST /oauth/fido2/challenge` and initiated this ceremony, if the
+    /// challenge request was authenticated. Stamped from the authenticated
+    /// client — the challenge endpoint accepts `private_key_jwt` — so
+    /// [`exchange_fido2_assertion`] can reject a state+assertion presented by
+    /// a different client, mirroring the `authorization_code` grant's
+    /// `verify_client_matches_code` (RFC 6749 §4.1.3). No RFC governs this
+    /// custom grant's client binding; it is Vouch's own decision, made by
+    /// analogy to that sibling grant.
+    ///
+    /// `None` when the challenge request carried no client credentials — the
+    /// challenge endpoint's staged rollout still accepts that, for CLI
+    /// compatibility and rolling-deploy state-token decoding — in which case
+    /// [`exchange_fido2_assertion`] enforces no binding at all, matching this
+    /// grant's behavior before the fix. `#[serde(default)]` lets a state
+    /// token minted by a server version that predates this field, or that
+    /// omitted `client_id` because the request was unauthenticated, decode
+    /// as `None` rather than fail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) client_id: Option<String>,
+    /// RFC 7519 §4.1.6: Issued at time. Not validated on decode — the token
+    /// is minted and consumed by this server on one clock, so `exp` alone
+    /// bounds its lifetime.
+    pub(crate) iat: i64,
+    /// RFC 7519 §4.1.4: Expiration time (5 minutes), enforced on decode.
+    pub(crate) exp: i64,
 }
 
 /// Parsed FIDO2 assertion payload from the `assertion` form parameter.
@@ -108,7 +149,11 @@ impl AssertionGrant {
     /// includes a member outside its length bounds), a challenge state that
     /// fails to decode or carries an unrepresentable `exp`, or a user handle
     /// that is not a UUID.
-    async fn validate(assertion: &str, state: &Arc<AppState>) -> ServiceResult<Self> {
+    async fn validate(
+        assertion: &str,
+        state: &Arc<AppState>,
+        arrival: ArrivalTime,
+    ) -> ServiceResult<Self> {
         let assertion_bytes = URL_SAFE_NO_PAD.decode(assertion).map_err(|_| {
             ServiceError::oauth(
                 OAuthErrorCode::InvalidGrant,
@@ -126,7 +171,11 @@ impl AssertionGrant {
 
         let challenge_state: Fido2ChallengeState = state
             .state_signer
-            .decode_state_token(payload.state.as_str(), JwtType::Fido2ChallengeState)
+            .decode_state_token(
+                payload.state.as_str(),
+                JwtType::Fido2ChallengeState,
+                arrival.as_second(),
+            )
             .await
             .map_err(|e| {
                 ServiceError::oauth(
@@ -160,7 +209,7 @@ pub struct Fido2AssertionParams<'a> {
     /// The base64url-encoded JSON assertion payload.
     pub assertion: &'a str,
     /// Authenticated client (via `private_key_jwt`).
-    pub client: &'a AuthenticatedClient,
+    pub client: &'a ValidatedOAuthClient,
     /// RFC 9449 §6 / RFC 8705 §3: how the issued token is bound.
     pub binding: TokenBinding<'a>,
     /// Requested scope.
@@ -168,7 +217,7 @@ pub struct Fido2AssertionParams<'a> {
     /// RFC 9396: Raw authorization_details JSON string.
     pub authorization_details: Option<&'a str>,
     /// Client metadata extracted from HTTP headers.
-    pub client_info: crate::db::ClientInfo,
+    pub client_info: ClientInfo,
 }
 
 /// Result of a successful FIDO2 assertion grant exchange.
@@ -206,11 +255,47 @@ pub(crate) async fn exchange_fido2_assertion(
     params: Fido2AssertionParams<'_>,
     client_auth: ClientAuthProof,
     sender_constraint: SenderConstraintProof,
+    arrival: ArrivalTime,
 ) -> ServiceResult<Fido2AssertionResult> {
     // Parse and check the assertion. This reads only the assertion parameter,
     // so it completes before the challenge state is consumed below.
-    let grant = AssertionGrant::validate(params.assertion, state).await?;
+    let grant = AssertionGrant::validate(params.assertion, state, arrival).await?;
     let user_id = grant.user_id;
+
+    // Bind the ceremony to the client that initiated it, when the challenge
+    // was authenticated at all. The challenge endpoint stamps the
+    // authenticated client's `client_id` into the state JWT; reject a
+    // state+assertion presented by any other client. This is the
+    // FIDO2-assertion-grant analogue of `verify_client_matches_code`
+    // (RFC 6749 §4.1.3): no RFC governs this custom grant's client binding,
+    // so the property is enforced here by mirroring that sibling grant. A
+    // state JWT with no `client_id` — an unauthenticated challenge request,
+    // still accepted during this staged rollout — enforces no binding,
+    // matching this grant's behavior before the fix.
+    //
+    // Checked before `try_consume_challenge_state` so a cross-client
+    // attempt — e.g. a captured state+assertion replayed under an
+    // attacker's client — leaves the single-use state and the
+    // authenticator's WebAuthn counter untouched, and the legitimate
+    // client's flow still completes (no denial of service). The presenting
+    // client is cryptographically authenticated at the token endpoint via
+    // `private_key_jwt` before this function is entered, so comparing
+    // `client_id`s is a binding check, not a self-asserted one.
+    if let Some(expected_client_id) = &grant.challenge_state.client_id
+        && expected_client_id != &params.client.client_id
+    {
+        tracing::warn!(
+            target: "security",
+            "FIDO2 assertion grant: client_id mismatch — challenge was issued to {} \
+             but token request authenticated as {}",
+            expected_client_id,
+            params.client.client_id,
+        );
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidGrant,
+            "Client ID mismatch between challenge and token request",
+        ));
+    }
 
     // Mark challenge used + look up authenticator in parallel
     // (independent DB operations on different tables). The returned
@@ -231,7 +316,7 @@ pub(crate) async fn exchange_fido2_assertion(
             }
         },
         async {
-            lookup_and_verify_authenticator(
+            let e = match lookup_and_verify_authenticator(
                 state,
                 AuthenticatorLookupParams {
                     credential_id: grant.payload.credential_id.as_bytes(),
@@ -239,9 +324,24 @@ pub(crate) async fn exchange_fido2_assertion(
                 },
             )
             .await
-            .map_err(|e| {
-                tracing::warn!("FIDO2 assertion grant: authenticator lookup failed: {e}");
-                ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Authentication failed")
+            {
+                Ok(found) => return Ok(found),
+                Err(e) => e,
+            };
+            record_lookup_failure(&state.audit, params.client_info.clone(), user_id, &e).await;
+            Err(match e {
+                // A storage fault says nothing about the grant, so it stays a 500.
+                LookupError::Service(err) => {
+                    tracing::error!("FIDO2 assertion grant: authenticator lookup failed: {err}");
+                    err
+                }
+                // Generic invalid_grant: the response does not say which refusal applied.
+                refusal @ (LookupError::NotFound(_)
+                | LookupError::UserMismatch { .. }
+                | LookupError::Deactivated { .. }) => {
+                    tracing::warn!("FIDO2 assertion grant: authenticator lookup failed: {refusal}");
+                    ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Authentication failed")
+                }
             })
         },
     )?;
@@ -255,11 +355,11 @@ pub(crate) async fn exchange_fido2_assertion(
     let user = lookup_result.user;
 
     // Verify WebAuthn assertion
-    let stored_counter = u32::try_from(authenticator.counter).unwrap_or(0);
+    let stored_counter = authenticator.counter.cast_unsigned();
     // Cloned for the failure audit event below, since the success path moves
     // `params.client_info` when it records the LoginSuccess event.
     let failure_client_info = params.client_info.clone();
-    let assertion_result = verify_login_assertion(LoginAssertionParams {
+    let assertion_result = match verify_login_assertion(LoginAssertionParams {
         authenticator_data: payload.authenticator_data.into_bytes(),
         client_data_json: payload.client_data_json.into_bytes(),
         signature: payload.signature.into_bytes(),
@@ -274,26 +374,45 @@ pub(crate) async fn exchange_fido2_assertion(
         origin_policy: state.config().as_ref().into(),
     })
     .await
-    .map_err(|e| {
-        tracing::warn!(
-            "FIDO2 assertion grant: assertion verification failed for user {}: {e}",
-            user_id
-        );
-        // P3.5: a failed assertion — including clone detection (counter
-        // regression) — is a high-signal security event. Record it in the
-        // audit trail with the credential and user IDs and the failure reason.
-        let failure_event = AuthEventParams {
-            user_id: user.id.clone(),
-            event_type: AuthEventType::LoginFailed,
-            authenticator_id: Some(authenticator.id.clone()),
-            success: false,
-            failure_reason: Some(e.to_string()),
-            client: failure_client_info,
-            ..AuthEventParams::default()
-        };
-        db::spawn_audit_event(&state.audit, failure_event, Some(user.email.clone()));
-        ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Authentication failed")
-    })?;
+    {
+        Ok(result) => result,
+        Err(e) => {
+            // A verification task that did not complete is a server fault,
+            // not a failed login: no audit row, and a 500 rather than
+            // `invalid_grant`, as for a storage fault during the lookup.
+            let Some(principal) = e.principal(&user.id) else {
+                tracing::error!("FIDO2 assertion grant: {e}");
+                return Err(ServiceError::Internal(
+                    "WebAuthn verification failed".to_string(),
+                ));
+            };
+            tracing::warn!(
+                "FIDO2 assertion grant: assertion verification failed for user {}: {e}",
+                user_id
+            );
+            // A failed assertion — including clone detection (counter regression)
+            // — is a high-signal security event. Record it in the audit trail with
+            // the credential and user IDs and the failure reason. A counter
+            // regression is reported only once the signature verified, so it
+            // counts against the credential's owner; every other failure leaves
+            // the `user_handle` request-supplied and the row unattributed.
+            let failure_event = AuthEventParams {
+                user_id: principal,
+                event_type: AuthEventType::LoginFailed,
+                authenticator_id: Some(authenticator.id.clone()),
+                success: false,
+                failure_reason: Some(e.to_string()),
+                client: failure_client_info,
+                client_id: None,
+                idp_issuer: None,
+            };
+            db::record_auth_event(&state.audit, failure_event, Some(user.email.clone())).await;
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidGrant,
+                "Authentication failed",
+            ));
+        }
+    };
 
     tracing::info!(
         "FIDO2 assertion grant: verified for user {}, counter={}, uv={}",
@@ -302,9 +421,24 @@ pub(crate) async fn exchange_fido2_assertion(
         assertion_result.user_verified,
     );
 
+    // Validate authorization_details if provided (RFC 9396). Pure request
+    // validation, so it runs before the counter commit below: a malformed
+    // parameter is rejected with nothing durable changed and nothing that
+    // needs an audit row.
+    let validated_ad = params
+        .authorization_details
+        .map(AuthorizationDetails::parse)
+        .transpose()?;
+
+    let ad_value = validated_ad.as_ref().map(serde_json::Value::from);
+
     // Update counter in database
     // WebAuthn counter is u32; stored bit-identical as i32. Real authenticators never
     // approach 2^31 uses, and bitwise reinterpret preserves DB monotonicity comparisons.
+    //
+    // From here on every exit records an audit event (`LoginFailed` from
+    // the posture gate, `LoginSuccess` otherwise): the counter update is
+    // committed, and a verified ceremony must never vanish from AuthEvents.
     db::update_authenticator_counter(
         &state.store,
         &authenticator.id,
@@ -314,16 +448,8 @@ pub(crate) async fn exchange_fido2_assertion(
     .map_err(|e| ServiceError::Internal(format!("Failed to update counter: {e}")))?;
 
     // Capture client metadata for the audit events below.
-    let client_ip = params.client_info.client_ip;
-    let client_user_agent = params.client_info.user_agent.clone();
-
-    // Validate authorization_details if provided (RFC 9396)
-    let validated_ad = params
-        .authorization_details
-        .map(AuthorizationDetails::parse)
-        .transpose()?;
-
-    let ad_value = validated_ad.as_ref().map(serde_json::Value::from);
+    let client_ip = params.client_info.client_ip();
+    let audit_client = params.client_info.clone();
 
     // Evaluate device posture policies (if org has active policies).
     // The login audit event is written AFTER this gate: a policy-denied
@@ -331,54 +457,58 @@ pub(crate) async fn exchange_fido2_assertion(
     // policies (step-up recency on token exchange) treat login_success as
     // proof of a completed, policy-compliant hardware login.
     if let Some(ref org_id) = user.org_id
-        && let Err(denied) = crate::services::policy::evaluate_posture_policies(
+        && let Err(denied) = policy::evaluate_posture_policies(
             state,
             org_id,
             &user.id,
             &user.email,
             client_ip,
-            &params.client.client.client_id,
+            &params.client.client_id,
             ad_value.as_ref(),
+            arrival,
         )
         .await
     {
+        // The assertion verified, so this refusal is the user's own and
+        // counts toward per-user temporal policies.
         let failed_event = AuthEventParams {
-            user_id: user.id.clone(),
+            user_id: Principal::Verified(user.id.clone()),
             event_type: AuthEventType::LoginFailed,
             authenticator_id: Some(authenticator.id.clone()),
             success: false,
             failure_reason: Some("posture policy denied".to_string()),
             client: params.client_info,
-            ..AuthEventParams::default()
+            client_id: None,
+            idp_issuer: None,
         };
-        db::spawn_audit_event(&state.audit, failed_event, Some(user.email.clone()));
+        db::record_auth_event(&state.audit, failed_event, Some(user.email.clone())).await;
         return Err(denied);
     }
 
-    // Log the successful auth event (fire-and-forget)
+    // Log the successful auth event
     let auth_event_params = AuthEventParams {
-        user_id: user.id.clone(),
+        user_id: Principal::Verified(user.id.clone()),
         event_type: AuthEventType::LoginSuccess,
         authenticator_id: Some(authenticator.id.clone()),
         success: true,
         client: params.client_info,
-        ..AuthEventParams::default()
+        failure_reason: None,
+        client_id: None,
+        idp_issuer: None,
     };
-    db::spawn_audit_event(&state.audit, auth_event_params, Some(user.email.clone()));
+    db::record_auth_event(&state.audit, auth_event_params, Some(user.email.clone())).await;
 
     // Create OAuth access token
     let scope = params.scope.map_or_else(ScopeSet::all, ScopeSet::parse);
 
-    let now = jiff::Timestamp::now().as_second();
-
-    // Snapshot org domain at session creation so federation claims reflect
-    // the user's state at this moment, not whenever the token is issued.
-    let org_domain = if let Some(ref org_id) = user.org_id {
-        db::get_organization_domain(&state.store, org_id)
-            .await
-            .map_err(|e| ServiceError::Internal(format!("Failed to fetch org domain: {e}")))?
-    } else {
-        None
+    // Org domain, read once at session creation for the federation claims.
+    let org_domain = match user.org_id.as_deref() {
+        Some(org_id) => {
+            db::get_user_org_domain(&state.store, &user.id, org_id, user.org_domain.as_deref())
+                .await
+                .map_err(|e| ServiceError::Internal(format!("Failed to fetch org domain: {e}")))?
+        }
+        None => None,
     };
 
     // Build the chokepoint proof here: `GrantProof::Fido2Assertion` can
@@ -395,33 +525,55 @@ pub(crate) async fn exchange_fido2_assertion(
             user_id: &user.id,
             email: &user.email,
             authenticator_id: Some(&authenticator.id),
-            client_id: &params.client.client.client_id,
+            client_id: &params.client.client_id,
             scope: Some(scope.clone()),
             binding: params.binding,
             act: None,
             audience: None,
-            auth_time: Some(now),
-            hardware_verification: crate::services::auth::HardwareVerification::Verified,
+            max_lifetime_secs: None,
+            // The ceremony-receipt instant from `verify_login_assertion` —
+            // the `auth_time` any token resting on this ceremony must report
+            // (see `LoginAssertionResult::verified_at`). Stamping this
+            // handler's own clock instead would overstate freshness to the
+            // key-deletion step-up gate by the verification-to-issuance
+            // processing delay, and diverge from the browser-login and
+            // device-code flows, which both carry the ceremony instant.
+            hardware_verification: HardwareVerification::Verified {
+                auth_time: Some(assertion_result.verified_at.instant()),
+            },
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: ad_value.as_ref(),
             hardware_aaguid: authenticator.aaguid.as_deref(),
             org_domain: org_domain.as_deref(),
+            source_code_hash: None,
         },
         proof,
+        arrival,
     )
     .await?;
 
     // Every access-token grant records an oauth_token_issued audit row.
+    // The user-org half of `resolve_event_org_domain`'s "prefer user, fall
+    // back to client" rule was already resolved above for the session
+    // claims, so it's reused here rather than re-derived; the client-org
+    // fallback still runs its own lookup when the user has no org, using the
+    // client already in scope instead of re-fetching it by id.
+    let audit_org_domain = db::resolve_event_org_domain(
+        &state.store,
+        org_domain.as_deref(),
+        params.client.org_id.as_deref(),
+    )
+    .await;
     db::record_oauth_event(
         &state.audit,
         &state.store,
         &db::RecordOAuthEventParams {
-            oauth_client_id: &params.client.client.id,
+            oauth_client_id: &params.client.id,
             event_type: db::OAuthEventType::TokenIssued,
             user_id: Some(&user.id),
-            ip_address: client_ip,
-            user_agent: client_user_agent.as_deref(),
+            client: &audit_client,
             details: Some("grant_type=fido2-assertion"),
+            org_domain: db::RecordedOrgDomain::Known(audit_org_domain.as_deref()),
         },
     )
     .await;
@@ -434,16 +586,4 @@ pub(crate) async fn exchange_fido2_assertion(
         email: user.email,
         authorization_details: validated_ad.as_ref().map(serde_json::Value::from),
     })
-}
-
-#[cfg(test)]
-mod tests {
-    // NOTE(mtls-threading): `Fido2AssertionParams::mtls_cert_thumbprint` is a
-    // plain `Option<&str>` threaded from the handler through to
-    // `create_oauth_access_token` as `CreateOAuthTokenParams::mtls_cert_thumbprint`.
-    // Unit-testing the threading in isolation would require a fully mocked AppState
-    // (database, signing key, WebAuthn instance, etc.). End-to-end coverage for
-    // RFC 8705 token binding through the FIDO2 grant should be added as an
-    // integration test in `crates/vouch-tests/` once the mTLS test infrastructure
-    // (client cert generation + mTLS test server) is available.
 }

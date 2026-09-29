@@ -17,13 +17,25 @@
 //! When no `WWW-Authenticate` header is present, we insert a minimal
 //! `Bearer` challenge with only the `resource_metadata` parameter.
 //!
-//! Scope: apply ONLY to protected-resource sub-routers (credential
-//! issuance, userinfo, introspect, register, keys, admin API, SCIM,
-//! applications). Do not apply to authorization-server metadata or
-//! pure UI routes — those aren't OAuth protected resources and 401s
-//! there have different semantics.
+//! Scope: apply ONLY to sub-routers whose 401 responses warrant a
+//! `resource_metadata` pointer — i.e. routes that carry RFC 6750
+//! Bearer tokens (credential issuance, userinfo, introspect, register,
+//! keys, admin API, SCIM, applications). Do not apply to authorization-
+//! server metadata or pure UI routes — those aren't OAuth protected
+//! resources and 401s there have different semantics.
+//!
+//! "Carries RFC 6750 Bearer transport" is a broader predicate than "is
+//! an RFC 6749/9728 OAuth 2.0 protected resource". The per-resource
+//! metadata document allowlist
+//! ([`crate::services::oidc::protected_resource::PROTECTED_RESOURCE_PREFIXES`])
+//! uses the stricter definition and deliberately excludes `/scim/v2/*`:
+//! its tokens are admin-minted opaque credentials (not AS-issued access
+//! tokens), so no `authorization_servers` entry is truthful for it.
+//! This middleware still applies to SCIM so its 401s point clients at
+//! the *root* metadata document (a deployment-wide overview), not a
+//! per-resource SCIM document.
 
-use crate::AppState;
+use crate::{AppState, http};
 use axum::{
     extract::{Request, State},
     http::{HeaderValue, StatusCode, header::WWW_AUTHENTICATE},
@@ -77,12 +89,12 @@ pub async fn layer(State(state): State<Arc<AppState>>, req: Request, next: Next)
 /// ASCII), but as a defense-in-depth measure we strip `\` and `"`
 /// from the URL before interpolation.
 fn append_resource_metadata(headers: &mut axum::http::HeaderMap, url: &str) {
-    let sanitized_url = crate::http::sanitize_challenge_value(url);
+    let sanitized_url = http::sanitize_challenge_value(url);
     let parameter = format!("{RESOURCE_METADATA_PARAM}=\"{sanitized_url}\"");
 
     match headers.get(WWW_AUTHENTICATE) {
         None => {
-            let challenge = crate::http::bearer_challenge(&[(RESOURCE_METADATA_PARAM, url)]);
+            let challenge = http::bearer_challenge(&[(RESOURCE_METADATA_PARAM, url)]);
             if let Ok(value) = HeaderValue::from_str(&challenge) {
                 headers.insert(WWW_AUTHENTICATE, value);
             }
@@ -169,6 +181,7 @@ fn has_resource_metadata_parameter(header: &str) -> bool {
 )]
 mod tests {
     use super::*;
+    use crate::http;
 
     #[test]
     fn appends_when_no_header_present() {
@@ -274,7 +287,7 @@ mod tests {
     #[test]
     fn sanitize_strips_quotes_and_backslashes() {
         let raw = "https://bad\"example.com\\/foo";
-        let cleaned = crate::http::sanitize_challenge_value(raw);
+        let cleaned = http::sanitize_challenge_value(raw);
         assert!(!cleaned.contains('"'));
         assert!(!cleaned.contains('\\'));
     }

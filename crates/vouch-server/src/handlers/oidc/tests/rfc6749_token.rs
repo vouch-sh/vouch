@@ -6,9 +6,11 @@
 //! endpoint instead of issuing a token.
 
 use super::helpers::*;
+use crate::handlers::oidc::token::{TokenRequestForm, TokenResponse};
+use crate::test_utils;
 
 // ========================================================================
-// P0: RFC 6749 — Token Endpoint
+// RFC 6749 — Token Endpoint
 // ========================================================================
 
 #[tokio::test]
@@ -136,32 +138,14 @@ async fn test_rfc6749_successful_authorization_code_exchange() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
-    let scope_set = ScopeSet::parse("openid email");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
-        },
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec::default(),
     )
-    .await
-    .expect("Failed to issue authorization code");
+    .await;
 
     let auth_header = client.basic_auth_header();
 
@@ -241,32 +225,17 @@ async fn test_rfc6749_token_response_no_error_field_on_success() {
 
     // The issue_oauth_access_token helper already validates success,
     // but let's explicitly verify via a fresh exchange.
-    let scope_set = ScopeSet::parse("openid");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            ..Default::default()
         },
     )
-    .await
-    .expect("Failed to issue code");
+    .await;
 
     let auth_header = client.basic_auth_header();
     let (status, body) = http_post_form(
@@ -313,37 +282,17 @@ async fn test_token_exchange_rejects_revoked_authenticator() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
-    let scope_set = ScopeSet::parse("openid email");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
-        },
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec::default(),
     )
-    .await
-    .expect("Failed to issue authorization code");
+    .await;
 
     // Revoke the authenticator between code issuance and code exchange.
-    db::delete_authenticator(&state.store, &auth_id)
-        .await
-        .expect("Failed to delete authenticator");
+    test_utils::remove_test_authenticator(&state.store, &auth_id).await;
 
     let auth_header = client.basic_auth_header();
     let (status, body) = http_post_form(
@@ -383,32 +332,17 @@ async fn test_rfc6749_token_client_secret_post_succeeds() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
-    let scope = ScopeSet::parse("openid");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            ..Default::default()
         },
     )
-    .await
-    .expect("issue code");
+    .await;
 
     // Credentials in the form body (NO Authorization header).
     let body = format!(
@@ -556,7 +490,7 @@ fn test_token_response_wire_shape_with_and_without_id_token() {
     // values serialize as plain strings. Pins the wire shape across the
     // SecretString field migration: the explicit serializers must produce
     // exactly what the bare `String`/`Option<String>` fields did.
-    let with = crate::handlers::oidc::token::TokenResponse {
+    let with = TokenResponse {
         access_token: "at-secret".into(),
         token_type: "Bearer".to_string(),
         expires_in: 3600,
@@ -569,7 +503,7 @@ fn test_token_response_wire_shape_with_and_without_id_token() {
     assert_eq!(json["access_token"], "at-secret");
     assert_eq!(json["id_token"], "idt-secret");
 
-    let without = crate::handlers::oidc::token::TokenResponse {
+    let without = TokenResponse {
         access_token: "at-secret".into(),
         token_type: "Bearer".to_string(),
         expires_in: 3600,
@@ -590,7 +524,7 @@ fn test_token_request_debug_never_prints_credential_material() {
     // Every credential-bearing field must be absent from `{:?}` output —
     // the manual Debug impl prints [REDACTED] and the SecretString fields
     // self-redact even if a future impl prints them directly.
-    let request = crate::handlers::oidc::token::TokenRequestForm {
+    let request = TokenRequestForm {
         grant_type: "authorization_code".to_string(),
         code: Some("visible-code".to_string()),
         redirect_uri: None,
@@ -745,6 +679,71 @@ async fn test_token_malformed_basic_header_challenges_with_basic() {
 }
 
 #[tokio::test]
+async fn test_client_credentials_malformed_basic_header_challenges_with_basic() {
+    // Regression for the `client_credentials` grant: the `Ok(None)` arm of
+    // `complete_client_auth` used to return a raw `invalid_client` 401 without
+    // `with_client_auth_challenge`, so RFC 6749 §5.2's `WWW-Authenticate: Basic`
+    // was omitted when the client attempted `Authorization: Basic`. A malformed
+    // header still classifies as `AuthorizationHeader`, so the challenge is owed.
+    let (app, _state) = test_app().await;
+
+    let response = http_post_form_full(
+        &app,
+        "/oauth/token",
+        "grant_type=client_credentials",
+        &[("Authorization", "Basic !!!not-base64!!!")],
+    )
+    .await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::UNAUTHORIZED,
+        "client_credentials with malformed Basic must be 401: {}",
+        response.body
+    );
+    assert_eq!(
+        www_authenticate(&response),
+        "Basic",
+        "client_credentials must carry WWW-Authenticate: Basic owed by RFC 6749 §5.2; \
+         got {:?}",
+        response.headers
+    );
+}
+
+#[tokio::test]
+async fn test_token_exchange_malformed_basic_header_challenges_with_basic() {
+    // Regression for the `token_exchange` grant: same defect and fix as
+    // `test_client_credentials_malformed_basic_header_challenges_with_basic`.
+    // `subject_token` and `subject_token_type` only need to be present to clear
+    // `TokenRequestForm::parse`; their values never reach `ExchangeTokens::from_request`
+    // because the client-auth check returns first.
+    let (app, _state) = test_app().await;
+
+    let response = http_post_form_full(
+        &app,
+        "/oauth/token",
+        "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+         &subject_token=anything&subject_token_type=urn:ietf:params:oauth:token-type:access_token",
+        &[("Authorization", "Basic !!!not-base64!!!")],
+    )
+    .await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::UNAUTHORIZED,
+        "token_exchange with malformed Basic must be 401: {}",
+        response.body
+    );
+    assert_eq!(
+        www_authenticate(&response),
+        "Basic",
+        "token_exchange must carry WWW-Authenticate: Basic owed by RFC 6749 §5.2; \
+         got {:?}",
+        response.headers
+    );
+}
+
+#[tokio::test]
 async fn test_fido2_grant_basic_auth_failure_challenges_with_basic() {
     // The fido2-assertion grant requires `private_key_jwt`, so a client that
     // presents Basic credentials is rejected as `invalid_client`. It attempted
@@ -840,6 +839,21 @@ fn no_credential_requests() -> Vec<(&'static str, &'static str)> {
              &redirect_uri=https%3A%2F%2Fexample.com%2Fcallback",
         ),
         (
+            "/oauth/token",
+            // RFC 6749 §4.4.2: client auth is REQUIRED for client_credentials.
+            "grant_type=client_credentials",
+        ),
+        (
+            "/oauth/token",
+            // RFC 8693 §2.1: client auth is REQUIRED for token exchange.
+            // `subject_token` and `subject_token_type` only need to be present
+            // to clear `TokenRequestForm::parse`; the client-auth check returns
+            // before `ExchangeTokens::from_request` ever runs.
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token=anything\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token",
+        ),
+        (
             "/oauth/par",
             "response_type=code&redirect_uri=https%3A%2F%2Fexample.com%2Fcallback\
              &code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM\
@@ -860,12 +874,12 @@ async fn test_no_credentials_challenges_uniformly_across_endpoints() {
         assert_eq!(
             response.status,
             StatusCode::UNAUTHORIZED,
-            "{path} must reject a request carrying no client credentials: {}",
+            "{path} ({body}) must reject a request carrying no client credentials: {}",
             response.body
         );
         assert!(
             www_authenticate(&response).starts_with("Basic"),
-            "{path} must advertise Basic when no credentials were presented, got: {:?}",
+            "{path} ({body}) must advertise Basic when no credentials were presented, got: {:?}",
             www_authenticate(&response)
         );
     }
@@ -1010,5 +1024,230 @@ async fn test_rfc6749_another_grants_parameter_is_ignored() {
     assert_eq!(
         body, baseline_body,
         "another grant's parameters must not change this grant's response"
+    );
+}
+
+// ========================================================================
+// RFC 6749 Section 10.5 — Scope of replay revocation
+// ========================================================================
+
+/// Exchange an authorization code at `/oauth/token`. Returns `(status, body)`.
+async fn exchange_code(
+    app: &axum::Router,
+    client: &TestOAuthClient,
+    code: &str,
+) -> (StatusCode, String) {
+    http_post_form(
+        app,
+        "/oauth/token",
+        &format!(
+            "grant_type=authorization_code&code={code}\
+             &redirect_uri=https://example.com/callback"
+        ),
+        &[("Authorization", &client.basic_auth_header())],
+    )
+    .await
+}
+
+/// Exchange `code` and return the access token it issues.
+async fn token_from_code(app: &axum::Router, client: &TestOAuthClient, code: &str) -> String {
+    let (status, body) = exchange_code(app, client, code).await;
+    assert_eq!(status, StatusCode::OK, "code exchange failed: {body}");
+    serde_json::from_str::<serde_json::Value>(&body)
+        .expect("token response is JSON")["access_token"]
+        .as_str()
+        .expect("access_token present")
+        .to_string()
+}
+
+/// Probe a client-audience access token at `/oauth/userinfo`, which accepts it
+/// where `/v1/keys` would reject it on audience grounds. 200 means the session
+/// is live, 401 means it has been revoked.
+async fn userinfo_status(app: &axum::Router, token: &str) -> StatusCode {
+    let (status, _body) = http_get(
+        app,
+        "/oauth/userinfo",
+        &[("Authorization", &format!("Bearer {token}"))],
+    )
+    .await;
+    status
+}
+
+/// RFC 6749 Section 10.5: "If the authorization server observes multiple
+/// attempts to exchange an authorization code for an access token, the
+/// authorization server SHOULD attempt to revoke all access tokens already
+/// granted based on the compromised authorization code."
+///
+/// `rfc9700::test_rfc9700_code_replay_revokes_the_tokens_it_issued` covers the
+/// revocation itself; this covers its scope. Only the replayed code's token is
+/// revoked, so a token from a second code and a token from a grant that has no
+/// single-use code both keep working.
+#[tokio::test]
+async fn test_rfc6749_code_replay_revocation_is_scoped_to_that_code() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "replay-scope@example.com").await;
+    let auth = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let code_a = issue_code(
+        &state,
+        &user,
+        &auth,
+        &client.client_id,
+        TestCodeSpec {
+            nonce: Some("a"),
+            ..Default::default()
+        },
+    )
+    .await;
+    let token_a = token_from_code(&app, &client, &code_a).await;
+    let code_b = issue_code(
+        &state,
+        &user,
+        &auth,
+        &client.client_id,
+        TestCodeSpec {
+            nonce: Some("b"),
+            ..Default::default()
+        },
+    )
+    .await;
+    let token_b = token_from_code(&app, &client, &code_b).await;
+    // A session from a grant with no single-use code. It carries the server's
+    // own audience, so `/v1/keys` is its probe.
+    let token_c = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    assert_eq!(
+        userinfo_status(&app, &token_b).await,
+        StatusCode::OK,
+        "token B must be live before the replay"
+    );
+    assert_token_alive(&app, &token_c, "token C").await;
+
+    let (status, body) = exchange_code(&app, &client, &code_a).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "replayed code A must be denied: {body}"
+    );
+
+    assert_eq!(
+        userinfo_status(&app, &token_a).await,
+        StatusCode::UNAUTHORIZED,
+        "the replayed code's own token must be revoked"
+    );
+    assert_eq!(
+        userinfo_status(&app, &token_b).await,
+        StatusCode::OK,
+        "a token issued from a different code must survive the replay"
+    );
+    assert_token_alive(&app, &token_c, "token C after the replay").await;
+}
+
+// ========================================================================
+// Transport-metadata attribution on the OauthTokenIssued audit row
+// ========================================================================
+
+/// Regression test: the `authorization_code` grant's `OauthTokenIssued` audit
+/// row must carry the requester's IP and User-Agent, matching the three sibling
+/// `OauthTokenIssued` writers (`client_credentials`, `device_code`,
+/// `fido2_assertion`).
+///
+/// Before the fix, the `GrantParams::AuthorizationCode` dispatcher arm dropped
+/// the request's `client_info` and `AuthCodeExchangeParams` carried no
+/// transport fields, so `exchange_authorization_code` hardcoded
+/// `ip_address: None` / `user_agent: None` on every auth-code token issuance.
+/// The OCSF projection (`services/policy/events.rs` `OauthTokenIssued` arm)
+/// mapped the null `client_ip` to `input.ip == ""`, producing an asymmetry
+/// where auth-code `IssueToken` events lacked `input.ip` while the three
+/// sibling grants carried a real address.
+///
+/// `build_test_request` (`test_utils.rs`) injects
+/// `ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 0)))`, and `test_config()`
+/// sets no `trusted_proxies`, so `resolve_client_ip` returns the TCP peer IP
+/// `127.0.0.1`. The `User-Agent` is supplied explicitly in the request headers.
+#[tokio::test]
+async fn test_rfc6749_authorization_code_grant_records_transport_metadata() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "authcode-transport@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let code = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec::default(),
+    )
+    .await;
+
+    let auth_header = client.basic_auth_header();
+    let user_agent = "vouch-regression-test/1.0";
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=authorization_code&code={}&redirect_uri=https://example.com/callback",
+            code
+        ),
+        &[("Authorization", &auth_header), ("User-Agent", user_agent)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "Successful token exchange must return 200: {body}"
+    );
+
+    // Audit writes are awaited before the handler responds, so the
+    // `oauth_token_issued` row is visible immediately.
+    let events = state
+        .audit
+        .query_events(&db::AuditEventFilter {
+            event_types: Some(vec!["oauth_token_issued".to_string()]),
+            user_id: Some(user.id.clone()),
+            ..db::AuditEventFilter::default()
+        })
+        .await
+        .expect("query audit events");
+    assert_eq!(
+        events.len(),
+        1,
+        "one auth-code exchange -> one OauthTokenIssued audit row"
+    );
+
+    let row = events
+        .first()
+        .expect("the auth-code OauthTokenIssued audit row exists");
+    let data: serde_json::Value =
+        serde_json::from_str(&row.data).expect("audit row data is valid JSON");
+
+    assert!(
+        data["client_ip"].is_string(),
+        "client_ip must NOT be null on the auth-code OauthTokenIssued row (got {data})"
+    );
+    assert_eq!(
+        data["client_ip"], "127.0.0.1",
+        "client_ip must be the test peer IP (got {data})"
+    );
+    assert_eq!(
+        data["user_agent"], user_agent,
+        "user_agent must match the request's User-Agent header (got {data})"
+    );
+    assert_eq!(
+        data["oauth_client_id"], client.app_id,
+        "oauth_client_id must identify the authenticating client (got {data})"
     );
 }

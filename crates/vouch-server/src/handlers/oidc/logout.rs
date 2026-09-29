@@ -325,6 +325,7 @@ pub(crate) async fn logout(
 /// a query parameter) or renders the local done page.
 pub(crate) async fn logout_post(
     State(state): State<Arc<AppState>>,
+    client_info: ClientInfo,
     headers: HeaderMap,
     jar: CookieJar,
     Form(form): Form<LogoutForm>,
@@ -342,7 +343,7 @@ pub(crate) async fn logout_post(
     // Clear the browser session first (DB deletion + cache invalidation + audit
     // event). The user asked to log out, so a later redirect-validation database
     // error must not prevent logout.
-    clear_user_session(&state, &jar, &headers, verified_client_id.as_deref()).await;
+    clear_user_session(&state, &jar, &client_info, verified_client_id.as_deref()).await;
 
     let clear_cookie = clear_session_cookie().to_string();
 
@@ -445,10 +446,19 @@ async fn resolve_post_logout_redirect_uri(
 ///
 /// The `rp_client_id` is the `aud` from the verified `id_token_hint`, included
 /// in the audit event to distinguish RP-initiated logouts from user-initiated ones.
+///
+/// The audit context lookup uses the expiry-agnostic
+/// [`db::find_session_by_token_hash`] rather than the expiry-filtering
+/// [`db::get_session_by_token_hash`]: a `POST /oauth/logout` deletes the row
+/// by `token_hash` regardless of expiry (see [`db::delete_session_by_token_hash`]),
+/// so the `Logout` audit event must fire whenever the row actually existed.
+/// The expiry-filtering lookup returns `None` for an expired-but-present row,
+/// silently dropping the audit event in the window between DB expiry and the
+/// next reaper tick.
 async fn clear_user_session(
     state: &AppState,
     jar: &CookieJar,
-    headers: &HeaderMap,
+    client_info: &ClientInfo,
     rp_client_id: Option<&str>,
 ) {
     let Some(token) = jar
@@ -460,43 +470,29 @@ async fn clear_user_session(
 
     let token_hash = hash_token(&token);
 
-    let session_info = match state
-        .session_cache
-        .get_session_by_token_hash(&state.store, &token_hash)
-        .await
-    {
-        Ok(info) => info,
-        Err(e) => {
-            // Don't silently drop the error: log it and proceed. The session is
-            // still deleted below; only the audit event's user context is lost.
-            tracing::warn!(error = %e, "RP-Initiated Logout: session lookup for audit failed");
-            None
-        }
-    };
-
+    // The deleted row, expired or not, carries the user for the `Logout`
+    // audit event (see `db::delete_session_by_token_hash`).
     match db::delete_session_by_token_hash(&state.store, &token_hash).await {
-        Ok(deleted) => {
-            if deleted {
-                state.session_cache.invalidate(&token_hash);
-                tracing::info!(
-                    rp_client_id = rp_client_id,
-                    "Session cleared during RP-Initiated Logout"
-                );
+        Ok(Some(session)) => {
+            state.session_cache.invalidate(&token_hash);
+            tracing::info!(
+                rp_client_id = rp_client_id,
+                "Session cleared during RP-Initiated Logout"
+            );
 
-                if let Some(session) = session_info {
-                    let client_info = ClientInfo::from(headers);
-                    let params = db::AuthEventParams {
-                        user_id: session.user_id.clone(),
-                        event_type: db::AuthEventType::Logout,
-                        success: true,
-                        client_id: rp_client_id.map(str::to_string),
-                        client: client_info,
-                        ..Default::default()
-                    };
-                    db::spawn_audit_event(&state.audit, params, Some(session.user_email));
-                }
-            }
+            let params = db::AuthEventParams {
+                user_id: db::Principal::Verified(session.user_id.clone()),
+                event_type: db::AuthEventType::Logout,
+                success: true,
+                client_id: rp_client_id.map(str::to_string),
+                client: client_info.clone(),
+                authenticator_id: None,
+                failure_reason: None,
+                idp_issuer: None,
+            };
+            db::record_auth_event(&state.audit, params, Some(session.user_email.clone())).await;
         }
+        Ok(None) => {}
         Err(e) => {
             tracing::warn!("Failed to delete session during RP-Initiated Logout: {e}");
         }
@@ -509,16 +505,20 @@ async fn clear_user_session(
 
 #[cfg(test)]
 #[expect(
+    clippy::expect_used,
+    clippy::indexing_slicing,
     clippy::unwrap_used,
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
     use super::*;
+    use crate::crypto;
+    use crate::db::{self, AuditEvent, AuditEventFilter, AuditEventKind, SessionPurpose};
     use crate::services::oidc::token::IdTokenClaims;
     use crate::test_utils::{
-        TestClientSpec, create_test_authenticator, create_test_client, create_test_session,
-        create_test_user, http_get, http_post_form, test_app, test_app_state,
-        test_app_state_with_rsa_key,
+        TestClientSpec, TestSessionSpec, create_test_authenticator, create_test_client,
+        create_test_expired_session_row, create_test_session_with, create_test_user, http_get,
+        http_post_form, test_app, test_app_state, test_app_state_with_rsa_key,
     };
 
     /// Build a minimal `IdTokenClaims` for signing in tests.
@@ -698,7 +698,16 @@ mod tests {
         // Create a user + session.
         let user = create_test_user(&state.store, "logout-redirect@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let session_token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         // Create an OAuth client with a registered post_logout_redirect_uri.
         let post_logout_uri = "https://rp.example.com/logged-out";
@@ -745,7 +754,16 @@ mod tests {
 
         let user = create_test_user(&state.store, "logout-inactive@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
-        let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let session_token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let post_logout_uri = "https://rp.example.com/logged-out";
         let client = create_test_client(
@@ -761,7 +779,7 @@ mod tests {
         let client_id = client.client_id;
 
         // Deactivate the client after creation.
-        crate::db::set_oauth_client_active(&state.store, &client.app_id, false)
+        db::set_oauth_client_active(&state.store, &client.app_id, false)
             .await
             .unwrap();
 
@@ -889,6 +907,421 @@ mod tests {
         assert!(
             status == axum::http::StatusCode::OK || status == axum::http::StatusCode::SEE_OTHER,
             "unexpected status: {status}"
+        );
+    }
+
+    // ====================================================================
+    // Audit-event regression: expired-but-present session row
+    // ====================================================================
+    //
+    // `clear_user_session` previously fetched the audit context via the
+    // expiry-filtering `get_session_by_token_hash`, which returns `None` for
+    // an expired-but-present row, then gated the `Logout` audit event on
+    // `if let Some(session) = session_info`. So an RP-initiated logout whose
+    // cookie session row had already expired (but had not yet been reaped)
+    // deleted the row without recording any audit event. These tests pin
+    // the fix: the audit fires for both expired and live rows, and only when
+    // a row was actually deleted.
+
+    async fn logout_audit_events(state: &crate::AppState, user_id: &str) -> Vec<AuditEvent> {
+        state
+            .audit
+            .query_events(&AuditEventFilter {
+                event_types: Some(vec![AuditEventKind::Logout.as_str().to_string()]),
+                user_id: Some(user_id.to_string()),
+                ..AuditEventFilter::default()
+            })
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_rp_logout_records_audit_event_for_expired_session_row() {
+        // The bug: an expired-but-present cookie session row was deleted
+        // during RP-initiated logout but no `Logout` audit event was written.
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "rp-logout-expired@example.com").await;
+
+        let (token, token_hash) = create_test_expired_session_row(
+            &state,
+            &user.id,
+            &user.email,
+            None,
+            SessionPurpose::OAuthAccessToken,
+        )
+        .await;
+
+        // Sanity: the expiry-filtering lookup returns `None` — the
+        // precondition the bug report describes.
+        let filtered =
+            db::get_session_by_token_hash(&state.store, &token_hash, jiff::Timestamp::now())
+                .await
+                .unwrap();
+        assert!(filtered.is_none(), "expired row must be filtered out");
+
+        let cookie = format!("{}={token}", vouch_common::SESSION_COOKIE_NAME);
+        let (status, _body) =
+            http_post_form(&app, "/oauth/logout", "", &[("Cookie", cookie.as_str())]).await;
+        assert!(
+            status == axum::http::StatusCode::OK || status == axum::http::StatusCode::SEE_OTHER,
+            "RP-initiated logout must succeed; got {status}"
+        );
+
+        // The row must be gone.
+        let after = db::find_session_by_token_hash(&state.store, &token_hash)
+            .await
+            .unwrap();
+        assert!(after.is_none(), "expired session row must be deleted");
+
+        // The `Logout` audit event must exist — the bug dropped it.
+        let events = logout_audit_events(&state, &user.id).await;
+        assert_eq!(
+            events.len(),
+            1,
+            "RP-initiated logout must record a Logout audit event for an expired-but-present row"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rp_logout_records_audit_event_for_live_session() {
+        // Happy path: a live cookie session row must also record the
+        // `Logout` audit event — guards against a fix that broke the
+        // happy path while repairing the expired-row case.
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "rp-logout-live@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let token_hash = crypto::hash_token(&token);
+
+        let cookie = format!("{}={token}", vouch_common::SESSION_COOKIE_NAME);
+        let (status, _body) =
+            http_post_form(&app, "/oauth/logout", "", &[("Cookie", cookie.as_str())]).await;
+        assert!(
+            status == axum::http::StatusCode::OK || status == axum::http::StatusCode::SEE_OTHER,
+            "RP-initiated logout must succeed; got {status}"
+        );
+
+        let after = db::find_session_by_token_hash(&state.store, &token_hash)
+            .await
+            .unwrap();
+        assert!(after.is_none(), "live session row must be deleted");
+
+        let events = logout_audit_events(&state, &user.id).await;
+        assert_eq!(
+            events.len(),
+            1,
+            "RP-initiated logout must record a Logout audit event for a live row"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rp_logout_no_audit_event_when_no_session_row() {
+        // No cookie / no row: `clear_user_session` deletes nothing, so no
+        // audit event must be recorded. Guards against a fix that records
+        // the event unconditionally.
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "rp-logout-none@example.com").await;
+
+        let (status, _body) = http_post_form(&app, "/oauth/logout", "", &[]).await;
+        assert!(
+            status == axum::http::StatusCode::OK || status == axum::http::StatusCode::SEE_OTHER,
+            "RP-initiated logout without a cookie must still succeed; got {status}"
+        );
+
+        let events = logout_audit_events(&state, &user.id).await;
+        assert!(
+            events.is_empty(),
+            "no Logout audit event when there is no session to delete"
+        );
+    }
+
+    // ================================================================
+    // Audit-event regression: client_ip on the RP-initiated row
+    // ================================================================
+    //
+    // The bug: `clear_user_session` built its `ClientInfo` from the request
+    // headers alone, which cannot see the TCP peer, so `client_ip` was always
+    // `None`, instead of using the `ClientInfo` request extractor that
+    // resolves the peer IP from `ConnectInfo<SocketAddr>` +
+    // `resolve_client_ip`. (That header-only constructor is now private to
+    // `client_info.rs`.) The
+    // sibling `POST /logout` handler records `client_ip` (and, for a
+    // GeoIP-resolvable remote peer, the `geo.*` block), so the two
+    // `Logout` event sources were inconsistent in what they recorded about
+    // the network origin of the request.
+    //
+    // `record_auth_event` derives the entire `geo` block from
+    // `params.client.client_ip`, so populating `client_ip` on this path
+    // fixes both the IP column and the IP-derived geo fields. The test
+    // harness injects `ConnectInfo(127.0.0.1)` on every request
+    // (`test_utils.rs::build_request`), and with the default empty
+    // `trusted_proxies` `resolve_client_ip` returns the peer IP as-is, so
+    // the extractor yields `client_ip = Some(127.0.0.1)`. Loopback is
+    // non-global so no `geo.*` keys are emitted (verified by the absence
+    // assertion); the `client_ip` assertion is the regression guard.
+
+    #[tokio::test]
+    async fn test_rp_logout_audit_records_client_ip() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "rp-logout-ip@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let cookie = format!("{}={token}", vouch_common::SESSION_COOKIE_NAME);
+        let (status, _body) = http_post_form(
+            &app,
+            "/oauth/logout",
+            "",
+            &[
+                ("Cookie", cookie.as_str()),
+                ("User-Agent", "vouch-test/1.0"),
+            ],
+        )
+        .await;
+        assert!(
+            status == axum::http::StatusCode::OK || status == axum::http::StatusCode::SEE_OTHER,
+            "RP-initiated logout must succeed; got {status}"
+        );
+
+        let events = logout_audit_events(&state, &user.id).await;
+        assert_eq!(
+            events.len(),
+            1,
+            "RP-initiated logout must record exactly one Logout audit event"
+        );
+        let data: serde_json::Value =
+            serde_json::from_str(&events[0].data).expect("audit data is valid JSON");
+
+        // The bug persisted `"client_ip": null` here. The fix routes the
+        // `ClientInfo` extractor (which resolves `ConnectInfo(127.0.0.1)` to
+        // `Some(127.0.0.1)`) into the audit row.
+        assert_eq!(
+            data.get("client_ip").and_then(|v| v.as_str()),
+            Some("127.0.0.1"),
+            "RP-initiated Logout audit row must carry the requester's peer IP, got {:?}",
+            data.get("client_ip")
+        );
+
+        // The extractor still reads header-derived fields, so a User-Agent
+        // sent by the requester is preserved on the row. Guards against a
+        // fix that populated the IP while dropping the header-derived fields.
+        assert_eq!(
+            data.get("user_agent").and_then(|v| v.as_str()),
+            Some("vouch-test/1.0"),
+            "RP-initiated Logout audit row must preserve the User-Agent header, got {:?}",
+            data.get("user_agent")
+        );
+
+        // Loopback is non-global (`geo::audit_fields` returns all-`None`).
+        // `GeoFields` is `#[serde(flatten)]`-ed into `AuthEventData`, so its
+        // keys (`country_code`/`asn`/`org_name`) appear at the top level —
+        // not nested under a `geo` object — and are omitted via
+        // `skip_serializing_if = "Option::is_none"`. Assert each top-level
+        // geo key is absent for the loopback peer.
+        assert!(
+            data.get("country_code").is_none(),
+            "no geo country_code is expected for loopback, got {:?}",
+            data.get("country_code")
+        );
+        assert!(
+            data.get("asn").is_none(),
+            "no geo asn is expected for loopback, got {:?}",
+            data.get("asn")
+        );
+        assert!(
+            data.get("org_name").is_none(),
+            "no geo org_name is expected for loopback, got {:?}",
+            data.get("org_name")
+        );
+    }
+
+    /// Regression: the RP-Initiated Logout audit row must record the same
+    /// `client_ip` as the sibling user-initiated `POST /logout` row under an
+    /// identical harness. Before the fix, `/oauth/logout` persisted
+    /// `"client_ip": null` while `/logout` persisted `"client_ip":
+    /// "127.0.0.1"`.
+    #[tokio::test]
+    async fn test_rp_logout_audit_client_ip_matches_user_logout_path() {
+        let (app, state) = test_app().await;
+
+        // RP-initiated path.
+        let rp_user = create_test_user(&state.store, "rp-ip-parity@example.com").await;
+        let rp_token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &rp_user.id,
+                email: &rp_user.email,
+                ..Default::default()
+            },
+        )
+        .await;
+        let rp_cookie = format!("{}={rp_token}", vouch_common::SESSION_COOKIE_NAME);
+        let (_status, _body) =
+            http_post_form(&app, "/oauth/logout", "", &[("Cookie", rp_cookie.as_str())]).await;
+        let rp_events = logout_audit_events(&state, &rp_user.id).await;
+        assert_eq!(rp_events.len(), 1, "RP-initiated: one Logout event");
+        let rp_data: serde_json::Value =
+            serde_json::from_str(&rp_events[0].data).expect("parse RP audit data");
+
+        // User-initiated path (handlers::auth::logout).
+        let u_user = create_test_user(&state.store, "user-ip-parity@example.com").await;
+        let u_token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &u_user.id,
+                email: &u_user.email,
+                ..Default::default()
+            },
+        )
+        .await;
+        let u_cookie = format!("{}={u_token}", vouch_common::SESSION_COOKIE_NAME);
+        let (_status, _body) = http_post_form(
+            &app,
+            "/logout",
+            "",
+            &[
+                ("Cookie", u_cookie.as_str()),
+                // The /logout route has a same-origin CSRF layer; supply the
+                // test origin so the request reaches the handler.
+                ("Origin", "https://test.example.com"),
+            ],
+        )
+        .await;
+        let u_events = logout_audit_events(&state, &u_user.id).await;
+        assert_eq!(u_events.len(), 1, "user-initiated: one Logout event");
+        let u_data: serde_json::Value =
+            serde_json::from_str(&u_events[0].data).expect("parse user audit data");
+
+        // Both paths must now record the same resolved peer IP.
+        assert_eq!(
+            rp_data.get("client_ip").and_then(|v| v.as_str()),
+            Some("127.0.0.1"),
+            "RP-initiated Logout audit row must carry the peer IP, got {:?}",
+            rp_data.get("client_ip")
+        );
+        assert_eq!(
+            u_data.get("client_ip").and_then(|v| v.as_str()),
+            Some("127.0.0.1"),
+            "user-initiated Logout audit row carries the peer IP"
+        );
+        assert_eq!(
+            rp_data.get("client_ip"),
+            u_data.get("client_ip"),
+            "RP-initiated and user-initiated Logout audit rows must agree on client_ip"
+        );
+    }
+
+    /// Regression: the `geo.*` block populates on the RP-initiated Logout
+    /// audit row when the requester's resolved IP is a **public global** IP.
+    /// The `http_post_form` helper injects `ConnectInfo(127.0.0.1)`, which is
+    /// loopback and non-global — `geo::audit_fields` returns all-`None` and
+    /// `skip_serializing_if` omits the `geo.*` keys (asserted by
+    /// `test_rp_logout_audit_records_client_ip`). This test bypasses the
+    /// helper and injects `ConnectInfo(8.8.8.8)` directly, then asserts the
+    /// embedded MaxMind GeoLite2 databases resolve it to `country_code=US`,
+    /// `asn=15169`, and a present `org_name` — the exact values pinned by
+    /// `geo::tests`. Loopback yields no geo on either logout path, so only a
+    /// public peer shows the geo block following the resolved IP.
+    #[tokio::test]
+    async fn test_rp_logout_audit_populates_geo_for_public_ip() {
+        use tower::ServiceExt;
+
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "rp-logout-geo@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let cookie = format!("{}={token}", vouch_common::SESSION_COOKIE_NAME);
+
+        // Build the request manually so the `ConnectInfo` extension carries a
+        // public global IP (8.8.8.8) instead of the loopback address the
+        // `http_post_form` helper hard-codes. The `ClientInfo` extractor reads
+        // this extension and resolves `client_ip = Some(8.8.8.8)`.
+        let mut request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/oauth/logout")
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .header("Cookie", &cookie)
+            .body(axum::body::Body::empty())
+            .expect("build request");
+        {
+            let (mut parts, body) = request.into_parts();
+            parts
+                .extensions
+                .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                    [8, 8, 8, 8],
+                    0,
+                ))));
+            request = axum::http::Request::from_parts(parts, body);
+        }
+
+        let response: axum::response::Response =
+            app.clone().oneshot(request).await.expect("execute request");
+        let status = response.status();
+        assert!(
+            status == axum::http::StatusCode::OK || status == axum::http::StatusCode::SEE_OTHER,
+            "RP-initiated logout must succeed; got {status}"
+        );
+
+        let events = logout_audit_events(&state, &user.id).await;
+        assert_eq!(events.len(), 1, "one Logout audit event");
+        let data: serde_json::Value =
+            serde_json::from_str(&events[0].data).expect("audit data is valid JSON");
+
+        // The resolved public IP must be recorded.
+        assert_eq!(
+            data.get("client_ip").and_then(|v| v.as_str()),
+            Some("8.8.8.8"),
+            "RP-initiated Logout audit row must carry the public peer IP, got {:?}",
+            data.get("client_ip")
+        );
+
+        // The geo fields are `#[serde(flatten)]`-ed into `AuthEventData`, so
+        // `country_code`/`asn`/`org_name` appear at the top level of the row
+        // — not nested under a `geo` object. The embedded GeoLite2 DBs resolve
+        // 8.8.8.8 (pinned by `geo::tests`: country_code="US", asn=15169).
+        assert_eq!(
+            data.get("country_code").and_then(|v| v.as_str()),
+            Some("US"),
+            "geo country_code must resolve for 8.8.8.8, got {:?}",
+            data.get("country_code")
+        );
+        assert_eq!(
+            data.get("asn").and_then(|v| v.as_u64()),
+            Some(15169),
+            "geo asn must resolve to Google's AS, got {:?}",
+            data.get("asn")
+        );
+        assert!(
+            data.get("org_name").and_then(|v| v.as_str()).is_some(),
+            "geo org_name must be present for 8.8.8.8, got {:?}",
+            data.get("org_name")
         );
     }
 }

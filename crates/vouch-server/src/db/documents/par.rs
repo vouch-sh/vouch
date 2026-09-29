@@ -43,16 +43,10 @@ impl DocumentType for PushedAuthorizationRequestDoc {
     const DOC_TYPE: &'static str = "pushed_authorization_request";
 
     fn index_entries(&self) -> Vec<IndexEntry> {
-        vec![
-            IndexEntry {
-                field: "request_uri",
-                value: self.request_uri.clone(),
-            },
-            IndexEntry {
-                field: "client_id",
-                value: self.client_id.clone(),
-            },
-        ]
+        vec![IndexEntry {
+            field: "request_uri",
+            value: self.request_uri.clone(),
+        }]
     }
 
     fn expires_at(&self) -> Option<Timestamp> {

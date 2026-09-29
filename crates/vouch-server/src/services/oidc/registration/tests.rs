@@ -7,6 +7,10 @@
 )]
 
 use super::*;
+use crate::db::{self, ClientKeys, OAuthClientType};
+use crate::error::ServiceError;
+use crate::services::oidc::SUPPORTED_RESPONSE_TYPES;
+use crate::services::oidc::grant_type::OAuthGrantType;
 
 fn assert_oauth_error<T: std::fmt::Debug>(
     result: Result<T, ServiceError>,
@@ -22,9 +26,9 @@ fn assert_oauth_error<T: std::fmt::Debug>(
 /// The shared redirect-URI rule as it applies to a native client, which is the
 /// client kind these cases describe: `https`, loopback `http`, and a custom
 /// scheme are all registrable, and a fragment is not.
-fn validate_redirect_uri_for_native(uri: &str) -> Result<(), crate::error::ServiceError> {
-    crate::db::validate_redirect_uri(uri, crate::db::OAuthClientType::Native).map_err(|e| {
-        crate::error::ServiceError::oauth(
+fn validate_redirect_uri_for_native(uri: &str) -> Result<(), ServiceError> {
+    db::validate_redirect_uri(uri, OAuthClientType::Native).map_err(|e| {
+        ServiceError::oauth(
             OAuthErrorCode::InvalidRedirectUri,
             format!("Invalid redirect URI '{uri}': {e}"),
         )
@@ -599,6 +603,12 @@ fn test_response_serialization_omits_none_fields() {
         software_id: None,
         software_version: None,
         dpop_bound_access_tokens: None,
+        tls_client_certificate_bound_access_tokens: None,
+        tls_client_auth_subject_dn: None,
+        tls_client_auth_san_dns: None,
+        tls_client_auth_san_uri: None,
+        tls_client_auth_san_ip: None,
+        tls_client_auth_san_email: None,
         id_token_signed_response_alg: "ES256".to_string(),
         authorization_signed_response_alg: None,
         introspection_signed_response_alg: None,
@@ -637,6 +647,17 @@ fn test_response_serialization_omits_none_fields() {
     assert!(value.get("software_id").is_none());
     assert!(value.get("software_version").is_none());
     assert!(value.get("dpop_bound_access_tokens").is_none());
+    // RFC 8705 §2.1.2/§3 metadata must be omitted when absent, not sent as null.
+    assert!(
+        value
+            .get("tls_client_certificate_bound_access_tokens")
+            .is_none()
+    );
+    assert!(value.get("tls_client_auth_subject_dn").is_none());
+    assert!(value.get("tls_client_auth_san_dns").is_none());
+    assert!(value.get("tls_client_auth_san_uri").is_none());
+    assert!(value.get("tls_client_auth_san_ip").is_none());
+    assert!(value.get("tls_client_auth_san_email").is_none());
 }
 
 /// When `client_secret` is present, `client_secret_expires_at` must also be present
@@ -667,6 +688,12 @@ fn test_response_serialization_includes_secret_fields_when_present() {
         software_id: None,
         software_version: None,
         dpop_bound_access_tokens: None,
+        tls_client_certificate_bound_access_tokens: None,
+        tls_client_auth_subject_dn: None,
+        tls_client_auth_san_dns: None,
+        tls_client_auth_san_uri: None,
+        tls_client_auth_san_ip: None,
+        tls_client_auth_san_email: None,
         id_token_signed_response_alg: "ES256".to_string(),
         authorization_signed_response_alg: None,
         introspection_signed_response_alg: None,
@@ -683,6 +710,89 @@ fn test_response_serialization_includes_secret_fields_when_present() {
     assert_eq!(value["client_secret"], "s3cr3t");
     assert_eq!(value["client_secret_expires_at"], 0);
     assert_eq!(value["redirect_uris"].as_array().unwrap().len(), 1);
+}
+
+/// All six RFC 8705 client-metadata fields must be present in the serialized
+/// registration response when set, so a client can confirm its mTLS metadata
+/// was accepted (RFC 7591 §3.2.1: "the authorization server MUST return all
+/// registered metadata about this client").
+// RFC 8705 §2.1.2 names the five certificate-subject parameters; RFC 8705 §3
+// names tls_client_certificate_bound_access_tokens.
+#[test]
+fn test_response_serialization_echoes_rfc8705_metadata() {
+    let response = RegistrationResponse {
+        client_id: "mtls-client-id".to_string(),
+        client_secret: None,
+        client_secret_expires_at: None,
+        client_id_issued_at: Some(1_700_000_000),
+        registration_access_token: None,
+        registration_client_uri: None,
+        redirect_uris: Some(vec!["https://example.com/callback".to_string()]),
+        token_endpoint_auth_method: "tls_client_auth".to_string(),
+        grant_types: vec!["authorization_code".to_string()],
+        response_types: vec!["code".to_string()],
+        client_name: Some("mTLS Echo Client".to_string()),
+        client_uri: None,
+        logo_uri: None,
+        tos_uri: None,
+        policy_uri: None,
+        scope: None,
+        contacts: None,
+        jwks: None,
+        jwks_uri: None,
+        software_id: None,
+        software_version: None,
+        dpop_bound_access_tokens: None,
+        tls_client_certificate_bound_access_tokens: Some(true),
+        tls_client_auth_subject_dn: Some("CN=mtls-echo.example.com".to_string()),
+        tls_client_auth_san_dns: Some("mtls.example.com".to_string()),
+        tls_client_auth_san_uri: Some("https://mtls.example.com/id".to_string()),
+        tls_client_auth_san_ip: Some("198.51.100.1".to_string()),
+        tls_client_auth_san_email: Some("mtls@example.com".to_string()),
+        id_token_signed_response_alg: "ES256".to_string(),
+        authorization_signed_response_alg: None,
+        introspection_signed_response_alg: None,
+        request_object_signing_alg: None,
+        require_signed_request_object: None,
+        userinfo_signed_response_alg: None,
+        request_uris: None,
+        post_logout_redirect_uris: None,
+    };
+
+    let json = serde_json::to_string(&response).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+    // RFC 8705 §3: the certificate-bound flag round-trips as a JSON boolean.
+    assert_eq!(
+        value["tls_client_certificate_bound_access_tokens"], true,
+        "tls_client_certificate_bound_access_tokens must echo when set: {json}"
+    );
+    // RFC 8705 §2.1.2: the five certificate-subject parameters round-trip verbatim.
+    assert_eq!(
+        value["tls_client_auth_subject_dn"].as_str(),
+        Some("CN=mtls-echo.example.com"),
+        "tls_client_auth_subject_dn must echo when set: {json}"
+    );
+    assert_eq!(
+        value["tls_client_auth_san_dns"].as_str(),
+        Some("mtls.example.com"),
+        "tls_client_auth_san_dns must echo when set: {json}"
+    );
+    assert_eq!(
+        value["tls_client_auth_san_uri"].as_str(),
+        Some("https://mtls.example.com/id"),
+        "tls_client_auth_san_uri must echo when set: {json}"
+    );
+    assert_eq!(
+        value["tls_client_auth_san_ip"].as_str(),
+        Some("198.51.100.1"),
+        "tls_client_auth_san_ip must echo when set: {json}"
+    );
+    assert_eq!(
+        value["tls_client_auth_san_email"].as_str(),
+        Some("mtls@example.com"),
+        "tls_client_auth_san_email must echo when set: {json}"
+    );
 }
 
 // =========================================================================
@@ -721,9 +831,7 @@ fn test_allowed_grant_types_includes_expected() {
 fn registration_only_grants_are_not_dispatchable() {
     for grant in REGISTRATION_ONLY_GRANT_TYPES {
         assert!(
-            grant
-                .parse::<crate::services::oidc::grant_type::OAuthGrantType>()
-                .is_err(),
+            grant.parse::<OAuthGrantType>().is_err(),
             "{grant} is dispatched by the token endpoint; \
              remove it from REGISTRATION_ONLY_GRANT_TYPES"
         );
@@ -734,7 +842,7 @@ fn registration_only_grants_are_not_dispatchable() {
 #[test]
 fn test_allowed_response_types_includes_code() {
     assert!(
-        crate::services::oidc::SUPPORTED_RESPONSE_TYPES.contains(&"code"),
+        SUPPORTED_RESPONSE_TYPES.contains(&"code"),
         "'code' must be in the supported response types set"
     );
 }
@@ -758,7 +866,7 @@ fn test_implicit_grant_not_allowed() {
 #[test]
 fn test_token_response_type_not_allowed() {
     assert!(
-        !crate::services::oidc::SUPPORTED_RESPONSE_TYPES.contains(&"token"),
+        !SUPPORTED_RESPONSE_TYPES.contains(&"token"),
         "'token' response type must not be allowed (implicit flow)"
     );
 }
@@ -768,7 +876,7 @@ fn test_token_response_type_not_allowed() {
 #[test]
 fn test_id_token_response_type_not_allowed() {
     assert!(
-        !crate::services::oidc::SUPPORTED_RESPONSE_TYPES.contains(&"id_token"),
+        !SUPPORTED_RESPONSE_TYPES.contains(&"id_token"),
         "'id_token' response type must not be allowed (implicit flow)"
     );
 }
@@ -996,19 +1104,46 @@ fn test_validate_grant_and_response_types_auth_code_without_code_response() {
     assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
 }
 
-// RFC 7591 §2.1: client_credentials registers with no response type.
+// RFC 7591 §2 Table 1 pairs `client_credentials` with a response_types value
+// of "(none)", and the surrounding text requires the implication to hold "vice
+// versa" — so a client_credentials-only client registers with no response
+// type, and sends `"response_types": []` to say so.
 #[test]
 fn test_validate_grant_and_response_types_client_credentials_valid() {
-    let mut req =
-        make_request_with_grant_response(Some(vec!["client_credentials"]), Some(vec!["code"]));
+    let mut req = make_request_with_grant_response(Some(vec!["client_credentials"]), Some(vec![]));
     let result = validate_grant_and_response_types(&mut req);
-    let validated = result.expect("client_credentials + code must be valid");
+    let validated = result.expect("client_credentials with no response type must be valid");
     assert_eq!(validated.auth_code_grant, AuthorizationCodeGrant::Absent);
     assert!(
         validated
             .grant_types
             .contains(&"client_credentials".to_string())
     );
+    assert!(
+        validated.response_types.is_empty(),
+        "an empty response_types must survive validation, not be defaulted to ['code']"
+    );
+}
+
+// RFC 7591 §2: "a server supporting these fields SHOULD take steps to ensure
+// that a client cannot register itself into an inconsistent state." Declaring
+// `code` while declaring no grant that can redeem one is that state, and it is
+// the half that lets a client hold a redirect_uri it can never use.
+#[test]
+fn test_validate_grant_and_response_types_rejects_code_without_authorization_code_grant() {
+    let mut req =
+        make_request_with_grant_response(Some(vec!["client_credentials"]), Some(vec!["code"]));
+    assert_oauth_error(
+        validate_grant_and_response_types(&mut req),
+        OAuthErrorCode::InvalidClientMetadata,
+    );
+
+    // The default is consistent with itself: omitting both fields yields
+    // `authorization_code` + `code`, which pairs.
+    let mut both_absent = make_request_with_grant_response(None, None);
+    let validated = validate_grant_and_response_types(&mut both_absent)
+        .expect("the two RFC 7591 §2 defaults must pair");
+    assert_eq!(validated.auth_code_grant, AuthorizationCodeGrant::Present);
 }
 
 // RFC 7591 §2: token_endpoint_auth_method is client metadata.
@@ -1054,7 +1189,7 @@ fn test_validate_redirect_uris_required_for_auth_code_empty() {
     let result = validate_redirect_uris(
         &mut req,
         AuthorizationCodeGrant::Present,
-        crate::db::OAuthClientType::Web,
+        OAuthClientType::Web,
     );
     assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
 }
@@ -1066,7 +1201,7 @@ fn test_validate_redirect_uris_not_required_without_auth_code() {
     let result = validate_redirect_uris(
         &mut req,
         AuthorizationCodeGrant::Absent,
-        crate::db::OAuthClientType::Web,
+        OAuthClientType::Web,
     );
     let uris = result.expect("Empty redirect_uris allowed without the authorization_code grant");
     assert!(uris.is_empty());
@@ -1082,7 +1217,7 @@ fn test_validate_redirect_uris_too_many() {
     let result = validate_redirect_uris(
         &mut req,
         AuthorizationCodeGrant::Absent,
-        crate::db::OAuthClientType::Web,
+        OAuthClientType::Web,
     );
     assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
 }
@@ -1097,7 +1232,7 @@ fn test_validate_redirect_uris_valid_uris_pass_through() {
     let result = validate_redirect_uris(
         &mut req,
         AuthorizationCodeGrant::Present,
-        crate::db::OAuthClientType::Web,
+        OAuthClientType::Web,
     );
     let uris = result.expect("Valid URIs must pass");
     assert_eq!(uris.len(), 2);
@@ -1110,7 +1245,7 @@ fn test_validate_redirect_uris_invalid_uri_rejected() {
     let result = validate_redirect_uris(
         &mut req,
         AuthorizationCodeGrant::Absent,
-        crate::db::OAuthClientType::Web,
+        OAuthClientType::Web,
     );
     assert_oauth_error(result, OAuthErrorCode::InvalidRedirectUri);
 }
@@ -1201,9 +1336,7 @@ fn test_validate_jwks_and_auth_method_private_key_jwt_with_jwks_uri_valid() {
     );
     assert_eq!(
         validated.keys,
-        Some(crate::db::ClientKeys::Uri(
-            "https://example.com/jwks.json".to_string()
-        ))
+        Some(ClientKeys::Uri("https://example.com/jwks.json".to_string()))
     );
 }
 
@@ -1218,10 +1351,7 @@ fn test_validate_jwks_and_auth_method_private_key_jwt_with_inline_jwks_valid() {
         validated.auth_method,
         TokenEndpointAuthMethod::PrivateKeyJwt
     );
-    assert!(matches!(
-        validated.keys,
-        Some(crate::db::ClientKeys::Inline(_))
-    ));
+    assert!(matches!(validated.keys, Some(ClientKeys::Inline(_))));
 }
 
 // RFC 7591 §2: token_endpoint_auth_method none registers a public client.
@@ -1242,7 +1372,7 @@ fn test_validate_jwks_and_auth_method_unknown_auth_method_rejected() {
 }
 
 // =========================================================================
-// validate_jwks_and_auth_method — tls_client_auth (RFC 8705 Section 2.1.1)
+// validate_jwks_and_auth_method — tls_client_auth (RFC 8705 Section 2.1.2)
 // =========================================================================
 
 /// tls_client_auth with a subject_dn identity field is accepted.
@@ -1273,6 +1403,89 @@ fn test_validate_tls_client_auth_requires_identity_field() {
     assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
 }
 
+/// An empty certificate-subject parameter deserializes as absent, so it cannot
+/// satisfy the one-field rule.
+///
+/// RFC 7591 is silent on empty JSON string values; this mirrors the RFC 6749
+/// §3.1/§3.2 rule the form-encoded endpoints already apply.
+#[test]
+fn test_empty_identity_field_deserializes_as_absent() {
+    let json = serde_json::json!({
+        "tls_client_auth_subject_dn": "",
+        "tls_client_auth_san_dns": "client.example.com"
+    });
+    let req: RegistrationRequest =
+        serde_json::from_value(json).expect("an empty identity field must deserialize");
+
+    assert_eq!(req.tls_client_auth_subject_dn, None);
+    assert_eq!(
+        req.tls_client_auth_san_dns.as_deref(),
+        Some("client.example.com")
+    );
+}
+
+/// A whitespace-only value is a value, matching the form-encoded rule that
+/// reads `%20` as present rather than as nothing.
+#[test]
+fn test_whitespace_identity_field_deserializes_as_present() {
+    let json = serde_json::json!({"tls_client_auth_subject_dn": " "});
+    let req: RegistrationRequest =
+        serde_json::from_value(json).expect("a whitespace identity field must deserialize");
+
+    assert_eq!(req.tls_client_auth_subject_dn.as_deref(), Some(" "));
+}
+
+/// tls_client_auth whose only identity field is empty must be rejected: an
+/// empty subject matches no certificate, so accepting it would leave the client
+/// unable to authenticate.
+///
+/// Deserialized rather than built from a struct literal, because the
+/// empty-is-absent rule lives in the deserializer — the same place the
+/// form-encoded endpoints apply it — not in the validator.
+// RFC 8705 §2.1.2 requires exactly one certificate-subject parameter.
+#[test]
+fn test_validate_tls_client_auth_rejects_empty_identity_field() {
+    let json = serde_json::json!({"tls_client_auth_subject_dn": ""});
+    let mut req: RegistrationRequest = serde_json::from_value(json).expect("deserializes");
+
+    let result = validate_jwks_and_auth_method(&mut req, "tls_client_auth");
+    assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
+}
+
+/// tls_client_auth with two identity fields must be rejected with invalid_client_metadata.
+// RFC 8705 §2.1.2: "A client using the "tls_client_auth" authentication method
+// MUST use exactly one of the below metadata parameters to indicate the
+// certificate subject value that the authorization server is to expect when
+// authenticating the respective client."
+#[test]
+fn test_validate_tls_client_auth_rejects_multiple_identity_fields() {
+    let mut req = RegistrationRequest {
+        tls_client_auth_subject_dn: Some("CN=test-client".to_string()),
+        tls_client_auth_san_dns: Some("client.example.com".to_string()),
+        ..Default::default()
+    };
+    let result = validate_jwks_and_auth_method(&mut req, "tls_client_auth");
+    assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
+}
+
+/// The identity-field rule binds tls_client_auth only; another method may carry
+/// the parameters without them meaning anything.
+// RFC 8705 §2.1.2 scopes the parameters to "a client using the
+// "tls_client_auth" authentication method".
+#[test]
+fn test_validate_identity_fields_unconstrained_for_other_auth_methods() {
+    let mut req = RegistrationRequest {
+        tls_client_auth_subject_dn: Some("CN=test-client".to_string()),
+        tls_client_auth_san_dns: Some("client.example.com".to_string()),
+        ..Default::default()
+    };
+    let result = validate_jwks_and_auth_method(&mut req, "client_secret_basic");
+    assert!(
+        result.is_ok(),
+        "the one-field rule must not reach a non-mTLS client, got: {result:?}"
+    );
+}
+
 /// tls_client_auth with san_dns identity field is accepted.
 // RFC 8705 §2.1.2: tls_client_auth_san_dns identifies the certificate subject.
 #[test]
@@ -1288,7 +1501,7 @@ fn test_validate_tls_client_auth_with_san_dns_accepted() {
     );
 }
 
-/// tls_client_auth with san_email identity field is accepted (RFC 8705 Section 2.1.1).
+/// tls_client_auth with san_email identity field is accepted (RFC 8705 Section 2.1.2).
 // RFC 8705 §2.1.2: tls_client_auth_san_email identifies the certificate subject.
 #[test]
 fn test_validate_tls_client_auth_with_san_email() {
@@ -1304,7 +1517,7 @@ fn test_validate_tls_client_auth_with_san_email() {
     );
 }
 
-/// tls_client_auth with san_uri identity field is accepted (RFC 8705 Section 2.1.1).
+/// tls_client_auth with san_uri identity field is accepted (RFC 8705 Section 2.1.2).
 // RFC 8705 §2.1.2: tls_client_auth_san_uri identifies the certificate subject.
 #[test]
 fn test_validate_tls_client_auth_with_san_uri() {
@@ -1320,7 +1533,7 @@ fn test_validate_tls_client_auth_with_san_uri() {
     );
 }
 
-/// tls_client_auth with san_ip identity field is accepted (RFC 8705 Section 2.1.1).
+/// tls_client_auth with san_ip identity field is accepted (RFC 8705 Section 2.1.2).
 // RFC 8705 §2.1.2: tls_client_auth_san_ip identifies the certificate subject.
 #[test]
 fn test_validate_tls_client_auth_with_san_ip() {

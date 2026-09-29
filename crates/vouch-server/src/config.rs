@@ -2,13 +2,19 @@
 //! Server configuration.
 
 use crate::crypto::webauthn_verify::OriginPolicy;
+use crate::db::pool::PoolConfig;
+use crate::infra::bootstrap::Bootstrap;
+use crate::infra::conn_caps::ConnCapConfig;
 use anyhow::{Context, Result};
 use aws_config::FrameworkMetadata;
+use clap::builder::{BoolishValueParser, TypedValueParser as _};
 use clap::{ArgAction, CommandFactory, Parser, parser::ValueSource};
 use ipnet::IpNet;
 use secrecy::{ExposeSecret, SecretString};
 use std::collections::{BTreeMap, HashMap};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
+use vouch_common::AaguidPolicy;
+use vouch_common::env;
 
 /// Build an AWS SDK config loader tagged with vouch-server framework metadata.
 ///
@@ -105,7 +111,7 @@ impl IdpConfig {
 /// Validate that a provider slug matches `[a-z0-9-]{1,32}` and does not start
 /// or end with a hyphen.
 pub fn validate_provider_slug(slug: &str) -> Result<()> {
-    if slug.is_empty() || slug.len() > 32 {
+    if slug.is_empty() || slug.chars().count() > 32 {
         anyhow::bail!("Provider slug '{}' must be 1-32 characters long", slug);
     }
     if !slug
@@ -507,11 +513,6 @@ pub struct Args {
     /// Require x5c attestation certificates during WebAuthn registration.
     ///
     /// When enabled, self-attestation (no certificate chain) is rejected.
-    /// Only authenticators that provide a full attestation certificate chain
-    /// (e.g., YubiKeys with packed attestation) will be accepted.
-    #[arg(long, env = "VOUCH_REQUIRE_ATTESTATION_CERT", default_value = "false")]
-    pub require_attestation_cert: bool,
-
     /// Log output format: "text" (default, human-readable) or "json" (structured).
     #[arg(long, env = "VOUCH_LOG_FORMAT", default_value = "text")]
     pub log_format: String,
@@ -523,6 +524,41 @@ pub struct Args {
     /// is used directly (safe for direct exposure without a reverse proxy).
     #[arg(long, env = "VOUCH_TRUSTED_PROXIES", default_value = "")]
     pub trusted_proxies: String,
+
+    /// Require a PROXY protocol v2 header from `VOUCH_TRUSTED_PROXIES` on the
+    /// HTTPS and mTLS listeners.
+    ///
+    /// For a TLS-passthrough proxy (Istio/Envoy `PASSTHROUGH`, nginx `stream`,
+    /// HAProxy `mode tcp`), which cannot add X-Forwarded-For. When set, every
+    /// connection to those listeners must come from a trusted proxy and start
+    /// with the header, whose source address becomes the client address;
+    /// X-Forwarded-For is ignored. Requires TLS and `VOUCH_TRUSTED_PROXIES`.
+    #[arg(
+        long,
+        env = "VOUCH_PROXY_PROTOCOL",
+        value_parser = clap::builder::BoolishValueParser::new(),
+    )]
+    pub proxy_protocol: bool,
+
+    /// Maximum open connections across all listeners. When reached, new
+    /// connections wait in the kernel backlog until one closes.
+    #[arg(
+        long,
+        env = "VOUCH_MAX_CONNECTIONS",
+        default_value_t = ConnCapConfig::DEFAULT.max_total,
+        value_parser = clap::value_parser!(u32).range(1..),
+    )]
+    pub max_connections: u32,
+
+    /// Maximum open connections per client address (IPv6: per /64). Peers in
+    /// `VOUCH_TRUSTED_PROXIES` are exempt; a PROXY header's source never is.
+    #[arg(
+        long,
+        env = "VOUCH_MAX_CONNECTIONS_PER_IP",
+        default_value_t = ConnCapConfig::DEFAULT.max_per_ip,
+        value_parser = clap::value_parser!(u32).range(1..),
+    )]
+    pub max_connections_per_ip: u32,
 
     /// Bearer token for /metrics endpoint. If unset, /metrics is disabled.
     #[arg(long, env = "VOUCH_METRICS_BEARER_TOKEN")]
@@ -546,20 +582,26 @@ pub struct Args {
     #[arg(long, env = "VOUCH_EXTRA_CA_CERTS")]
     pub extra_ca_certs: Option<String>,
 
+    /// Path to a PEM file of CA certificates that issue `tls_client_auth`
+    /// client certificates (RFC 8705 §2.1). Multiple certs can be
+    /// concatenated in one file. Unset disables `tls_client_auth`.
+    #[arg(long, env = "VOUCH_MTLS_CLIENT_CA_CERTS")]
+    pub mtls_client_ca_certs: Option<String>,
+
     /// Maximum number of database connections in the pool.
-    #[arg(long, env = "VOUCH_DB_MAX_CONNECTIONS", default_value = "25")]
+    #[arg(long, env = "VOUCH_DB_MAX_CONNECTIONS", default_value_t = PoolConfig::DEFAULT.max_connections)]
     pub db_max_connections: u32,
 
     /// Minimum number of idle database connections in the pool.
-    #[arg(long, env = "VOUCH_DB_MIN_CONNECTIONS", default_value = "2")]
+    #[arg(long, env = "VOUCH_DB_MIN_CONNECTIONS", default_value_t = PoolConfig::DEFAULT.min_connections)]
     pub db_min_connections: u32,
 
     /// Idle connection timeout in seconds.
-    #[arg(long, env = "VOUCH_DB_IDLE_TIMEOUT_SECS", default_value = "300")]
+    #[arg(long, env = "VOUCH_DB_IDLE_TIMEOUT_SECS", default_value_t = PoolConfig::DEFAULT.idle_timeout_secs)]
     pub db_idle_timeout_secs: u64,
 
     /// Connection acquire timeout in seconds.
-    #[arg(long, env = "VOUCH_DB_ACQUIRE_TIMEOUT_SECS", default_value = "5")]
+    #[arg(long, env = "VOUCH_DB_ACQUIRE_TIMEOUT_SECS", default_value_t = PoolConfig::DEFAULT.acquire_timeout_secs)]
     pub db_acquire_timeout_secs: u64,
 
     /// Maximum number of entries in the session lookup cache.
@@ -613,14 +655,17 @@ pub fn bootstrap_overlay_args(
             continue;
         };
         if matches!(arg.get_action(), ArgAction::SetTrue) {
-            // SetTrue args cannot accept `--flag=value`, so parse the blob
-            // value leniently and emit the bare flag only when truthy.
-            let truthy = matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "true" | "1" | "yes" | "on"
-            );
-            if truthy {
-                tokens.push(OsString::from(format!("--{long}")));
+            // SetTrue args cannot accept `--flag=value`, so emit the bare
+            // flag when truthy. The value is read with the parser clap applies
+            // to the env var, so a blob value means what the same env value
+            // means. A value neither truthy nor falsy is passed as
+            // `--flag=value`, which clap refuses, naming the flag. No `Arg`
+            // is passed: clap panics formatting an error for an `Arg` of an
+            // unbuilt `Command`, and this error is discarded anyway.
+            match BoolishValueParser::new().parse_ref(&command, None, OsStr::new(value)) {
+                Ok(true) => tokens.push(OsString::from(format!("--{long}"))),
+                Ok(false) => {}
+                Err(_) => tokens.push(OsString::from(format!("--{long}={value}"))),
             }
         } else {
             tokens.push(OsString::from(format!("--{long}={value}")));
@@ -707,6 +752,55 @@ impl PartialEq<BaseUrl> for &str {
 impl serde::Serialize for BaseUrl {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&self.0)
+    }
+}
+
+/// A configured shared secret that cannot be empty.
+///
+/// Some config secrets switch a feature on by being present and then serve as
+/// the key that authenticates callers of that feature: the GitHub webhook HMAC
+/// key, the `/metrics` bearer token, the certification test-mode HMAC key, the
+/// GitHub App OAuth client secret. An
+/// empty value set through the environment or the S3 overlay would enable the
+/// feature under a key everyone knows. The only constructors map `""` to
+/// `None`, so holding a `NonEmptySecret` is evidence the key is not empty and
+/// "set but empty" behaves exactly like "unset".
+#[derive(Clone)]
+pub struct NonEmptySecret(SecretString);
+
+impl NonEmptySecret {
+    /// Wrap `secret`, or return `None` when it is empty.
+    #[must_use]
+    pub fn new(secret: SecretString) -> Option<Self> {
+        if secret.expose_secret().is_empty() {
+            None
+        } else {
+            Some(Self(secret))
+        }
+    }
+
+    /// Build from an optional CLI/env value; unset and empty both yield `None`.
+    #[must_use]
+    pub fn from_arg(value: Option<String>) -> Option<Self> {
+        value.map(SecretString::from).and_then(Self::new)
+    }
+
+    /// The wrapped secret, for APIs that take a plain `SecretString`.
+    #[must_use]
+    pub fn as_secret(&self) -> &SecretString {
+        &self.0
+    }
+}
+
+impl ExposeSecret<str> for NonEmptySecret {
+    fn expose_secret(&self) -> &str {
+        self.0.expose_secret()
+    }
+}
+
+impl std::fmt::Debug for NonEmptySecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("NonEmptySecret([REDACTED])")
     }
 }
 
@@ -810,12 +904,14 @@ pub struct ServerConfig {
     /// GitHub App private key (PEM format, RSA).
     pub github_app_key: Option<SecretString>,
     /// GitHub webhook secret for verifying webhook signatures.
-    pub github_webhook_secret: Option<SecretString>,
+    pub github_webhook_secret: Option<NonEmptySecret>,
     /// GitHub App Client ID (for OAuth user authentication).
     /// This is found in the GitHub App settings, different from App ID.
     pub github_app_client_id: Option<String>,
-    /// GitHub App Client Secret (for OAuth user authentication).
-    pub github_app_client_secret: Option<SecretString>,
+    /// GitHub App Client Secret (for OAuth user authentication). Its presence
+    /// switches GitHub OAuth on ([`Self::github_oauth_configured`]), so an
+    /// empty value loads as unset.
+    pub github_app_client_secret: Option<NonEmptySecret>,
     /// TLS certificate (base64-encoded PEM format).
     pub tls_cert: Option<String>,
     /// TLS private key (base64-encoded PEM format).
@@ -841,24 +937,30 @@ pub struct ServerConfig {
     pub jwt_assertion_max_lifetime_seconds: i64,
     /// AAGUID allowlist policy for WebAuthn registration (default: `Any`).
     pub allowed_aaguids: vouch_common::AaguidPolicy,
-    /// Require x5c attestation certificates during WebAuthn registration.
-    pub require_attestation_cert: bool,
     /// Log output format: `text` or `json`.
     pub log_format: LogFormat,
     /// Trusted proxy CIDRs for X-Forwarded-For parsing.
     pub trusted_proxies: Vec<IpNet>,
+    /// Whether the HTTPS and mTLS listeners require a PROXY protocol header
+    /// from `trusted_proxies` instead of reading X-Forwarded-For.
+    pub proxy_protocol: bool,
+    /// Caps on open connections.
+    pub connection_caps: ConnCapConfig,
     /// Bearer token for /metrics endpoint access control.
     /// If `None`, the /metrics endpoint is not exposed.
-    pub metrics_bearer_token: Option<SecretString>,
+    pub metrics_bearer_token: Option<NonEmptySecret>,
     /// Secret token for the certification test-mode endpoint.
     /// When `Some`, `GET /certification/complete-login` is registered.
     /// MUST NOT be set in production deployments.
-    pub certification_test_token: Option<SecretString>,
+    pub certification_test_token: Option<NonEmptySecret>,
     /// Path to a PEM file containing extra CA certificates to trust for
     /// outbound HTTPS requests (e.g., peers with self-signed certs).
     pub extra_ca_certs: Option<String>,
+    /// Path to a PEM file of CA certificates that issue `tls_client_auth`
+    /// client certificates. Read once at startup.
+    pub mtls_client_ca_certs: Option<String>,
     /// Database pool configuration.
-    pub pool_config: crate::db::pool::PoolConfig,
+    pub pool_config: PoolConfig,
     /// Maximum entries in the session lookup cache.
     pub session_cache_max_capacity: u64,
     /// TTL for session cache entries in seconds.
@@ -924,10 +1026,7 @@ impl ServerConfig {
     /// `instance` carries IMDS-discovered facts (region, availability zone,
     /// partition) used only as a fallback beneath `AWS_REGION`/`AWS_AZ`/
     /// `AWS_PARTITION` — see `infra::bootstrap`.
-    pub fn from_args(
-        args: Args,
-        instance: Option<&crate::infra::bootstrap::Bootstrap>,
-    ) -> Result<Self> {
+    pub fn from_args(args: Args, instance: Option<&Bootstrap>) -> Result<Self> {
         // Note: Validation of rp_id and jwt_secret is deferred to validate()
         // to allow these values to come from S3 config.
 
@@ -937,15 +1036,15 @@ impl ServerConfig {
         // a blank `Region::new("")` — see `aws_config_loader`. The same
         // empty-means-unset pattern is already used by `ssh_ca_key_path` and
         // `allowed_domains` below.
-        let aws_region = vouch_common::env::non_empty(args.aws_region)
-            .or_else(|| vouch_common::env::non_empty_env("AWS_DEFAULT_REGION"))
+        let aws_region = env::non_empty(args.aws_region)
+            .or_else(|| env::non_empty_env("AWS_DEFAULT_REGION"))
             .or_else(|| instance.map(|b| b.region.clone()));
-        let aws_az = vouch_common::env::non_empty(args.aws_az)
-            .or_else(|| instance.map(|b| b.availability_zone.clone()));
-        let aws_partition = vouch_common::env::non_empty(args.aws_partition)
+        let aws_az =
+            env::non_empty(args.aws_az).or_else(|| instance.map(|b| b.availability_zone.clone()));
+        let aws_partition = env::non_empty(args.aws_partition)
             .or_else(|| instance.and_then(|b| b.partition.clone()));
-        let aws_use_fips_endpoint = vouch_common::env::non_empty(args.aws_use_fips_endpoint)
-            .map(|v| v.eq_ignore_ascii_case("true"));
+        let aws_use_fips_endpoint =
+            env::non_empty(args.aws_use_fips_endpoint).map(|v| v.eq_ignore_ascii_case("true"));
 
         // Normalize: strip any trailing slashes so the issuer and every
         // endpoint derived from `base_url` (OIDC discovery, JWT `iss`, DPoP
@@ -977,7 +1076,7 @@ impl ServerConfig {
         };
 
         // Parse AAGUID policy
-        let allowed_aaguids = vouch_common::AaguidPolicy::parse(&args.allowed_aaguids)
+        let allowed_aaguids = AaguidPolicy::parse(&args.allowed_aaguids)
             .map_err(|e| anyhow::anyhow!("Invalid VOUCH_ALLOWED_AAGUIDS: {}", e))?;
 
         // Parse log format
@@ -985,6 +1084,12 @@ impl ServerConfig {
 
         // Parse trusted proxies
         let trusted_proxies = parse_trusted_proxies(&args.trusted_proxies)?;
+        if args.proxy_protocol && trusted_proxies.is_empty() {
+            anyhow::bail!(
+                "VOUCH_PROXY_PROTOCOL requires VOUCH_TRUSTED_PROXIES: only the proxies listed \
+                 there may send the PROXY header"
+            );
+        }
 
         // Parse unified IdP list (OIDC + SAML).
         let idps = parse_idps(args.idps.as_deref())?;
@@ -1012,7 +1117,7 @@ impl ServerConfig {
             resource_tos_uri: args
                 .resource_tos_uri
                 .or_else(|| Some("https://vouch.sh/terms/".to_string())),
-            security_contact: vouch_common::env::non_empty(args.security_contact)
+            security_contact: env::non_empty(args.security_contact)
                 .unwrap_or_else(|| "security@vouch.sh".to_string()),
             cli_download_macos: args.cli_download_macos,
             cli_download_linux: args.cli_download_linux,
@@ -1035,14 +1140,14 @@ impl ServerConfig {
             github_app_id: args.github_app_id,
             github_app_name: args.github_app_name,
             github_app_key: args.github_app_key.map(SecretString::from),
-            github_webhook_secret: args.github_webhook_secret.map(SecretString::from),
+            github_webhook_secret: NonEmptySecret::from_arg(args.github_webhook_secret),
             github_app_client_id: args.github_app_client_id,
-            github_app_client_secret: args.github_app_client_secret.map(SecretString::from),
+            github_app_client_secret: NonEmptySecret::from_arg(args.github_app_client_secret),
             tls_cert: args.tls_cert,
             tls_key: args.tls_key.map(SecretString::from),
             s3_config_bucket: args.s3_config_bucket,
             s3_config_key: args.s3_config_key,
-            s3_config_region: vouch_common::env::non_empty(args.s3_config_region),
+            s3_config_region: env::non_empty(args.s3_config_region),
             s3_config_poll_interval: args.s3_config_poll_interval,
             aws_region,
             aws_az,
@@ -1050,13 +1155,21 @@ impl ServerConfig {
             aws_use_fips_endpoint,
             jwt_assertion_max_lifetime_seconds: args.jwt_assertion_max_lifetime,
             allowed_aaguids,
-            require_attestation_cert: args.require_attestation_cert,
             log_format,
             trusted_proxies,
-            metrics_bearer_token: args.metrics_bearer_token.map(SecretString::from),
-            certification_test_token: args.certification_test_token.map(SecretString::from),
+            proxy_protocol: args.proxy_protocol,
+            connection_caps: ConnCapConfig {
+                max_total: args.max_connections,
+                max_per_ip: args.max_connections_per_ip,
+            },
+            // `NonEmptySecret` treats `VAR=""` as unset: each of these three
+            // switches a feature on by being present and then keys it, so an
+            // empty value would enable the feature under a publicly-known key.
+            metrics_bearer_token: NonEmptySecret::from_arg(args.metrics_bearer_token),
+            certification_test_token: NonEmptySecret::from_arg(args.certification_test_token),
             extra_ca_certs: args.extra_ca_certs,
-            pool_config: crate::db::pool::PoolConfig {
+            mtls_client_ca_certs: args.mtls_client_ca_certs,
+            pool_config: PoolConfig {
                 max_connections: args.db_max_connections,
                 min_connections: args.db_min_connections,
                 idle_timeout_secs: args.db_idle_timeout_secs,
@@ -1065,24 +1178,6 @@ impl ServerConfig {
             session_cache_max_capacity: args.session_cache_max_capacity,
             session_cache_ttl_secs: args.session_cache_ttl_secs,
         })
-    }
-
-    /// Check if at least one IdP (of any kind) is configured.
-    #[must_use]
-    pub fn has_idps(&self) -> bool {
-        !self.idps.is_empty()
-    }
-
-    /// Check if at least one OIDC IdP is configured.
-    #[must_use]
-    pub fn has_oidc_idp(&self) -> bool {
-        self.idps.iter().any(|i| matches!(i, IdpConfig::Oidc(_)))
-    }
-
-    /// Check if at least one SAML IdP is configured.
-    #[must_use]
-    pub fn has_saml_idp(&self) -> bool {
-        self.idps.iter().any(|i| matches!(i, IdpConfig::Saml(_)))
     }
 
     /// Get the organization display name.
@@ -1110,14 +1205,6 @@ impl ServerConfig {
         self.github_app_key.as_ref().map(|s| s.expose_secret())
     }
 
-    /// Get the GitHub webhook secret (exposed) if configured.
-    #[must_use]
-    pub fn github_webhook_secret_exposed(&self) -> Option<&str> {
-        self.github_webhook_secret
-            .as_ref()
-            .map(|s| s.expose_secret())
-    }
-
     /// Check if GitHub App OAuth is configured (client ID and secret present).
     #[must_use]
     pub fn github_oauth_configured(&self) -> bool {
@@ -1136,6 +1223,19 @@ impl ServerConfig {
     #[must_use]
     pub fn tls_configured(&self) -> bool {
         self.tls_cert.is_some() && self.tls_key.is_some()
+    }
+
+    /// Proxies a request's peer can be: none with the PROXY protocol on,
+    /// because the peer is then the client itself. X-Forwarded-For is walked
+    /// only through these; walking it through `trusted_proxies` in PROXY mode
+    /// would let a client inside that range choose its address.
+    #[must_use]
+    pub fn forwarded_for_proxies(&self) -> &[IpNet] {
+        if self.proxy_protocol {
+            &[]
+        } else {
+            &self.trusted_proxies
+        }
     }
 
     /// Validate that all required configuration is present.
@@ -1360,12 +1460,13 @@ pub fn resolve_dsql_endpoints(
 )]
 mod tests {
     use crate::config::{
-        Args, IdpConfig, SamlProviderConfig, ServerConfig, bootstrap_overlay_args,
-        resolve_dsql_endpoints, validate_provider_slug,
+        Args, BaseUrl, IdpConfig, NonEmptySecret, SamlProviderConfig, ServerConfig,
+        bootstrap_overlay_args, resolve_dsql_endpoints, validate_provider_slug,
     };
+    use crate::infra::bootstrap::Bootstrap;
     use crate::test_utils::test_config;
     use clap::{CommandFactory, Parser};
-    use secrecy::SecretString;
+    use secrecy::{ExposeSecret, SecretString};
     use std::collections::{BTreeMap, HashMap};
 
     fn saml_provider_for_tests() -> SamlProviderConfig {
@@ -1381,7 +1482,7 @@ mod tests {
     #[test]
     fn test_org_issuer_preserves_scheme_and_port() {
         let mut config = test_config();
-        config.base_url = crate::config::BaseUrl::new("http://localhost:3000");
+        config.base_url = BaseUrl::new("http://localhost:3000");
         assert_eq!(config.primary_host().as_deref(), Some("localhost"));
         assert_eq!(
             config.org_issuer("acme").as_deref(),
@@ -1392,7 +1493,7 @@ mod tests {
     #[test]
     fn test_org_issuer_production_shape() {
         let mut config = test_config();
-        config.base_url = crate::config::BaseUrl::new("https://us.vouch.sh");
+        config.base_url = BaseUrl::new("https://us.vouch.sh");
         assert_eq!(config.primary_host().as_deref(), Some("us.vouch.sh"));
         assert_eq!(
             config.org_issuer("acme").as_deref(),
@@ -1403,23 +1504,9 @@ mod tests {
     #[test]
     fn test_org_issuer_unparseable_base_url() {
         let mut config = test_config();
-        config.base_url = crate::config::BaseUrl::new("not a url");
+        config.base_url = BaseUrl::new("not a url");
         assert!(config.primary_host().is_none());
         assert!(config.org_issuer("acme").is_none());
-    }
-
-    #[test]
-    fn test_has_saml_idp_when_configured() {
-        let mut config = test_config();
-        config.idps.push(IdpConfig::Saml(saml_provider_for_tests()));
-        assert!(config.has_saml_idp());
-    }
-
-    #[test]
-    fn test_has_saml_idp_returns_false_when_none() {
-        let mut config = test_config();
-        config.idps.retain(|i| matches!(i, IdpConfig::Oidc(_)));
-        assert!(!config.has_saml_idp());
     }
 
     #[test]
@@ -1473,14 +1560,6 @@ mod tests {
         let mut config = test_config();
         config.idps = vec![IdpConfig::Saml(saml_provider_for_tests())];
         assert!(config.validate().is_ok());
-    }
-
-    #[test]
-    fn test_has_oidc_idp_false_when_only_saml() {
-        let mut config = test_config();
-        config.idps = vec![IdpConfig::Saml(saml_provider_for_tests())];
-        assert!(!config.has_oidc_idp(), "should be false when only SAML set");
-        assert!(config.has_saml_idp(), "has_saml_idp should be true");
     }
 
     #[test]
@@ -1607,15 +1686,6 @@ mod tests {
     }
 
     #[test]
-    fn test_has_idps_empty() {
-        let mut config = test_config();
-        config.idps = Vec::new();
-        assert!(!config.has_idps());
-        assert!(!config.has_oidc_idp());
-        assert!(!config.has_saml_idp());
-    }
-
-    #[test]
     fn test_validate_rejects_zero_idps() {
         // Without an IdP we cannot verify user identity, so the server must
         // refuse to boot rather than silently degrade to placeholder users.
@@ -1635,16 +1705,8 @@ mod tests {
         // the OpenID conformance suite from running.
         let mut config = test_config();
         config.idps = Vec::new();
-        config.certification_test_token = Some(SecretString::from("cert-token"));
+        config.certification_test_token = NonEmptySecret::new(SecretString::from("cert-token"));
         assert!(config.validate().is_ok());
-    }
-
-    #[test]
-    fn test_has_idps_with_providers() {
-        let config = test_config();
-        // test_config sets one OIDC provider
-        assert!(config.has_idps());
-        assert!(config.has_oidc_idp());
     }
 
     /// Regression for #541: wildcard CORS origin must be rejected at startup
@@ -1810,27 +1872,6 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_overlay_emits_bare_flag_for_truthy_bool() {
-        // require_attestation_cert is ArgAction::SetTrue (plain bool field),
-        // which cannot accept `--flag=value` on the command line.
-        let matches = matches_ignoring_process_env(&["vouch-server"]);
-        let blob = blob(&[("VOUCH_REQUIRE_ATTESTATION_CERT", "true")]);
-        let tokens = bootstrap_overlay_args(&matches, &blob);
-        assert_eq!(
-            tokens,
-            vec![std::ffi::OsString::from("--require-attestation-cert")]
-        );
-    }
-
-    #[test]
-    fn bootstrap_overlay_emits_nothing_for_falsy_bool() {
-        let matches = matches_ignoring_process_env(&["vouch-server"]);
-        let blob = blob(&[("VOUCH_REQUIRE_ATTESTATION_CERT", "false")]);
-        let tokens = bootstrap_overlay_args(&matches, &blob);
-        assert!(tokens.is_empty(), "got: {tokens:?}");
-    }
-
-    #[test]
     fn bootstrap_overlay_skips_empty_blob_values() {
         // Regression: an empty value in the bootstrap blob used to emit
         // `--flag=`, which clap parses as `Some("")`. That blocked the
@@ -1866,8 +1907,8 @@ mod tests {
     // exercised below.
     // ========================================================================
 
-    fn imds_bootstrap() -> crate::infra::bootstrap::Bootstrap {
-        crate::infra::bootstrap::Bootstrap {
+    fn imds_bootstrap() -> Bootstrap {
+        Bootstrap {
             region: "us-east-1".to_string(),
             availability_zone: "us-east-1a".to_string(),
             partition: Some("aws".to_string()),
@@ -1963,6 +2004,81 @@ mod tests {
     }
 
     // ========================================================================
+    // ServerConfig::from_args — shared-secret keys are NonEmptySecret
+    //
+    // The webhook HMAC key, the /metrics bearer token and the certification
+    // HMAC key each switch a feature on by being present and then key it.
+    // Clap yields `Some("")` for `--flag=` and for `VAR=""` alike (the env
+    // path is not exercised directly: `set_var` is `unsafe` under edition 2024
+    // and `unsafe_code` is denied), and that must load as `None`.
+    // ========================================================================
+
+    #[test]
+    fn non_empty_secret_rejects_empty() {
+        assert!(NonEmptySecret::new(SecretString::from("")).is_none());
+        assert!(NonEmptySecret::from_arg(Some(String::new())).is_none());
+        assert!(NonEmptySecret::from_arg(None).is_none());
+        assert_eq!(
+            NonEmptySecret::from_arg(Some("k".to_string()))
+                .expect("non-empty value is kept")
+                .expose_secret(),
+            "k"
+        );
+    }
+
+    #[test]
+    fn from_args_empty_shared_secrets_yield_none() {
+        let args = Args::try_parse_from([
+            "vouch-server",
+            "--certification-test-token=",
+            "--metrics-bearer-token=",
+            "--github-webhook-secret=",
+            "--github-app-client-id=client-id",
+            "--github-app-client-secret=",
+        ])
+        .expect("parse with empty shared secrets");
+        let config = ServerConfig::from_args(args, None).expect("config builds");
+        assert!(
+            config.certification_test_token.is_none(),
+            "an empty certification token must not register the login-bypass routes"
+        );
+        assert!(
+            config.metrics_bearer_token.is_none(),
+            "an empty metrics token must not register /metrics"
+        );
+        assert!(
+            config.github_webhook_secret.is_none(),
+            "an empty webhook secret must leave webhook verification unconfigured"
+        );
+        assert!(
+            config.github_app_client_secret.is_none(),
+            "an empty GitHub App client secret must load as unset"
+        );
+        assert!(
+            !config.github_oauth_configured(),
+            "a client ID with an empty client secret must not switch GitHub OAuth on"
+        );
+    }
+
+    #[test]
+    fn from_args_non_empty_certification_test_token_is_preserved() {
+        let args = Args::try_parse_from([
+            "vouch-server",
+            "--certification-test-token=test-cert-token-32bytes-padding!!",
+        ])
+        .expect("parse with non-empty --certification-test-token");
+        let config = ServerConfig::from_args(args, None).expect("config builds");
+        assert_eq!(
+            config
+                .certification_test_token
+                .as_ref()
+                .expect("token present")
+                .expose_secret(),
+            "test-cert-token-32bytes-padding!!"
+        );
+    }
+
+    // ========================================================================
     // ServerConfig::from_args — base_url trailing-slash normalization
     //
     // OIDC Discovery 1.0 §4.3 requires exact string equality between the
@@ -1972,6 +2088,100 @@ mod tests {
     // (`https://host//oauth/token`), breaking spec-compliant clients and
     // DPoP `htu` validation.
     // ========================================================================
+
+    // ========================================================================
+    // ServerConfig::from_args — PROXY protocol
+    // ========================================================================
+
+    #[test]
+    fn from_args_proxy_protocol_off_by_default() {
+        let args =
+            Args::try_parse_from(["vouch-server", "--trusted-proxies=10.0.0.0/8"]).expect("parse");
+        let config = ServerConfig::from_args(args, None).expect("config builds");
+        assert!(!config.proxy_protocol);
+        assert_eq!(config.forwarded_for_proxies(), config.trusted_proxies);
+    }
+
+    /// With the PROXY protocol on, the trusted proxies send the header and
+    /// X-Forwarded-For is not read: the peer is then the client itself, and a
+    /// client inside the trusted range could otherwise pick its address.
+    #[test]
+    fn from_args_proxy_protocol_ignores_forwarded_for() {
+        let args = Args::try_parse_from([
+            "vouch-server",
+            "--proxy-protocol",
+            "--trusted-proxies=10.0.0.0/8",
+        ])
+        .expect("parse");
+        let config = ServerConfig::from_args(args, None).expect("config builds");
+        assert!(config.proxy_protocol);
+        assert_eq!(config.trusted_proxies.len(), 1);
+        assert!(config.forwarded_for_proxies().is_empty());
+    }
+
+    // proxy-protocol.txt §2: "The receiver SHOULD ensure proper access
+    // filtering so that only trusted proxies are allowed to use this
+    // protocol." With no trusted proxy there is no one to accept it from.
+    #[test]
+    fn from_args_rejects_proxy_protocol_without_trusted_proxies() {
+        let args = Args::try_parse_from(["vouch-server", "--proxy-protocol"]).expect("parse");
+        let err = ServerConfig::from_args(args, None)
+            .err()
+            .expect("PROXY protocol with no trusted proxy is fatal");
+        assert!(
+            err.to_string().contains("VOUCH_TRUSTED_PROXIES"),
+            "the error names the missing setting: {err}"
+        );
+    }
+
+    #[test]
+    fn bootstrap_overlay_sets_truthy_flag() {
+        let matches = matches_ignoring_process_env(&["vouch-server"]);
+        let tokens = bootstrap_overlay_args(&matches, &blob(&[("VOUCH_PROXY_PROTOCOL", "true")]));
+        assert_eq!(tokens, vec![std::ffi::OsString::from("--proxy-protocol")]);
+        let tokens = bootstrap_overlay_args(&matches, &blob(&[("VOUCH_PROXY_PROTOCOL", "false")]));
+        assert!(
+            tokens.is_empty(),
+            "a false flag emits nothing, got: {tokens:?}"
+        );
+    }
+
+    #[test]
+    fn bootstrap_overlay_reads_flags_as_the_env_var_does() {
+        let matches = matches_ignoring_process_env(&["vouch-server"]);
+        for truthy in ["t", "y", "TRUE", "on", "1"] {
+            let tokens =
+                bootstrap_overlay_args(&matches, &blob(&[("VOUCH_PROXY_PROTOCOL", truthy)]));
+            assert_eq!(
+                tokens,
+                vec![std::ffi::OsString::from("--proxy-protocol")],
+                "{truthy:?} is true from the env var, so it is true from the blob"
+            );
+        }
+        for falsy in ["f", "n", "off", "0"] {
+            let tokens =
+                bootstrap_overlay_args(&matches, &blob(&[("VOUCH_PROXY_PROTOCOL", falsy)]));
+            assert!(
+                tokens.is_empty(),
+                "{falsy:?} emits nothing, got: {tokens:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn bootstrap_overlay_refuses_a_flag_value_that_is_not_boolean() {
+        let matches = matches_ignoring_process_env(&["vouch-server"]);
+        let tokens = bootstrap_overlay_args(&matches, &blob(&[("VOUCH_PROXY_PROTOCOL", "maybe")]));
+        let mut argv = vec![std::ffi::OsString::from("vouch-server")];
+        argv.extend(tokens);
+        let err = Args::try_parse_from(argv)
+            .err()
+            .expect("a non-boolean flag value is fatal");
+        assert!(
+            err.to_string().contains("--proxy-protocol"),
+            "the error names the flag: {err}"
+        );
+    }
 
     #[test]
     fn from_args_trims_single_trailing_slash_from_base_url() {
@@ -2088,5 +2298,38 @@ mod tests {
         endpoints.insert("us-east-1".to_string(), "postgres://x/postgres".to_string());
         let err = resolve_dsql_endpoints(&endpoints, None, Some("us-west-2")).unwrap_err();
         assert!(err.to_string().contains("not found"), "got: {err}");
+    }
+
+    /// Every flag default is written once, in code; the operator reference
+    /// repeats it, so a default that changes in code must change there too.
+    #[test]
+    fn documented_env_defaults_match_args() {
+        let doc = include_str!("../../../docs/src/reference/environment-variables.md");
+        let mut mismatches = Vec::new();
+        for arg in Args::command().get_arguments() {
+            let Some(env) = arg.get_env().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let [default] = arg.get_default_values() else {
+                continue;
+            };
+            let default = default.to_string_lossy();
+            // The reference writes an empty default as prose ("_(empty)_").
+            if default.is_empty() {
+                continue;
+            }
+            let row_start = format!("| `{env}` |");
+            let Some(row) = doc.lines().find(|line| line.starts_with(&row_start)) else {
+                continue;
+            };
+            let documented = row.split('|').nth(3).map(str::trim).unwrap_or_default();
+            if documented != format!("`{default}`") {
+                mismatches.push(format!("{env}: code `{default}`, docs {documented}"));
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "stale defaults in environment-variables.md: {mismatches:#?}"
+        );
     }
 }

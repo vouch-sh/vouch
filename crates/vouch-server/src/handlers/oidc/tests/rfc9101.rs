@@ -8,6 +8,8 @@
 //! Reference: <https://www.rfc-editor.org/rfc/rfc9101>
 
 use super::helpers::*;
+use crate::crypto::alg::JwsAlgorithm;
+use crate::db;
 use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, KeyPair};
 
 // ========================================================================
@@ -118,6 +120,104 @@ fn build_request_object_with_claims(claims: &serde_json::Value, pkcs8_bytes: &[u
     sign_jwt(pkcs8_bytes, &header, claims)
 }
 
+// ------------------------------------------------------------------------
+// In-process HTTPS mock for the `request_uri` (OIDC Core §6.2) fetch path.
+// ------------------------------------------------------------------------
+//
+// `fetch_request_object` enforces HTTPS, so a plaintext wiremock server cannot
+// drive it. These helpers stand up a one-shot `tokio-rustls` server on the
+// loopback address that serves a signed Request Object JWT, mirroring the
+// pattern in `infra/jwks` tests. The SSRF egress guard allows loopback when
+// TLS is not configured (the test default), and the request uses the
+// `127.0.0.1` IP literal to avoid a DNS lookup, so the fetch reaches the
+// handler's fetch-and-validate logic rather than a guard rejection.
+
+/// Throwaway self-signed ECDSA P-256 certificate for in-process TLS test
+/// servers. It has no IP SAN; the test client uses `danger_accept_invalid_certs`
+/// and the URL uses the `127.0.0.1` IP literal, so the missing SAN does not
+/// affect the guarantee being pinned. Valid until 2036.
+const TLS_CERT_PEM: &str = "-----BEGIN CERTIFICATE-----\n\
+MIIBoDCCAUagAwIBAgIUPOBIDoD8Akv9FXfEjb8GEV6GYLowCgYIKoZIzj0EAwIw\n\
+HDEaMBgGA1UEAwwRdm91Y2gtcHEtdGxzLXRlc3QwHhcNMjYwNzA5MTEzMDE1WhcN\n\
+MzYwNzA2MTEzMDE1WjAcMRowGAYDVQQDDBF2b3VjaC1wcS10bHMtdGVzdDBZMBMG\n\
+ByqGSM49AgEGCCqGSM49AwEHA0IABO7wN7GBAX4FydRe2AvENBb6WZ9XHh4NKbkO\n\
+G9ulpEIAVoZaGHMAlK7ZGTLf/tBukQxhXDwQKLLot23POsF8nP+jZjBkMB0GA1Ud\n\
+DgQWBBQ3svXuWL2wS8xcHilgxDuYURTVwDAfBgNVHSMEGDAWgBQ3svXuWL2wS8xc\n\
+HilgxDuYURTVwDAUBgNVHREEDTALgglsb2NhbGhvc3QwDAYDVR0TAQH/BAIwADAK\n\
+BggqhkjOPQQDAgNIADBFAiEAqVgc77k203H6G5gEaAcHuna5DKJmQPCQjQLQAtry\n\
+KnMCICKcoY9vNlshsz2y7RVcfGqowba3/xXj3aYFegT/BdAW\n\
+-----END CERTIFICATE-----\n";
+const TLS_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgTljx1Qv2H2TQMKaX\n\
++palx1XsuLkORqDCzFBkRDcz3tihRANCAATu8DexgQF+BcnUXtgLxDQW+lmfVx4e\n\
+DSm5DhvbpaRCAFaGWhhzAJSu2Rky3/7QbpEMYVw8ECiy6LdtzzrBfJz/\n\
+-----END PRIVATE KEY-----\n";
+
+/// A `tokio-rustls` acceptor using the throwaway self-signed cert above and an
+/// explicit aws-lc-rs provider (no reliance on a process-default provider).
+fn tls_acceptor() -> tokio_rustls::TlsAcceptor {
+    use rustls::pki_types::pem::PemObject;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+    use std::sync::Arc;
+    let certs: Vec<CertificateDer<'static>> =
+        CertificateDer::pem_slice_iter(TLS_CERT_PEM.as_bytes())
+            .collect::<Result<Vec<_>, _>>()
+            .expect("parse test certificate");
+    let key = PrivateKeyDer::from_pem_slice(TLS_KEY_PEM.as_bytes()).expect("parse test key");
+    let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+    .expect("configure TLS versions")
+    .with_no_client_auth()
+    .with_single_cert(certs, key)
+    .expect("build server config");
+    tokio_rustls::TlsAcceptor::from(Arc::new(config))
+}
+
+/// A `reqwest` client that performs a real TLS handshake but does not verify
+/// the server certificate. Used for the `request_uri` HTTPS fetch against the
+/// in-process mock; kept off the shared `AppState::http_client` to avoid
+/// weakening any other test's trust store.
+fn https_client_trusting_any_cert() -> reqwest::Client {
+    reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("build test https client")
+}
+
+/// Spawn a one-shot HTTPS server on `127.0.0.1` that serves `jwt` as the body
+/// of a `GET /ro.jwt` response, and return the `https://127.0.0.1:{port}/ro.jwt`
+/// URL. The server accepts a single connection — enough for one
+/// `request_uri=` authorize request — then shuts down.
+async fn spawn_request_object_server(jwt: String) -> String {
+    use tokio::io::AsyncWriteExt;
+    let acceptor = tls_acceptor();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback listener");
+    let port = listener.local_addr().expect("local_addr").port();
+    let response = format!(
+        "HTTP/1.1 200 OK\r\n\
+         Content-Type: application/oauth-authz-req+jwt\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\
+         \r\n\
+         {jwt}",
+        jwt.len()
+    );
+    tokio::spawn(async move {
+        let (stream, _peer) = listener.accept().await.expect("accept connection");
+        let mut tls = acceptor.accept(stream).await.expect("TLS handshake");
+        if tls.write_all(response.as_bytes()).await.is_err() {
+            return;
+        }
+        let _shutdown = tls.shutdown().await;
+    });
+    format!("https://127.0.0.1:{port}/ro.jwt")
+}
+
 // ========================================================================
 // RFC 9101 — Discovery Metadata
 // ========================================================================
@@ -195,7 +295,16 @@ async fn test_rfc9101_authorize_with_valid_request_parameter_es256() {
     let user = create_test_user(&state.store, "jar-es256@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let (client, pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
-    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let issuer = &state.config().base_url;
     let request_jwt = build_request_object(&client.client_id, issuer, &pkcs8_bytes);
@@ -231,6 +340,81 @@ async fn test_rfc9101_authorize_with_valid_request_parameter_es256() {
     );
 }
 
+// RFC 9101 / RFC 7517 §4.5: JAR request-object verification reaches
+// `find_matching_key` via `jar.rs -> find_matching_key_with_refresh_client`.
+// `kid` uniqueness is a SHOULD, not a MUST, and the write-time gates do not
+// reject duplicate `kid`s. With two keys sharing `kid="jar-test-key-1" — the
+// first unbuildable (EC missing `x`/`y`), the second valid — the kid-match
+// branch must skip the unbuildable first key and verify the Request Object
+// against the valid sibling. Pre-fix this returned `invalid_request_object`.
+#[tokio::test]
+async fn test_rfc9101_authorize_skips_unbuildable_key_before_valid() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "jar-malformed@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+
+    // Register a JAR client whose inline JWKS has a malformed EC key (missing
+    // x/y, same kid) FIRST, then the valid EC signing key.
+    let (pkcs8_bytes, valid_jwk) = generate_es256_signing_key();
+    let malformed_jwk = serde_json::json!({
+        "kty": "EC", "crv": "P-256", "use": "sig", "alg": "ES256", "kid": "jar-test-key-1"
+    });
+    let jwks_value = serde_json::json!({ "keys": [malformed_jwk, valid_jwk] });
+    let client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            jwks: TestJwks::Custom(jwks_value),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let issuer = &state.config().base_url;
+    let request_jwt = build_request_object(&client.client_id, issuer, &pkcs8_bytes);
+
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?client_id={}&request={}",
+            client.client_id,
+            urlencoding::encode(&request_jwt),
+        ),
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+    )
+    .await;
+
+    assert!(
+        response.status == StatusCode::FOUND || response.status == StatusCode::SEE_OTHER,
+        "JAR with malformed-first key should still verify against the valid sibling, got: {} body: {}",
+        response.status,
+        response.body,
+    );
+
+    let location = response
+        .headers
+        .get("Location")
+        .expect("Must have Location header")
+        .to_str()
+        .expect("Location header");
+    assert!(
+        location.contains("code="),
+        "Successful response must include authorization code: {location}"
+    );
+}
+
 #[tokio::test]
 async fn test_rfc9101_authorize_request_object_with_pkce() {
     // Verify PKCE parameters from the Request Object are used.
@@ -239,7 +423,16 @@ async fn test_rfc9101_authorize_request_object_with_pkce() {
     let user = create_test_user(&state.store, "jar-pkce@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let (client, pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
-    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let issuer = &state.config().base_url;
     let request_jwt = build_request_object(&client.client_id, issuer, &pkcs8_bytes);
@@ -639,7 +832,16 @@ async fn test_rfc9101_require_signed_request_object_rejects_plain_params() {
 
     let user = create_test_user(&state.store, "jar-required@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let (_pkcs8_bytes, jwk) = generate_es256_signing_key();
     let jwks_value = serde_json::json!({ "keys": [jwk] });
@@ -694,7 +896,16 @@ async fn test_rfc9101_require_signed_request_object_accepts_valid_jar() {
 
     let user = create_test_user(&state.store, "jar-reqok@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let (pkcs8_bytes, jwk) = generate_es256_signing_key();
     let jwks_value = serde_json::json!({ "keys": [jwk] });
@@ -916,7 +1127,7 @@ async fn test_rfc9101_client_signing_alg_es256_rejects_rs256_jwt() {
         &user.id,
         TestClientSpec {
             jwks: TestJwks::Custom(jwks_value),
-            request_object_signing_alg: Some(crate::crypto::alg::JwsAlgorithm::Es256),
+            request_object_signing_alg: Some(JwsAlgorithm::Es256),
             require_signed_request_object: Some(false),
             ..Default::default()
         },
@@ -979,7 +1190,16 @@ async fn test_rfc9101_client_signing_alg_es256_accepts_es256_jwt() {
 
     let user = create_test_user(&state.store, "jar-algok@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let (pkcs8_bytes, jwk) = generate_es256_signing_key();
     let jwks_value = serde_json::json!({ "keys": [jwk] });
@@ -988,7 +1208,7 @@ async fn test_rfc9101_client_signing_alg_es256_accepts_es256_jwt() {
         &user.id,
         TestClientSpec {
             jwks: TestJwks::Custom(jwks_value),
-            request_object_signing_alg: Some(crate::crypto::alg::JwsAlgorithm::Es256),
+            request_object_signing_alg: Some(JwsAlgorithm::Es256),
             require_signed_request_object: Some(false),
             ..Default::default()
         },
@@ -1152,7 +1372,16 @@ async fn test_rfc9101_state_from_request_object_preserved_in_response() {
     let user = create_test_user(&state.store, "jar-state@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let (client, pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
-    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let now = jiff::Timestamp::now().as_second();
     let issuer = &state.config().base_url;
@@ -1345,7 +1574,16 @@ async fn test_rfc9101_fapi2_matching_query_params_accepted() {
     let user = create_test_user(&state.store, "jar-fapi-match@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let (client, pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
-    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let now = jiff::Timestamp::now().as_second();
     let issuer = &state.config().base_url;
@@ -1554,6 +1792,558 @@ async fn test_rfc9101_par_request_object_with_nested_request_claim_rejected() {
 }
 
 // ========================================================================
+// RFC 9101 — PAR + JAR: Request Parameter Validation
+//
+// RFC 9101 §6.3: "The authorization server MUST extract the set of
+// authorization request parameters from the Request Object value ... The
+// authorization server then validates the request, as specified in OAuth 2.0
+// [RFC6749]." A parameter therefore answers the same way whether it arrived
+// in a plain form body or inside a signed Request Object — same acceptance,
+// same rejection, and the same RFC 6749 §5.2 error code, which is what
+// separates a §6.3 validation failure from the §6.1/§6.2 failures that carry
+// `invalid_request_object`.
+// ========================================================================
+
+#[tokio::test]
+async fn test_rfc9101_par_rejects_unsupported_prompt_in_request_object() {
+    // OIDC Core §3.1.2.1 permits either answer for a value outside the defined
+    // set — "it MAY return an error or it MAY ignore it" — and Vouch returns
+    // one. A signed Request Object must get the same answer a plain form body
+    // does, down to the error code.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "jar-par-badprompt@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
+
+    let issuer = &state.config().base_url;
+    let now = jiff::Timestamp::now().as_second();
+    let challenge = sha256_base64url("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk");
+
+    let claims = serde_json::json!({
+        "iss": client.client_id,
+        "aud": issuer,
+        "exp": now + 300,
+        "iat": now,
+        "response_type": "code",
+        "client_id": client.client_id,
+        "redirect_uri": "https://example.com/callback",
+        "scope": "openid",
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+        "prompt": "x_vendor_ext"
+    });
+
+    let request_jwt = build_request_object_with_claims(&claims, &pkcs8_bytes);
+
+    let body = format!(
+        "request={}&client_id={}&client_secret={}",
+        urlencoding::encode(&request_jwt),
+        urlencoding::encode(&client.client_id),
+        urlencoding::encode(&client.client_secret),
+    );
+
+    let (status, response_body) = http_post_form(&app, "/oauth/par", &body, &[]).await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "PAR with unsupported prompt in Request Object should return 400: {response_body}"
+    );
+
+    let json: serde_json::Value = serde_json::from_str(&response_body).expect("Valid JSON");
+    assert_eq!(
+        json["error"], "invalid_request",
+        "a §6.3 parameter-validation failure carries the RFC 6749 §5.2 code, \
+         not invalid_request_object: {response_body}"
+    );
+
+    let description = json["error_description"]
+        .as_str()
+        .expect("error_description must be a string");
+    assert!(
+        description.contains("login"),
+        "error_description should mention 'login': {description}"
+    );
+    assert!(
+        description.contains("none"),
+        "error_description should mention 'none': {description}"
+    );
+    assert!(
+        description.contains("consent"),
+        "error_description should mention 'consent': {description}"
+    );
+}
+
+/// The two request formats must not merely both fail — they must fail
+/// identically. This is the property #1110 was actually about, and asserting
+/// it directly is what keeps a future change from fixing one path only.
+#[tokio::test]
+async fn test_rfc9101_par_prompt_rejection_matches_plain_request() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "jar-par-parity@example.com").await;
+    let (client, pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
+
+    let issuer = &state.config().base_url;
+    let now = jiff::Timestamp::now().as_second();
+    let challenge = sha256_base64url("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk");
+
+    for prompt in ["x_vendor_ext", "select_account", "none login"] {
+        let claims = serde_json::json!({
+            "iss": client.client_id,
+            "aud": issuer,
+            "exp": now + 300,
+            "iat": now,
+            "response_type": "code",
+            "client_id": client.client_id,
+            "redirect_uri": "https://example.com/callback",
+            "scope": "openid",
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+            "prompt": prompt
+        });
+        let request_jwt = build_request_object_with_claims(&claims, &pkcs8_bytes);
+
+        let (jar_status, jar_body) = http_post_form(
+            &app,
+            "/oauth/par",
+            &format!(
+                "request={}&client_id={}&client_secret={}",
+                urlencoding::encode(&request_jwt),
+                urlencoding::encode(&client.client_id),
+                urlencoding::encode(&client.client_secret),
+            ),
+            &[],
+        )
+        .await;
+
+        let (plain_status, plain_body) = http_post_form(
+            &app,
+            "/oauth/par",
+            &format!(
+                "response_type=code&client_id={}&client_secret={}&redirect_uri={}\
+                 &code_challenge={challenge}&code_challenge_method=S256&scope=openid&prompt={}",
+                urlencoding::encode(&client.client_id),
+                urlencoding::encode(&client.client_secret),
+                urlencoding::encode("https://example.com/callback"),
+                urlencoding::encode(prompt),
+            ),
+            &[],
+        )
+        .await;
+
+        // Both must reject, not merely agree: an equality check alone would
+        // pass if the two paths ever agreed on accepting the value.
+        assert_eq!(
+            jar_status,
+            StatusCode::BAD_REQUEST,
+            "prompt={prompt:?} must be rejected in a Request Object: {jar_body}"
+        );
+        assert_eq!(
+            jar_status, plain_status,
+            "prompt={prompt:?} must yield the same status either way: \
+             JAR {jar_body} vs plain {plain_body}"
+        );
+
+        let jar: serde_json::Value = serde_json::from_str(&jar_body).expect("Valid JSON");
+        let plain: serde_json::Value = serde_json::from_str(&plain_body).expect("Valid JSON");
+        assert_eq!(
+            jar["error"], plain["error"],
+            "prompt={prompt:?} must yield the same error code either way: \
+             JAR {jar_body} vs plain {plain_body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_rfc9101_par_translates_account_selection_in_request_object() {
+    // OIDC Core §3.1.2.1 rejects `select_account` here — Vouch cannot "obtain
+    // an account selection choice made by the End-User" — but RFC 9126 §2.3
+    // bars the user-interaction code that rejection carries from the PAR
+    // endpoint, so it arrives as `invalid_request` like the plain path's.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "jar-par-selectaccount@example.com").await;
+    let (client, pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
+
+    let issuer = &state.config().base_url;
+    let now = jiff::Timestamp::now().as_second();
+    let challenge = sha256_base64url("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk");
+
+    let claims = serde_json::json!({
+        "iss": client.client_id,
+        "aud": issuer,
+        "exp": now + 300,
+        "iat": now,
+        "response_type": "code",
+        "client_id": client.client_id,
+        "redirect_uri": "https://example.com/callback",
+        "scope": "openid",
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+        "prompt": "select_account"
+    });
+
+    let request_jwt = build_request_object_with_claims(&claims, &pkcs8_bytes);
+
+    let (status, response_body) = http_post_form(
+        &app,
+        "/oauth/par",
+        &format!(
+            "request={}&client_id={}&client_secret={}",
+            urlencoding::encode(&request_jwt),
+            urlencoding::encode(&client.client_id),
+            urlencoding::encode(&client.client_secret),
+        ),
+        &[],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "prompt=select_account must be rejected: {response_body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&response_body).expect("Valid JSON");
+    assert_eq!(
+        json["error"], "invalid_request",
+        "PAR must not answer with a user-interaction error code: {response_body}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc9101_par_accepts_supported_prompt_values_in_request_object() {
+    // No regression: every honored prompt value must still be accepted when
+    // carried inside a signed Request Object at the PAR endpoint. OIDC Core
+    // §3.1.2.1 makes `prompt` a space-delimited list, so a request for two
+    // behaviors at once belongs in the same set.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "jar-par-goodprompt@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
+
+    let issuer = &state.config().base_url;
+    let now = jiff::Timestamp::now().as_second();
+    let challenge = sha256_base64url("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk");
+
+    for supported in ["login", "none", "consent", "login consent"] {
+        let claims = serde_json::json!({
+            "iss": client.client_id,
+            "aud": issuer,
+            "exp": now + 300,
+            "iat": now,
+            "response_type": "code",
+            "client_id": client.client_id,
+            "redirect_uri": "https://example.com/callback",
+            "scope": "openid",
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+            "prompt": supported
+        });
+
+        let request_jwt = build_request_object_with_claims(&claims, &pkcs8_bytes);
+
+        let body = format!(
+            "request={}&client_id={}&client_secret={}",
+            urlencoding::encode(&request_jwt),
+            urlencoding::encode(&client.client_id),
+            urlencoding::encode(&client.client_secret),
+        );
+
+        let (status, response_body) = http_post_form(&app, "/oauth/par", &body, &[]).await;
+
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "PAR with supported prompt '{supported}' should succeed: {response_body}"
+        );
+
+        let json: serde_json::Value = serde_json::from_str(&response_body).expect("Valid JSON");
+        assert!(
+            json["request_uri"].as_str().is_some(),
+            "successful PAR must return a request_uri: {response_body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_rfc9101_par_accepts_omitted_and_null_prompt_in_request_object() {
+    // No regression: a Request Object without a `prompt` claim, and one carrying
+    // an explicit `null`, must both be accepted (treated as omitted) at PAR.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "jar-par-noprompt@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
+
+    let issuer = &state.config().base_url;
+    let now = jiff::Timestamp::now().as_second();
+    let challenge = sha256_base64url("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk");
+
+    let base = serde_json::json!({
+        "iss": client.client_id,
+        "aud": issuer,
+        "exp": now + 300,
+        "iat": now,
+        "response_type": "code",
+        "client_id": client.client_id,
+        "redirect_uri": "https://example.com/callback",
+        "scope": "openid",
+        "code_challenge": challenge,
+        "code_challenge_method": "S256"
+    });
+
+    let omitted = base.clone();
+    let mut with_null = base.clone();
+    with_null["prompt"] = serde_json::Value::Null;
+
+    for (label, claims) in [("omitted", omitted), ("null", with_null)] {
+        let request_jwt = build_request_object_with_claims(&claims, &pkcs8_bytes);
+
+        let body = format!(
+            "request={}&client_id={}&client_secret={}",
+            urlencoding::encode(&request_jwt),
+            urlencoding::encode(&client.client_id),
+            urlencoding::encode(&client.client_secret),
+        );
+
+        let (status, response_body) = http_post_form(&app, "/oauth/par", &body, &[]).await;
+
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "PAR with {label} prompt should succeed: {response_body}"
+        );
+
+        let json: serde_json::Value = serde_json::from_str(&response_body).expect("Valid JSON");
+        assert!(
+            json["request_uri"].as_str().is_some(),
+            "successful PAR must return a request_uri: {response_body}"
+        );
+    }
+}
+
+/// RFC 6749 §3.1: "Parameters sent without a value MUST be treated as if they
+/// were omitted from the request." RFC 9101 §6.3 makes a Request Object's
+/// claims the request's parameters, so an empty claim means what an empty form
+/// value means — nothing. Without this, a signed request would reject
+/// `"prompt": ""` while `prompt=` in a form body is silently dropped before
+/// the handler ever sees it.
+#[tokio::test]
+async fn test_rfc9101_par_treats_empty_request_object_parameters_as_omitted() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "jar-par-emptyparam@example.com").await;
+    let (client, pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
+
+    let issuer = &state.config().base_url;
+    let now = jiff::Timestamp::now().as_second();
+    let challenge = sha256_base64url("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk");
+
+    // Each of these is rejected outright when an empty value survives to the
+    // validator: `code_challenge_method` has no empty member, `resource` must
+    // parse as an absolute URI, and `scope` would arrive as an empty set
+    // rather than defaulting to `openid`. Reaching 201 is therefore proof the
+    // empty value was dropped, not merely tolerated.
+    for empty_param in ["code_challenge_method", "resource", "scope", "prompt"] {
+        let mut claims = serde_json::json!({
+            "iss": client.client_id,
+            "aud": issuer,
+            "exp": now + 300,
+            "iat": now,
+            "response_type": "code",
+            "client_id": client.client_id,
+            "redirect_uri": "https://example.com/callback",
+            "scope": "openid",
+            "code_challenge": challenge,
+            "code_challenge_method": "S256"
+        });
+        claims[empty_param] = serde_json::Value::String(String::new());
+
+        let request_jwt = build_request_object_with_claims(&claims, &pkcs8_bytes);
+
+        let (status, response_body) = http_post_form(
+            &app,
+            "/oauth/par",
+            &format!(
+                "request={}&client_id={}&client_secret={}",
+                urlencoding::encode(&request_jwt),
+                urlencoding::encode(&client.client_id),
+                urlencoding::encode(&client.client_secret),
+            ),
+            &[],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "an empty {empty_param:?} claim must read as an omitted one: {response_body}"
+        );
+    }
+}
+
+/// A Request Object whose claims are the wrong JSON type is malformed, not
+/// badly signed. Reporting it as a signature failure sends the client to
+/// inspect a key that is fine.
+#[tokio::test]
+async fn test_rfc9101_par_reports_malformed_claims_separately_from_signature() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "jar-par-malformed@example.com").await;
+    let (client, pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
+
+    let issuer = &state.config().base_url;
+    let now = jiff::Timestamp::now().as_second();
+    let challenge = sha256_base64url("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk");
+
+    // `max_age` is a number; a client sending it as a string is a common bug.
+    let claims = serde_json::json!({
+        "iss": client.client_id,
+        "aud": issuer,
+        "exp": now + 300,
+        "iat": now,
+        "response_type": "code",
+        "client_id": client.client_id,
+        "redirect_uri": "https://example.com/callback",
+        "scope": "openid",
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+        "max_age": "300"
+    });
+
+    let request_jwt = build_request_object_with_claims(&claims, &pkcs8_bytes);
+
+    let (status, response_body) = http_post_form(
+        &app,
+        "/oauth/par",
+        &format!(
+            "request={}&client_id={}&client_secret={}",
+            urlencoding::encode(&request_jwt),
+            urlencoding::encode(&client.client_id),
+            urlencoding::encode(&client.client_secret),
+        ),
+        &[],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a Request Object with a wrongly typed claim must be rejected: {response_body}"
+    );
+
+    let json: serde_json::Value = serde_json::from_str(&response_body).expect("Valid JSON");
+    assert_eq!(
+        json["error"], "invalid_request_object",
+        "a malformed Request Object is still an invalid Request Object: {response_body}"
+    );
+
+    let description = json["error_description"]
+        .as_str()
+        .expect("error_description must be a string");
+    assert!(
+        description.contains("malformed"),
+        "the description must say the claims are malformed, not that the \
+         signature failed: {description}"
+    );
+    assert!(
+        !description.contains("signature"),
+        "a well-signed Request Object must not be reported as a signature \
+         failure: {description}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc9101_authorize_rejects_unsupported_prompt_in_request_object() {
+    // The authorize endpoint shares `validate_request_object` with PAR, so an
+    // unsupported `prompt` in a Request Object must also be rejected there —
+    // never issuing an authorization code — even with a valid session.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "jar-auth-badprompt@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let issuer = &state.config().base_url;
+    let now = jiff::Timestamp::now().as_second();
+    let challenge = sha256_base64url("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk");
+
+    // `select_account` is defined by OIDC Core §3.1.2.1 and gets the code that
+    // section names; `x_vendor_ext` is outside the defined set and gets the
+    // ordinary RFC 6749 §4.1.2.1 one.
+    for (prompt, expected_error) in [
+        ("select_account", "error=account_selection_required"),
+        ("x_vendor_ext", "error=invalid_request"),
+    ] {
+        let claims = serde_json::json!({
+            "iss": client.client_id,
+            "aud": issuer,
+            "exp": now + 300,
+            "iat": now,
+            "response_type": "code",
+            "client_id": client.client_id,
+            "redirect_uri": "https://example.com/callback",
+            "scope": "openid",
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+            "prompt": prompt
+        });
+
+        let request_jwt = build_request_object_with_claims(&claims, &pkcs8_bytes);
+
+        let response = http_get_full(
+            &app,
+            &format!(
+                "/oauth/authorize?client_id={}&request={}",
+                client.client_id,
+                urlencoding::encode(&request_jwt),
+            ),
+            &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+        )
+        .await;
+
+        let location = response
+            .headers
+            .get("Location")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+
+        // A valid JAR request with this session would redirect to the callback
+        // with `code=`. RFC 9101 §6.3 sends this failure back the same way a
+        // plain request's would go — a redirect carrying the error, not the
+        // Request Object error page.
+        assert!(
+            response.status == StatusCode::FOUND || response.status == StatusCode::SEE_OTHER,
+            "prompt={prompt:?} should redirect with an error, got {}: {}",
+            response.status,
+            response.body
+        );
+        assert!(
+            !location.contains("code="),
+            "prompt={prompt:?} must not issue an authorization code: {location}"
+        );
+        assert!(
+            location.contains(expected_error),
+            "prompt={prompt:?} should redirect with {expected_error}: {location}"
+        );
+    }
+}
+
+// ========================================================================
 // RFC 9101 — Discovery: require_signed_request_object Default
 // ========================================================================
 
@@ -1672,7 +2462,16 @@ async fn test_rfc9101_registration_rejects_pinned_alg_without_usable_key() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "jar-unusable-reg@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let body = serde_json::json!({
         "redirect_uris": ["https://example.com/callback"],
@@ -1708,7 +2507,16 @@ async fn test_rfc9101_registration_rejects_required_signing_without_any_key() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "jar-no-keys-reg@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let body = serde_json::json!({
         "redirect_uris": ["https://example.com/callback"],
@@ -1738,14 +2546,29 @@ async fn test_rfc9101_update_rejects_jwks_without_key_for_pinned_alg() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "jar-unusable-put@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let (client_id, reg_token, _pkcs8) =
         register_working_jar_client(&app, &state, &session_token, "JAR PUT App").await;
 
+    // RFC 7592 Section 2.2: "This request MUST include all client metadata fields as
+    // returned to the client from a previous registration, read, or update
+    // operation." The client keeps its Request Object commitment, so the
+    // replacement JWKS is checked against it.
     let put_body = serde_json::json!({
         "redirect_uris": ["https://example.com/callback"],
         "client_id": client_id,
+        "request_object_signing_alg": "ES256",
+        "require_signed_request_object": true,
         "jwks": rsa_only_jwks(),
     });
     let (put_status, put_resp) = http_put_json(
@@ -1766,12 +2589,79 @@ async fn test_rfc9101_update_rejects_jwks_without_key_for_pinned_alg() {
 }
 
 #[tokio::test]
+async fn test_rfc9101_update_omitting_signing_alg_drops_the_commitment() {
+    // RFC 7592 Section 2.2: "Omitted fields MUST be treated as null or empty values
+    // by the server, indicating the client's request to delete them from the
+    // client's registration." A PUT that drops both RFC 9101 fields drops the
+    // commitment, so a JWKS that could not satisfy it is no longer a conflict
+    // — and the client is left accepting unsigned authorization requests.
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "jar-drop-put@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let (client_id, reg_token, _pkcs8) =
+        register_working_jar_client(&app, &state, &session_token, "JAR Drop App").await;
+
+    let put_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_id": client_id,
+        "jwks": rsa_only_jwks(),
+    });
+    let (put_status, put_resp) = http_put_json(
+        &app,
+        &format!("/oauth/register/{client_id}"),
+        &put_body.to_string(),
+        &[("Authorization", &format!("Bearer {reg_token}"))],
+    )
+    .await;
+
+    assert_eq!(
+        put_status,
+        StatusCode::OK,
+        "a PUT omitting both RFC 9101 fields clears them, so the replacement JWKS \
+         has no pinned algorithm to be incompatible with. Got {put_status}: {put_resp}"
+    );
+
+    let stored = db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup ok")
+        .expect("client exists");
+    assert_eq!(
+        stored.request_object_signing_alg, None,
+        "request_object_signing_alg must be cleared by a PUT that omits it"
+    );
+    assert_eq!(
+        stored.require_signed_request_object, None,
+        "require_signed_request_object must be cleared by a PUT that omits it"
+    );
+}
+
+#[tokio::test]
 async fn test_rfc9101_update_accepts_jwks_with_key_for_pinned_alg() {
     // The rotation the check must not block: a new EC key, same pinned alg.
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "jar-rotate-put@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let (client_id, reg_token, _pkcs8) =
         register_working_jar_client(&app, &state, &session_token, "JAR Rotate App").await;
@@ -1780,6 +2670,8 @@ async fn test_rfc9101_update_accepts_jwks_with_key_for_pinned_alg() {
     let put_body = serde_json::json!({
         "redirect_uris": ["https://example.com/callback"],
         "client_id": client_id,
+        "request_object_signing_alg": "ES256",
+        "require_signed_request_object": true,
         "jwks": { "keys": [new_ec_jwk] },
     });
     let (put_status, put_resp) = http_put_json(
@@ -1803,14 +2695,23 @@ async fn test_rfc9101_admin_update_rejects_jwks_without_key_for_pinned_alg() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "jar-admin-patch@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let auth = format!("Bearer {session_token}");
 
     let (client_id, _reg_token, _pkcs8) =
         register_working_jar_client(&app, &state, &session_token, "Admin JAR App").await;
 
     // The admin API is keyed by the stored document id, not the client_id.
-    let app_id = crate::db::get_oauth_client_by_client_id(&state.store, &client_id)
+    let app_id = db::get_oauth_client_by_client_id(&state.store, &client_id)
         .await
         .expect("lookup ok")
         .expect("client exists")
@@ -1846,12 +2747,21 @@ async fn test_rfc9101_admin_update_form_rejects_jwks_without_key_for_pinned_alg(
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "jar-admin-form@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let (client_id, _reg_token, _pkcs8) =
         register_working_jar_client(&app, &state, &session_token, "Admin JAR Form App").await;
 
-    let app_id = crate::db::get_oauth_client_by_client_id(&state.store, &client_id)
+    let app_id = db::get_oauth_client_by_client_id(&state.store, &client_id)
         .await
         .expect("lookup ok")
         .expect("client exists")
@@ -1870,6 +2780,7 @@ async fn test_rfc9101_admin_update_form_rejects_jwks_without_key_for_pinned_alg(
         &[
             ("Cookie", &format!("__Host-vouch_session={session_token}")),
             ("Content-Type", "application/x-www-form-urlencoded"),
+            ("Origin", "https://test.example.com"),
         ],
     )
     .await;
@@ -1879,4 +2790,316 @@ async fn test_rfc9101_admin_update_form_rejects_jwks_without_key_for_pinned_alg(
         "the admin form must refuse a JWKS with no key usable for the pinned ES256. \
          Got {status}: {resp}"
     );
+}
+
+// ========================================================================
+// RFC 9101 Section 6.3 — request_uri error redirect echoes Request Object state
+// ========================================================================
+//
+// OIDC Core §6.2 / RFC 9101 §6.3: when a Request Object is fetched via an
+// HTTPS `request_uri`, the Request Object's parameters are the request's, even
+// if the same parameter is in the query. RFC 6749 §4.1.2.1 requires the error
+// response to echo the request's `state`. So when a fetched Request Object
+// passes JWT validation but fails `validate_authorize_request`, the error
+// redirect must carry the Request Object's `state` — not the query's. These
+// tests exercise that path end-to-end through a real HTTPS fetch of a signed
+// Request Object.
+
+/// Parse the `state` query parameter out of a redirect `Location` URL.
+fn location_state(location: &str) -> Option<String> {
+    let url = url::Url::parse(location).expect("Location is a valid URL");
+    url.query_pairs()
+        .find(|(k, _)| k == "state")
+        .map(|(_, v)| v.into_owned())
+}
+
+/// Build a Request Object whose `state` is `ro_state` and which otherwise has
+/// valid claims, but carries an unsupported `prompt`. `validate_request_object`
+/// copies `prompt` through unchecked, while `validate_authorize_request`
+/// rejects it via `PromptSet::parse` — so the Request Object reaches the
+/// `handle_request_uri_fetch` error path that echoes `state` (the same trigger
+/// the sibling JAR test `test_rfc9101_authorize_rejects_unsupported_prompt_in_request_object`
+/// uses for the `request=` flow).
+fn build_request_object_with_unsupported_prompt(
+    client_id: &str,
+    issuer: &str,
+    pkcs8_bytes: &[u8],
+    ro_state: &str,
+) -> String {
+    let now = jiff::Timestamp::now().as_second();
+    let claims = serde_json::json!({
+        "iss": client_id,
+        "aud": issuer,
+        "exp": now + 300,
+        "iat": now,
+        "response_type": "code",
+        "client_id": client_id,
+        "redirect_uri": "https://example.com/callback",
+        "scope": "openid",
+        "state": ro_state,
+        "code_challenge": sha256_base64url("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
+        "code_challenge_method": "S256",
+        "prompt": "x_vendor_ext"
+    });
+    build_request_object_with_claims(&claims, pkcs8_bytes)
+}
+
+/// The `request_uri`-fetch error path must echo the Request Object's `state`,
+/// not the query's. When the query omits `state` (the RFC 9101 §6.3 conformant
+/// construction) and a fetched Request Object passes JWT validation but fails
+/// `validate_authorize_request`, the error redirect must carry the Request
+/// Object's `state` rather than be empty (RFC 9101 §6.3 / RFC 6749 §4.1.2.1).
+#[tokio::test]
+async fn test_rfc9101_request_uri_error_redirect_echoes_request_object_state() {
+    let http_client = https_client_trusting_any_cert();
+    let (app, state) = test_app_with_http_client(http_client).await;
+
+    let user = create_test_user(&state.store, "jar-requri-state@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
+
+    let issuer = &state.config().base_url;
+    let ro_state = "ro-unique-state-abc123";
+    let request_jwt = build_request_object_with_unsupported_prompt(
+        &client.client_id,
+        issuer,
+        &pkcs8_bytes,
+        ro_state,
+    );
+    let request_uri = spawn_request_object_server(request_jwt).await;
+
+    // The query omits `state` — the RFC 9101 §6.3 conformant pattern: the
+    // Request Object carries it, the query does not.
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?client_id={}&request_uri={}",
+            client.client_id,
+            urlencoding::encode(&request_uri),
+        ),
+        &[],
+    )
+    .await;
+
+    assert!(
+        response.status == StatusCode::FOUND || response.status == StatusCode::SEE_OTHER,
+        "a fetched Request Object failing value validation should redirect with an error, \
+         got: {} body: {}",
+        response.status,
+        response.body,
+    );
+    let location = response
+        .headers
+        .get("Location")
+        .expect("error redirect has a Location header")
+        .to_str()
+        .expect("Location is ASCII");
+    assert!(
+        location.contains("error=invalid_request"),
+        "should redirect with error=invalid_request, got: {location}"
+    );
+    assert!(
+        !location.contains("code="),
+        "must not issue an authorization code: {location}"
+    );
+    assert_eq!(
+        location_state(location).as_deref(),
+        Some(ro_state),
+        "error redirect must echo the Request Object's `state` ({ro_state}), not be empty; \
+         got: {location}",
+    );
+}
+
+/// When the query carries a *different* `state` than the Request Object, RFC
+/// 9101 §6.3 says the Request Object's value wins. The error redirect must
+/// carry the Request Object's `state`, not the query's.
+#[tokio::test]
+async fn test_rfc9101_request_uri_error_redirect_prefers_request_object_state_over_query() {
+    let http_client = https_client_trusting_any_cert();
+    let (app, state) = test_app_with_http_client(http_client).await;
+
+    let user = create_test_user(&state.store, "jar-requri-qstate@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
+
+    let issuer = &state.config().base_url;
+    let ro_state = "ro-distinct-state-456";
+    let query_state = "query-different-state-789";
+    let request_jwt = build_request_object_with_unsupported_prompt(
+        &client.client_id,
+        issuer,
+        &pkcs8_bytes,
+        ro_state,
+    );
+    let request_uri = spawn_request_object_server(request_jwt).await;
+
+    // The query carries a *different* `state` than the Request Object.
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?client_id={}&state={}&request_uri={}",
+            client.client_id,
+            urlencoding::encode(query_state),
+            urlencoding::encode(&request_uri),
+        ),
+        &[],
+    )
+    .await;
+
+    assert!(
+        response.status == StatusCode::FOUND || response.status == StatusCode::SEE_OTHER,
+        "should redirect with an error, got: {} body: {}",
+        response.status,
+        response.body,
+    );
+    let location = response
+        .headers
+        .get("Location")
+        .expect("error redirect has a Location header")
+        .to_str()
+        .expect("Location is ASCII");
+    assert!(
+        location.contains("error=invalid_request"),
+        "should redirect with error=invalid_request, got: {location}"
+    );
+    assert_eq!(
+        location_state(location).as_deref(),
+        Some(ro_state),
+        "error redirect must echo the Request Object's `state` ({ro_state}), not the query's \
+         `state` ({query_state}); got: {location}",
+    );
+    assert_ne!(
+        location_state(location).as_deref(),
+        Some(query_state),
+        "error redirect must not echo the query's `state`; got: {location}",
+    );
+}
+
+// ========================================================================
+// RFC 7591 §2 — registered `response_types` on the JAR paths
+//
+// RFC 7591 §2 defines `response_types` as the "response type strings that
+// the client can use at the authorization endpoint". The `request` and
+// `request_uri` paths resolve the client separately from the plain-query
+// path, so each is pinned: a client registered with `response_types: []`
+// is refused with an `unauthorized_client` redirect (RFC 6749 §4.1.2.1) that
+// echoes the Request Object's `state`, and no code is issued.
+// ========================================================================
+
+/// A JAR client with a custom `response_types` registration.
+async fn create_test_jar_client_with_response_types(
+    store: &db::store::DocumentStore,
+    user_id: &str,
+    response_types: Vec<String>,
+) -> (TestOAuthClient, Vec<u8>) {
+    let (pkcs8_bytes, jwk) = generate_es256_signing_key();
+    let client = create_test_client(
+        store,
+        user_id,
+        TestClientSpec {
+            jwks: TestJwks::Custom(serde_json::json!({ "keys": [jwk] })),
+            response_types: Some(response_types),
+            ..Default::default()
+        },
+    )
+    .await;
+    (client, pkcs8_bytes)
+}
+
+fn assert_unauthorized_client_redirect(response: &HttpResponse) {
+    assert!(
+        response.status == StatusCode::FOUND || response.status == StatusCode::SEE_OTHER,
+        "a client not registered for 'code' must redirect with an error, got: {} body: {}",
+        response.status,
+        response.body,
+    );
+    let location = response
+        .headers
+        .get("Location")
+        .expect("error redirect has a Location header")
+        .to_str()
+        .expect("Location is ASCII");
+    assert!(
+        location.starts_with("https://example.com/callback"),
+        "error must go to the registered redirect_uri: {location}"
+    );
+    assert!(
+        location.contains("error=unauthorized_client"),
+        "RFC 6749 §4.1.2.1: expected error=unauthorized_client, got: {location}"
+    );
+    assert!(
+        !location.contains("code="),
+        "must not issue an authorization code: {location}"
+    );
+    // RFC 9101 §6.3: the Request Object's parameters are the request's,
+    // including the `state` the error response echoes.
+    assert_eq!(
+        location_state(location).as_deref(),
+        Some("jar-test-state"),
+        "error redirect must echo the Request Object's state: {location}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc9101_request_parameter_rejects_client_not_registered_for_code() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "jar-no-code@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) =
+        create_test_jar_client_with_response_types(&state.store, &user.id, vec![]).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let issuer = &state.config().base_url;
+    let request_jwt = build_request_object(&client.client_id, issuer, &pkcs8_bytes);
+
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?client_id={}&request={}",
+            client.client_id,
+            urlencoding::encode(&request_jwt),
+        ),
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+    )
+    .await;
+
+    assert_unauthorized_client_redirect(&response);
+}
+
+#[tokio::test]
+async fn test_rfc9101_request_uri_rejects_client_not_registered_for_code() {
+    let http_client = https_client_trusting_any_cert();
+    let (app, state) = test_app_with_http_client(http_client).await;
+
+    let user = create_test_user(&state.store, "jar-requri-no-code@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) =
+        create_test_jar_client_with_response_types(&state.store, &user.id, vec![]).await;
+
+    let issuer = &state.config().base_url;
+    let request_jwt = build_request_object(&client.client_id, issuer, &pkcs8_bytes);
+    let request_uri = spawn_request_object_server(request_jwt).await;
+
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?client_id={}&request_uri={}",
+            client.client_id,
+            urlencoding::encode(&request_uri),
+        ),
+        &[],
+    )
+    .await;
+
+    assert_unauthorized_client_redirect(&response);
 }

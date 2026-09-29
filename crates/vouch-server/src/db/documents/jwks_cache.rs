@@ -45,6 +45,10 @@ impl JwksCacheDoc {
 
     /// Age of the cache in seconds (saturating at 0).
     #[must_use]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "measures cache age for a refetch decision, not a request one"
+    )]
     pub fn age_seconds(&self) -> i64 {
         Timestamp::now()
             .as_second()

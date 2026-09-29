@@ -216,6 +216,10 @@ impl ActivityId {
         id: 99,
         name: "Identity Bound",
     };
+    const KEY_RENAMED: Self = Self {
+        id: 99,
+        name: "Key Renamed",
+    };
 
     // Authorize Session (3003)
     const ASSIGN_PRIVILEGES: Self = Self {
@@ -324,6 +328,15 @@ fn ocsf_class(kind: AuditEventKind) -> OcsfMapping {
         }
         AuditEventKind::KeyRemoved => {
             OcsfMapping::new(ClassUid::AccountChange, ActivityId::MFA_FACTOR_DISABLE)
+        }
+        // A rename mutates an MFA factor's metadata (its user-settable
+        // label), not its lifecycle. OCSF's Account Change class defines
+        // no "MFA Factor Update" activity, so this falls back to the
+        // `activity_id: 99` "Other" escape hatch with a source-specific
+        // label, matching how the codebase handles other account-change
+        // updates without a predefined activity (AdminPromote, etc.).
+        AuditEventKind::KeyRenamed => {
+            OcsfMapping::new(ClassUid::AccountChange, ActivityId::KEY_RENAMED)
         }
         AuditEventKind::KeyRegistrationReplay => {
             OcsfMapping::new(ClassUid::AccountChange, ActivityId::MFA_FACTOR_ENABLE)
@@ -530,6 +543,13 @@ pub(crate) fn parse_event_data(data: &str) -> RawOrValue {
     }
 }
 
+/// The top-level `refusal` member an event's `data` carries when the action
+/// it records was refused.
+#[derive(serde::Deserialize)]
+struct RefusalMarker {
+    refusal: Option<String>,
+}
+
 /// Project a stored [`AuditEvent`] into its OCSF representation.
 ///
 /// Never fails: an `event_type` that doesn't match a registered
@@ -569,7 +589,14 @@ pub(crate) fn to_ocsf(event: &AuditEvent) -> OcsfEvent {
         };
     };
 
-    let mapping = ocsf_class(kind);
+    // A refused action (e.g. the last-admin floor) records under the kind of
+    // the action it attempted, so the kind alone would report it as done.
+    let mapping =
+        if serde_json::from_str::<RefusalMarker>(&event.data).is_ok_and(|m| m.refusal.is_some()) {
+            ocsf_class(kind).failure()
+        } else {
+            ocsf_class(kind)
+        };
     let class_uid = mapping.class.value();
     let type_uid = u32::from(class_uid)
         .saturating_mul(100)
@@ -617,6 +644,8 @@ pub(crate) fn to_ocsf(event: &AuditEvent) -> OcsfEvent {
 )]
 mod tests {
     use super::*;
+    use crate::db::documents::audit::AdminMemberActionData;
+    use crate::db::{Refusal, ScimAuditData};
     use jiff::Timestamp;
 
     fn sample_event(kind: AuditEventKind, data: &str) -> AuditEvent {
@@ -740,6 +769,42 @@ mod tests {
         assert_eq!(ocsf.severity_id.value(), SeverityId::Medium.value());
     }
 
+    #[test]
+    fn refused_admin_removal_reports_failure_status() {
+        let data = |refusal| {
+            serde_json::to_string(&AdminMemberActionData {
+                action: "remove_user",
+                target_user_id: "u-target",
+                admin_user_id: "u-admin",
+                keys_revoked: None,
+                refusal,
+            })
+            .unwrap()
+        };
+        let refused = to_ocsf(&sample_event(
+            AuditEventKind::AdminRemoveUser,
+            &data(Some(Refusal::LastAdmin)),
+        ));
+        assert_eq!(refused.status_id.value(), StatusId::Failure.value());
+        let removed = to_ocsf(&sample_event(AuditEventKind::AdminRemoveUser, &data(None)));
+        assert_eq!(removed.status_id.value(), StatusId::Success.value());
+    }
+
+    #[test]
+    fn refused_scim_delete_reports_failure_status() {
+        let data = serde_json::to_string(&ScimAuditData {
+            operation: "delete",
+            resource_type: "User",
+            resource_id: "u-target",
+            actor_token_id: None,
+            details: Some(r#"{"accessRevoked":true,"deleted":false}"#),
+            refusal: Some(Refusal::LastAdmin),
+        })
+        .unwrap();
+        let ocsf = to_ocsf(&sample_event(AuditEventKind::ScimOperation, &data));
+        assert_eq!(ocsf.status_id.value(), StatusId::Failure.value());
+    }
+
     /// OCSF 1.9.0: when `activity_id` is `99` (Other), `activity_name`
     /// **must** carry a source-specific label (not the literal "Other"),
     /// and we additionally preserve the original `event_type` in
@@ -747,7 +812,7 @@ mod tests {
     /// OCSF classification layer without parsing the opaque `data` blob.
     #[test]
     fn activity_id_99_events_have_source_specific_name_and_unmapped_event_type() {
-        let cases: [(AuditEventKind, u16, &str); 5] = [
+        let cases: [(AuditEventKind, u16, &str); 6] = [
             (AuditEventKind::AdminPromote, 3001, "Admin Promote"),
             (AuditEventKind::AdminDemote, 3001, "Admin Demote"),
             (
@@ -761,6 +826,7 @@ mod tests {
                 "OAuth Token Revoked",
             ),
             (AuditEventKind::ScimOperation, 3004, "SCIM Operation"),
+            (AuditEventKind::KeyRenamed, 3001, "Key Renamed"),
         ];
 
         for (kind, expected_class_uid, expected_activity_name) in cases {

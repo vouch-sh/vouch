@@ -64,6 +64,10 @@
             {% endif %}
         </form>
 
+        {% if let Some(err) = filter_error %}
+        <div class="mb-4 px-4 py-3 rounded bg-red-900/30 border border-red-800 text-red-300 text-sm" role="alert">{{ err }}</div>
+        {% endif %}
+
         <div class="bg-vouch-surface border border-vouch-border rounded-lg overflow-hidden">
             <table class="w-full text-sm">
                 <thead>

@@ -21,10 +21,11 @@ use crate::AppState;
 use crate::crypto::alg::JwsAlgorithm;
 use crate::crypto::{generate_random_bytes, hash_token};
 use crate::db::{
-    self, CreateOAuthClientParams, FapiProfile, OAuthClient, OAuthClientType, OAuthEventType,
-    RegistrationSource, TokenEndpointAuthMethod, UpdateClientRegistrationParams,
+    self, ClientKeys, CreateOAuthClientParams, FapiProfile, KeyType, OAuthClient, OAuthClientType,
+    OAuthEventType, RegistrationSource, TokenEndpointAuthMethod, UpdateClientRegistrationParams,
 };
 use crate::error::{OAuthErrorCode, ServiceError};
+use crate::services::oidc::SUPPORTED_RESPONSE_TYPES;
 use crate::services::oidc::grant_type::OAuthGrantType;
 use axum::http::StatusCode;
 use base64::Engine;
@@ -33,6 +34,7 @@ use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
+use vouch_common::protocol::{GRANT_TYPE_AUTHORIZATION_CODE, GRANT_TYPE_CLIENT_CREDENTIALS};
 
 // ============================================================================
 // Allowed Grant and Response Types
@@ -88,6 +90,7 @@ pub struct RegistrationRequest {
     /// RFC 7591 Section 2: Array of OAuth 2.0 response type strings.
     pub response_types: Option<Vec<String>>,
     /// RFC 7591 Section 2: Human-readable name of the client.
+    #[serde(default, deserialize_with = "empty_string_as_none")]
     pub client_name: Option<String>,
     /// RFC 7591 Section 2: URL of the client's home page.
     pub client_uri: Option<String>,
@@ -98,6 +101,7 @@ pub struct RegistrationRequest {
     /// RFC 7591 Section 2: URL of the client's privacy policy.
     pub policy_uri: Option<String>,
     /// RFC 7591 Section 2: Space-delimited scope string.
+    #[serde(default, deserialize_with = "empty_string_as_none")]
     pub scope: Option<String>,
     /// RFC 7591 Section 2: Array of contact email addresses.
     pub contacts: Option<Vec<String>>,
@@ -106,22 +110,29 @@ pub struct RegistrationRequest {
     /// RFC 7591 Section 2: URL for the client's JSON Web Key Set.
     pub jwks_uri: Option<String>,
     /// RFC 7591 Section 2: Unique identifier for the client software.
+    #[serde(default, deserialize_with = "empty_string_as_none")]
     pub software_id: Option<String>,
     /// RFC 7591 Section 2: Version of the client software.
+    #[serde(default, deserialize_with = "empty_string_as_none")]
     pub software_version: Option<String>,
     /// FAPI 2.0: Whether access tokens must be DPoP-bound.
     pub dpop_bound_access_tokens: Option<bool>,
     /// OIDC Core Section 3.1.3.7: ID token signing algorithm.
     pub id_token_signed_response_alg: Option<String>,
-    /// RFC 8705 Section 2.1.1: subject DN for tls_client_auth.
+    /// RFC 8705 Section 2.1.2: subject DN for tls_client_auth.
+    #[serde(default, deserialize_with = "empty_string_as_none")]
     pub tls_client_auth_subject_dn: Option<String>,
-    /// RFC 8705 Section 2.1.1: SAN DNS name for tls_client_auth.
+    /// RFC 8705 Section 2.1.2: SAN DNS name for tls_client_auth.
+    #[serde(default, deserialize_with = "empty_string_as_none")]
     pub tls_client_auth_san_dns: Option<String>,
-    /// RFC 8705 Section 2.1.1: SAN URI for tls_client_auth.
+    /// RFC 8705 Section 2.1.2: SAN URI for tls_client_auth.
+    #[serde(default, deserialize_with = "empty_string_as_none")]
     pub tls_client_auth_san_uri: Option<String>,
-    /// RFC 8705 Section 2.1.1: SAN IP for tls_client_auth.
+    /// RFC 8705 Section 2.1.2: SAN IP for tls_client_auth.
+    #[serde(default, deserialize_with = "empty_string_as_none")]
     pub tls_client_auth_san_ip: Option<String>,
-    /// RFC 8705 Section 2.1.1: SAN email for tls_client_auth.
+    /// RFC 8705 Section 2.1.2: SAN email for tls_client_auth.
+    #[serde(default, deserialize_with = "empty_string_as_none")]
     pub tls_client_auth_san_email: Option<String>,
     /// RFC 8705 Section 3: certificate-bound access tokens.
     pub tls_client_certificate_bound_access_tokens: Option<bool>,
@@ -144,6 +155,42 @@ pub struct RegistrationRequest {
     /// When present, only these URIs are accepted as `post_logout_redirect_uri` in
     /// the end-session request. Absent means no redirect-back after logout.
     pub post_logout_redirect_uris: Option<Vec<String>>,
+}
+
+/// Deserialize an optional string, reading an empty value as absent.
+///
+/// RFC 7591 is silent here: its JSON body has no counterpart to RFC 6749 §3.1
+/// and §3.2's "Parameters sent without a value MUST be treated as if they were
+/// omitted from the request", which
+/// [`crate::handlers::extractors::OAuthForm`] applies to the form-encoded
+/// endpoints. So the choice is ours, and it is made the same way: a stored
+/// empty string is a third state next to "absent" and "set" that means nothing
+/// the two do not, so the field is not stored at all.
+///
+/// Carried by the fields where an empty value would otherwise be persisted:
+/// the RFC 8705 §2.1.2 certificate-subject parameters, where an empty string
+/// matches no certificate and would satisfy the exactly-one rule with a value
+/// that still leaves the client unable to authenticate; and `client_name`,
+/// `scope`, `software_id`, and `software_version`, which have no validator to
+/// pass. An emptied `client_name` therefore takes the same
+/// `"Unnamed Client"` fallback an omitted one does, and the other three go to
+/// NULL — `software_id` is indexed, so this also keeps an empty key out of the
+/// index.
+///
+/// The remaining metadata fields keep serde's plain `Option<String>`, because
+/// an empty value there already reaches a validator that rejects it outright
+/// (an empty `logo_uri` is not a valid HTTPS URL, an empty `application_type`
+/// is not "native" or "web", an empty signing algorithm is not a supported
+/// one). Reading those as absent would turn an explicit
+/// `invalid_client_metadata` into a silent default and hide the client's bug.
+///
+/// A whitespace-only value stays present, matching the form-encoded rule that
+/// reads `%20` as a value rather than as nothing.
+fn empty_string_as_none<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?.filter(|s| !s.is_empty()))
 }
 
 impl RegistrationRequest {
@@ -172,7 +219,12 @@ impl RegistrationRequest {
                 serde_json::Value::String(v.clone()),
             );
         }
-        if let Some(ref v) = self.contacts {
+        // An empty list carries nothing an absent key does not, so it is not
+        // stored. Individual empty members never reach here: an address without
+        // an `@` is refused by `validate_contacts_and_uris`.
+        if let Some(ref v) = self.contacts
+            && !v.is_empty()
+        {
             metadata.insert(
                 "contacts".to_string(),
                 serde_json::Value::Array(
@@ -246,6 +298,24 @@ pub struct RegistrationResponse {
     pub software_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dpop_bound_access_tokens: Option<bool>,
+    /// RFC 8705 §3: certificate-bound access tokens.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls_client_certificate_bound_access_tokens: Option<bool>,
+    /// RFC 8705 §2.1.2: certificate subject DN for tls_client_auth.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls_client_auth_subject_dn: Option<String>,
+    /// RFC 8705 §2.1.2: SAN DNS name for tls_client_auth.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls_client_auth_san_dns: Option<String>,
+    /// RFC 8705 §2.1.2: SAN URI for tls_client_auth.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls_client_auth_san_uri: Option<String>,
+    /// RFC 8705 §2.1.2: SAN IP for tls_client_auth.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls_client_auth_san_ip: Option<String>,
+    /// RFC 8705 §2.1.2: SAN email for tls_client_auth.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls_client_auth_san_email: Option<String>,
     /// OIDC: Algorithm used for signing ID tokens.
     pub id_token_signed_response_alg: String,
     /// JARM: signing algorithm for authorization responses.
@@ -303,6 +373,18 @@ impl std::fmt::Debug for RegistrationResponse {
             .field("software_version", &self.software_version)
             .field("dpop_bound_access_tokens", &self.dpop_bound_access_tokens)
             .field(
+                "tls_client_certificate_bound_access_tokens",
+                &self.tls_client_certificate_bound_access_tokens,
+            )
+            .field(
+                "tls_client_auth_subject_dn",
+                &self.tls_client_auth_subject_dn,
+            )
+            .field("tls_client_auth_san_dns", &self.tls_client_auth_san_dns)
+            .field("tls_client_auth_san_uri", &self.tls_client_auth_san_uri)
+            .field("tls_client_auth_san_ip", &self.tls_client_auth_san_ip)
+            .field("tls_client_auth_san_email", &self.tls_client_auth_san_email)
+            .field(
                 "id_token_signed_response_alg",
                 &self.id_token_signed_response_alg,
             )
@@ -353,6 +435,7 @@ pub async fn register_client(
     state: &Arc<AppState>,
     mut request: RegistrationRequest,
     authenticated_user_id: Option<&str>,
+    client_info: &db::ClientInfo,
 ) -> Result<RegistrationResponse, ServiceError> {
     // 1. Validate grant/response types, apply defaults, check consistency
     let validated = validate_grant_and_response_types(&mut request)?;
@@ -361,6 +444,18 @@ pub async fn register_client(
     // because the application type decides whether a custom URI scheme may be
     // registered, and inferring that type needs the auth method.
     let jwks_auth = validate_jwks_and_auth_method(&mut request, &validated.auth_method_str)?;
+    // RFC 7591 §2: "The authorization server MAY reject any requested client
+    // metadata values ... by returning an error response as described in
+    // Section 3.2.2." Without client CAs a `tls_client_auth` client could
+    // never authenticate, so it is refused rather than registered.
+    if jwks_auth.auth_method == TokenEndpointAuthMethod::TlsClientAuth
+        && state.client_cert_trust.is_none()
+    {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidClientMetadata,
+            "tls_client_auth is not enabled on this server",
+        ));
+    }
 
     // 7. Resolve the application type, then validate redirect URIs against it.
     let app_type = resolve_client_type(
@@ -396,161 +491,38 @@ pub async fn register_client(
                 "FAPI 2.0 requires jwks or jwks_uri",
             ));
         }
-        // Only for private_key_jwt: its JWKS carries client-assertion signing
-        // keys, so an inline JWKS must have at least one key usable with
-        // FAPI_ALLOWED (ES256/PS256/EdDSA) — see JwkSet::has_fapi_allowed_key.
-        // Without this, a client could register as FAPI 2.0 with an
-        // RS256-only JWKS and be unable to authenticate at the token endpoint
-        // from the start. tls_client_auth/self_signed_tls_client_auth JWKS
-        // conveys certificates via x5c instead (RFC 8705 §2.2.2), so this
-        // check does not apply to them.
-        if jwks_auth.auth_method == TokenEndpointAuthMethod::PrivateKeyJwt
-            && let Some(jwks) = jwks_auth
-                .keys
-                .as_ref()
-                .and_then(crate::db::ClientKeys::inline)
-            && !jwks.has_fapi_allowed_key()
-        {
-            return Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidClientMetadata,
-                "FAPI 2.0 requires a JWKS key usable with ES256, PS256, or EdDSA",
-            ));
-        }
         FapiProfile::Fapi2Security
     } else {
         FapiProfile::None
     };
 
-    // OIDC Core Section 3.1.3.7: Default is RS256, but fall back to ES256 if no RSA key.
-    let explicit_alg: Option<JwsAlgorithm> =
-        if let Some(ref s) = request.id_token_signed_response_alg {
-            let parsed = s.parse::<JwsAlgorithm>().map_err(|_| {
-                ServiceError::oauth(
-                    OAuthErrorCode::InvalidClientMetadata,
-                    format!(
-                        "Unsupported id_token_signed_response_alg: '{s}'. \
-                     Supported: RS256, ES256"
-                    ),
-                )
-            })?;
-            // Only RS256 and ES256 are accepted for ID tokens.
-            if !matches!(parsed, JwsAlgorithm::Rs256 | JwsAlgorithm::Es256) {
-                return Err(ServiceError::oauth(
-                    OAuthErrorCode::InvalidClientMetadata,
-                    format!(
-                        "Unsupported id_token_signed_response_alg: '{s}'. \
-                     Supported: RS256, ES256"
-                    ),
-                ));
-            }
+    // Only for private_key_jwt: its JWKS carries client-assertion signing
+    // keys, so an inline JWKS must hold at least one key usable with the
+    // profile's allowlist — see JwkSet::has_client_assertion_key. Without
+    // this, a client could register with an RS256-only JWKS as FAPI 2.0, or
+    // an encryption-only JWKS on either profile, and be unable to
+    // authenticate at the token endpoint from the start.
+    // tls_client_auth/self_signed_tls_client_auth JWKS conveys certificates
+    // via x5c instead (RFC 8705 §2.2.2), so this check does not apply to
+    // them. A remote jwks_uri can't be inspected synchronously.
+    if jwks_auth.auth_method == TokenEndpointAuthMethod::PrivateKeyJwt
+        && let Some(jwks) = jwks_auth.keys.as_ref().and_then(ClientKeys::inline)
+        && !jwks.has_client_assertion_key(fapi_profile)
+    {
+        return Err(no_client_assertion_key(fapi_profile));
+    }
 
-            // FAPI 2.0 Section 5.4: RS256 is not permitted for FAPI clients.
-            reject_rs256_for_fapi(parsed, fapi_profile, "id_token_signed_response_alg")?;
-
-            // If RS256 is explicitly requested but no RSA key is configured, reject.
-            // An unspecified algorithm falls back to ES256 automatically (see below).
-            if parsed == JwsAlgorithm::Rs256 && state.oidc_rsa_key.is_none() {
-                return Err(ServiceError::oauth(
-                    OAuthErrorCode::InvalidClientMetadata,
-                    "RS256 is not available (no RSA signing key configured)",
-                ));
-            }
-
-            Some(parsed)
-        } else {
-            None
-        };
-
-    // When the client didn't specify, use RS256 if available, otherwise ES256.
-    // FAPI 2.0 Section 5.4: FAPI clients always use ES256.
-    let id_token_alg = if fapi_profile != FapiProfile::None {
-        JwsAlgorithm::Es256
-    } else {
-        explicit_alg.unwrap_or_else(|| {
-            if state.oidc_rsa_key.is_some() {
-                JwsAlgorithm::Rs256
-            } else {
-                JwsAlgorithm::Es256
-            }
-        })
-    };
-
-    // 12b. Validate authorization_signed_response_alg (JARM).
-    // Serde rejects "none" and symmetric (HS*) algorithms since they are not
-    // valid JwsAlgorithm variants. Only RS256 and ES256 are accepted for JARM.
-    let jarm_alg: Option<JwsAlgorithm> =
-        if let Some(ref s) = request.authorization_signed_response_alg {
-            let parsed = s.parse::<JwsAlgorithm>().map_err(|_| {
-                ServiceError::oauth(
-                    OAuthErrorCode::InvalidClientMetadata,
-                    format!(
-                        "Unsupported authorization_signed_response_alg: '{s}'. \
-                     Must be an asymmetric algorithm such as RS256 or ES256"
-                    ),
-                )
-            })?;
-            // Only RS256 and ES256 are accepted for JARM responses.
-            if !matches!(parsed, JwsAlgorithm::Rs256 | JwsAlgorithm::Es256) {
-                return Err(ServiceError::oauth(
-                    OAuthErrorCode::InvalidClientMetadata,
-                    format!(
-                        "Unsupported authorization_signed_response_alg: '{s}'. \
-                     Supported: RS256, ES256"
-                    ),
-                ));
-            }
-            // FAPI 2.0 Section 5.4.1: RS256 is not permitted for FAPI clients.
-            reject_rs256_for_fapi(parsed, fapi_profile, "authorization_signed_response_alg")?;
-            if parsed == JwsAlgorithm::Rs256 && state.oidc_rsa_key.is_none() {
-                return Err(ServiceError::oauth(
-                    OAuthErrorCode::InvalidClientMetadata,
-                    "RS256 is not available for authorization_signed_response_alg \
-                 (no RSA signing key configured)",
-                ));
-            }
-            Some(parsed)
-        } else {
-            None
-        };
-
-    // 12c. Validate introspection_signed_response_alg (RFC 9701).
-    // Only ES256 is supported — the server's primary P-256 ECDSA key.
-    let introspection_alg: Option<JwsAlgorithm> =
-        if let Some(ref s) = request.introspection_signed_response_alg {
-            let parsed = s.parse::<JwsAlgorithm>().map_err(|_| {
-                ServiceError::oauth(
-                    OAuthErrorCode::InvalidClientMetadata,
-                    format!(
-                        "Unsupported introspection_signed_response_alg: '{s}'. \
-                     Supported: ES256"
-                    ),
-                )
-            })?;
-            if parsed != JwsAlgorithm::Es256 {
-                return Err(ServiceError::oauth(
-                    OAuthErrorCode::InvalidClientMetadata,
-                    format!(
-                        "Unsupported introspection_signed_response_alg: '{s}'. \
-                     Supported: ES256"
-                    ),
-                ));
-            }
-            Some(parsed)
-        } else {
-            None
-        };
-
-    // 12c-2. Validate userinfo_signed_response_alg (OIDC Core Section 5.3.4).
+    // 12b. Validate the signed-response algorithms (OIDC Core §3.1.3.7 and
+    // §5.3.4, JARM §2.3.2, RFC 9701 §6.1).
     let rsa_key = if state.oidc_rsa_key.is_some() {
         RsaSigningKey::Available
     } else {
         RsaSigningKey::Unavailable
     };
-    let userinfo_alg = validate_userinfo_signed_response_alg(
-        request.userinfo_signed_response_alg.as_deref(),
-        rsa_key,
-        fapi_profile,
-    )?;
+    let algs = validate_signed_response_algs(&request, rsa_key, fapi_profile)?;
+    // A new client that names no algorithm gets the server default.
+    let id_token_alg =
+        resolve_id_token_alg(algs.id_token, fapi_profile, default_id_token_alg(rsa_key));
 
     // 12b-2. Validate request_uris (OIDC Core Section 6.2).
     let validated_request_uris = validate_request_uris(request.request_uris.as_deref())?;
@@ -560,72 +532,16 @@ pub async fn register_client(
         request.post_logout_redirect_uris.as_deref(),
     )?;
 
-    // 12d. Validate request_object_signing_alg (RFC 9101).
-    let req_obj_alg: Option<JwsAlgorithm> = if let Some(ref s) = request.request_object_signing_alg
-    {
-        let parsed = s.parse::<JwsAlgorithm>().map_err(|_| {
-            ServiceError::oauth(
-                OAuthErrorCode::InvalidClientMetadata,
-                format!("Unsupported request_object_signing_alg: '{s}'"),
-            )
-        })?;
-        // FAPI 2.0 Section 5.4: RS256 is not permitted for FAPI clients.
-        reject_rs256_for_fapi(parsed, fapi_profile, "request_object_signing_alg")?;
-        Some(parsed)
-    } else {
-        None
-    };
-
-    // Determine require_signed_request_object:
-    // - Explicit request value takes precedence
-    // - FAPI 2.0 Message Signing requires signed request objects (JAR/RFC 9101)
-    //   only when the client registers a request_object_signing_alg
-    // - FAPI 2.0 Security Profile uses unsigned PAR (RFC 9126) without JAR
-    let require_signed = request
-        .require_signed_request_object
-        .unwrap_or(fapi_profile != FapiProfile::None && req_obj_alg.is_some());
-
-    // 12e. A client that commits to Request Objects needs key material the
-    // verifier can select for them. RFC 9101 §6.2 governs the runtime side —
-    // "The signature MUST be validated using a key associated with the client
-    // and the algorithm specified in the 'alg' Header Parameter" — and is
-    // silent on whether an unsatisfiable registration must be refused; this
-    // refuses it for the same reason JwkSet::has_fapi_allowed_key and
-    // JwkSet::has_x5c refuse theirs. Accepted unchecked, the pairing leaves the
-    // client unable to reach the authorization endpoint at all: the signed
-    // path fails key resolution, and require_signed_request_object refuses
-    // the plain one. `require_signed_request_object` commits a client to
-    // signing without necessarily naming an algorithm, hence the separate
-    // presence check.
-    if require_signed || req_obj_alg.is_some() {
-        if jwks_auth.keys.is_none() {
-            return Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidClientMetadata,
-                "A client registering request_object_signing_alg or \
-                 require_signed_request_object must also register jwks or jwks_uri",
-            ));
-        }
-        // A remote jwks_uri can't be inspected synchronously, so the
-        // per-algorithm check only guards the inline case.
-        if let Some(alg) = req_obj_alg
-            && let Some(jwks) = jwks_auth
-                .keys
-                .as_ref()
-                .and_then(crate::db::ClientKeys::inline)
-            && !jwks.has_key_for(alg)
-        {
-            return Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidClientMetadata,
-                format!(
-                    "The submitted jwks holds no key usable for \
-                     request_object_signing_alg '{alg}'; it needs a key of type \
-                     {} whose alg (if declared) is '{alg}' and whose use (if \
-                     declared) is 'sig'",
-                    crate::db::KeyType::for_alg(alg)
-                ),
-            ));
-        }
-    }
+    // 12d. Validate the RFC 9101 Request Object commitment against the key
+    // material this request carries. Shared with the update path.
+    let request_object = validate_request_object_signing(
+        request.request_object_signing_alg.as_deref(),
+        request.require_signed_request_object,
+        fapi_profile,
+        jwks_auth.keys.as_ref(),
+    )?;
+    let req_obj_alg = request_object.alg;
+    let require_signed = request_object.require_signed;
 
     // Build the client name (fallback to software_id or "Unnamed Client")
     let client_name = request.client_name.as_deref().unwrap_or("Unnamed Client");
@@ -672,11 +588,11 @@ pub async fn register_client(
             tls_client_auth_san_email: request.tls_client_auth_san_email.as_deref(),
             tls_client_certificate_bound_access_tokens: request
                 .tls_client_certificate_bound_access_tokens,
-            authorization_signed_response_alg: jarm_alg,
-            introspection_signed_response_alg: introspection_alg,
+            authorization_signed_response_alg: algs.authorization,
+            introspection_signed_response_alg: algs.introspection,
             request_object_signing_alg: req_obj_alg,
             require_signed_request_object: if require_signed { Some(true) } else { None },
-            userinfo_signed_response_alg: userinfo_alg,
+            userinfo_signed_response_alg: algs.userinfo,
             request_uris: validated_request_uris.clone(),
             post_logout_redirect_uris: validated_post_logout_redirect_uris.clone(),
         },
@@ -695,11 +611,27 @@ pub async fn register_client(
         ServiceError::Internal("Failed to create client".to_string())
     })?;
 
-    // 16. Generate client_secret for confidential clients
-    let client_secret = if matches!(
-        jwks_auth.auth_method,
-        TokenEndpointAuthMethod::ClientSecretBasic | TokenEndpointAuthMethod::ClientSecretPost
-    ) {
+    // 16. Record audit event — the client row is committed, so its audit row
+    // is written before the fallible secret-generation step below; a secret
+    // failure must not leave a registered client with no `ClientRegistered`
+    // event.
+    let base_url = &state.config().base_url;
+    db::record_oauth_event(
+        &state.audit,
+        &state.store,
+        &db::RecordOAuthEventParams {
+            oauth_client_id: &client.id,
+            event_type: OAuthEventType::ClientRegistered,
+            user_id: authenticated_user_id,
+            client: client_info,
+            details: Some("RFC 7591 dynamic registration"),
+            org_domain: db::RecordedOrgDomain::Unresolved,
+        },
+    )
+    .await;
+
+    // 17. Generate client_secret for confidential clients
+    let client_secret = if jwks_auth.auth_method.uses_client_secret() {
         let secret_bytes = generate_random_bytes(SECRET_LENGTH)
             .map_err(|_| ServiceError::Internal("Failed to generate client secret".to_string()))?;
         let secret = format!("vouch_{}", URL_SAFE_NO_PAD.encode(secret_bytes));
@@ -718,22 +650,6 @@ pub async fn register_client(
     } else {
         None
     };
-
-    // 17. Record audit event
-    let base_url = &state.config().base_url;
-    db::record_oauth_event(
-        &state.audit,
-        &state.store,
-        &db::RecordOAuthEventParams {
-            oauth_client_id: &client.id,
-            event_type: OAuthEventType::ClientRegistered,
-            user_id: authenticated_user_id,
-            ip_address: None,
-            user_agent: None,
-            details: Some("RFC 7591 dynamic registration"),
-        },
-    )
-    .await;
 
     // Derive client_id_issued_at from created_at
     let client_id_issued_at = client.created_at.as_second();
@@ -775,22 +691,28 @@ pub async fn register_client(
         jwks: jwks_auth
             .keys
             .as_ref()
-            .and_then(crate::db::ClientKeys::inline)
+            .and_then(ClientKeys::inline)
             .and_then(|set| serde_json::to_value(set).ok()),
         jwks_uri: jwks_auth
             .keys
             .as_ref()
-            .and_then(crate::db::ClientKeys::uri)
+            .and_then(ClientKeys::uri)
             .map(String::from),
         software_id: request.software_id,
         software_version: request.software_version,
         dpop_bound_access_tokens: if dpop_bound { Some(true) } else { None },
+        tls_client_certificate_bound_access_tokens: if cert_bound { Some(true) } else { None },
+        tls_client_auth_subject_dn: request.tls_client_auth_subject_dn,
+        tls_client_auth_san_dns: request.tls_client_auth_san_dns,
+        tls_client_auth_san_uri: request.tls_client_auth_san_uri,
+        tls_client_auth_san_ip: request.tls_client_auth_san_ip,
+        tls_client_auth_san_email: request.tls_client_auth_san_email,
         id_token_signed_response_alg: id_token_alg.to_string(),
-        authorization_signed_response_alg: jarm_alg.map(|a| a.to_string()),
-        introspection_signed_response_alg: introspection_alg.map(|a| a.to_string()),
+        authorization_signed_response_alg: algs.authorization.map(|a| a.to_string()),
+        introspection_signed_response_alg: algs.introspection.map(|a| a.to_string()),
         request_object_signing_alg: req_obj_alg.map(|a| a.to_string()),
         require_signed_request_object: if require_signed { Some(true) } else { None },
-        userinfo_signed_response_alg: userinfo_alg.map(|a| a.to_string()),
+        userinfo_signed_response_alg: algs.userinfo.map(|a| a.to_string()),
         request_uris: validated_request_uris,
         post_logout_redirect_uris: validated_post_logout_redirect_uris,
     })
@@ -873,11 +795,284 @@ fn validate_userinfo_signed_response_alg(
     }
 }
 
+/// Validate an explicit `id_token_signed_response_alg`.
+///
+/// Returns the parsed algorithm, or `None` when the field is absent — the
+/// caller supplies the fallback, because initial registration and an RFC 7592
+/// update fall back to different values. See [`resolve_id_token_alg`].
+fn validate_id_token_signed_response_alg(
+    raw: Option<&str>,
+    rsa_key: RsaSigningKey,
+    fapi_profile: FapiProfile,
+) -> Result<Option<JwsAlgorithm>, ServiceError> {
+    let Some(s) = raw else { return Ok(None) };
+    let unsupported = || {
+        ServiceError::oauth(
+            OAuthErrorCode::InvalidClientMetadata,
+            format!("Unsupported id_token_signed_response_alg: '{s}'. Supported: RS256, ES256"),
+        )
+    };
+    let parsed = s.parse::<JwsAlgorithm>().map_err(|_| unsupported())?;
+    // Only RS256 and ES256 are accepted for ID tokens.
+    if !matches!(parsed, JwsAlgorithm::Rs256 | JwsAlgorithm::Es256) {
+        return Err(unsupported());
+    }
+    // FAPI 2.0 Section 5.4: RS256 is not permitted for FAPI clients.
+    reject_rs256_for_fapi(parsed, fapi_profile, "id_token_signed_response_alg")?;
+    if parsed == JwsAlgorithm::Rs256 && rsa_key == RsaSigningKey::Unavailable {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidClientMetadata,
+            "RS256 is not available (no RSA signing key configured)",
+        ));
+    }
+    Ok(Some(parsed))
+}
+
+/// The ID token signing algorithm a client ends up with.
+///
+/// `fallback` is what an omitted field resolves to. The `id_token_signed_
+/// response_alg` column is non-nullable, so "omitted" has no cleared state to
+/// fall back to and each path picks its own:
+///
+/// * Initial registration falls back to the server default — OIDC Core
+///   §3.1.3.7 names RS256, and this server substitutes ES256 when it has no
+///   RSA signing key.
+/// * An RFC 7592 update falls back to the algorithm the client registered.
+///   §2.2 asks that an omitted field be deleted, but immediately allows the
+///   other reading: "The authorization server MAY ignore any null or empty
+///   value in the request just as any other value." Re-deriving the server
+///   default instead would move a client that chose ES256 onto RS256 on any
+///   PUT that did not restate the field — a silent downgrade of ID token
+///   signing, on a server that always has an RSA key available. Ignoring the
+///   omission is the conformant reading that does not weaken the client.
+///
+/// FAPI 2.0 §5.4 pins FAPI clients to ES256 either way.
+fn resolve_id_token_alg(
+    explicit: Option<JwsAlgorithm>,
+    fapi_profile: FapiProfile,
+    fallback: JwsAlgorithm,
+) -> JwsAlgorithm {
+    if fapi_profile != FapiProfile::None {
+        return JwsAlgorithm::Es256;
+    }
+    explicit.unwrap_or(fallback)
+}
+
+/// The ID token signing algorithm a new registration gets when it names none.
+///
+/// OIDC Core §3.1.3.7 names RS256 the default; ES256 stands in when the
+/// server has no RSA signing key.
+fn default_id_token_alg(rsa_key: RsaSigningKey) -> JwsAlgorithm {
+    match rsa_key {
+        RsaSigningKey::Available => JwsAlgorithm::Rs256,
+        RsaSigningKey::Unavailable => JwsAlgorithm::Es256,
+    }
+}
+
+/// Validate `authorization_signed_response_alg` (JARM §2.3.2).
+///
+/// Only RS256 and ES256 are accepted. Serde rejects "none" and the symmetric
+/// HS* algorithms before this point, since they are not `JwsAlgorithm`
+/// variants.
+///
+/// Returns the parsed algorithm, or `None` if the field is absent.
+fn validate_authorization_signed_response_alg(
+    raw: Option<&str>,
+    rsa_key: RsaSigningKey,
+    fapi_profile: FapiProfile,
+) -> Result<Option<JwsAlgorithm>, ServiceError> {
+    let Some(s) = raw else { return Ok(None) };
+    let parsed = s.parse::<JwsAlgorithm>().map_err(|_| {
+        ServiceError::oauth(
+            OAuthErrorCode::InvalidClientMetadata,
+            format!(
+                "Unsupported authorization_signed_response_alg: '{s}'. \
+                 Must be an asymmetric algorithm such as RS256 or ES256"
+            ),
+        )
+    })?;
+    if !matches!(parsed, JwsAlgorithm::Rs256 | JwsAlgorithm::Es256) {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidClientMetadata,
+            format!(
+                "Unsupported authorization_signed_response_alg: '{s}'. Supported: RS256, ES256"
+            ),
+        ));
+    }
+    // FAPI 2.0 Section 5.4.1: RS256 is not permitted for FAPI clients.
+    reject_rs256_for_fapi(parsed, fapi_profile, "authorization_signed_response_alg")?;
+    if parsed == JwsAlgorithm::Rs256 && rsa_key == RsaSigningKey::Unavailable {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidClientMetadata,
+            "RS256 is not available for authorization_signed_response_alg \
+             (no RSA signing key configured)",
+        ));
+    }
+    Ok(Some(parsed))
+}
+
+/// Validate `introspection_signed_response_alg` (RFC 9701 §6.1).
+///
+/// Only ES256 is supported — the server's primary P-256 ECDSA key.
+///
+/// Returns the parsed algorithm, or `None` if the field is absent.
+fn validate_introspection_signed_response_alg(
+    raw: Option<&str>,
+) -> Result<Option<JwsAlgorithm>, ServiceError> {
+    let Some(s) = raw else { return Ok(None) };
+    let unsupported = || {
+        ServiceError::oauth(
+            OAuthErrorCode::InvalidClientMetadata,
+            format!("Unsupported introspection_signed_response_alg: '{s}'. Supported: ES256"),
+        )
+    };
+    let parsed = s.parse::<JwsAlgorithm>().map_err(|_| unsupported())?;
+    if parsed != JwsAlgorithm::Es256 {
+        return Err(unsupported());
+    }
+    Ok(Some(parsed))
+}
+
+/// The signed-response algorithms a client registers.
+#[derive(Debug, Clone, Copy)]
+struct SignedResponseAlgs {
+    /// The explicitly requested value, if any. Unlike the other three, this
+    /// one has no cleared state, so the caller resolves an omission with
+    /// [`resolve_id_token_alg`].
+    id_token: Option<JwsAlgorithm>,
+    authorization: Option<JwsAlgorithm>,
+    introspection: Option<JwsAlgorithm>,
+    userinfo: Option<JwsAlgorithm>,
+}
+
+/// Validate every signed-response algorithm a registration request carries.
+///
+/// Shared by initial registration and the RFC 7592 update path, so an
+/// algorithm one accepts cannot be one the other rejects. `fapi_profile` is
+/// the profile the client will hold: derived from the request at registration,
+/// and the registered profile on an update, where it is immutable.
+fn validate_signed_response_algs(
+    request: &RegistrationRequest,
+    rsa_key: RsaSigningKey,
+    fapi_profile: FapiProfile,
+) -> Result<SignedResponseAlgs, ServiceError> {
+    Ok(SignedResponseAlgs {
+        id_token: validate_id_token_signed_response_alg(
+            request.id_token_signed_response_alg.as_deref(),
+            rsa_key,
+            fapi_profile,
+        )?,
+        authorization: validate_authorization_signed_response_alg(
+            request.authorization_signed_response_alg.as_deref(),
+            rsa_key,
+            fapi_profile,
+        )?,
+        introspection: validate_introspection_signed_response_alg(
+            request.introspection_signed_response_alg.as_deref(),
+        )?,
+        userinfo: validate_userinfo_signed_response_alg(
+            request.userinfo_signed_response_alg.as_deref(),
+            rsa_key,
+            fapi_profile,
+        )?,
+    })
+}
+
+/// A client's RFC 9101 Request Object commitment.
+#[derive(Debug, Clone, Copy)]
+struct RequestObjectSigning {
+    alg: Option<JwsAlgorithm>,
+    require_signed: bool,
+}
+
+/// Validate `request_object_signing_alg` and `require_signed_request_object`
+/// (RFC 9101) against the key material the same request carries.
+///
+/// A client that commits to Request Objects needs key material the verifier can
+/// select for them. RFC 9101 §6.2 governs the runtime side — "The signature
+/// MUST be validated using a key associated with the client and the algorithm
+/// specified in the 'alg' Header Parameter" — and is silent on whether an
+/// unsatisfiable registration must be refused; this refuses it for the same
+/// reason `JwkSet::has_client_assertion_key` and `JwkSet::has_x5c` refuse theirs.
+/// Accepted unchecked, the pairing leaves the client unable to reach the
+/// authorization endpoint at all: the signed path fails key resolution, and
+/// `require_signed_request_object` refuses the plain one.
+///
+/// Both values and the JWKS come from the same request, so this holds for an
+/// RFC 7592 PUT — a full replacement — as much as for initial registration.
+fn validate_request_object_signing(
+    raw_alg: Option<&str>,
+    raw_require_signed: Option<bool>,
+    fapi_profile: FapiProfile,
+    keys: Option<&ClientKeys>,
+) -> Result<RequestObjectSigning, ServiceError> {
+    let alg = match raw_alg {
+        None => None,
+        Some(s) => {
+            let parsed = s.parse::<JwsAlgorithm>().map_err(|_| {
+                ServiceError::oauth(
+                    OAuthErrorCode::InvalidClientMetadata,
+                    format!("Unsupported request_object_signing_alg: '{s}'"),
+                )
+            })?;
+            // FAPI 2.0 Section 5.4: RS256 is not permitted for FAPI clients.
+            reject_rs256_for_fapi(parsed, fapi_profile, "request_object_signing_alg")?;
+            Some(parsed)
+        }
+    };
+
+    // An explicit value wins. Otherwise FAPI 2.0 Message Signing requires
+    // signed request objects (JAR/RFC 9101) only once the client names a
+    // request_object_signing_alg; the FAPI 2.0 Security Profile uses unsigned
+    // PAR (RFC 9126) without JAR.
+    let require_signed =
+        raw_require_signed.unwrap_or(fapi_profile != FapiProfile::None && alg.is_some());
+
+    // `require_signed_request_object` commits a client to signing without
+    // necessarily naming an algorithm, hence the separate presence check.
+    if require_signed || alg.is_some() {
+        if keys.is_none() {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidClientMetadata,
+                "A client registering request_object_signing_alg or \
+                 require_signed_request_object must also register jwks or jwks_uri",
+            ));
+        }
+        // A remote jwks_uri can't be inspected synchronously, so the
+        // per-algorithm check only guards the inline case.
+        if let Some(alg) = alg
+            && let Some(jwks) = keys.and_then(ClientKeys::inline)
+            && !jwks.has_key_for(alg)
+        {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidClientMetadata,
+                format!(
+                    "The submitted jwks holds no key usable for \
+                     request_object_signing_alg '{alg}'; it needs a key of type \
+                     {} whose alg (if declared) is '{alg}' and whose use (if \
+                     declared) is 'sig'",
+                    KeyType::for_alg(alg)
+                ),
+            ));
+        }
+    }
+
+    Ok(RequestObjectSigning {
+        alg,
+        require_signed,
+    })
+}
+
 /// Validate `request_uris` — each must be HTTPS, max 10 entries.
 ///
 /// Returns the validated list, or `None` if the field is absent.
 fn validate_request_uris(uris: Option<&[String]>) -> Result<Option<Vec<String>>, ServiceError> {
     let Some(uris) = uris else { return Ok(None) };
+    // An empty allowlist is the same state as no allowlist, so it is not
+    // stored — as in `validate_post_logout_redirect_uris_registration`.
+    if uris.is_empty() {
+        return Ok(None);
+    }
     const MAX_REQUEST_URIS: usize = 10;
     if uris.len() > MAX_REQUEST_URIS {
         return Err(ServiceError::oauth(
@@ -966,14 +1161,18 @@ fn validate_grant_and_response_types(
         }
     }
 
+    // RFC 7591 §2: "If omitted, the default behavior is that the client will
+    // use only the `authorization_code` Grant Type." Materializing it here
+    // keeps the stored row explicit; `OAuthClient::is_authorized_for_grant`
+    // resolves an absent list to the same constant for rows written elsewhere.
     let grant_types = request
         .grant_types
         .take()
-        .unwrap_or_else(|| vec!["authorization_code".to_string()]);
+        .unwrap_or_else(|| vec![GRANT_TYPE_AUTHORIZATION_CODE.to_string()]);
     let response_types = request
         .response_types
         .take()
-        .unwrap_or_else(|| vec!["code".to_string()]);
+        .unwrap_or_else(|| vec![super::RESPONSE_TYPE_CODE.to_string()]);
     let auth_method_str = request
         .token_endpoint_auth_method
         .take()
@@ -989,7 +1188,7 @@ fn validate_grant_and_response_types(
         }
     }
     for rt in &response_types {
-        if !crate::services::oidc::SUPPORTED_RESPONSE_TYPES.contains(&rt.as_str()) {
+        if !SUPPORTED_RESPONSE_TYPES.contains(&rt.as_str()) {
             return Err(ServiceError::oauth(
                 OAuthErrorCode::InvalidClientMetadata,
                 format!("Unsupported response type: '{rt}'"),
@@ -1002,11 +1201,34 @@ fn validate_grant_and_response_types(
     } else {
         AuthorizationCodeGrant::Absent
     };
-    let has_code_response = response_types.iter().any(|r| r == "code");
+    // RFC 7591 §2: the two fields "are related in that the 'grant_types'
+    // available to a client influence the 'response_types' that the client is
+    // allowed to use, and vice versa", and a server supporting them "SHOULD
+    // take steps to ensure that a client cannot register itself into an
+    // inconsistent state". Table 1 pairs `authorization_code` with `code`, so
+    // the implication is checked in both directions — an unpaired
+    // `response_types: ["code"]` is the half that lets a client hold a
+    // redirect_uri it can never redeem a code against.
+    //
+    // Note the asymmetry in what an omitted field means: `grant_types`
+    // defaults to `["authorization_code"]` and `response_types` to `["code"]`,
+    // so the two defaults are consistent with each other. A client that wants
+    // neither — a machine-to-machine client using only `client_credentials` —
+    // has to say so by sending `"response_types": []`.
+    let has_code_response = response_types
+        .iter()
+        .any(|r| r == super::RESPONSE_TYPE_CODE);
     if auth_code_grant == AuthorizationCodeGrant::Present && !has_code_response {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClientMetadata,
             "grant_types includes 'authorization_code' but response_types is missing 'code'",
+        ));
+    }
+    if has_code_response && auth_code_grant == AuthorizationCodeGrant::Absent {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidClientMetadata,
+            "response_types includes 'code' but grant_types is missing 'authorization_code'; \
+             send \"response_types\": [] for a client that does not use the authorization code flow",
         ));
     }
 
@@ -1052,8 +1274,26 @@ fn validate_redirect_uris(
 #[derive(Debug)]
 struct ValidatedJwksAuth {
     /// RFC 7591 §2 key material, in whichever of the two forms was sent.
-    keys: Option<crate::db::ClientKeys>,
+    keys: Option<ClientKeys>,
     auth_method: TokenEndpointAuthMethod,
+}
+
+/// The `invalid_client_metadata` error for a `private_key_jwt` JWKS with no
+/// key usable under `profile`'s client-assertion allowlist, shared by
+/// registration (RFC 7591) and replacement (RFC 7592) so both name the same
+/// algorithms.
+fn no_client_assertion_key(profile: FapiProfile) -> ServiceError {
+    ServiceError::oauth(
+        OAuthErrorCode::InvalidClientMetadata,
+        match profile {
+            FapiProfile::Fapi2Security => {
+                "FAPI 2.0 requires a JWKS key usable with ES256, PS256, or EdDSA"
+            }
+            FapiProfile::None => {
+                "private_key_jwt requires a JWKS key usable with ES256, RS256, PS256, or EdDSA"
+            }
+        },
+    )
 }
 
 /// Validate the structure of whichever key form was supplied, and the HTTPS
@@ -1065,9 +1305,9 @@ struct ValidatedJwksAuth {
 /// Shared by both initial registration and the update path. Does not validate the
 /// relationship to `token_endpoint_auth_method` — that is handled by
 /// `validate_jwks_and_auth_method` for the initial registration path.
-fn validate_jwks_shape(keys: Option<&crate::db::ClientKeys>) -> Result<(), ServiceError> {
-    let jwks = keys.and_then(crate::db::ClientKeys::inline);
-    let jwks_uri = keys.and_then(crate::db::ClientKeys::uri);
+fn validate_jwks_shape(keys: Option<&ClientKeys>) -> Result<(), ServiceError> {
+    let jwks = keys.and_then(ClientKeys::inline);
+    let jwks_uri = keys.and_then(ClientKeys::uri);
     if let Some(jwks) = jwks {
         // A key set with no keys parses but can never authenticate anyone.
         // Everything else the old shape check covered — that this is an object
@@ -1102,7 +1342,7 @@ fn validate_jwks_and_auth_method(
     // Pairing the two parameters is the mutual-exclusion check: RFC 7591 §2
     // says they "MUST NOT both be present in the same request or response",
     // and `ClientKeys` is the only shape the rest of the code accepts.
-    let keys = crate::db::ClientKeys::from_stored(request.jwks.take(), request.jwks_uri.take())
+    let keys = ClientKeys::from_stored(request.jwks.take(), request.jwks_uri.take())
         .map_err(|e| ServiceError::oauth(OAuthErrorCode::InvalidClientMetadata, e.to_string()))?;
     validate_jwks_shape(keys.as_ref())?;
 
@@ -1136,7 +1376,7 @@ fn validate_jwks_and_auth_method(
     // inspected synchronously, so this only guards the inline case, same as
     // the FAPI algorithm-usability check.
     if auth_method == TokenEndpointAuthMethod::SelfSignedTlsClientAuth
-        && let Some(jwks) = keys.as_ref().and_then(crate::db::ClientKeys::inline)
+        && let Some(jwks) = keys.as_ref().and_then(ClientKeys::inline)
         && !jwks.has_x5c()
     {
         return Err(ServiceError::oauth(
@@ -1145,25 +1385,78 @@ fn validate_jwks_and_auth_method(
         ));
     }
 
-    // RFC 8705 Section 2.1.1: tls_client_auth requires at least one identity field
-    if auth_method == TokenEndpointAuthMethod::TlsClientAuth {
-        let has_identity = request.tls_client_auth_subject_dn.is_some()
-            || request.tls_client_auth_san_dns.is_some()
-            || request.tls_client_auth_san_email.is_some()
-            || request.tls_client_auth_san_uri.is_some()
-            || request.tls_client_auth_san_ip.is_some();
-        if !has_identity {
-            return Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidClientMetadata,
-                "tls_client_auth requires at least one identity field \
-                 (tls_client_auth_subject_dn, tls_client_auth_san_dns, \
-                 tls_client_auth_san_email, tls_client_auth_san_uri, \
-                 or tls_client_auth_san_ip)",
-            ));
+    validate_tls_client_auth_identity(auth_method, request)?;
+
+    Ok(ValidatedJwksAuth { keys, auth_method })
+}
+
+/// Enforce the certificate-subject metadata rule on a `tls_client_auth` client.
+///
+/// RFC 8705 §2.1.2:
+///
+/// > A client using the "tls_client_auth" authentication method MUST use
+/// > exactly one of the below metadata parameters to indicate the certificate
+/// > subject value that the authorization server is to expect when
+/// > authenticating the respective client.
+///
+/// Zero is refused because `verify_tls_client_auth` reads an all-absent client
+/// as `CertificateNotRegistered`, so the client could never authenticate at the
+/// token endpoint. More than one is refused because that same function consults
+/// the parameters in a fixed precedence order and returns on the first one
+/// present, silently ignoring the rest.
+///
+/// Shared by initial registration and the RFC 7592 §2.2 PUT. The PUT is a full
+/// replacement — omitted fields are cleared — so without this check there it
+/// could move a working client into the exact state registration refuses.
+///
+/// Returns `Ok(())` for every other authentication method, which does not use
+/// these parameters.
+fn validate_tls_client_auth_identity(
+    auth_method: TokenEndpointAuthMethod,
+    request: &RegistrationRequest,
+) -> Result<(), ServiceError> {
+    if auth_method != TokenEndpointAuthMethod::TlsClientAuth {
+        return Ok(());
+    }
+
+    // Listed in the precedence order `verify_tls_client_auth` consults them.
+    let mut present: Vec<&str> = Vec::new();
+    for (name, value) in [
+        (
+            "tls_client_auth_subject_dn",
+            &request.tls_client_auth_subject_dn,
+        ),
+        ("tls_client_auth_san_dns", &request.tls_client_auth_san_dns),
+        (
+            "tls_client_auth_san_email",
+            &request.tls_client_auth_san_email,
+        ),
+        ("tls_client_auth_san_uri", &request.tls_client_auth_san_uri),
+        ("tls_client_auth_san_ip", &request.tls_client_auth_san_ip),
+    ] {
+        if value.is_some() {
+            present.push(name);
         }
     }
 
-    Ok(ValidatedJwksAuth { keys, auth_method })
+    match present.len() {
+        1 => Ok(()),
+        0 => Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidClientMetadata,
+            "tls_client_auth requires exactly one identity field \
+             (tls_client_auth_subject_dn, tls_client_auth_san_dns, \
+             tls_client_auth_san_email, tls_client_auth_san_uri, \
+             or tls_client_auth_san_ip)",
+        )),
+        count => Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidClientMetadata,
+            format!(
+                "tls_client_auth requires exactly one identity field, but {count} were \
+                 supplied: {}",
+                present.join(", ")
+            ),
+        )),
+    }
 }
 
 /// Validate HTTPS URI fields and contacts.
@@ -1211,6 +1504,109 @@ fn parse_declared_client_type(declared: &str) -> Result<OAuthClientType, Service
     }
 }
 
+/// The error returned when an RFC 7592 PUT tries to change a field that is
+/// fixed at registration.
+///
+/// RFC 7591 §3.2.2 defines the code: "invalid_client_metadata — The value of
+/// one of the client metadata fields is invalid and the server has rejected
+/// this request."
+fn immutable_field_error(field: &str, registered: &str) -> ServiceError {
+    ServiceError::oauth(
+        OAuthErrorCode::InvalidClientMetadata,
+        format!(
+            "{field} cannot be changed after registration (registered value: \
+             '{registered}'). Omit the field or resend the registered value."
+        ),
+    )
+}
+
+/// Refuse an RFC 7592 update that tries to change a field fixed at registration.
+///
+/// These four fix the client's security class rather than describe it:
+/// `token_endpoint_auth_method` decides how the client proves who it is,
+/// `application_type` decides whether PKCE is mandatory and which redirect URI
+/// schemes are legal, and the two sender-constraining flags are what
+/// `register_client` reads to derive the `fapi_profile` a client keeps for
+/// life. Writing any of them here would let a client relax its own security
+/// class using nothing but its registration access token.
+///
+/// Restating the current value succeeds, because RFC 7592 §2.2 obliges a
+/// client to do exactly that: "This request MUST include all client metadata
+/// fields as returned to the client from a previous registration, read, or
+/// update operation." Only a differing value is refused, and an omitted field
+/// leaves the registered value alone — an immutable field has no "cleared"
+/// state to fall back to.
+///
+/// Must run before [`validate_grant_and_response_types`], which takes
+/// `token_endpoint_auth_method` out of the request and substitutes a default.
+fn reject_immutable_changes(
+    request: &RegistrationRequest,
+    client: &OAuthClient,
+) -> Result<(), ServiceError> {
+    if let Some(ref declared) = request.token_endpoint_auth_method {
+        let registered = client.token_endpoint_auth_method.as_str();
+        if declared != registered {
+            return Err(immutable_field_error(
+                "token_endpoint_auth_method",
+                registered,
+            ));
+        }
+    }
+
+    if let Some(ref declared) = request.application_type
+        && parse_declared_client_type(declared)? != client.application_type
+    {
+        return Err(immutable_field_error(
+            "application_type",
+            client.application_type.as_str(),
+        ));
+    }
+
+    // RFC 9449 §5 and RFC 8705 §3 sender constraints. `register_client` reads
+    // the pair to decide `fapi_profile`, so a PUT that flipped either would
+    // leave a client whose stored profile no longer matches the binding it
+    // declares — a state initial registration cannot produce.
+    if let Some(declared) = request.dpop_bound_access_tokens
+        && declared != client.dpop_bound_access_tokens
+    {
+        return Err(immutable_field_error(
+            "dpop_bound_access_tokens",
+            &client.dpop_bound_access_tokens.to_string(),
+        ));
+    }
+    if let Some(declared) = request.tls_client_certificate_bound_access_tokens
+        && declared != client.tls_client_certificate_bound_access_tokens
+    {
+        return Err(immutable_field_error(
+            "tls_client_certificate_bound_access_tokens",
+            &client
+                .tls_client_certificate_bound_access_tokens
+                .to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+/// Whether an RFC 7592 update restates a stored `response_types: ["code"]`
+/// with no `authorization_code` grant. That pair is what an omitted
+/// `response_types` defaulted to before the reverse consistency check
+/// existed; a client restating it faithfully is not moving into an
+/// inconsistent state. Grant order is not significant (RFC 7591 §2).
+fn restates_stored_code_only_pair(request: &RegistrationRequest, client: &OAuthClient) -> bool {
+    let stored_grants = client.grant_types.as_deref().unwrap_or_default();
+    let requested_grants = request.grant_types.as_deref().unwrap_or_default();
+    let is_code_only =
+        |rts: Option<&[String]>| rts.is_some_and(|r| r == [super::RESPONSE_TYPE_CODE]);
+    is_code_only(client.response_types.as_deref())
+        && is_code_only(request.response_types.as_deref())
+        && !stored_grants
+            .iter()
+            .any(|g| g == GRANT_TYPE_AUTHORIZATION_CODE)
+        && requested_grants.len() == stored_grants.len()
+        && requested_grants.iter().all(|g| stored_grants.contains(g))
+}
+
 /// The application type to validate this registration's redirect URIs against.
 ///
 /// The client's own `application_type` wins when it sends one, since OIDC
@@ -1241,7 +1637,7 @@ fn determine_client_type(
     let has_client_credentials_only = grant_types.len() == 1
         && grant_types
             .first()
-            .is_some_and(|g| g == "client_credentials");
+            .is_some_and(|g| g == GRANT_TYPE_CLIENT_CREDENTIALS);
     let is_public = auth_method == TokenEndpointAuthMethod::None;
     // RFC 8252 §7: a native app receives its redirect either on the loopback
     // interface or through a private-use URI scheme, so either shape is the
@@ -1271,16 +1667,28 @@ fn determine_client_type(
 // Client Configuration Read (RFC 7592 Section 2.1)
 // ============================================================================
 
-/// Read the configuration of a dynamically registered client (RFC 7592).
+/// Read the configuration of a dynamically registered client (RFC 7592 §2.1).
 ///
 /// Authenticates the caller using the registration access token, then returns
-/// the current client metadata. The response omits the
-/// `registration_access_token` (RFC 7592 Section 3).
+/// the current client metadata. RFC 7592 §3 marks `registration_access_token`
+/// as REQUIRED in every Client Information Response, and §2.1 states the GET
+/// response uses "a payload as described in Section 3", so the field is
+/// echoed back rather than omitted.
+///
+/// A read is idempotent and side-effect free, so the presented bearer token is
+/// echoed verbatim rather than rotated. RFC 7592 §5 permits (but does not
+/// require) rotating the token on a read; rotating would turn the GET into a
+/// write and silently invalidate the caller's stored credential, breaking
+/// management clients that do not capture the rotated value from a GET
+/// response (e.g. `vouch-cli`'s `is_client_registered`, which checks only the
+/// HTTP status and reuses the token it already holds).
 ///
 /// # Errors
 ///
-/// - A 401 `invalid_token` API error if the Bearer token is missing or invalid.
-/// - `ServiceError::NotFound` if the `client_id` does not exist.
+/// - A 401 `invalid_token` API error if the Bearer token is missing, invalid,
+///   or belongs to a non-existent, inactive, or non-dynamically-registered
+///   client (RFC 7592 §2.1/§5 make all of these indistinguishable to avoid
+///   disclosing client existence).
 pub async fn read_client_configuration(
     state: &Arc<AppState>,
     client_id: &str,
@@ -1290,7 +1698,14 @@ pub async fn read_client_configuration(
         lookup_and_verify_registration_token(state, client_id, registration_access_token).await?;
 
     let base_url = &state.config().base_url;
-    Ok(build_client_response(client, base_url))
+    let mut response = build_client_response(client, base_url);
+    // RFC 7592 §3: registration_access_token is REQUIRED in every Client
+    // Information Response, including the GET response per §2.1. Echo the
+    // presented bearer token rather than rotating it — a read is idempotent,
+    // §5 makes rotation on a read MAY (not MUST), and rotation would
+    // invalidate the caller's stored credential (see the fn doc).
+    response.registration_access_token = Some(registration_access_token.to_owned().into());
+    Ok(response)
 }
 
 /// Delete a dynamically registered client (RFC 7592 Section 2.3).
@@ -1300,23 +1715,104 @@ pub async fn read_client_configuration(
 ///
 /// # Errors
 ///
-/// - A 401 `invalid_token` API error if the Bearer token is missing or invalid.
-/// - `ServiceError::NotFound` if the `client_id` does not exist.
+/// - A 401 `invalid_token` API error if the Bearer token is missing, invalid,
+///   or belongs to a non-existent, inactive, or non-dynamically-registered
+///   client (RFC 7592 §2.3/§5 make all of these indistinguishable to avoid
+///   disclosing client existence).
 pub async fn delete_client_configuration(
     state: &Arc<AppState>,
     client_id: &str,
     registration_access_token: &str,
+    client_info: &db::ClientInfo,
 ) -> Result<(), ServiceError> {
     let client =
         lookup_and_verify_registration_token(state, client_id, registration_access_token).await?;
 
-    db::delete_oauth_client(&state.store, &client.id)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to delete dynamically registered client {client_id}: {e}");
-            ServiceError::Internal("Failed to delete client".to_string())
-        })?;
+    // Consume the token before deleting. Of concurrent DELETEs, or a DELETE
+    // racing a PUT that rotates the token, only the request that consumes it
+    // proceeds; the rest hold a token that is no longer valid (RFC 7592
+    // §2.3) and must not delete or audit.
+    let consumed = db::consume_registration_access_token(
+        &state.store,
+        &client.id,
+        &hash_token(registration_access_token),
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to consume registration token for {client_id}: {e}");
+        ServiceError::Internal("Failed to delete client".to_string())
+    })?;
+    let Some(consumed) = consumed else {
+        tracing::debug!(
+            "RFC 7592 DELETE for client_id {client_id} lost its registration access token \
+             to a concurrent request"
+        );
+        return Err(invalid_registration_token());
+    };
 
+    // Delete the client and revoke every session it minted (M2M and
+    // user-issued). RFC 7592 §2.3: "the authorization server SHOULD ...
+    // invalidate all existing authorization grants and currently active
+    // access tokens ... associated with this client" — without the session
+    // delete, tokens issued to the deleted dynamically registered client
+    // keep validating at resource endpoints until `exp`.
+    //
+    // The consume above committed in its own write, and the delete's steps
+    // commit separately. If one fails before the row is removed, the client
+    // survives with no registration access token, and without the undo below
+    // the owner could never retry. The undo is a compare-and-set on the
+    // version the consume committed, so it cannot reinstate a token that an
+    // owner deletion, deactivation or transfer revoked in the meantime.
+    if let Err(e) = db::delete_oauth_client_and_revoke_sessions(
+        &state.store,
+        &state.session_cache,
+        &client.id,
+        &client.client_id,
+    )
+    .await
+    {
+        tracing::error!("Failed to delete dynamically registered client {client_id}: {e}");
+        match db::restore_registration_access_token(&state.store, consumed).await {
+            Ok(true) => {}
+            Ok(false) => tracing::warn!(
+                "Did not restore the registration access token of client {client_id} after a \
+                 failed delete: the client changed after the token was consumed"
+            ),
+            Err(restore_err) => tracing::error!(
+                "Failed to restore the registration access token of client {client_id} after a \
+                 failed delete: {restore_err}"
+            ),
+        }
+        return Err(ServiceError::Internal(
+            "Failed to delete client".to_string(),
+        ));
+    }
+
+    // The client doc is already deleted above, so `Unresolved`'s client-org
+    // fallback (a lookup by `client.id`) would always miss. `client.org_id`
+    // is still in scope from before the delete, so resolve the fallback
+    // ourselves instead of losing the org attribution on every org-owned
+    // client whose owning user has no org of their own.
+    let user_org_domain = if let Some(user_id) = client.user_id.as_deref()
+        && let Ok(Some(user)) = db::get_user_by_id(&state.store, user_id).await
+        && let Some(org_id) = user.org_id.as_deref()
+    {
+        match user.org_domain.clone() {
+            Some(domain) => Some(domain),
+            None => db::get_organization_domain(&state.store, org_id)
+                .await
+                .ok()
+                .flatten(),
+        }
+    } else {
+        None
+    };
+    let audit_org_domain = db::resolve_event_org_domain(
+        &state.store,
+        user_org_domain.as_deref(),
+        client.org_id.as_deref(),
+    )
+    .await;
     db::record_oauth_event(
         &state.audit,
         &state.store,
@@ -1324,9 +1820,9 @@ pub async fn delete_client_configuration(
             oauth_client_id: &client.id,
             event_type: OAuthEventType::ClientDeleted,
             user_id: client.user_id.as_deref(),
-            ip_address: None,
-            user_agent: None,
+            client: client_info,
             details: Some("RFC 7592 client configuration DELETE"),
+            org_domain: db::RecordedOrgDomain::Known(audit_org_domain.as_deref()),
         },
     )
     .await;
@@ -1348,42 +1844,60 @@ pub async fn delete_client_configuration(
 ///
 /// # Errors
 ///
-/// - A 401 `invalid_token` API error if the Bearer token is invalid.
-/// - `ServiceError::NotFound` if the `client_id` does not exist.
+/// - A 401 `invalid_token` API error if the Bearer token is missing, invalid,
+///   or belongs to a non-existent, inactive, or non-dynamically-registered
+///   client (RFC 7592 §2.2/§5 make all of these indistinguishable to avoid
+///   disclosing client existence).
 /// - `ServiceError::OAuth` if the request body contains invalid metadata.
 pub async fn update_client_configuration(
     state: &Arc<AppState>,
     client_id: &str,
     registration_access_token: &str,
     request: RegistrationRequest,
+    client_info: &db::ClientInfo,
 ) -> Result<RegistrationResponse, ServiceError> {
     let client =
         lookup_and_verify_registration_token(state, client_id, registration_access_token).await?;
 
-    // Validate grant/response types (take() empties the request fields)
     let mut mutable_request = request;
+
+    // Refuse a request that changes a field fixed at registration, rather than
+    // returning 200 for an update that silently did nothing. Runs first
+    // because validate_grant_and_response_types take()s
+    // token_endpoint_auth_method and substitutes a default.
+    reject_immutable_changes(&mutable_request, &client)?;
+
+    // RFC 7592 §2.2: the PUT "MUST include all client metadata fields as
+    // returned to the client", so a restatement of the stored pair is
+    // normalized to what registration issues for such a client today rather
+    // than failing the reverse check below.
+    if restates_stored_code_only_pair(&mutable_request, &client) {
+        mutable_request.response_types = Some(vec![]);
+    }
+
+    // Validate grant/response types (take() empties the request fields)
     let validated = validate_grant_and_response_types(&mut mutable_request)?;
 
     // Validate redirect URIs (same cardinality + format rules as initial
-    // registration). An update may restate `application_type`; absent that, the
-    // client keeps the type it registered with.
-    let app_type = match mutable_request.application_type.as_deref() {
-        Some(declared) => parse_declared_client_type(declared)?,
-        None => client.application_type,
-    };
-    let redirect_uris =
-        validate_redirect_uris(&mut mutable_request, validated.auth_code_grant, app_type)?;
+    // registration). `application_type` is immutable and any restatement has
+    // already been checked against it, so the registered type is what the
+    // URIs are validated against — the type the client keeps.
+    let redirect_uris = validate_redirect_uris(
+        &mut mutable_request,
+        validated.auth_code_grant,
+        client.application_type,
+    )?;
 
     // Build updated registration metadata (cosmetic fields)
     let registration_metadata = mutable_request.registration_metadata();
 
     // Pairing the two parameters is the mutual-exclusion check (RFC 7591 §2);
     // the shape checks follow.
-    let keys = crate::db::ClientKeys::from_stored(
-        mutable_request.jwks.take(),
-        mutable_request.jwks_uri.take(),
-    )
-    .map_err(|e| ServiceError::oauth(OAuthErrorCode::InvalidClientMetadata, e.to_string()))?;
+    let keys =
+        ClientKeys::from_stored(mutable_request.jwks.take(), mutable_request.jwks_uri.take())
+            .map_err(|e| {
+                ServiceError::oauth(OAuthErrorCode::InvalidClientMetadata, e.to_string())
+            })?;
     validate_jwks_shape(keys.as_ref())?;
 
     // PUT is a full replacement, so re-check the auth-method/JWKS
@@ -1420,7 +1934,7 @@ pub async fn update_client_configuration(
     // method exists for non-FAPI clients too). A remote jwks_uri can't be
     // inspected synchronously, so this only guards the inline case.
     if client.token_endpoint_auth_method == TokenEndpointAuthMethod::SelfSignedTlsClientAuth
-        && let Some(jwks) = keys.as_ref().and_then(crate::db::ClientKeys::inline)
+        && let Some(jwks) = keys.as_ref().and_then(ClientKeys::inline)
         && !jwks.has_x5c()
     {
         return Err(ServiceError::oauth(
@@ -1433,63 +1947,54 @@ pub async fn update_client_configuration(
     // below), so `client.fapi_profile` already reflects what this update
     // preserves. Only for private_key_jwt: its JWKS carries client-assertion
     // signing keys, so an inline JWKS replacing the client's key material
-    // must have at least one key usable with FAPI_ALLOWED — see
-    // JwkSet::has_fapi_allowed_key. tls_client_auth/self_signed_tls_client_auth
-    // JWKS conveys certificates via x5c instead (RFC 8705 §2.2.2), so this
-    // check does not apply to them. A remote jwks_uri can't be inspected
-    // synchronously, so this only guards the inline case, same as
-    // registration and the admin application API.
-    if client.is_fapi()
-        && client.token_endpoint_auth_method == TokenEndpointAuthMethod::PrivateKeyJwt
-        && let Some(jwks) = keys.as_ref().and_then(crate::db::ClientKeys::inline)
-        && !jwks.has_fapi_allowed_key()
+    // must have at least one key usable with the client's profile allowlist
+    // — see JwkSet::has_client_assertion_key. tls_client_auth/
+    // self_signed_tls_client_auth JWKS conveys certificates via x5c instead
+    // (RFC 8705 §2.2.2), so this check does not apply to them. A remote
+    // jwks_uri can't be inspected synchronously, so this only guards the
+    // inline case, same as registration and the admin application API.
+    if client.token_endpoint_auth_method == TokenEndpointAuthMethod::PrivateKeyJwt
+        && let Some(jwks) = keys.as_ref().and_then(ClientKeys::inline)
+        && !jwks.has_client_assertion_key(client.fapi_profile)
     {
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidClientMetadata,
-            "FAPI 2.0 requires a JWKS key usable with ES256, PS256, or EdDSA",
-        ));
+        return Err(no_client_assertion_key(client.fapi_profile));
     }
 
-    // `request_object_signing_alg` and `require_signed_request_object` are not
-    // among the fields a PUT writes, so the client keeps whatever it
-    // registered — and this replacement has to stay compatible with it. A
-    // JWKS with no key the verifier could select for the pinned algorithm
-    // shuts both doors at the authorization endpoint, which is how a routine
-    // key rotation that swaps key type silently bricks a working client.
-    // Same inline-only limitation as the checks above.
-    if client.require_signed_request_object == Some(true) && keys.is_none() {
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidClientMetadata,
-            "This client requires signed Request Objects, so it must keep a jwks or jwks_uri",
-        ));
-    }
-    if let Some(alg) = client.request_object_signing_alg
-        && let Some(jwks) = keys.as_ref().and_then(crate::db::ClientKeys::inline)
-        && !jwks.has_key_for(alg)
-    {
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidClientMetadata,
-            format!(
-                "The submitted jwks holds no key usable for this client's \
-                 request_object_signing_alg '{alg}'; it needs a key of type {} whose \
-                 alg (if declared) is '{alg}' and whose use (if declared) is 'sig'",
-                crate::db::KeyType::for_alg(alg)
-            ),
-        ));
-    }
+    // The five RFC 8705 §2.1.2 certificate-subject parameters are written as a
+    // full replacement below, so a PUT that omits them clears them. Checked
+    // against the client's registered (immutable) auth method, which is what
+    // decides whether the parameters are required at all.
+    validate_tls_client_auth_identity(client.token_endpoint_auth_method, &mutable_request)?;
 
-    // Validate userinfo_signed_response_alg (same rules as initial registration).
-    // The client's FAPI profile is immutable post-registration (RFC 7592), so we
-    // re-apply the original profile's algorithm restrictions to any updates.
+    // Validate the signed-response algorithms with the same validators initial
+    // registration uses. The client's FAPI profile is immutable
+    // post-registration, so the original profile's restrictions still apply.
     let rsa_key = if state.oidc_rsa_key.is_some() {
         RsaSigningKey::Available
     } else {
         RsaSigningKey::Unavailable
     };
-    let userinfo_alg = validate_userinfo_signed_response_alg(
-        mutable_request.userinfo_signed_response_alg.as_deref(),
-        rsa_key,
+    let algs = validate_signed_response_algs(&mutable_request, rsa_key, client.fapi_profile)?;
+    // An update that names no algorithm keeps the one the client registered,
+    // rather than re-deriving the server default and moving an ES256 client
+    // onto RS256 — see resolve_id_token_alg.
+    let id_token_alg = resolve_id_token_alg(
+        algs.id_token,
         client.fapi_profile,
+        client.id_token_signed_response_alg,
+    );
+
+    // The RFC 9101 Request Object commitment and the JWKS backing it are both
+    // replaced by this request, so they are checked against each other rather
+    // than against what the client registered. A JWKS with no key the verifier
+    // could select for the named algorithm shuts both doors at the
+    // authorization endpoint, which is how a routine key rotation that swaps
+    // key type silently bricks a working client.
+    let request_object = validate_request_object_signing(
+        mutable_request.request_object_signing_alg.as_deref(),
+        mutable_request.require_signed_request_object,
+        client.fapi_profile,
+        keys.as_ref(),
     )?;
 
     // Validate request_uris (same rules as initial registration).
@@ -1509,11 +2014,20 @@ pub async fn update_client_configuration(
     let new_reg_token = generate_registration_token()?;
     let new_reg_token_hash = hash_token(&new_reg_token);
 
-    // token_endpoint_auth_method is intentionally NOT updated — it is immutable
-    // per RFC 7592 (clients cannot change their auth method after registration).
+    // RFC 7592 §2.2 is a full replacement: "Valid values of client metadata
+    // fields in this request MUST replace, not augment, the values previously
+    // associated with this client. Omitted fields MUST be treated as null or
+    // empty values by the server, indicating the client's request to delete
+    // them from the client's registration." Every field below therefore takes
+    // the request's value, cleared when the request omits it — the exceptions
+    // being the immutable fields, which are absent from these params and
+    // whose restatement `reject_immutable_changes` has already checked, and
+    // `client_name`, whose column cannot hold NULL and so falls back to the
+    // registration default.
     let updated = db::update_oauth_client_registration(
         &state.store,
         &client.id,
+        &hash_token(registration_access_token),
         &UpdateClientRegistrationParams {
             redirect_uris: &redirect_uris,
             grant_types: Some(&validated.grant_types),
@@ -1521,15 +2035,47 @@ pub async fn update_client_configuration(
             keys: keys.as_ref(),
             registration_access_token_hash: &new_reg_token_hash,
             registration_metadata: Some(&registration_metadata),
-            userinfo_signed_response_alg: userinfo_alg,
+            userinfo_signed_response_alg: algs.userinfo,
             request_uris: validated_request_uris.as_deref(),
             post_logout_redirect_uris: validated_post_logout_redirect_uris.clone(),
+            client_name: mutable_request.client_name.as_deref(),
+            software_id: mutable_request.software_id.as_deref(),
+            software_version: mutable_request.software_version.as_deref(),
+            id_token_signed_response_alg: id_token_alg,
+            authorization_signed_response_alg: algs.authorization,
+            introspection_signed_response_alg: algs.introspection,
+            request_object_signing_alg: request_object.alg,
+            require_signed_request_object: if request_object.require_signed {
+                Some(true)
+            } else {
+                None
+            },
+            tls_client_auth_subject_dn: mutable_request.tls_client_auth_subject_dn.as_deref(),
+            tls_client_auth_san_dns: mutable_request.tls_client_auth_san_dns.as_deref(),
+            tls_client_auth_san_uri: mutable_request.tls_client_auth_san_uri.as_deref(),
+            tls_client_auth_san_ip: mutable_request.tls_client_auth_san_ip.as_deref(),
+            tls_client_auth_san_email: mutable_request.tls_client_auth_san_email.as_deref(),
         },
     )
     .await
     .map_err(|e| {
+        // `software_id` is indexed, and the store rejects NUL bytes in index
+        // values (issue #883). It is the one client-supplied index value a
+        // PUT can write, so this is a bad request, not a server fault.
+        if let Some(invalid) = e.downcast_ref::<db::InvalidIndexValue>() {
+            return ServiceError::oauth(
+                OAuthErrorCode::InvalidClientMetadata,
+                format!("{} must not contain a NUL (0x00) character", invalid.field),
+            );
+        }
         tracing::error!("Failed to update client {client_id}: {e}");
         ServiceError::Internal("Failed to update client".to_string())
+    })?
+    .ok_or_else(|| {
+        // RFC 7592 §2.2: a concurrent PUT or DELETE replaced the token after
+        // the verification above, so it is no longer valid.
+        tracing::debug!("RFC 7592 PUT for client_id {client_id} lost its token to a race");
+        invalid_registration_token()
     })?;
 
     db::record_oauth_event(
@@ -1539,9 +2085,9 @@ pub async fn update_client_configuration(
             oauth_client_id: &client.id,
             event_type: OAuthEventType::ClientUpdated,
             user_id: client.user_id.as_deref(),
-            ip_address: None,
-            user_agent: None,
+            client: client_info,
             details: Some("RFC 7592 client configuration PUT"),
+            org_domain: db::RecordedOrgDomain::Unresolved,
         },
     )
     .await;
@@ -1559,38 +2105,79 @@ pub async fn update_client_configuration(
     Ok(response)
 }
 
-/// Look up a client by `client_id` and verify the registration access token.
+/// The single 401 every registration-token failure returns. RFC 6750 §3.1:
+/// registration endpoints are OAuth protected resources, so a bearer-token
+/// failure is `invalid_token`, not the client-authentication error
+/// `invalid_client`. One response for every rejection avoids disclosing client
+/// existence or type.
+fn invalid_registration_token() -> ServiceError {
+    ServiceError::api(
+        StatusCode::UNAUTHORIZED,
+        OAuthErrorCode::InvalidToken.as_str(),
+        "Invalid registration access token",
+    )
+}
+
+/// Look up a client by `client_id` and verify its registration access token.
+///
+/// Per RFC 7592 §2.1/2.2/2.3 and the security rationale in §5, *every* failure
+/// case returns the **same** HTTP 401 `invalid_token` response, so that a
+/// caller who only knows the public `client_id` cannot distinguish:
+/// - a `client_id` that does not exist,
+/// - a client that is inactive / was deprovisioned,
+/// - a client created through the admin UI (no registration access token), and
+/// - a dynamically-registered client presented with the wrong bearer token.
+///
+/// Any distinction (e.g. a 404 for a missing client, or a different 401 message
+/// for an admin-created client) leaks client existence and type, which §5
+/// forbids. Detailed diagnostics are emitted to the server log only.
+///
+/// A genuine database outage is the one exception: it surfaces as an HTTP 500
+/// `server_error` because it is a transient fault independent of the queried
+/// `client_id` and carries no information about whether the client exists.
+///
+/// On the `client_id`-does-not-exist branch the presented token is additionally
+/// revoked, per the `SHOULD` that accompanies the 401 in §2.1/2.2/2.3. A token
+/// offered against a `client_id` that was never issued it is either a guess or a
+/// leaked credential; either way it has no legitimate use, and it may still be
+/// live for the client it really belongs to. Revocation is best-effort and never
+/// changes the response — see [`db::revoke_registration_access_token`].
 async fn lookup_and_verify_registration_token(
     state: &Arc<AppState>,
     client_id: &str,
     token: &str,
 ) -> Result<OAuthClient, ServiceError> {
-    let client = db::get_oauth_client_by_client_id(&state.store, client_id)
-        .await
-        .map_err(|e| {
+    let client = match db::get_oauth_client_by_client_id(&state.store, client_id).await {
+        Ok(Some(client)) => client,
+        Ok(None) => {
+            tracing::debug!("RFC 7592 token verification failed: client_id {client_id} not found");
+            revoke_token_for_unknown_client(state, token).await;
+            return Err(invalid_registration_token());
+        }
+        Err(e) => {
+            // A real database failure is not an auth determination; keep it as
+            // an internal error so monitoring sees the outage rather than
+            // misclassifying it as an invalid registration access token.
             tracing::error!("DB error looking up client {client_id}: {e}");
-            ServiceError::Internal("Database error".to_string())
-        })?
-        .ok_or(ServiceError::NotFound("Client"))?;
+            return Err(ServiceError::Internal("Database error".to_string()));
+        }
+    };
 
     if !client.active {
-        return Err(ServiceError::NotFound("Client"));
+        tracing::debug!("RFC 7592 token verification failed: client_id {client_id} is inactive");
+        return Err(invalid_registration_token());
     }
 
-    let stored_hash = client
-        .registration_access_token_hash
-        .as_deref()
-        .ok_or_else(|| {
-            // RFC 7592 §2 / RFC 6750 §3.1: registration endpoints are OAuth
-            // protected resources, so bearer-token failures are
-            // `invalid_token`, not the client-authentication error
-            // `invalid_client`.
-            ServiceError::api(
-                StatusCode::UNAUTHORIZED,
-                OAuthErrorCode::InvalidToken.as_str(),
-                "Client has no registration access token",
-            )
-        })?;
+    let stored_hash = match client.registration_access_token_hash.as_deref() {
+        Some(hash) => hash,
+        None => {
+            tracing::debug!(
+                "RFC 7592 token verification failed: client_id {client_id} has no \
+                 registration access token (admin-created client)"
+            );
+            return Err(invalid_registration_token());
+        }
+    };
 
     let provided_hash = hash_token(token);
     let is_match: bool = provided_hash
@@ -1599,20 +2186,91 @@ async fn lookup_and_verify_registration_token(
         .into();
 
     if !is_match {
-        return Err(ServiceError::api(
-            StatusCode::UNAUTHORIZED,
-            OAuthErrorCode::InvalidToken.as_str(),
-            "Invalid registration access token",
-        ));
+        tracing::debug!(
+            "RFC 7592 token verification failed: bearer token does not match the stored \
+             hash for client_id {client_id}"
+        );
+        return Err(invalid_registration_token());
+    }
+
+    // A client with no owner is open registration only if it is `Public`,
+    // which is the scope `register_client` gives an unauthenticated
+    // registration. A `Personal` or `Organization` client with no owner was
+    // unlinked from a deleted user; its token died with them. Offboarding
+    // clears the hash on that write, so this refuses whatever a future writer
+    // forgets to clear, and the rows that deletions before that fix left
+    // holding a hash.
+    //
+    // Registrations made before open registration was stored as `Public`
+    // (February to March 2026) are also `Personal` with no owner, and are
+    // refused too. The CLI treats the 401 as "no longer registered" and
+    // registers again at the next `vouch login` that re-checks it (daily).
+    if client.user_id.is_none() && client.access_scope != db::AccessScope::Public {
+        tracing::debug!(
+            "RFC 7592 token verification failed: client_id {client_id} has no owner but is \
+             not an open-registration client"
+        );
+        return Err(invalid_registration_token());
+    }
+
+    // A client registered by a user is managed on that user's behalf, so it
+    // follows the user's deactivation: a deactivated (or deleted) owner's
+    // registration access token is invalid "for other reasons" (RFC 6750
+    // §3.1). Open-registration clients have no owner and are unaffected.
+    if let Some(owner_id) = client.user_id.as_deref() {
+        match db::get_user_by_id(&state.store, owner_id).await {
+            Ok(Some(owner)) if owner.active => {}
+            Ok(_) => {
+                tracing::debug!(
+                    "RFC 7592 token verification failed: client_id {client_id}'s owner is \
+                     deactivated or deleted"
+                );
+                return Err(invalid_registration_token());
+            }
+            Err(e) => {
+                tracing::error!("DB error looking up the owner of client {client_id}: {e}");
+                return Err(ServiceError::Internal("Database error".to_string()));
+            }
+        }
     }
 
     Ok(client)
 }
 
+/// Revoke a registration access token presented against an unknown `client_id`.
+///
+/// RFC 7592 §2.1 (and identically §2.2, and §2.3 with "if possible"):
+///
+/// > If the client does not exist on this server, the server MUST respond with
+/// > HTTP 401 Unauthorized and the registration access token used to make this
+/// > request SHOULD be immediately revoked.
+///
+/// Best-effort by construction: the outcome never reaches the response, so a
+/// failed revocation cannot turn into a distinguisher, and a database error here
+/// must not mask the 401 the caller is owed. The token is hashed the same way it
+/// was stored, so a miss costs one indexed lookup and nothing else.
+async fn revoke_token_for_unknown_client(state: &Arc<AppState>, token: &str) {
+    match db::revoke_registration_access_token(&state.store, &hash_token(token)).await {
+        Ok(Some(owner_id)) => {
+            tracing::warn!(
+                "RFC 7592: revoked the registration access token of client {owner_id} after it \
+                 was presented against a client_id that does not exist"
+            );
+        }
+        Ok(None) => {}
+        Err(e) => {
+            tracing::error!("RFC 7592: failed to revoke a misdirected registration token: {e}");
+        }
+    }
+}
+
 /// Build a `RegistrationResponse` from a stored `OAuthClient`.
 ///
-/// Per RFC 7592 Section 3, the response omits the `registration_access_token`
-/// but includes the `registration_client_uri`.
+/// Leaves `registration_access_token` unset (`None`); RFC 7592 Section 3 marks
+/// it REQUIRED in every Client Information Response, so each caller populates
+/// it — [`read_client_configuration`] echoes the presented bearer token and
+/// [`update_client_configuration`] sets a freshly rotated one. Includes the
+/// REQUIRED `registration_client_uri`.
 fn build_client_response(client: OAuthClient, base_url: &str) -> RegistrationResponse {
     let grant_types = client.grant_types.unwrap_or_default();
     let response_types = client.response_types.unwrap_or_default();
@@ -1649,12 +2307,12 @@ fn build_client_response(client: OAuthClient, base_url: &str) -> RegistrationRes
         jwks: client
             .keys
             .as_ref()
-            .and_then(crate::db::ClientKeys::inline)
+            .and_then(ClientKeys::inline)
             .and_then(|set| serde_json::to_value(set).ok()),
         jwks_uri: client
             .keys
             .as_ref()
-            .and_then(crate::db::ClientKeys::uri)
+            .and_then(ClientKeys::uri)
             .map(String::from),
         software_id: client.software_id,
         software_version: client.software_version,
@@ -1663,6 +2321,18 @@ fn build_client_response(client: OAuthClient, base_url: &str) -> RegistrationRes
         } else {
             None
         },
+        tls_client_certificate_bound_access_tokens: if client
+            .tls_client_certificate_bound_access_tokens
+        {
+            Some(true)
+        } else {
+            None
+        },
+        tls_client_auth_subject_dn: client.tls_client_auth_subject_dn,
+        tls_client_auth_san_dns: client.tls_client_auth_san_dns,
+        tls_client_auth_san_uri: client.tls_client_auth_san_uri,
+        tls_client_auth_san_ip: client.tls_client_auth_san_ip,
+        tls_client_auth_san_email: client.tls_client_auth_san_email,
         id_token_signed_response_alg: client.id_token_signed_response_alg.to_string(),
         authorization_signed_response_alg: client
             .authorization_signed_response_alg
@@ -1707,7 +2377,7 @@ fn metadata_string_array(metadata: &serde_json::Value, key: &str) -> Option<Vec<
 /// Only available when the `test-utils` feature is enabled.
 #[cfg(feature = "test-utils")]
 pub fn validate_redirect_uri_for_test(uri: &str) -> Result<(), ServiceError> {
-    db::validate_redirect_uri(uri, crate::db::OAuthClientType::Native).map_err(|e| {
+    db::validate_redirect_uri(uri, OAuthClientType::Native).map_err(|e| {
         ServiceError::oauth(
             OAuthErrorCode::InvalidRedirectUri,
             format!("Invalid redirect URI '{uri}': {e}"),

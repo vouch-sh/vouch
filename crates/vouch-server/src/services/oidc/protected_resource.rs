@@ -16,10 +16,17 @@
 //!   `base_url` (i.e. Vouch itself).
 //! * `jwks_uri` points at Vouch's existing JWKS endpoint. It is used
 //!   by clients to verify the `signed_metadata` JWT below.
-//! * `dpop_bound_access_tokens_required` is `true`: every access
-//!   token Vouch issues is DPoP-bound (`cnf.jkt`), and the resource
-//!   token extractor (`handlers::session::extract_resource_token`)
-//!   rejects unbound tokens.
+//! * `dpop_bound_access_tokens_required` is `false`: Vouch issues
+//!   both DPoP-bound (`cnf.jkt`) and unbound Bearer access tokens
+//!   depending on the client and grant (FAPI clients are
+//!   sender-constrained; browser sessions, enrollment, the built-in
+//!   device flow, and non-FAPI clients receive unbound Bearer
+//!   tokens). The resource token extractor
+//!   (`handlers::session::extract_resource_token`) accepts both and
+//!   validates the sender constraint when `cnf` is present. DPoP
+//!   support is advertised separately via
+//!   `dpop_signing_alg_values_supported`; per RFC 9728 §2, `false`
+//!   is the spec-defined default.
 //!
 //! ## Signed metadata (RFC 9728 §3.3)
 //!
@@ -85,6 +92,18 @@ pub const SIGNED_METADATA_TYP: &str = "oauth-protected-resource+jwt";
 /// identical to the resource identifier used by the client") because
 /// we never echo back a resource URL that isn't actually served.
 ///
+/// Qualification: an entry must be an OAuth 2.0 protected resource in
+/// the RFC 6749/9728 sense — its endpoints accept access tokens *issued
+/// by an authorization server* (RFC 6749 §1.4). RFC 6750 Bearer
+/// transport alone is not sufficient: a route that carries an opaque
+/// admin-minted credential as `Authorization: Bearer <opaque>` is
+/// RFC 6750-compliant transport but is not an OAuth 2.0 protected
+/// resource when no authorization server can mint a token the route
+/// accepts. `/scim/v2/*` is therefore deliberately excluded — it
+/// authenticates against a disjoint SCIM token table (admin-minted
+/// via `/api/v1/org/scim-tokens`), so any `authorization_servers`
+/// entry for it would be a false claim (RFC 9728 §2).
+///
 /// The list is intentionally prefix-based: a client that asks about
 /// `v1/credentials/aws/token` also matches the `v1/credentials/aws`
 /// prefix if one were registered. Matches are exact or
@@ -100,7 +119,6 @@ pub const PROTECTED_RESOURCE_PREFIXES: &[&str] = &[
     "v1/keys",
     "api/v1/org",
     "api/v1/applications",
-    "scim/v2",
 ];
 
 /// Protected Resource Metadata document (RFC 9728 §2).
@@ -196,10 +214,18 @@ pub struct ProtectedResourceMetadata {
     /// excluding RS256.
     pub dpop_signing_alg_values_supported: Vec<JwsAlgorithm>,
 
-    /// RFC 9728 §2 + RFC 9449: OPTIONAL. `true` means every access
-    /// token accepted at this resource must be DPoP-bound
-    /// (`cnf.jkt`). Vouch enforces this in
-    /// [`crate::handlers::session::extract_resource_token`].
+    /// RFC 9728 §2 + RFC 9449: OPTIONAL. `true` means the protected
+    /// resource **always requires** DPoP-bound access tokens
+    /// (`cnf.jkt`); per RFC 9728 §2, `false` is the spec-defined
+    /// default. Vouch sets this to `false` because it issues and
+    /// accepts both sender-constrained tokens (DPoP for FAPI clients,
+    /// mTLS for cert-bound clients) and unbound Bearer tokens (browser
+    /// sessions, enrollment, the built-in device flow, non-FAPI
+    /// clients). Sender-constraint validation when `cnf` is present is
+    /// enforced in
+    /// [`crate::handlers::session::extract_resource_token`]; DPoP
+    /// algorithm support is advertised via
+    /// `dpop_signing_alg_values_supported`.
     pub dpop_bound_access_tokens_required: bool,
 
     /// RFC 9728 §3.3: OPTIONAL. JWS-signed JWT containing the same
@@ -330,7 +356,7 @@ pub async fn build_protected_resource_metadata(
         tls_client_certificate_bound_access_tokens: config.tls_configured(),
         authorization_details_types_supported: None,
         dpop_signing_alg_values_supported,
-        dpop_bound_access_tokens_required: true,
+        dpop_bound_access_tokens_required: false,
         signed_metadata: String::new(),
     };
 
@@ -351,6 +377,10 @@ pub async fn build_protected_resource_metadata(
 ///   cache validation).
 ///
 /// The header's `typ` is [`SIGNED_METADATA_TYP`].
+#[expect(
+    clippy::disallowed_methods,
+    reason = "mints the protected-resource metadata iat"
+)]
 async fn build_signed_metadata(
     state: &Arc<AppState>,
     metadata: &ProtectedResourceMetadata,
@@ -428,8 +458,27 @@ mod tests {
             SubPathClassification::Known("oauth/register/abc-123".to_string())
         );
         assert_eq!(
+            classify_sub_path("api/v1/org/audit-events"),
+            SubPathClassification::Known("api/v1/org/audit-events".to_string())
+        );
+    }
+
+    #[test]
+    fn classify_sub_path_scim_v2_is_not_a_protected_resource() {
+        // `/scim/v2/*` authenticates against a disjoint SCIM token
+        // table (admin-minted opaque credentials), not AS-issued OAuth
+        // access tokens, so it is not an RFC 6749/9728 OAuth 2.0
+        // protected resource. Per-prefix and deeper SCIM paths must
+        // classify as Unknown so no false RFC 9728 metadata document is
+        // served for them.
+        assert_eq!(classify_sub_path("scim/v2"), SubPathClassification::Unknown);
+        assert_eq!(
+            classify_sub_path("scim/v2/Users"),
+            SubPathClassification::Unknown
+        );
+        assert_eq!(
             classify_sub_path("scim/v2/Users/42"),
-            SubPathClassification::Known("scim/v2/Users/42".to_string())
+            SubPathClassification::Unknown
         );
     }
 

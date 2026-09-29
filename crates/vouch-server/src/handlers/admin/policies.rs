@@ -1,26 +1,27 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-//! Device posture policies UI and API handlers.
+//! Device posture policies — browser UI handlers.
 
 use crate::AppState;
-use crate::db;
+use crate::arrival::ArrivalTime;
 use crate::db::documents::audit::{CustomPolicyAdminData, PreconfiguredPolicyToggleData};
+use crate::db::{self, MAX_CUSTOM_POLICIES};
 use crate::error::ServiceError;
 use crate::handlers::admin::flash;
 use crate::impl_template_response;
 use crate::services::policy as posture;
 use askama::Template;
 use aws_lc_rs::digest::{self, SHA256};
-use axum::Json;
 use axum::extract::{OriginalUri, State};
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::cookie::CookieJar;
 use serde::Deserialize;
 use std::sync::Arc;
+use vouch_common::ResourceLabel;
 
 use crate::handlers::ValidPath;
-use crate::handlers::browser_login::validate_origin;
-use crate::handlers::session::{AuthContext, extract_org_admin, get_resource_auth_context};
+use crate::handlers::extractors::{AdminPage, OrgAdmin};
+use crate::handlers::session::{AuthContext, extract_org_admin};
 
 const REDIRECT_BASE: &str = "/admin/policies";
 
@@ -28,8 +29,9 @@ fn redirect_error(jar: CookieJar, msg: impl Into<String>) -> Response {
     (flash::set_err(jar, msg), Redirect::to(REDIRECT_BASE)).into_response()
 }
 
-/// Maximum number of custom policies per org (active + inactive).
-const MAX_CUSTOM_POLICIES: usize = 20;
+/// Maximum length of a policy description, in Unicode characters. Matches the
+/// `maxlength` the admin form advertises.
+const MAX_POLICY_DESCRIPTION_CHARS: usize = 500;
 
 /// Size bound on a stored builder spec. A legitimate spec is well under
 /// this; anything larger is dropped rather than stored.
@@ -84,28 +86,13 @@ impl_template_response!(AdminPoliciesTemplate);
 pub(crate) async fn admin_policies_page(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
+    admin: AdminPage,
 ) -> Response {
-    let auth = get_resource_auth_context(&state, &jar).await;
-
-    if !auth.authenticated {
-        return Redirect::to("/enroll/start").into_response();
-    }
-    if !auth.is_org_admin {
-        return Redirect::to("/integrations").into_response();
-    }
-
-    let user_id = match auth.user_id {
-        Some(ref id) => id.clone(),
-        None => return Redirect::to("/enroll/start").into_response(),
-    };
-
-    let org_id = match db::get_user_by_id(&state.store, &user_id).await {
-        Ok(Some(user)) => match user.org_id {
-            Some(id) => id,
-            None => return Redirect::to("/integrations").into_response(),
-        },
-        _ => return Redirect::to("/integrations").into_response(),
-    };
+    let AdminPage {
+        auth,
+        user_id: _,
+        org_id,
+    } = admin;
 
     let active_slugs = match db::get_active_preconfigured_slugs(&state.store, &org_id).await {
         Ok(slugs) => slugs,
@@ -187,9 +174,8 @@ pub(crate) async fn toggle_preconfigured_policy(
     headers: HeaderMap,
     jar: CookieJar,
     ValidPath(slug): ValidPath<String>,
+    arrival: ArrivalTime,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-
     if !posture::is_valid_preconfigured_slug(&slug) {
         return Err(ServiceError::api(
             StatusCode::NOT_FOUND,
@@ -198,13 +184,36 @@ pub(crate) async fn toggle_preconfigured_policy(
         ));
     }
 
-    let (admin, org_id) =
-        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
+    let (admin, org_id) = extract_org_admin(
+        &state,
+        &headers,
+        &jar,
+        method.as_str(),
+        uri.path(),
+        None,
+        arrival,
+    )
+    .await?;
 
-    // Single read of active slugs — fixes TOCTOU from old handler
-    let mut active_slugs = db::get_active_preconfigured_slugs(&state.store, &org_id)
+    // Single read of the posture config that captures the document id and
+    // version alongside the active slugs. The previous flow read the slugs
+    // here and then called the blind `set_preconfigured_active` helper, which
+    // re-reads the doc internally and writes it back unconditionally
+    // (`store.update`): two concurrent admin toggles on the same org each read
+    // the same stale slug list, each mutate their own copy, and the second
+    // write silently overwrites the first — one toggle is lost while both
+    // requests succeed and log audit events. Capturing the version here and
+    // compare-and-update-ing makes a concurrent toggle surface as a 409 the
+    // admin re-reads and re-issues, instead of a silent lost update (cf.
+    // `update_custom_policy`, which uses `store.modify` to the same end).
+    let config = db::get_preconfigured_active_with_version(&state.store, &org_id)
         .await
         .map_err(|e| ServiceError::Internal(format!("Failed to load posture config: {e}")))?;
+
+    let mut active_slugs = config
+        .as_ref()
+        .map(|c| c.active_slugs.clone())
+        .unwrap_or_default();
 
     let already_active = active_slugs.iter().any(|s| s == &slug);
 
@@ -230,9 +239,39 @@ pub(crate) async fn toggle_preconfigured_policy(
         active_slugs.push(slug.clone());
     }
 
-    db::set_preconfigured_active(&state.store, &org_id, active_slugs)
+    // Optimistic-concurrency write: guard on the version captured above so a
+    // concurrent toggle cannot silently clobber this one. The first-time
+    // activation (no config doc yet) inserts.
+    let applied = match config.as_ref() {
+        Some(cfg) => db::compare_and_set_preconfigured_active(
+            &state.store,
+            &cfg.doc_id,
+            cfg.version,
+            &org_id,
+            active_slugs,
+        )
         .await
-        .map_err(|e| ServiceError::Internal(format!("Failed to update posture config: {e}")))?;
+        .map_err(|e| ServiceError::Internal(format!("Failed to update posture config: {e}")))?,
+        // First activation for this org: there is no version to guard on, so
+        // the deterministic document ID is the serialization point. A
+        // concurrent first activation returns `false` here for the same
+        // reason a lost compare-and-update does, and takes the same path.
+        None => db::create_preconfigured_active(&state.store, &org_id, active_slugs)
+            .await
+            .map_err(|e| ServiceError::Internal(format!("Failed to create posture config: {e}")))?,
+    };
+
+    if !applied {
+        // A concurrent toggle won the version race and persisted its change.
+        // Refuse rather than overwrite it; the admin re-reads the page and
+        // re-issues the toggle against the current state. No audit event is
+        // recorded — the toggle did not persist (see the custom-path analog
+        // in `toggle_custom_policy`, which returns 404 + no audit event when
+        // `update_custom_policy` loses the OCC race).
+        return Err(ServiceError::Conflict(format!(
+            "The posture policy configuration changed concurrently; please retry the '{slug}' toggle."
+        )));
+    }
 
     let action = if already_active {
         "disabled"
@@ -244,18 +283,15 @@ pub(crate) async fn toggle_preconfigured_policy(
         slug: &slug,
         admin_user_id: &admin.id,
     };
-    if let Err(e) = state
+    state
         .audit
-        .insert_event(
+        .record_event(
             db::AuditEventKind::AdminPolicyToggle,
             Some(&admin.id),
             Some(&admin.email),
             &data,
         )
-        .await
-    {
-        tracing::warn!(error = %e, "failed to write admin_policy_toggle audit event");
-    }
+        .await;
 
     tracing::info!(
         "Admin {} {} preconfigured policy '{}'",
@@ -317,6 +353,7 @@ fn verified_builder_spec(form: &CustomPolicyForm) -> Option<&str> {
 
 /// POST /admin/policies/custom — Create a new custom policy.
 pub(crate) async fn create_custom_policy(
+    arrival: ArrivalTime,
     method: Method,
     uri: OriginalUri,
     State(state): State<Arc<AppState>>,
@@ -324,17 +361,16 @@ pub(crate) async fn create_custom_policy(
     jar: CookieJar,
     axum::Form(form): axum::Form<CustomPolicyForm>,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-
     // Validate inputs before auth
-    if form.name.is_empty() || form.name.len() > 100 {
+    let Ok(name) = ResourceLabel::parse(&form.name) else {
         return Ok(redirect_error(
             jar,
             "Name must be between 1 and 100 characters",
         ));
-    }
+    };
 
-    if form.policy_text.is_empty() || form.policy_text.len() > posture::catalog::MAX_POLICY_TEXT_LEN
+    if form.policy_text.is_empty()
+        || form.policy_text.chars().count() > posture::catalog::MAX_POLICY_TEXT_LEN
     {
         return Ok(redirect_error(
             jar,
@@ -346,7 +382,7 @@ pub(crate) async fn create_custom_policy(
     }
 
     if let Some(ref desc) = form.description
-        && desc.len() > 500
+        && desc.chars().count() > MAX_POLICY_DESCRIPTION_CHARS
     {
         return Ok(redirect_error(
             jar,
@@ -356,24 +392,19 @@ pub(crate) async fn create_custom_policy(
 
     // Authenticate before parsing: policy text is attacker-influenced
     // input, so only an authenticated org admin may reach the parser.
-    let (admin, org_id) =
-        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
+    let (admin, org_id) = extract_org_admin(
+        &state,
+        &headers,
+        &jar,
+        method.as_str(),
+        uri.path(),
+        None,
+        arrival,
+    )
+    .await?;
 
     if let Err(e) = posture::validate_policy_text(&form.policy_text) {
         return Ok(redirect_error(jar, format!("Invalid policy: {e}")));
-    }
-
-    // Check total custom policy count limit
-    let custom_count = db::list_custom_policies(&state.store, &org_id)
-        .await
-        .map_err(|e| ServiceError::Internal(format!("Failed to count policies: {e}")))?
-        .len();
-
-    if custom_count >= MAX_CUSTOM_POLICIES {
-        return Ok(redirect_error(
-            jar,
-            format!("Maximum of {MAX_CUSTOM_POLICIES} custom policies allowed"),
-        ));
     }
 
     let description = form.description.clone().filter(|d| !d.is_empty());
@@ -381,15 +412,24 @@ pub(crate) async fn create_custom_policy(
     let policy = db::create_custom_policy(
         &state.store,
         db::CreateCustomPolicyParams {
-            name: &form.name,
+            name: name.as_str(),
             description: description.as_deref(),
             policy_text: &form.policy_text,
             org_id: &org_id,
             builder_spec: verified_builder_spec(&form),
         },
     )
-    .await
-    .map_err(|e| ServiceError::Internal(format!("Failed to create policy: {e}")))?;
+    .await;
+    let policy = match policy {
+        Ok(policy) => policy,
+        Err(db::CreateCustomPolicyError::LimitReached) => {
+            return Ok(redirect_error(
+                jar,
+                format!("Maximum of {MAX_CUSTOM_POLICIES} custom policies allowed"),
+            ));
+        }
+        Err(db::CreateCustomPolicyError::Other(e)) => return Err(e),
+    };
 
     let policy_hash = policy_text_hash(&form.policy_text);
     let data = CustomPolicyAdminData {
@@ -399,18 +439,15 @@ pub(crate) async fn create_custom_policy(
         admin_user_id: &admin.id,
         policy_text_hash: Some(policy_hash),
     };
-    if let Err(e) = state
+    state
         .audit
-        .insert_event(
+        .record_event(
             db::AuditEventKind::AdminPolicyCreate,
             Some(&admin.id),
             Some(&admin.email),
             &data,
         )
-        .await
-    {
-        tracing::warn!(error = %e, "failed to write admin_policy_create audit event");
-    }
+        .await;
 
     tracing::info!(
         "Admin {} created custom policy '{}'",
@@ -422,7 +459,12 @@ pub(crate) async fn create_custom_policy(
 }
 
 /// POST /admin/policies/custom/{id} — Update a custom policy.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "axum extractors, one per request input; they cannot be bundled"
+)]
 pub(crate) async fn update_custom_policy(
+    arrival: ArrivalTime,
     method: Method,
     uri: OriginalUri,
     State(state): State<Arc<AppState>>,
@@ -431,16 +473,15 @@ pub(crate) async fn update_custom_policy(
     ValidPath(id): ValidPath<String>,
     axum::Form(form): axum::Form<CustomPolicyForm>,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-
-    if form.name.is_empty() || form.name.len() > 100 {
+    let Ok(name) = ResourceLabel::parse(&form.name) else {
         return Ok(redirect_error(
             jar,
             "Name must be between 1 and 100 characters",
         ));
-    }
+    };
 
-    if form.policy_text.is_empty() || form.policy_text.len() > posture::catalog::MAX_POLICY_TEXT_LEN
+    if form.policy_text.is_empty()
+        || form.policy_text.chars().count() > posture::catalog::MAX_POLICY_TEXT_LEN
     {
         return Ok(redirect_error(
             jar,
@@ -451,8 +492,25 @@ pub(crate) async fn update_custom_policy(
         ));
     }
 
-    let (admin, org_id) =
-        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
+    if let Some(ref desc) = form.description
+        && desc.chars().count() > MAX_POLICY_DESCRIPTION_CHARS
+    {
+        return Ok(redirect_error(
+            jar,
+            "Description must be 500 characters or less",
+        ));
+    }
+
+    let (admin, org_id) = extract_org_admin(
+        &state,
+        &headers,
+        &jar,
+        method.as_str(),
+        uri.path(),
+        None,
+        arrival,
+    )
+    .await?;
 
     if let Err(e) = posture::validate_policy_text(&form.policy_text) {
         return Ok(redirect_error(jar, format!("Invalid policy: {e}")));
@@ -465,7 +523,7 @@ pub(crate) async fn update_custom_policy(
         &id,
         &org_id,
         db::UpdateCustomPolicyParams {
-            name: Some(&form.name),
+            name: Some(name.as_str()),
             description: description
                 .as_deref()
                 .map_or(db::FieldUpdate::Clear, db::FieldUpdate::Set),
@@ -492,22 +550,21 @@ pub(crate) async fn update_custom_policy(
     let data = CustomPolicyAdminData {
         action: "custom_policy_updated".to_string(),
         policy_id: &id,
-        policy_name: Some(&form.name),
+        // Record the same trimmed name that was persisted, not the raw form
+        // input, so the audit row never names a value no policy row holds.
+        policy_name: Some(name.as_str()),
         admin_user_id: &admin.id,
         policy_text_hash: Some(policy_hash),
     };
-    if let Err(e) = state
+    state
         .audit
-        .insert_event(
+        .record_event(
             db::AuditEventKind::AdminPolicyUpdate,
             Some(&admin.id),
             Some(&admin.email),
             &data,
         )
-        .await
-    {
-        tracing::warn!(error = %e, "failed to write admin_policy_update audit event");
-    }
+        .await;
 
     tracing::info!("Admin {} updated custom policy '{}'", admin.email, id);
 
@@ -516,17 +573,14 @@ pub(crate) async fn update_custom_policy(
 
 /// POST /admin/policies/custom/{id}/delete — Delete a custom policy.
 pub(crate) async fn delete_custom_policy(
-    method: Method,
-    uri: OriginalUri,
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    jar: CookieJar,
+    admin: OrgAdmin,
     ValidPath(id): ValidPath<String>,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-
-    let (admin, org_id) =
-        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
+    let OrgAdmin {
+        user: admin,
+        org_id,
+    } = admin;
 
     let deleted = db::delete_custom_policy(&state.store, &id, &org_id)
         .await
@@ -547,18 +601,15 @@ pub(crate) async fn delete_custom_policy(
         admin_user_id: &admin.id,
         policy_text_hash: None,
     };
-    if let Err(e) = state
+    state
         .audit
-        .insert_event(
+        .record_event(
             db::AuditEventKind::AdminPolicyDelete,
             Some(&admin.id),
             Some(&admin.email),
             &data,
         )
-        .await
-    {
-        tracing::warn!(error = %e, "failed to write admin_policy_delete audit event");
-    }
+        .await;
 
     tracing::info!("Admin {} deleted custom policy '{}'", admin.email, id);
 
@@ -567,17 +618,15 @@ pub(crate) async fn delete_custom_policy(
 
 /// POST /admin/policies/custom/{id}/toggle — Toggle active state.
 pub(crate) async fn toggle_custom_policy(
-    method: Method,
-    uri: OriginalUri,
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    admin: OrgAdmin,
     jar: CookieJar,
     ValidPath(id): ValidPath<String>,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-
-    let (admin, org_id) =
-        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
+    let OrgAdmin {
+        user: admin,
+        org_id,
+    } = admin;
 
     let policy = db::get_custom_policy(&state.store, &id)
         .await
@@ -638,45 +687,47 @@ pub(crate) async fn toggle_custom_policy(
     .await
     .map_err(|e| ServiceError::Internal(format!("Failed to toggle policy: {e}")))?;
 
-    if result.is_none() {
+    // Audit from the refreshed post-commit document returned by
+    // `update_custom_policy`, not the pre-toggle `policy` snapshot: the
+    // OCC retry loop can absorb a concurrent rename/re-text, in which case
+    // the stale snapshot would name/hash a version the row no longer holds.
+    // Cf. the sibling `update_custom_policy` handler (#1135).
+    let Some(updated) = result else {
         return Err(ServiceError::api(
             StatusCode::NOT_FOUND,
             "not_found",
             "Policy not found",
         ));
-    }
+    };
 
     let action = if new_active {
         "activated"
     } else {
         "deactivated"
     };
-    let policy_hash = policy_text_hash(&policy.policy_text);
+    let policy_hash = policy_text_hash(&updated.policy_text);
     let data = CustomPolicyAdminData {
         action: format!("custom_policy_{action}"),
         policy_id: &id,
-        policy_name: Some(&policy.name),
+        policy_name: Some(&updated.name),
         admin_user_id: &admin.id,
         policy_text_hash: Some(policy_hash),
     };
-    if let Err(e) = state
+    state
         .audit
-        .insert_event(
+        .record_event(
             db::AuditEventKind::AdminPolicyToggle,
             Some(&admin.id),
             Some(&admin.email),
             &data,
         )
-        .await
-    {
-        tracing::warn!(error = %e, "failed to write admin_policy_toggle audit event");
-    }
+        .await;
 
     tracing::info!(
         "Admin {} {} custom policy '{}'",
         admin.email,
         action,
-        policy.name
+        updated.name
     );
 
     Ok(Redirect::to("/admin/policies").into_response())
@@ -697,126 +748,6 @@ fn policy_text_hash(expression: &str) -> String {
         .collect()
 }
 
-/// Response for the policy editor's validate call.
-#[derive(Debug, serde::Serialize)]
-pub(crate) struct ValidateResponse {
-    pub valid: bool,
-    /// The text that was validated — generated from `rule`, or echoed from
-    /// `policy_text`. Absent only when generation itself failed.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub policy_text: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub test_result: Option<TestResult>,
-}
-
-/// Result of dry-running policy text against the sample device.
-#[derive(Debug, serde::Serialize)]
-pub(crate) struct TestResult {
-    pub pass: bool,
-    /// True when the verdict reflects an empty event history rather than
-    /// the policy's logic. The editor renders the explanation from the
-    /// i18n catalog.
-    pub reads_history: bool,
-}
-
-/// Request to validate a policy (JSON API for the policy editor): raw
-/// `policy_text` or a builder `rule`, exactly one of the two.
-#[derive(Debug, Deserialize)]
-pub(crate) struct ValidateRequest {
-    #[serde(default)]
-    pub policy_text: Option<String>,
-    #[serde(default)]
-    pub rule: Option<posture::rule::RuleSpec>,
-    /// Which decision point to dry-run `policy_text` against; a `rule`
-    /// carries its own. Defaults to token issuance.
-    #[serde(default)]
-    pub decision: Option<posture::catalog::DecisionPoint>,
-    /// Device the dry run evaluates; the built-in sample device when
-    /// absent.
-    #[serde(default)]
-    pub test_posture: Option<vouch_common::posture::DevicePosture>,
-}
-
-fn invalid(text: Option<String>, error: String) -> Json<ValidateResponse> {
-    Json(ValidateResponse {
-        valid: false,
-        policy_text: text,
-        error: Some(error),
-        test_result: None,
-    })
-}
-
-/// POST /api/v1/org/policies/validate — validate a policy (JSON).
-pub(crate) async fn validate_policy_api(
-    method: Method,
-    uri: OriginalUri,
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    jar: CookieJar,
-    Json(req): Json<ValidateRequest>,
-) -> Result<Json<ValidateResponse>, ServiceError> {
-    // Authenticate before parsing: policy text is attacker-influenced
-    // input, so only an authenticated org admin may reach the parser.
-    let _auth =
-        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
-
-    let (policy_text, decision) = match (req.policy_text, req.rule) {
-        (Some(_), Some(_)) | (None, None) => {
-            return Err(ServiceError::api(
-                StatusCode::BAD_REQUEST,
-                "invalid_request",
-                "Provide exactly one of policy_text or rule",
-            ));
-        }
-        (Some(text), None) => (
-            text,
-            req.decision
-                .unwrap_or(posture::catalog::DecisionPoint::IssueToken),
-        ),
-        (None, Some(rule)) => match posture::rule::generate(&rule) {
-            Ok(text) => (text, rule.decision),
-            Err(e) => return Ok(invalid(None, e.to_string())),
-        },
-    };
-
-    if policy_text.is_empty() || policy_text.len() > posture::catalog::MAX_POLICY_TEXT_LEN {
-        return Ok(invalid(
-            Some(policy_text),
-            format!(
-                "Policy text must be between 1 and {} characters",
-                posture::catalog::MAX_POLICY_TEXT_LEN
-            ),
-        ));
-    }
-
-    if let Err(e) = posture::validate_policy_text(&policy_text) {
-        return Ok(invalid(Some(policy_text), format!("{e}")));
-    }
-
-    let test_posture = req
-        .test_posture
-        .unwrap_or_else(posture::catalog::sample_posture);
-    let test_result = match posture::test_policy_text(&policy_text, &test_posture, decision) {
-        Ok(result) => Some(TestResult {
-            pass: result.pass,
-            reads_history: result.reads_history,
-        }),
-        Err(_) => Some(TestResult {
-            pass: false,
-            reads_history: false,
-        }),
-    };
-
-    Ok(Json(ValidateResponse {
-        valid: true,
-        policy_text: Some(policy_text),
-        error: None,
-        test_result,
-    }))
-}
-
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
@@ -826,277 +757,92 @@ pub(crate) async fn validate_policy_api(
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
-    use super::{PolicyRow, posture};
+    use super::{MAX_POLICY_DESCRIPTION_CHARS, PolicyRow, posture};
     use crate::db;
     use crate::test_utils::*;
     use axum::http::StatusCode;
     use std::sync::Arc;
+    use vouch_common::ResourceLabel;
 
     fn admin_cookie(token: &str) -> String {
         format!("{}={token}", vouch_common::SESSION_COOKIE_NAME)
     }
 
-    /// Helper: create an org with an admin user and return the session token.
-    async fn setup_admin(state: &crate::AppState) -> (crate::db::User, String) {
-        let org = create_test_org(&state.store, "example.com").await;
-        let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
-        let auth_id = create_test_authenticator(&state.store, &admin.id).await;
-        let token = create_test_session(state, &admin.id, &admin.email, &auth_id).await;
-        (admin, token)
-    }
-
-    // ── Validation API — accepted input ──────────────────────────────────────
+    /// Policy text that parses, for tests whose subject is a different field.
+    const VALID_POLICY_TEXT: &str = "forbid (principal, action == Vouch::Action::\"IssueToken\", resource) unless { context.device.os == \"macos\" };";
 
     #[tokio::test]
-    async fn test_policy_validate_valid_expression() {
+    async fn test_update_custom_policy_audit_records_trimmed_name() {
+        // #1135: the update audit event must name the value actually persisted
+        // (trimmed), not the raw form input — otherwise it names a value no
+        // policy row holds. Parsing once into a ResourceLabel and using it for
+        // both the write and the audit is what keeps them from diverging.
         let (app, state) = test_app().await;
-        let (_admin, token) = setup_admin(&state).await;
-        let auth = format!("Bearer {token}");
+        let (admin, token) = create_test_org_admin(&state).await;
+        let cookie = admin_cookie(&token);
+        let origin = "https://test.example.com";
+        let org_id = admin.org_id.clone().expect("admin has org");
 
-        let body = serde_json::json!({
-            "policy_text": "forbid (principal, action == Vouch::Action::\"IssueToken\", resource) unless { context.device.os == \"macos\" };"
-        });
-        let (status, resp) = http_post_json(
+        let created = db::create_custom_policy(
+            &state.store,
+            db::CreateCustomPolicyParams {
+                name: "Original",
+                description: None,
+                policy_text: VALID_POLICY_TEXT,
+                org_id: &org_id,
+                builder_spec: None,
+            },
+        )
+        .await
+        .expect("create custom policy");
+
+        let form = format!(
+            "policy_name={}&policy_text={}",
+            urlencoding::encode(" My Policy "),
+            urlencoding::encode(VALID_POLICY_TEXT),
+        );
+        let (status, _body) = http_post_form(
             &app,
-            "/api/v1/org/policies/validate",
-            &body.to_string(),
-            &[("Authorization", &auth)],
+            &format!("/admin/policies/custom/{}", created.id),
+            &form,
+            &[("Cookie", &cookie), ("Origin", origin)],
         )
         .await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
 
+        let stored = db::list_custom_policies(&state.store, &org_id)
+            .await
+            .expect("list")
+            .into_iter()
+            .find(|p| p.id == created.id)
+            .expect("still present");
+        assert_eq!(stored.name, "My Policy", "stored name is trimmed");
+
+        let filter = db::AuditEventFilter {
+            event_types: Some(vec![
+                db::AuditEventKind::AdminPolicyUpdate.as_str().to_string(),
+            ]),
+            user_id: Some(admin.id.clone()),
+            ..Default::default()
+        };
+        let events = state
+            .audit
+            .query_events(&filter)
+            .await
+            .expect("query audit events");
+        assert_eq!(events.len(), 1, "one update -> one audit event");
+        let v: serde_json::Value = serde_json::from_str(&events[0].data).expect("json");
         assert_eq!(
-            status,
-            StatusCode::OK,
-            "valid policy text should return 200: {resp}"
-        );
-        let json: serde_json::Value = serde_json::from_str(&resp).unwrap();
-        assert_eq!(json["valid"], true, "valid field must be true");
-        assert!(
-            json.get("error").is_none() || json["error"].is_null(),
-            "no error for valid policy text"
-        );
-        assert_eq!(
-            json["test_result"]["pass"], true,
-            "without test_posture the built-in sample device is used, which runs macOS"
-        );
-        assert_eq!(
-            json["policy_text"], body["policy_text"],
-            "raw policy_text is echoed back"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_policy_validate_with_test_posture() {
-        let (app, state) = test_app().await;
-        let (_admin, token) = setup_admin(&state).await;
-        let auth = format!("Bearer {token}");
-
-        let body = serde_json::json!({
-            "policy_text": "forbid (principal, action == Vouch::Action::\"IssueToken\", resource) unless { context.device.os == \"macos\" };",
-            "test_posture": {
-                "type": "device_posture",
-                "posture_version": 1,
-                "os": "macos"
-            }
-        });
-        let (status, resp) = http_post_json(
-            &app,
-            "/api/v1/org/policies/validate",
-            &body.to_string(),
-            &[("Authorization", &auth)],
-        )
-        .await;
-
-        assert_eq!(
-            status,
-            StatusCode::OK,
-            "valid policy with matching posture should return 200: {resp}"
-        );
-        let json: serde_json::Value = serde_json::from_str(&resp).unwrap();
-        assert_eq!(json["valid"], true, "valid must be true");
-        assert_eq!(
-            json["test_result"]["pass"], true,
-            "test_result.pass must be true when posture matches"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_policy_validate_with_failing_test_posture() {
-        let (app, state) = test_app().await;
-        let (_admin, token) = setup_admin(&state).await;
-        let auth = format!("Bearer {token}");
-
-        // Expression checks for macos but posture reports linux
-        let body = serde_json::json!({
-            "policy_text": "forbid (principal, action == Vouch::Action::\"IssueToken\", resource) unless { context.device.os == \"macos\" };",
-            "test_posture": {
-                "type": "device_posture",
-                "posture_version": 1,
-                "os": "linux"
-            }
-        });
-        let (status, resp) = http_post_json(
-            &app,
-            "/api/v1/org/policies/validate",
-            &body.to_string(),
-            &[("Authorization", &auth)],
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::OK, "Response should be 200: {resp}");
-        let json: serde_json::Value = serde_json::from_str(&resp).unwrap();
-        assert_eq!(json["valid"], true, "the policy text itself is valid");
-        assert_eq!(
-            json["test_result"]["pass"], false,
-            "test_result.pass must be false when posture does not match"
-        );
-    }
-
-    // ── Validation API — rejected input ──────────────────────────────────────
-
-    #[tokio::test]
-    async fn test_policy_validate_accepts_builder_rule() {
-        let (app, state) = test_app().await;
-        let (_admin, token) = setup_admin(&state).await;
-        let auth = format!("Bearer {token}");
-
-        let body = serde_json::json!({
-            "rule": {
-                "decision": "issue_token",
-                "body": { "kind": "device", "conditions": [
-                    { "kind": "field", "field": "disk_encryption_enabled", "op": "eq", "value": true }
-                ]}
-            }
-        });
-        let (status, resp) = http_post_json(
-            &app,
-            "/api/v1/org/policies/validate",
-            &body.to_string(),
-            &[("Authorization", &auth)],
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::OK, "builder rule must validate: {resp}");
-        let json: serde_json::Value = serde_json::from_str(&resp).unwrap();
-        assert_eq!(json["valid"], true, "{resp}");
-        let text = json["policy_text"].as_str().expect("generated text");
-        assert!(
-            text.contains("unless {\n    context.device.disk_encryption_enabled\n}"),
-            "generated text carries the condition: {text}"
-        );
-        assert_eq!(
-            json["test_result"]["pass"], true,
-            "the sample device has disk encryption on"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_policy_validate_rule_dry_runs_as_its_own_decision() {
-        let (app, state) = test_app().await;
-        let (_admin, token) = setup_admin(&state).await;
-        let auth = format!("Bearer {token}");
-
-        // A step-up rule on exchange: with no history it must DENY when
-        // evaluated as an exchange (as IssueToken it would trivially pass).
-        let body = serde_json::json!({
-            "rule": {
-                "decision": "exchange_token",
-                "body": { "kind": "history", "conditions": [
-                    { "shape": "not_happened_within", "event": "login_success",
-                      "window": { "amount": 15, "unit": "m" } }
-                ]}
-            }
-        });
-        let (status, resp) = http_post_json(
-            &app,
-            "/api/v1/org/policies/validate",
-            &body.to_string(),
-            &[("Authorization", &auth)],
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::OK, "{resp}");
-        let json: serde_json::Value = serde_json::from_str(&resp).unwrap();
-        assert_eq!(json["valid"], true, "{resp}");
-        assert_eq!(
-            json["test_result"]["reads_history"], true,
-            "a temporal rule is history-dependent"
-        );
-        assert_eq!(
-            json["test_result"]["pass"], false,
-            "an exchange-scoped forbid must fire when dry-run as an exchange"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_policy_validate_rejects_both_or_neither_input() {
-        let (app, state) = test_app().await;
-        let (_admin, token) = setup_admin(&state).await;
-        let auth = format!("Bearer {token}");
-
-        for body in [
-            serde_json::json!({}),
-            serde_json::json!({
-                "policy_text": "permit (principal, action, resource);",
-                "rule": {
-                    "decision": "issue_token",
-                    "body": { "kind": "device", "conditions": [
-                        { "kind": "field", "field": "tty", "op": "eq", "value": true }
-                    ]}
-                }
-            }),
-        ] {
-            let (status, resp) = http_post_json(
-                &app,
-                "/api/v1/org/policies/validate",
-                &body.to_string(),
-                &[("Authorization", &auth)],
-            )
-            .await;
-            assert_eq!(
-                status,
-                StatusCode::BAD_REQUEST,
-                "exactly one of policy_text/rule is required: {resp}"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn test_policy_validate_reports_rule_errors_as_invalid() {
-        let (app, state) = test_app().await;
-        let (_admin, token) = setup_admin(&state).await;
-        let auth = format!("Bearer {token}");
-
-        // Device conditions on exchange cannot generate.
-        let body = serde_json::json!({
-            "rule": {
-                "decision": "exchange_token",
-                "body": { "kind": "device", "conditions": [
-                    { "kind": "field", "field": "tty", "op": "eq", "value": true }
-                ]}
-            }
-        });
-        let (status, resp) = http_post_json(
-            &app,
-            "/api/v1/org/policies/validate",
-            &body.to_string(),
-            &[("Authorization", &auth)],
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::OK, "{resp}");
-        let json: serde_json::Value = serde_json::from_str(&resp).unwrap();
-        assert_eq!(json["valid"], false, "{resp}");
-        assert!(
-            json["error"].as_str().unwrap().contains("token issuance"),
-            "the error explains the device-on-exchange restriction: {resp}"
+            v["policy_name"].as_str().expect("policy_name present"),
+            stored.name.as_str(),
+            "audit records the persisted (trimmed) name, not raw form.name",
         );
     }
 
     #[tokio::test]
     async fn test_create_stores_verified_builder_spec_and_drops_mismatched() {
         let (app, state) = test_app().await;
-        let (admin, token) = setup_admin(&state).await;
+        let (admin, token) = create_test_org_admin(&state).await;
         let cookie = admin_cookie(&token);
         let origin = "https://test.example.com";
         let org_id = admin.org_id.clone().expect("admin has org");
@@ -1166,143 +912,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_policy_validate_requires_auth() {
-        let (app, _state) = test_app().await;
-
-        let body = serde_json::json!({"policy_text": "forbid (principal, action == Vouch::Action::\"IssueToken\", resource) unless { context.device.os == \"macos\" };"});
-        let (status, _resp) = http_post_json(
-            &app,
-            "/api/v1/org/policies/validate",
-            &body.to_string(),
-            &[],
-        )
-        .await;
-
-        assert_eq!(
-            status,
-            StatusCode::UNAUTHORIZED,
-            "Unauthenticated request must return 401"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_policy_validate_requires_org_admin() {
-        let (app, state) = test_app().await;
-        let org = create_test_org(&state.store, "example.com").await;
-        let member =
-            create_test_user_in_org(&state.store, "member@example.com", &org.id, false).await;
-        let auth_id = create_test_authenticator(&state.store, &member.id).await;
-        let token = create_test_session(&state, &member.id, &member.email, &auth_id).await;
-        let auth = format!("Bearer {token}");
-
-        let body = serde_json::json!({"policy_text": "forbid (principal, action == Vouch::Action::\"IssueToken\", resource) unless { context.device.os == \"macos\" };"});
-        let (status, _resp) = http_post_json(
-            &app,
-            "/api/v1/org/policies/validate",
-            &body.to_string(),
-            &[("Authorization", &auth)],
-        )
-        .await;
-
-        assert_eq!(
-            status,
-            StatusCode::FORBIDDEN,
-            "Non-admin user must receive 403"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_policy_validate_empty_expression() {
-        let (app, state) = test_app().await;
-        let (_admin, token) = setup_admin(&state).await;
-        let auth = format!("Bearer {token}");
-
-        let body = serde_json::json!({"policy_text": ""});
-        let (status, resp) = http_post_json(
-            &app,
-            "/api/v1/org/policies/validate",
-            &body.to_string(),
-            &[("Authorization", &auth)],
-        )
-        .await;
-
-        assert_eq!(
-            status,
-            StatusCode::OK,
-            "Empty expression returns 200: {resp}"
-        );
-        let json: serde_json::Value = serde_json::from_str(&resp).unwrap();
-        assert_eq!(
-            json["valid"], false,
-            "valid must be false for empty expression"
-        );
-        assert!(
-            json["error"].as_str().is_some(),
-            "error message must be present"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_policy_validate_too_long_expression() {
-        let (app, state) = test_app().await;
-        let (_admin, token) = setup_admin(&state).await;
-        let auth = format!("Bearer {token}");
-
-        let long_expr = "a".repeat(4097);
-        let body = serde_json::json!({"policy_text": long_expr});
-        let (status, resp) = http_post_json(
-            &app,
-            "/api/v1/org/policies/validate",
-            &body.to_string(),
-            &[("Authorization", &auth)],
-        )
-        .await;
-
-        assert_eq!(
-            status,
-            StatusCode::OK,
-            "Over-length expression returns 200: {resp}"
-        );
-        let json: serde_json::Value = serde_json::from_str(&resp).unwrap();
-        assert_eq!(
-            json["valid"], false,
-            "valid must be false for >4096 char expression"
-        );
-        assert!(
-            json["error"].as_str().is_some(),
-            "error message must be present"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_policy_validate_invalid_syntax() {
-        let (app, state) = test_app().await;
-        let (_admin, token) = setup_admin(&state).await;
-        let auth = format!("Bearer {token}");
-
-        // An unterminated string literal cannot parse
-        let body = serde_json::json!({"policy_text": "posture.os == \"unterminated"});
-        let (status, resp) = http_post_json(
-            &app,
-            "/api/v1/org/policies/validate",
-            &body.to_string(),
-            &[("Authorization", &auth)],
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::OK, "Invalid policy returns 200: {resp}");
-        let json: serde_json::Value = serde_json::from_str(&resp).unwrap();
-        assert_eq!(
-            json["valid"], false,
-            "valid must be false for invalid syntax"
-        );
-        assert!(
-            json["error"].as_str().is_some(),
-            "error message must be present for invalid policy text"
-        );
-    }
-
     // ── Admin UI Endpoints — Auth checks ─────────────────────────────────────
 
     #[tokio::test]
@@ -1325,7 +934,16 @@ mod tests {
         let member =
             create_test_user_in_org(&state.store, "member@example.com", &org.id, false).await;
         let auth_id = create_test_authenticator(&state.store, &member.id).await;
-        let token = create_test_session(&state, &member.id, &member.email, &auth_id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &member.id,
+                email: &member.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
         let cookie = admin_cookie(&token);
 
         let (status, _body) = http_get(&app, "/admin/policies", &[("Cookie", &cookie)]).await;
@@ -1344,7 +962,7 @@ mod tests {
     #[tokio::test]
     async fn test_admin_policies_page_renders_builder_scaffolding() {
         let (app, state) = test_app().await;
-        let (_admin, token) = setup_admin(&state).await;
+        let (_admin, token) = create_test_org_admin(&state).await;
         let cookie = admin_cookie(&token);
 
         let (status, body) = http_get(&app, "/admin/policies", &[("Cookie", &cookie)]).await;
@@ -1382,7 +1000,7 @@ mod tests {
     #[tokio::test]
     async fn test_create_custom_policy_requires_origin() {
         let (app, state) = test_app().await;
-        let (_admin, token) = setup_admin(&state).await;
+        let (_admin, token) = create_test_org_admin(&state).await;
         let cookie = admin_cookie(&token);
 
         let (status, _body) = http_post_form(
@@ -1403,7 +1021,7 @@ mod tests {
     #[tokio::test]
     async fn test_toggle_preconfigured_requires_origin() {
         let (app, state) = test_app().await;
-        let (_admin, token) = setup_admin(&state).await;
+        let (_admin, token) = create_test_org_admin(&state).await;
         let cookie = admin_cookie(&token);
 
         let (status, _body) = http_post_form(
@@ -1426,7 +1044,7 @@ mod tests {
     #[tokio::test]
     async fn test_create_custom_policy_rejects_empty_name() {
         let (app, state) = test_app().await;
-        let (_admin, token) = setup_admin(&state).await;
+        let (_admin, token) = create_test_org_admin(&state).await;
         let cookie = admin_cookie(&token);
         let origin = "https://test.example.com";
 
@@ -1446,10 +1064,175 @@ mod tests {
         );
     }
 
+    // The name and description guards count Unicode characters, not UTF-8
+    // bytes, so a multibyte value within the limit the form advertises is
+    // stored rather than rejected.
+    #[tokio::test]
+    async fn test_create_custom_policy_accepts_multibyte_name_and_description() {
+        let (app, state) = test_app().await;
+        let (admin, token) = create_test_org_admin(&state).await;
+        let cookie = admin_cookie(&token);
+        let origin = "https://test.example.com";
+        let org_id = admin.org_id.clone().expect("admin has org");
+
+        // 90 CJK characters = 270 bytes; 400 CJK characters = 1200 bytes.
+        let name = "名".repeat(90);
+        let description = "説".repeat(400);
+        assert!(name.len() > ResourceLabel::MAX_CHARS);
+        assert!(description.len() > MAX_POLICY_DESCRIPTION_CHARS);
+
+        let form = format!(
+            "policy_name={}&policy_description={}&policy_text={}",
+            urlencoding::encode(&name),
+            urlencoding::encode(&description),
+            urlencoding::encode(VALID_POLICY_TEXT),
+        );
+        let (status, _body) = http_post_form(
+            &app,
+            "/admin/policies/custom",
+            &form,
+            &[("Cookie", &cookie), ("Origin", origin)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+
+        let stored = db::list_custom_policies(&state.store, &org_id)
+            .await
+            .expect("list")
+            .into_iter()
+            .find(|p| p.name == name)
+            .expect("multibyte name within the character limit must be stored");
+        assert_eq!(stored.description.as_deref(), Some(description.as_str()));
+    }
+
+    #[tokio::test]
+    async fn test_create_custom_policy_rejects_multibyte_name_over_char_limit() {
+        let (app, state) = test_app().await;
+        let (admin, token) = create_test_org_admin(&state).await;
+        let cookie = admin_cookie(&token);
+        let origin = "https://test.example.com";
+        let org_id = admin.org_id.clone().expect("admin has org");
+
+        let name = "名".repeat(101);
+        let form = format!(
+            "policy_name={}&policy_text={}",
+            urlencoding::encode(&name),
+            urlencoding::encode(VALID_POLICY_TEXT),
+        );
+        let (status, _body) = http_post_form(
+            &app,
+            "/admin/policies/custom",
+            &form,
+            &[("Cookie", &cookie), ("Origin", origin)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+
+        assert!(
+            db::list_custom_policies(&state.store, &org_id)
+                .await
+                .expect("list")
+                .is_empty(),
+            "a name over the character limit must not be stored"
+        );
+    }
+
+    // A name of only whitespace is empty once trimmed, and the trimmed form is
+    // what gets stored.
+    #[tokio::test]
+    async fn test_create_custom_policy_rejects_whitespace_only_name() {
+        let (app, state) = test_app().await;
+        let (admin, token) = create_test_org_admin(&state).await;
+        let cookie = admin_cookie(&token);
+        let origin = "https://test.example.com";
+        let org_id = admin.org_id.clone().expect("admin has org");
+
+        let form = format!(
+            "policy_name={}&policy_text={}",
+            urlencoding::encode("   "),
+            urlencoding::encode(VALID_POLICY_TEXT),
+        );
+        let (status, _body) = http_post_form(
+            &app,
+            "/admin/policies/custom",
+            &form,
+            &[("Cookie", &cookie), ("Origin", origin)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+
+        assert!(
+            db::list_custom_policies(&state.store, &org_id)
+                .await
+                .expect("list")
+                .is_empty(),
+            "a whitespace-only name must not be stored"
+        );
+    }
+
+    // The update path bounds the description too, so a policy cannot be given
+    // an unbounded description after creation.
+    #[tokio::test]
+    async fn test_update_custom_policy_rejects_description_over_char_limit() {
+        let (app, state) = test_app().await;
+        let (admin, token) = create_test_org_admin(&state).await;
+        let cookie = admin_cookie(&token);
+        let origin = "https://test.example.com";
+        let org_id = admin.org_id.clone().expect("admin has org");
+
+        let form = format!(
+            "policy_name={}&policy_text={}",
+            urlencoding::encode("Original"),
+            urlencoding::encode(VALID_POLICY_TEXT),
+        );
+        let (status, _body) = http_post_form(
+            &app,
+            "/admin/policies/custom",
+            &form,
+            &[("Cookie", &cookie), ("Origin", origin)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+        let created = db::list_custom_policies(&state.store, &org_id)
+            .await
+            .expect("list")
+            .into_iter()
+            .find(|p| p.name == "Original")
+            .expect("created");
+
+        let long_description = "x".repeat(501);
+        let form = format!(
+            "policy_name={}&policy_description={}&policy_text={}",
+            urlencoding::encode("Renamed"),
+            urlencoding::encode(&long_description),
+            urlencoding::encode(VALID_POLICY_TEXT),
+        );
+        let (status, _body) = http_post_form(
+            &app,
+            &format!("/admin/policies/custom/{}", created.id),
+            &form,
+            &[("Cookie", &cookie), ("Origin", origin)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+
+        let after = db::list_custom_policies(&state.store, &org_id)
+            .await
+            .expect("list")
+            .into_iter()
+            .find(|p| p.id == created.id)
+            .expect("still present");
+        assert_eq!(
+            after.name, "Original",
+            "an over-long description must reject the whole update"
+        );
+        assert!(after.description.is_none());
+    }
+
     #[tokio::test]
     async fn test_create_custom_policy_rejects_long_cel() {
         let (app, state) = test_app().await;
-        let (_admin, token) = setup_admin(&state).await;
+        let (_admin, token) = create_test_org_admin(&state).await;
         let cookie = admin_cookie(&token);
         let origin = "https://test.example.com";
 
@@ -1476,7 +1259,7 @@ mod tests {
     #[tokio::test]
     async fn test_toggle_preconfigured_invalid_slug() {
         let (app, state) = test_app().await;
-        let (_admin, token) = setup_admin(&state).await;
+        let (_admin, token) = create_test_org_admin(&state).await;
         let cookie = admin_cookie(&token);
         let origin = "https://test.example.com";
 
@@ -1495,9 +1278,200 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_toggle_preconfigured_activates_and_logs_audit_event() {
+        // Happy path: activating a preconfigured policy on an org with no
+        // prior config takes the insert branch, persists the slug, and logs
+        // exactly one `admin_policy_toggle` audit event.
+        let (app, state) = test_app().await;
+        let (admin, token) = create_test_org_admin(&state).await;
+        let cookie = admin_cookie(&token);
+        let origin = "https://test.example.com";
+        let org_id = admin.org_id.clone().expect("admin has org");
+
+        let before = count_toggle_audit_events(&state, &admin.id).await;
+        let (status, _body) = http_post_form(
+            &app,
+            "/admin/policies/preconfigured/firewall/toggle",
+            "",
+            &[("Cookie", &cookie), ("Origin", origin)],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::SEE_OTHER,
+            "successful toggle must redirect"
+        );
+
+        let slugs = db::get_active_preconfigured_slugs(&state.store, &org_id)
+            .await
+            .expect("slugs");
+        assert!(
+            slugs.iter().any(|s| s == "firewall"),
+            "firewall must be active after the toggle: {slugs:?}"
+        );
+
+        let after = count_toggle_audit_events(&state, &admin.id).await;
+        assert_eq!(
+            after,
+            before + 1,
+            "exactly one audit event must follow a successful toggle"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_toggle_preconfigured_deactivates_and_logs_audit_event() {
+        // Happy path: toggling an already-active slug removes it and logs one
+        // audit event. Covers the `Some(doc)` + already_active → retain branch.
+        let (app, state) = test_app().await;
+        let (admin, token) = create_test_org_admin(&state).await;
+        let cookie = admin_cookie(&token);
+        let origin = "https://test.example.com";
+        let org_id = admin.org_id.clone().expect("admin has org");
+
+        db::set_preconfigured_active(&state.store, &org_id, vec!["firewall".to_string()])
+            .await
+            .expect("seed active");
+
+        let before = count_toggle_audit_events(&state, &admin.id).await;
+        let (status, _body) = http_post_form(
+            &app,
+            "/admin/policies/preconfigured/firewall/toggle",
+            "",
+            &[("Cookie", &cookie), ("Origin", origin)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::SEE_OTHER, "deactivate must redirect");
+
+        let slugs = db::get_active_preconfigured_slugs(&state.store, &org_id)
+            .await
+            .expect("slugs");
+        assert!(
+            !slugs.iter().any(|s| s == "firewall"),
+            "firewall must be deactivated: {slugs:?}"
+        );
+
+        let after = count_toggle_audit_events(&state, &admin.id).await;
+        assert_eq!(
+            after,
+            before + 1,
+            "exactly one audit event must follow a successful deactivation"
+        );
+    }
+
+    /// Regression: two concurrent admin toggles on the same org previously
+    /// each read the same stale slug list, each mutated their own copy, and
+    /// the blind `store.update` made the second write silently overwrite the
+    /// first — one toggle was lost while both requests returned a success
+    /// redirect and logged an audit event.
+    ///
+    /// The handler now captures the document version and writes via
+    /// `compare_and_set_preconfigured_active` (a single-shot
+    /// `compare_and_update`), so a concurrent toggle surfaces as a `409
+    /// Conflict` and the earlier write survives. This deterministically
+    /// reproduces the race using the `compare_and_update` test seam: the hook
+    /// fires inside `compare_and_update` right before the guarded `UPDATE`
+    /// and commits a concurrent admin's activation of `firewall` through a
+    /// hookless writer (`store.update`, which does not re-enter the hook),
+    /// bumping the config's version. The handler's guarded `UPDATE` (with the
+    /// stale version) then matches zero rows → `Ok(false)` → `409`.
+    #[tokio::test]
+    async fn test_toggle_preconfigured_concurrent_toggle_returns_conflict() {
+        use crate::db::documents::posture_policy::PostureConfigDoc;
+
+        let (app, state) = test_app_with_modify_hook(|store| {
+            let writer = store.clone();
+            store.set_compare_and_update_test_hook(Arc::new(move |doc_id: &str| {
+                let writer = writer.clone();
+                let doc_id = doc_id.to_string();
+                Box::pin(async move {
+                    // Only act on the posture-config document; `get::<T>`
+                    // filters by `doc_type`, so any other `compare_and_update`
+                    // (none in this test, but defensively) returns `None`.
+                    let Some(doc) = writer.get::<PostureConfigDoc>(&doc_id).await.expect("read")
+                    else {
+                        return;
+                    };
+                    // Simulate a concurrent admin activating `firewall` on top
+                    // of the current slugs. `store.update` is the blind path
+                    // that does NOT fire the `compare_and_update` hook, so
+                    // there is no recursion.
+                    let mut data = doc.data;
+                    if !data.active_slugs.iter().any(|s| s == "firewall") {
+                        data.active_slugs.push("firewall".to_string());
+                    }
+                    writer
+                        .update(&doc_id, &data)
+                        .await
+                        .expect("concurrent toggle");
+                })
+            }));
+        })
+        .await;
+
+        let (admin, token) = create_test_org_admin(&state).await;
+        let cookie = admin_cookie(&token);
+        let origin = "https://test.example.com";
+        let org_id = admin.org_id.clone().expect("admin has org");
+
+        // Start from `disk_encryption` active so the handler reads a
+        // non-empty list and toggles `screen_lock` on top of it — the exact
+        // interleaving from the bug report (Request A adds screen_lock while a
+        // concurrent request adds firewall).
+        db::set_preconfigured_active(&state.store, &org_id, vec!["disk_encryption".to_string()])
+            .await
+            .expect("seed");
+
+        let before = count_toggle_audit_events(&state, &admin.id).await;
+        let (status, body) = http_post_form(
+            &app,
+            "/admin/policies/preconfigured/screen_lock/toggle",
+            "",
+            &[("Cookie", &cookie), ("Origin", origin)],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "a concurrent toggle must surface as 409, not a silent overwrite: {body}"
+        );
+        assert!(
+            body.contains("conflict"),
+            "the 409 body must carry the conflict code: {body}"
+        );
+
+        // No audit event for the losing (rejected) toggle.
+        let after = count_toggle_audit_events(&state, &admin.id).await;
+        assert_eq!(
+            after, before,
+            "no audit event must be logged when the toggle did not persist"
+        );
+
+        // The concurrent winner's write survives; the rejected toggle's slug
+        // does not. Before the fix the handler's blind write would have
+        // clobbered the list with `["disk_encryption", "screen_lock"]`,
+        // silently losing the concurrent `firewall` activation.
+        let slugs = db::get_active_preconfigured_slugs(&state.store, &org_id)
+            .await
+            .expect("slugs");
+        assert!(
+            slugs.iter().any(|s| s == "firewall"),
+            "the concurrent winner's slug must survive: {slugs:?}"
+        );
+        assert!(
+            !slugs.iter().any(|s| s == "screen_lock"),
+            "the rejected toggle's slug must NOT persist: {slugs:?}"
+        );
+        assert!(
+            slugs.iter().any(|s| s == "disk_encryption"),
+            "the pre-existing slug must survive: {slugs:?}"
+        );
+    }
+
     // ── Custom policy toggle ─────────────────────────────────────────────────
 
-    /// Helper: create a custom policy (inactive) owned by `setup_admin`'s org
+    /// Helper: create a custom policy (inactive) owned by `create_test_org_admin`'s org
     /// and return its id.
     async fn create_inactive_custom_policy(state: &crate::AppState, org_id: &str) -> String {
         let policy = db::create_custom_policy(
@@ -1535,7 +1509,7 @@ mod tests {
     #[tokio::test]
     async fn test_toggle_custom_policy_activates_and_logs_audit_event() {
         let (app, state) = test_app().await;
-        let (admin, token) = setup_admin(&state).await;
+        let (admin, token) = create_test_org_admin(&state).await;
         let cookie = admin_cookie(&token);
         let origin = "https://test.example.com";
 
@@ -1575,7 +1549,7 @@ mod tests {
     #[tokio::test]
     async fn test_toggle_custom_policy_unknown_id_returns_not_found() {
         let (app, state) = test_app().await;
-        let (admin, token) = setup_admin(&state).await;
+        let (admin, token) = create_test_org_admin(&state).await;
         let cookie = admin_cookie(&token);
         let origin = "https://test.example.com";
 
@@ -1642,7 +1616,7 @@ mod tests {
         })
         .await;
 
-        let (admin, token) = setup_admin(&state).await;
+        let (admin, token) = create_test_org_admin(&state).await;
         let cookie = admin_cookie(&token);
         let origin = "https://test.example.com";
 
@@ -1684,12 +1658,145 @@ mod tests {
             "policy must have been deleted by the OCC hook"
         );
     }
+
+    /// Regression: a concurrent full update that renames/re-texts the policy
+    /// between `toggle_custom_policy`'s initial `get_custom_policy` and its
+    /// `update_custom_policy` commit is absorbed by the OCC retry loop — the
+    /// toggle's `modify` closure only touches `active`, so it re-reads the
+    /// concurrent update's name/text and commits on top. The toggle succeeds
+    /// (303), the DB row holds the concurrent update's name/text plus the
+    /// toggled `active`, and `db::update_custom_policy` returns the refreshed
+    /// post-commit document. The `AdminPolicyToggle` audit event must reflect
+    /// that persisted state (name + `policy_text_hash`), not the stale
+    /// pre-toggle snapshot — otherwise it names/hashes a version the row no
+    /// longer holds at commit time, defeating `policy_text_hash`'s purpose of
+    /// tracing "which version was in effect at the time of an admin action."
+    ///
+    /// This deterministically drives the race with `set_modify_test_hook` (the
+    /// same seam as the concurrent-delete test above): on the toggle's first
+    /// OCC attempt the hook issues a blind `store.update` that renames +
+    /// re-texts the policy, bumping its version. The toggle's first
+    /// `compare_and_update` then matches zero rows, the loop retries, re-reads
+    /// the new name/text, applies `active`, and commits.
+    #[tokio::test]
+    async fn test_toggle_custom_policy_concurrent_update_audits_persisted_name_and_hash() {
+        use crate::db::documents::posture_policy::CustomPosturePolicyDoc;
+
+        let new_text = VALID_POLICY_TEXT;
+        let (app, state) = test_app_with_modify_hook(|store| {
+            let writer = store.clone();
+            store.set_modify_test_hook(Arc::new(move |doc_id: &str, attempt: u32| {
+                let writer = writer.clone();
+                let doc_id = doc_id.to_string();
+                let new_text = new_text.to_string();
+                Box::pin(async move {
+                    if attempt != 0 {
+                        return;
+                    }
+                    let Some(doc) = writer
+                        .get::<CustomPosturePolicyDoc>(&doc_id)
+                        .await
+                        .expect("read policy")
+                    else {
+                        return;
+                    };
+                    let mut data = doc.data;
+                    data.name = "ConcurrentRename".to_string();
+                    data.policy_text = new_text;
+                    writer
+                        .update(&doc_id, &data)
+                        .await
+                        .expect("concurrent full update");
+                })
+            }));
+        })
+        .await;
+
+        let (admin, token) = create_test_org_admin(&state).await;
+        let cookie = admin_cookie(&token);
+        let origin = "https://test.example.com";
+        let org_id = admin.org_id.clone().expect("admin has org");
+        let policy_id = create_inactive_custom_policy(&state, &org_id).await;
+        let pre_toggle_text = "posture.os == \"linux\"";
+
+        let (status, body) = http_post_form(
+            &app,
+            &format!("/admin/policies/custom/{policy_id}/toggle"),
+            "",
+            &[("Cookie", &cookie), ("Origin", origin)],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::SEE_OTHER,
+            "toggle must succeed after the OCC retry: {body}"
+        );
+
+        let stored = db::get_custom_policy(&state.store, &policy_id)
+            .await
+            .expect("get")
+            .expect("policy exists");
+        assert!(stored.active, "toggle must flip active to true");
+        assert_eq!(
+            stored.name, "ConcurrentRename",
+            "concurrent rename persisted"
+        );
+        assert_eq!(
+            stored.policy_text, VALID_POLICY_TEXT,
+            "concurrent re-text persisted"
+        );
+
+        // The audit event must agree with the persisted post-commit row, not
+        // the pre-toggle snapshot. Before the fix this asserted the stale
+        // `policy_name == "Toggle Me"` and `policy_text_hash ==
+        // hash(pre_toggle_text)`.
+        let filter = db::AuditEventFilter {
+            event_types: Some(vec![
+                db::AuditEventKind::AdminPolicyToggle.as_str().to_string(),
+            ]),
+            user_id: Some(admin.id.clone()),
+            ..Default::default()
+        };
+        let events = state
+            .audit
+            .query_events(&filter)
+            .await
+            .expect("query audit events");
+        assert_eq!(events.len(), 1, "exactly one toggle audit event");
+        let v: serde_json::Value = serde_json::from_str(&events[0].data).expect("json");
+        assert_eq!(
+            v["policy_name"].as_str().unwrap(),
+            stored.name,
+            "audit policy_name must match the persisted (post-commit) name, not the pre-toggle snapshot"
+        );
+        assert_eq!(
+            v["policy_name"].as_str().unwrap(),
+            "ConcurrentRename",
+            "audit must not record the stale pre-toggle name 'Toggle Me'"
+        );
+        assert_eq!(
+            v["policy_text_hash"].as_str().unwrap(),
+            super::policy_text_hash(&stored.policy_text),
+            "audit hash must match the persisted (post-commit) text"
+        );
+        assert_eq!(
+            v["policy_text_hash"].as_str().unwrap(),
+            super::policy_text_hash(VALID_POLICY_TEXT),
+            "audit must not record the stale pre-toggle text hash"
+        );
+        assert_ne!(
+            v["policy_text_hash"].as_str().unwrap(),
+            super::policy_text_hash(pre_toggle_text),
+            "audit must not record the hash of the superseded text"
+        );
+    }
+
     /// A stored policy that fails validation is flagged on the page, so an
     /// admin sees it before users are locked out.
     #[tokio::test]
     async fn test_policies_page_flags_invalid_custom_policy() {
         let (app, state) = test_app().await;
-        let (admin, _token) = setup_admin(&state).await;
+        let (admin, _token) = create_test_org_admin(&state).await;
         let org_id = admin.org_id.clone().expect("admin must have an org");
 
         // A bare boolean expression stores fine but is not a policy.

@@ -5,9 +5,11 @@
 //! - RFC 8693 - OAuth 2.0 Token Exchange
 
 use crate::AppState;
+use crate::arrival::ArrivalTime;
 use crate::crypto::hash_token;
-use crate::db;
+use crate::db::{self, SessionPurpose};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
+use crate::infra::metrics;
 use crate::redact_email;
 use crate::services::auth::{
     ActorClaim, CreateOAuthTokenParams, MAX_DELEGATION_DEPTH, TokenBinding, TokenIssuanceProof,
@@ -16,6 +18,8 @@ use crate::services::auth::{
 use crate::services::oidc::ScopeSet;
 use crate::services::oidc::authorization_details::AuthorizationDetails;
 use crate::services::oidc::claims::OidcIdTokenClaimsBuilder;
+use crate::services::oidc::validated_client::ValidatedOAuthClient;
+use crate::services::policy;
 use jiff::Timestamp;
 use secrecy::{ExposeSecret, SecretString};
 use std::sync::Arc;
@@ -164,6 +168,44 @@ impl<'a> ActorToken<'a> {
     }
 }
 
+/// RFC 8693 §2.1 `requested_token_type`: the subset of [`TokenType`] this
+/// server will issue. [`TokenType::Jwt`] has no variant because the server
+/// never issues a token it would label with the generic `jwt` URN — RFC 8693
+/// §2.2.1 requires `issued_token_type` to name what was actually issued, and
+/// every issued token is either an access token or an ID token. `jwt` remains
+/// a valid `subject_token_type` and `actor_token_type`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestedTokenType {
+    /// `requested_token_type=urn:ietf:params:oauth:token-type:access_token`.
+    AccessToken,
+    /// `requested_token_type=urn:ietf:params:oauth:token-type:id_token`.
+    IdToken,
+}
+
+impl RequestedTokenType {
+    /// Parse the OPTIONAL `requested_token_type` parameter, or `None` when
+    /// the request omits it (the issued type is then at the server's
+    /// discretion per RFC 8693 §2.1 — this server issues an access token).
+    ///
+    /// # Errors
+    ///
+    /// `invalid_request` when the declared type is one this server does not
+    /// issue.
+    pub fn from_param(urn: Option<&str>) -> ServiceResult<Option<Self>> {
+        let Some(urn) = urn else {
+            return Ok(None);
+        };
+        match TokenType::parse(urn) {
+            Some(TokenType::AccessToken) => Ok(Some(Self::AccessToken)),
+            Some(TokenType::IdToken) => Ok(Some(Self::IdToken)),
+            Some(TokenType::Jwt) | None => Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidRequest,
+                "Unsupported requested_token_type",
+            )),
+        }
+    }
+}
+
 /// Default lifetime for an exchanged OIDC ID token
 /// (`requested_token_type=id_token`). Short because the token is presented
 /// immediately as a federation assertion (Kubernetes, Claude/OpenAI WIF) and
@@ -184,16 +226,18 @@ pub struct TokenExchangeParams<'a> {
     /// RFC 8693 Section 2.1: The requested scope for the new token (OPTIONAL).
     pub scope: Option<&'a str>,
     /// RFC 8693 Section 2.1: The desired type of the requested security token (OPTIONAL).
-    pub requested_token_type: Option<TokenType>,
-    /// OAuth client_id of the requesting client.
-    pub client_id: &'a str,
+    pub requested_token_type: Option<RequestedTokenType>,
+    /// The requesting client, checked for the token-exchange grant.
+    pub client: &'a ValidatedOAuthClient,
     /// RFC 9449 §6 / RFC 8705 §3: how the issued token is bound. The DPoP
     /// witness travels instead of its thumbprint so an exchanged token cannot
     /// be sender-constrained to a key that was never proven.
     pub binding: TokenBinding<'a>,
-    /// Client IP from the TCP peer socket, for temporal policy correlation
-    /// (e.g. the exchange-IP-consistency policy).
-    pub client_ip: Option<std::net::IpAddr>,
+    /// The request's transport metadata, from the `ClientInfo` extractor:
+    /// the client IP feeds the exchange policies (e.g. IP consistency), and
+    /// the IP and User-Agent are recorded on the token-exchange audit row,
+    /// whose `client_ip` later becomes the history event's `input.ip`.
+    pub client_info: &'a db::ClientInfo,
     /// RFC 9396 Section 6: Authorization details for narrowing.
     pub authorization_details: Option<&'a str>,
 }
@@ -253,12 +297,13 @@ pub(crate) async fn exchange_token(
     state: &Arc<AppState>,
     params: TokenExchangeParams<'_>,
     proof: TokenIssuanceProof,
+    arrival: ArrivalTime,
 ) -> ServiceResult<TokenExchangeResult> {
     // Reject `actor_token` with `requested_token_type=id_token`. The ID-token
     // path issues a clean OIDC claim set and does not carry the `act` claim,
     // so honoring `actor_token` here would silently drop the delegation chain.
     // Refuse the combination explicitly rather than ignore the input.
-    if params.requested_token_type == Some(TokenType::IdToken) && params.actor.is_some() {
+    if params.requested_token_type == Some(RequestedTokenType::IdToken) && params.actor.is_some() {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidRequest,
             "actor_token is not supported with requested_token_type=id_token",
@@ -270,8 +315,14 @@ pub(crate) async fn exchange_token(
     let subject_token = params.subject.token.expose_secret();
     let subject_decoded = decode_token(subject_token, &state.oidc_key, &config.base_url)
         .ok_or_else(|| {
+            // RFC 8693 §2.2.2: "If the request itself is not valid or if
+            // either the 'subject_token' or 'actor_token' are invalid for any
+            // reason, or are unacceptable based on policy, the authorization
+            // server MUST construct an error response, as specified in
+            // Section 5.2 of [RFC6749]. The value of the 'error' parameter
+            // MUST be the 'invalid_request' error code."
             ServiceError::oauth(
-                OAuthErrorCode::InvalidGrant,
+                OAuthErrorCode::InvalidRequest,
                 "Invalid or expired subject token",
             )
         })?;
@@ -280,12 +331,12 @@ pub(crate) async fn exchange_token(
     let subject_token_hash = hash_token(subject_token);
     let subject_session = state
         .session_cache
-        .get_session_by_token_hash(&state.store, &subject_token_hash)
+        .get_session_by_token_hash(&state.store, &subject_token_hash, arrival)
         .await
         .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
         .ok_or_else(|| {
             ServiceError::oauth(
-                OAuthErrorCode::InvalidGrant,
+                OAuthErrorCode::InvalidRequest,
                 "Subject token session not found",
             )
         })?;
@@ -297,12 +348,15 @@ pub(crate) async fn exchange_token(
         .await
         .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
         .ok_or_else(|| {
-            ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Subject token user not found")
+            ServiceError::oauth(
+                OAuthErrorCode::InvalidRequest,
+                "Subject token user not found",
+            )
         })?;
 
     if !subject_user.active {
         return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidGrant,
+            OAuthErrorCode::InvalidRequest,
             "User account is deactivated",
         ));
     }
@@ -311,28 +365,41 @@ pub(crate) async fn exchange_token(
     // policies — step-up recency, IP consistency, logout-invalidates —
     // are enforced here, before any token is minted.
     if let Some(ref org_id) = subject_user.org_id {
-        crate::services::policy::evaluate_exchange_policies(
+        policy::evaluate_exchange_policies(
             state,
             org_id,
             &subject_user.id,
             &subject_user.email,
-            params.client_ip,
-            params.client_id,
+            params.client_info.client_ip(),
+            &params.client.client_id,
             params.audience,
+            arrival,
         )
-        .await?;
+        .await
+        // RFC 8693 §2.2.2: a subject token "unacceptable based on policy"
+        // MUST be reported with the invalid_request error code. The policy
+        // engine answers access_denied for every decision point (the login
+        // path keeps that code), so remap here, at the only exchange caller,
+        // preserving the policy name and remediation in the description.
+        .map_err(|e| match e {
+            ServiceError::OAuth {
+                code: OAuthErrorCode::AccessDenied,
+                description,
+            } => ServiceError::oauth(OAuthErrorCode::InvalidRequest, description),
+            other => other,
+        })?;
     }
 
     let subject_email = &subject_user.email;
 
     // Handle actor token if present (for delegation chains)
-    let actor_claim = if let Some(actor) = params.actor {
+    let (actor_claim, actor_user_id) = if let Some(actor) = params.actor {
         let actor_token = actor.token().expose_secret();
 
         // Decode actor token (supports both HS256 and ES256)
         let actor_decoded = decode_token(actor_token, &state.oidc_key, &config.base_url)
             .ok_or_else(|| {
-                ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Invalid actor token")
+                ServiceError::oauth(OAuthErrorCode::InvalidRequest, "Invalid actor token")
             })?;
 
         // Block self-delegation: actor and subject must be different users
@@ -345,18 +412,17 @@ pub(crate) async fn exchange_token(
 
         // Verify the actor token's session exists in the database
         let actor_token_hash = hash_token(actor_token);
-        if !matches!(
-            state
-                .session_cache
-                .get_session_by_token_hash(&state.store, &actor_token_hash)
-                .await,
-            Ok(Some(_))
-        ) {
-            return Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidGrant,
-                "Actor token session not found or revoked",
-            ));
-        }
+        let _actor_session = state
+            .session_cache
+            .get_session_by_token_hash(&state.store, &actor_token_hash, arrival)
+            .await
+            .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
+            .ok_or_else(|| {
+                ServiceError::oauth(
+                    OAuthErrorCode::InvalidRequest,
+                    "Actor token session not found or revoked",
+                )
+            })?;
 
         // Always load the actor user to check the active flag (#550).
         // Also use the canonical email from the DB when it is absent from the JWT.
@@ -364,19 +430,53 @@ pub(crate) async fn exchange_token(
             .await
             .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
             .ok_or_else(|| {
-                ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Actor token user not found")
+                ServiceError::oauth(OAuthErrorCode::InvalidRequest, "Actor token user not found")
             })?;
         if !actor_user.active {
             return Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidGrant,
+                OAuthErrorCode::InvalidRequest,
                 "User account is deactivated",
             ));
         }
+        // Temporal policy gate for the actor principal: evaluate only
+        // `logout_invalidates_exchange`, not the full `evaluate_exchange_policies`
+        // set. The other ExchangeToken policies reason about the *request*
+        // (IP consistency, step-up recency) or the *subject's* history (rate
+        // limit), so applying them to the actor would ban cross-IP delegations
+        // and require the actor to have logged in within 15m. Only
+        // `logout_invalidates_exchange` — "a token issued before logout being
+        // exchanged for credentials" — maps onto the actor, closing the
+        // temporal half of #550 that the structural `user.active` mirroring
+        // left open. A browser-only logout records `Logout` but deletes only
+        // the cookie session row, so the actor's access-token row — and the
+        // `Logout` audit event — survive `get_session_by_token_hash` and the
+        // `active` check.
+        if let Some(ref actor_org_id) = actor_user.org_id {
+            policy::evaluate_actor_logout_policy(
+                state,
+                actor_org_id,
+                &actor_user.id,
+                &actor_user.email,
+                arrival,
+            )
+            .await
+            // RFC 8693 §2.2.2: an actor token "unacceptable based on policy"
+            // MUST be reported with the `invalid_request` error code. The
+            // policy engine answers access_denied, so remap here, preserving
+            // the policy name and remediation in the description.
+            .map_err(|e| match e {
+                ServiceError::OAuth {
+                    code: OAuthErrorCode::AccessDenied,
+                    description,
+                } => ServiceError::oauth(OAuthErrorCode::InvalidRequest, description),
+                other => other,
+            })?;
+        }
+        let actor_user_id = actor_user.id.clone();
         let actor_email = actor_decoded
             .email()
             .map(str::to_string)
             .unwrap_or(actor_user.email);
-
         // Preserve the existing actor chain from the subject token (if any)
         // to correctly track multi-hop delegation. The new actor wraps the
         // existing chain from the subject token's `act` claim.
@@ -395,9 +495,9 @@ pub(crate) async fn exchange_token(
             ));
         }
 
-        Some(actor)
+        (Some(actor), Some(actor_user_id))
     } else {
-        None
+        (None, None)
     };
 
     // Calculate granted scope (intersection of requested and available).
@@ -405,19 +505,24 @@ pub(crate) async fn exchange_token(
     // rather than defaulting to ScopeSet::all() to prevent scope escalation.
     let granted_scope = calculate_granted_scope(params.scope, subject_decoded.scope());
 
-    // Cap exchanged-token lifetime by subject token's remaining TTL
-    // (RFC 8693 Section 2.2).
-    let mut expires_in = state.config().session_hours.saturating_mul(3600);
-
-    if let Some(subject_exp) = subject_decoded.exp() {
-        let now = Timestamp::now().as_second();
-        let remaining = subject_exp.saturating_sub(now);
-        if remaining > 0
-            && let Ok(remaining_u64) = u64::try_from(remaining)
-        {
-            expires_in = expires_in.min(remaining_u64);
-        }
-    }
+    // Cap exchanged-token lifetime by subject token's remaining TTL. RFC 8693
+    // §2.2.1 defines `expires_in` as "The validity lifetime, in seconds, of
+    // the token issued by the authorization server." The spec does not
+    // mandate capping that by the subject token's TTL; bounding the issued
+    // token by the subject's remaining TTL is this server's design decision
+    // (mirrored by the ID-token branch). The cap is applied unconditionally —
+    // including when the subject's integer-second remaining TTL is 0 — so an
+    // exchanged access token never outlives its subject token (see
+    // [`cap_lifetime_by_subject_ttl`]).
+    // The cap is measured from the request's arrival, and
+    // `create_oauth_access_token` stamps the issued `exp` from that same
+    // instant, so `exp_issued = arrival + min(session, subject_exp - arrival)`
+    // can never exceed `subject_exp`.
+    let expires_in = cap_lifetime_by_subject_ttl(
+        state.config().session_hours.saturating_mul(3600),
+        subject_decoded.exp(),
+        arrival.as_second(),
+    );
 
     // RFC 9068: Audience is the explicit audience param (target resource server),
     // falling back to client_id if no audience specified.
@@ -444,10 +549,12 @@ pub(crate) async fn exchange_token(
     // upstream SSO but before FIDO2 registration) from minting a WIF
     // assertion that downstream relying parties trust as hardware-attested,
     // gate the fork on the subject token's hardware verification level.
-    if params.requested_token_type == Some(TokenType::IdToken) {
+    if params.requested_token_type == Some(RequestedTokenType::IdToken) {
         if !subject_decoded.hardware_verification().hardware_verified() {
+            // RFC 8693 §2.2.2: a subject token "unacceptable based on policy"
+            // MUST be reported with the invalid_request error code.
             return Err(ServiceError::oauth(
-                OAuthErrorCode::AccessDenied,
+                OAuthErrorCode::InvalidRequest,
                 "ID token exchange requires a hardware-verified subject token",
             ));
         }
@@ -461,8 +568,10 @@ pub(crate) async fn exchange_token(
                 expires_in,
                 hardware_aaguid: subject_session.hardware_aaguid.as_deref(),
                 org_domain: subject_session.org_domain.as_deref(),
-                client_id: params.client_id,
+                client_id: &params.client.client_id,
+                client_info: params.client_info,
             },
+            arrival,
         )
         .await;
     }
@@ -509,52 +618,58 @@ pub(crate) async fn exchange_token(
             user_id: &subject_session.user_id,
             email: subject_email,
             authenticator_id,
-            client_id: params.client_id,
+            client_id: &params.client.client_id,
             scope: granted_scope.clone(),
             binding: params.binding,
             act: actor_claim,
             audience,
-            // Token exchange does not carry auth_time from the subject token
-            auth_time: None,
+            // Thread the subject-TTL cap into the issued token: `expires_in`
+            // is already `min(session_hours*3600, subject_remaining)` above,
+            // so passing it as `max_lifetime_secs` makes the JWT `exp` claim
+            // and the `sessions.expires_at` row honor that cap — the value
+            // reported to the client (RFC 8693 §2.2.1 `expires_in`) then
+            // describes the token it accompanies.
+            max_lifetime_secs: Some(expires_in),
             // Propagate hardware verification from the subject token so
             // non-FIDO2 tokens (e.g., JWT bearer) cannot be laundered into
-            // hardware-verified tokens via exchange.
+            // hardware-verified tokens via exchange. The reconstruction drops
+            // `auth_time` — the exchange runs no ceremony of its own.
             hardware_verification: subject_decoded.hardware_verification(),
-            session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
+            session_purpose: SessionPurpose::OAuthAccessToken,
             authorization_details: effective_ad_value.as_ref(),
             // Propagate the subject session's federation snapshot so the
             // exchanged session reports the original authenticator/org even
             // after the user rotates keys or changes orgs.
             hardware_aaguid: subject_session.hardware_aaguid.as_deref(),
             org_domain: subject_session.org_domain.as_deref(),
+            // RFC 6749 Section 10.5 asks the server to revoke "all access
+            // tokens already granted based on the compromised authorization
+            // code". An exchanged token derives its authority from the subject
+            // token, so it inherits the subject's code and is revoked with it;
+            // inheriting rather than clearing also keeps a chain of exchanges
+            // linked back to the code that started it.
+            source_code_hash: subject_session.source_code_hash.as_deref(),
         },
         proof,
+        arrival,
     )
     .await?;
 
-    // Log the token exchange for audit (best-effort — failures are non-fatal)
-    let now = Timestamp::now();
+    // Log the token exchange for audit (best-effort — failures are non-fatal).
+    // The audit row's `expires_at` is taken from the minted token's actual
+    // expiration (`session_result.expires_at`) so the `token_exchange` audit
+    // row, the `sessions` row, and the JWT `exp` claim all record the same
+    // lifetime for one token — re-deriving it from a separately-stamped `now`
+    // would let the audit row drift from the mint-time value.
     let issued_token_hash = hash_token(session_result.token.expose_secret());
     let scope_string = granted_scope.as_ref().map(|s| s.to_space_separated());
-    let expires_at = if let Ok(expires_seconds) = i64::try_from(expires_in)
-        && let Some(exp) = now.as_second().checked_add(expires_seconds)
-        && let Ok(ts) = Timestamp::from_second(exp)
-    {
-        ts
-    } else {
-        tracing::warn!(
-            "token exchange audit: expires_at overflow ({expires_in}s from {}), \
-             recording `now` instead",
-            now.as_second()
-        );
-        now
-    };
+    let expires_at = session_result.expires_at;
     if let Err(e) = db::insert_token_exchange(
         &state.store,
         &db::InsertTokenExchangeParams {
             subject_user_id: &subject_session.user_id,
             subject_token_hash: &subject_token_hash,
-            actor_user_id: None,
+            actor_user_id: actor_user_id.as_deref(),
             issued_token_hash: &issued_token_hash,
             requested_audience: params.audience,
             granted_scope: scope_string.as_deref(),
@@ -574,9 +689,13 @@ pub(crate) async fn exchange_token(
                 event_type: "token_issued".to_string(),
                 success: true,
                 ..Default::default()
-            },
+            }
+            .with_client(
+                params.client_info.client_ip(),
+                params.client_info.user_agent().map(String::from),
+            ),
             &db::TokenExchangeDetails {
-                client_id: params.client_id.to_string(),
+                client_id: params.client.client_id.clone(),
                 audience: params.audience.map(String::from),
                 scope: scope_string.clone(),
                 issued_token_type: TokenType::AccessToken.as_urn().to_string(),
@@ -595,7 +714,7 @@ pub(crate) async fn exchange_token(
         access_token: session_result.token.clone(),
         issued_token_type: TokenType::AccessToken.as_urn().to_string(),
         token_type: session_result.token_type.to_string(),
-        expires_in,
+        expires_in: session_result.expires_in,
         scope: granted_scope,
         authorization_details: effective_ad,
     })
@@ -619,6 +738,8 @@ struct IdTokenContext<'a> {
     org_domain: Option<&'a str>,
     /// OAuth client performing the exchange, for the audit event.
     client_id: &'a str,
+    /// The request's transport metadata, for the audit event.
+    client_info: &'a db::ClientInfo,
 }
 
 /// Mint a clean OIDC ID token (ES256) for an RFC 8693 exchange where the
@@ -639,6 +760,7 @@ struct IdTokenContext<'a> {
 async fn issue_id_token(
     state: &Arc<AppState>,
     ctx: IdTokenContext<'_>,
+    arrival: ArrivalTime,
 ) -> ServiceResult<TokenExchangeResult> {
     let config = state.config();
 
@@ -659,6 +781,13 @@ async fn issue_id_token(
     let audience = ctx.audience.unwrap_or(&issuer);
     let expires_in = ctx.expires_in.min(DEFAULT_ID_TOKEN_EXPIRES_SECS);
 
+    // Stamp the arrival instant once and use it for every temporal claim of
+    // this response. The ID token's `iat`/`exp` (built by the claims builder)
+    // and the audit record's `expires_at` both read this same `now`, so the
+    // signed JWT's `exp` and the audit row cannot disagree by the latency
+    // between the two mints — see `arrival.rs` for the contract.
+    let now = arrival.timestamp();
+
     // `hardware_aaguid` and `hd` are session-time snapshots — they reflect the
     // authenticator/org state at session creation and survive later rotations
     // of the user's keys or organization membership.
@@ -666,6 +795,7 @@ async fn issue_id_token(
         .hardware_aaguid(ctx.hardware_aaguid.map(String::from))
         .hd(ctx.org_domain.map(String::from))
         .valid_for_seconds(expires_in)
+        .issued_at(now)
         .build()
         .map_err(|e| ServiceError::Internal(format!("Failed to build ID token claims: {e}")))?;
 
@@ -680,8 +810,10 @@ async fn issue_id_token(
         .await
         .map_err(|e| ServiceError::Internal(format!("Failed to sign ID token: {e}")))?;
 
-    // Log the exchange for audit (best-effort — failures are non-fatal).
-    let now = Timestamp::now();
+    // Log the exchange for audit (best-effort — failures are non-fatal). The
+    // audit's `expires_at` is derived from the same `now` (the request's
+    // arrival instant) the claims builder stamped onto the JWT's `exp`, so
+    // the row and the signed token agree on the lifetime of one token.
     let issued_token_hash = hash_token(&id_token);
     let expires_at = i64::try_from(expires_in)
         .ok()
@@ -700,6 +832,8 @@ async fn issue_id_token(
         &db::InsertTokenExchangeParams {
             subject_user_id: ctx.user_id,
             subject_token_hash: ctx.subject_token_hash,
+            // Always None: actor_token with requested_token_type=id_token is
+            // rejected before this path is reached.
             actor_user_id: None,
             issued_token_hash: &issued_token_hash,
             requested_audience: ctx.audience,
@@ -721,7 +855,11 @@ async fn issue_id_token(
                 event_type: "token_issued".to_string(),
                 success: true,
                 ..Default::default()
-            },
+            }
+            .with_client(
+                ctx.client_info.client_ip(),
+                ctx.client_info.user_agent().map(String::from),
+            ),
             &db::TokenExchangeDetails {
                 client_id: ctx.client_id.to_string(),
                 audience: ctx.audience.map(String::from),
@@ -732,7 +870,7 @@ async fn issue_id_token(
         )
         .await;
 
-    crate::infra::metrics::record_credential_issuance("oidc");
+    metrics::record_credential_issuance("oidc");
 
     tracing::info!(
         "Issued OIDC ID token via exchange for {} (audience: {audience})",
@@ -796,6 +934,39 @@ fn calculate_granted_scope(
     }
 }
 
+/// Cap an exchanged access token's lifetime by the subject token's remaining
+/// TTL.
+///
+/// RFC 8693 §2.2.1 defines `expires_in` as "The validity lifetime, in
+/// seconds, of the token issued by the authorization server." The spec does
+/// not mandate capping that lifetime by the subject token's TTL; bounding the
+/// issued token by the subject's remaining TTL is this server's design
+/// decision. The cap binds unconditionally, including at the `remaining == 0`
+/// integer-second boundary where the subject token has reached its `exp`.
+///
+/// `session_secs` is the configured full session lifetime
+/// (`session_hours * 3600`). When the subject token exposes an `exp` claim,
+/// the returned lifetime is `min(session_secs, max(0, subject_exp - now))` —
+/// so a subject token that has reached its integer-second `exp`
+/// (`subject_exp == now`, i.e. zero remaining) caps the issued token to `0`
+/// seconds rather than the full `session_secs`. A subject token whose `exp`
+/// has already passed (negative remaining, only reachable when the JWT
+/// validation gate's leeway admits it) likewise caps to `0` via
+/// `saturating_sub` + `try_from(..).unwrap_or(0)`. When the subject token has
+/// no `exp` claim, the configured `session_secs` is returned unchanged.
+///
+/// `now` is taken as integer seconds because the subject JWT `exp` is an
+/// integer-second claim (RFC 7519 §4.1.4), so sub-second comparison would add
+/// no precision.
+fn cap_lifetime_by_subject_ttl(session_secs: u64, subject_exp: Option<i64>, now: i64) -> u64 {
+    let Some(subject_exp) = subject_exp else {
+        return session_secs;
+    };
+    let remaining = subject_exp.saturating_sub(now);
+    let remaining_u64 = u64::try_from(remaining).unwrap_or(0);
+    session_secs.min(remaining_u64)
+}
+
 #[cfg(test)]
 #[expect(
     clippy::expect_used,
@@ -803,6 +974,9 @@ fn calculate_granted_scope(
 )]
 mod tests {
     use super::*;
+    use crate::arrival::ArrivalTime;
+    use crate::crypto;
+    use crate::db::ClientInfo;
 
     #[test]
     fn test_calculate_granted_scope_with_available() {
@@ -860,6 +1034,78 @@ mod tests {
         assert_eq!(result, Some(ScopeSet::parse("openid email")));
     }
 
+    // ---- cap_lifetime_by_subject_ttl ----
+    //
+    // The default `session_hours` lifetime is 28800s (8h); the cap must bind
+    // at every reachable value of `subject_exp - now`, including the
+    // integer-second boundary where it is exactly 0.
+
+    #[test]
+    fn test_cap_lifetime_no_subject_exp_returns_full_session() {
+        // No `exp` claim (e.g. opaque/bare JWT subject) — no cap applies.
+        assert_eq!(cap_lifetime_by_subject_ttl(28_800, None, 1_000_000), 28_800);
+    }
+
+    #[test]
+    fn test_cap_lifetime_subject_far_future_returns_session_secs() {
+        // Subject outlives the configured session — cap is the session lifetime.
+        assert_eq!(
+            cap_lifetime_by_subject_ttl(28_800, Some(5_000_000), 1_000_000),
+            28_800
+        );
+    }
+
+    #[test]
+    fn test_cap_lifetime_subject_shorter_than_session_caps_to_remaining() {
+        // Subject has 60s left — issued token is capped to ~60s, not 28800s.
+        assert_eq!(
+            cap_lifetime_by_subject_ttl(28_800, Some(1_000_060), 1_000_000),
+            60
+        );
+    }
+
+    #[test]
+    fn test_cap_lifetime_subject_exp_equals_now_caps_to_zero() {
+        // The regression: `subject_exp == now` means zero integer-second
+        // remaining. The old `if remaining > 0` guard skipped the cap and
+        // minted the full 28800s; the fix must clamp to 0.
+        assert_eq!(
+            cap_lifetime_by_subject_ttl(28_800, Some(1_000_000), 1_000_000),
+            0
+        );
+    }
+
+    #[test]
+    fn test_cap_lifetime_subject_exp_in_past_caps_to_zero() {
+        // Defensive: a subject whose `exp` is already in the past (only
+        // reachable if the JWT validation gate's leeway admitted it) must also
+        // clamp to 0, never fall back to the full session lifetime.
+        assert_eq!(
+            cap_lifetime_by_subject_ttl(28_800, Some(999_999), 1_000_000),
+            0
+        );
+    }
+
+    #[test]
+    fn test_cap_lifetime_remaining_one_second_caps_to_one() {
+        // Just above the boundary — 1s remaining yields a 1s token, proving
+        // the boundary fix does not over-clamp the positive-remaining path.
+        assert_eq!(
+            cap_lifetime_by_subject_ttl(28_800, Some(1_000_001), 1_000_000),
+            1
+        );
+    }
+
+    #[test]
+    fn test_cap_lifetime_small_session_secs_preserves_floor_when_subject_longer() {
+        // A tiny configured `session_secs` with a long-lived subject must
+        // return `session_secs`, not the subject's longer remaining.
+        assert_eq!(
+            cap_lifetime_by_subject_ttl(30, Some(5_000_000), 1_000_000),
+            30
+        );
+    }
+
     /// Each [`TokenType`] must map to the matching `protocol` constant in both
     /// directions. Swapped match arms would still compile and would still
     /// carry the RFC 8693 §3 prefix, so the prefix alone proves nothing.
@@ -900,6 +1146,42 @@ mod tests {
             "access_token",
         ] {
             assert_eq!(TokenType::parse(urn), None, "{urn} must not parse");
+        }
+    }
+
+    #[test]
+    fn test_requested_token_type_accepts_issuable_types() {
+        assert_eq!(
+            RequestedTokenType::from_param(None).expect("absent param is valid"),
+            None
+        );
+        assert_eq!(
+            RequestedTokenType::from_param(Some(protocol::TOKEN_TYPE_ACCESS_TOKEN))
+                .expect("access_token is issuable"),
+            Some(RequestedTokenType::AccessToken)
+        );
+        assert_eq!(
+            RequestedTokenType::from_param(Some(protocol::TOKEN_TYPE_ID_TOKEN))
+                .expect("id_token is issuable"),
+            Some(RequestedTokenType::IdToken)
+        );
+    }
+
+    #[test]
+    fn test_requested_token_type_rejects_types_the_server_never_issues() {
+        // RFC 8693 §2.2.1: `issued_token_type` names what was actually issued,
+        // and this server only issues access tokens and ID tokens — so `jwt`
+        // is a valid subject/actor type but not a requested type.
+        for urn in [
+            protocol::TOKEN_TYPE_JWT,
+            "urn:ietf:params:oauth:token-type:saml2",
+            "urn:ietf:params:oauth:token-type:refresh_token",
+            "",
+        ] {
+            assert!(
+                RequestedTokenType::from_param(Some(urn)).is_err(),
+                "{urn} must be rejected as a requested_token_type"
+            );
         }
     }
 
@@ -1022,5 +1304,122 @@ mod tests {
         assert!(debug.contains("Bearer"), "{debug}");
         assert!(debug.contains("3600"), "{debug}");
         assert!(debug.contains("TokenExchangeResult"), "{debug}");
+    }
+
+    // ========================================================================
+    // issue_id_token — arrival anchoring
+    //
+    // Commit addbaecd threaded `arrival` into the audit record's `expires_at`
+    // but left `OidcIdTokenClaimsBuilder::build` on `Timestamp::now()`. The
+    // signed JWT's `exp` and the audit's `expires_at` were stamped from two
+    // different clocks, so the row and the signed token could disagree on
+    // one token's lifetime. The fix stamps both from a single arrival
+    // instant; this test pins that contract by holding `arrival` fixed at a
+    // deterministic past instant and asserting:
+    //   * the ID token's `iat`/`exp` were stamped from `arrival`, not
+    //     `Timestamp::now()` (which would have produced the wall clock at
+    //     `iat`);
+    //   * the audit's `expires_at` equals the ID token's `exp`.
+    // ========================================================================
+
+    /// Decode the middle segment of a JWT into a `serde_json::Value`. Used in
+    /// tests to inspect claims without signature verification.
+    fn decode_jwt_payload(token: &str) -> serde_json::Value {
+        use base64::Engine;
+        let mut parts = token.split('.');
+        let _header = parts.next().expect("JWT header segment");
+        let payload = parts.next().expect("JWT payload segment");
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload)
+            .expect("base64 decode");
+        serde_json::from_slice(&bytes).expect("JSON payload")
+    }
+
+    /// A request for an exchanged ID token is anchored on a single arrival
+    /// instant: the JWT's `iat`/`exp` and the audit's `expires_at` all read
+    /// that instant, so the row and the signed token cannot disagree about
+    /// one token's lifetime.
+    #[tokio::test]
+    async fn test_issue_id_token_anchors_jwt_exp_and_audit_expires_at_on_arrival() {
+        use crate::db::documents::oauth::TokenExchangeDoc;
+        use crate::test_utils::{create_test_user, test_app_state};
+
+        let state = test_app_state().await;
+        let user = create_test_user(&state.store, "id-token-arrival@example.com").await;
+        // Far below `DEFAULT_ID_TOKEN_EXPIRES_SECS` (600s) so the federation
+        // ceiling in `issue_id_token` does not clamp `expires_in`.
+        let expires_in = 60;
+        let arrival_seconds: i64 = 1_700_000_000;
+        let arrival = ArrivalTime::for_test_second(arrival_seconds);
+
+        let result = issue_id_token(
+            &state,
+            IdTokenContext {
+                user_id: &user.id,
+                email: &user.email,
+                subject_token_hash: "subject-token-hash-test",
+                audience: None,
+                expires_in,
+                hardware_aaguid: None,
+                org_domain: None,
+                client_id: "token-exchange-client-id",
+                client_info: &ClientInfo::default(),
+            },
+            arrival,
+        )
+        .await
+        .expect("issue_id_token should succeed");
+
+        // The reported `expires_in` must match the requested ceiling because
+        // it is below the federation default.
+        assert_eq!(
+            result.expires_in, expires_in,
+            "the response's expires_in must be the capped lifetime"
+        );
+
+        let id_token = result.access_token.expose_secret();
+        let claims = decode_jwt_payload(id_token);
+        let iat = claims
+            .get("iat")
+            .and_then(|v| v.as_i64())
+            .expect("iat present");
+        let exp = claims
+            .get("exp")
+            .and_then(|v| v.as_i64())
+            .expect("exp present");
+
+        // The JWT itself was stamped from `arrival`, not from `Timestamp::now()`.
+        // Before the fix `iat` was the wall clock, ~1_700_000_000 seconds later
+        // than this fixed-past arrival.
+        assert_eq!(
+            iat, arrival_seconds,
+            "ID token iat must be stamped from `arrival`, not an ambient `Timestamp::now()`"
+        );
+        assert_eq!(
+            exp,
+            arrival_seconds + i64::try_from(expires_in).expect("expires_in fits in i64"),
+            "ID token exp must be `arrival.as_second() + expires_in`"
+        );
+
+        // The audit row's `expires_at` must equal the signed JWT's `exp` — the
+        // row records the same lifetime as the token it describes.
+        let issued_token_hash = crypto::hash_token(id_token);
+        let audit_rows = state
+            .store
+            .find_all::<TokenExchangeDoc>("subject_user_id", &user.id)
+            .await
+            .expect("query token_exchange by subject_user_id");
+        let audit_row = audit_rows
+            .into_iter()
+            .find(|d| d.data.issued_token_hash == issued_token_hash)
+            .expect("a token_exchange audit row for the issued token must exist");
+        assert_eq!(
+            audit_row.data.expires_at.as_second(),
+            exp,
+            "token_exchange audit row expires_at ({}) must equal the issued ID \
+             token's JWT exp ({exp}) — the audit row records the same lifetime \
+             as the signed token, both anchored on `arrival`",
+            audit_row.data.expires_at.as_second(),
+        );
     }
 }

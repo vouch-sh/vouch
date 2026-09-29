@@ -378,6 +378,7 @@ pub(crate) const JS_I18N_KEYS: &[&str] = &[
     "admin-js-version-encodes",
     "admin-policies-playground-title",
     "appcreate-js-fapi-required",
+    "appcreate-js-keyauth-required",
     "appcreate-js-jwks-json",
     "appcreate-js-postlogout-invalid",
     "appcreate-js-jwks-keys",

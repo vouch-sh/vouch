@@ -10,6 +10,9 @@ use crate::fido2_types::{
     AttestationObject, AuthData, Challenge, ClientDataJson, CoseKey, CredentialId, Signature,
     StateToken, UserHandle,
 };
+use crate::protocol::{
+    ERROR_ACCESS_DENIED, ERROR_AUTHORIZATION_PENDING, ERROR_EXPIRED_TOKEN, ERROR_SLOW_DOWN,
+};
 
 // ============================================================================
 // Registration
@@ -118,6 +121,24 @@ pub struct DeviceCodeRequest {
     /// Requested scope (optional).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
+    /// RFC 6749 §2.3.1 `client_secret_post`. `client_secret_basic` travels in
+    /// the `Authorization` header instead.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::serialize_opt_secret_string"
+    )]
+    pub client_secret: Option<secrecy::SecretString>,
+    /// RFC 7521 §4.2 `client_assertion`: "The assertion being used to
+    /// authenticate the client." Present for a `private_key_jwt` client.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::serialize_opt_secret_string"
+    )]
+    pub client_assertion: Option<secrecy::SecretString>,
+    /// RFC 7521 §4.2 `client_assertion_type`: "The format of the assertion as
+    /// defined by the authorization server." Present iff `client_assertion` is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_assertion_type: Option<String>,
 }
 
 /// Response containing device and user codes.
@@ -150,6 +171,17 @@ pub struct DeviceTokenRequest {
     pub grant_type: String,
     /// Device code from device authorization response.
     pub device_code: String,
+    /// RFC 7521 §4.2 `client_assertion`: "The assertion being used to
+    /// authenticate the client." Present for a `private_key_jwt` client.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::serialize_opt_secret_string"
+    )]
+    pub client_assertion: Option<secrecy::SecretString>,
+    /// RFC 7521 §4.2 `client_assertion_type`: "The format of the assertion as
+    /// defined by the authorization server." Present iff `client_assertion` is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_assertion_type: Option<String>,
 }
 
 /// Response containing access token.
@@ -181,6 +213,10 @@ impl std::fmt::Debug for DeviceTokenResponse {
 }
 
 /// OAuth 2.0 error response.
+///
+/// The RFC 8628 device-poll codes are built from the [`crate::protocol`]
+/// constants rather than literals: the CLI's poll loop dispatches on the same
+/// constants, so the emitted string and the matched string cannot drift apart.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OAuthError {
     /// Error code.
@@ -195,7 +231,7 @@ impl OAuthError {
     #[must_use]
     pub fn authorization_pending() -> Self {
         Self {
-            error: "authorization_pending".to_string(),
+            error: ERROR_AUTHORIZATION_PENDING.to_string(),
             error_description: Some("The user has not yet completed authorization".to_string()),
         }
     }
@@ -204,7 +240,7 @@ impl OAuthError {
     #[must_use]
     pub fn slow_down() -> Self {
         Self {
-            error: "slow_down".to_string(),
+            error: ERROR_SLOW_DOWN.to_string(),
             error_description: Some("Polling too frequently, please slow down".to_string()),
         }
     }
@@ -213,7 +249,7 @@ impl OAuthError {
     #[must_use]
     pub fn expired_token() -> Self {
         Self {
-            error: "expired_token".to_string(),
+            error: ERROR_EXPIRED_TOKEN.to_string(),
             error_description: Some("The device code has expired".to_string()),
         }
     }
@@ -222,7 +258,7 @@ impl OAuthError {
     #[must_use]
     pub fn access_denied() -> Self {
         Self {
-            error: "access_denied".to_string(),
+            error: ERROR_ACCESS_DENIED.to_string(),
             error_description: Some("The user denied the authorization request".to_string()),
         }
     }
@@ -604,6 +640,7 @@ pub struct GitHubAccountStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::{CLIENT_ASSERTION_TYPE_JWT_BEARER, GRANT_TYPE_DEVICE_CODE};
 
     /// The OIDC ID token is a bearer credential for cloud identity
     /// federation and must never appear in `{:?}` output.
@@ -617,5 +654,38 @@ mod tests {
         assert!(debug.contains("[REDACTED]"), "{debug}");
         assert!(!debug.contains("secret-token"), "{debug}");
         assert!(debug.contains("28800"), "{debug}");
+    }
+
+    /// RFC 7523 §2.2: "The value of the \"client_assertion_type\" is
+    /// \"urn:ietf:params:oauth:client-assertion-type:jwt-bearer\"." Both device
+    /// requests carry the assertion under the RFC 7521 §4.2 parameter names and
+    /// omit them when the client has no assertion.
+    #[test]
+    #[expect(
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        reason = "test-only serialization of literals and JSON field lookups"
+    )]
+    fn test_device_requests_serialize_client_assertion_parameters() {
+        let with_assertion = DeviceTokenRequest {
+            grant_type: GRANT_TYPE_DEVICE_CODE.to_string(),
+            device_code: "code".to_string(),
+            client_assertion: Some("header.payload.signature".into()),
+            client_assertion_type: Some(CLIENT_ASSERTION_TYPE_JWT_BEARER.to_string()),
+        };
+        let value = serde_json::to_value(&with_assertion).expect("serialize");
+        assert_eq!(value["client_assertion"], "header.payload.signature");
+        assert_eq!(
+            value["client_assertion_type"],
+            "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+        );
+
+        let without = DeviceCodeRequest {
+            client_id: Some("client".to_string()),
+            ..Default::default()
+        };
+        let value = serde_json::to_value(&without).expect("serialize");
+        assert!(value.get("client_assertion").is_none(), "{value}");
+        assert!(value.get("client_assertion_type").is_none(), "{value}");
     }
 }

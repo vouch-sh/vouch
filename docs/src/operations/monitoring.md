@@ -61,16 +61,28 @@ scrape_configs:
       - targets: ["auth.example.com"]
 ```
 
-`/metrics` is not rate-limited, but it is subject to the global 30-second request timeout.
+`/metrics` is not rate-limited, but it is subject to the global 10-second request timeout.
 
 ### Exported metrics
 
 | Metric | Type | Labels | Meaning |
 |--------|------|--------|---------|
-| `http_requests_total` | counter | `method`, `path`, `status` | Requests served. `path` is the matched route template (e.g. `/v1/keys/{id}`), not the raw URL, so cardinality stays bounded. |
+| `http_requests_total` | counter | `method`, `path`, `status` | Requests served. See the label note below. |
 | `http_request_duration_seconds` | histogram | `method`, `path` | Request latency. Not labelled by status. |
 | `vouch_auth_events_total` | counter | `event_type` | Authentication outcomes |
 | `vouch_credential_issuance_total` | counter | `type` | Credentials issued |
+| `vouch_connections_open` | gauge | — | Open connections across all listeners. At `VOUCH_MAX_CONNECTIONS`, new connections wait to be accepted. |
+| `vouch_connections_rejected_total` | counter | `reason` | Connections closed at accept. `reason` is `per_ip` (over `VOUCH_MAX_CONNECTIONS_PER_IP`), `proxy_source` (with `VOUCH_PROXY_PROTOCOL` on, a connection to the HTTPS or mTLS listener from outside `VOUCH_TRUSTED_PROXIES`), or `proxy_header` (a missing, malformed or late PROXY header). |
+
+The `method` and `path` labels are both drawn from fixed sets, so the number of series has a
+ceiling that no request can raise:
+
+- `path` is the matched route template (e.g. `/v1/keys/{id}`), never the raw request target. A
+  request that matches no route is labelled `<unmatched>` rather than by the target it asked for,
+  so 404 traffic contributes exactly one series per method/status pair. To see what is actually
+  being probed, read the request logs — every request logs its raw path on the `request` span.
+- `method` is one of the nine methods registered by RFC 9110. Any other token — HTTP permits any
+  token as a method — is labelled `OTHER`.
 
 `vouch_auth_events_total` uses these `event_type` values: `enrollment`, `browser_login_success`,
 `fido2_login_success`, `fido2_login_failure`, `authorization_code_success`.
@@ -80,7 +92,7 @@ scrape_configs:
 > The metrics carry no `HELP` or `TYPE` descriptions in the scrape output. This page is the
 > reference for what they mean.
 
-There are no gauges, and no metrics for database pool saturation, cleanup runs, or rate-limit
+There are no metrics for database pool saturation, cleanup runs, or rate-limit
 rejections specifically. Use `http_requests_total{status="429"}` to observe rate limiting, and your
 database's own monitoring for pool health.
 

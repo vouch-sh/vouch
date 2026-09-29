@@ -2,6 +2,9 @@
 //! RFC 7523 §2.2 / 7521 — JWT client authentication assertion tests.
 
 use super::helpers::*;
+use crate::db::TokenEndpointAuthMethod;
+use crate::db::documents::oauth::OAuthClientDoc;
+use crate::db::documents::session::SessionDoc;
 use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair};
 
 // ========================================================================
@@ -70,7 +73,7 @@ async fn create_test_jwt_client(
         user_id,
         TestClientSpec {
             jwks: TestJwks::Custom(jwks_value),
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
             ..Default::default()
         },
     )
@@ -80,7 +83,7 @@ async fn create_test_jwt_client(
 }
 
 // ========================================================================
-// P1: RFC 7523 §2.2 — JWT Profile for Client Authentication
+// RFC 7523 §2.2 — JWT Profile for Client Authentication
 //
 // The §2.1 authorization grant (`grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer`)
 // has been removed. The lock-in test below asserts the token endpoint rejects it.
@@ -193,32 +196,14 @@ async fn test_rfc7523_private_key_jwt_client_auth_full_flow() {
     let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
 
     // Issue an authorization code
-    let scope_set = ScopeSet::parse("openid email");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
-        },
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec::default(),
     )
-    .await
-    .expect("Failed to issue authorization code");
+    .await;
 
     // Exchange code with private_key_jwt client assertion
     let token_endpoint = format!("{}/oauth/token", state.config().base_url);
@@ -247,6 +232,176 @@ async fn test_rfc7523_private_key_jwt_client_auth_full_flow() {
     );
 }
 
+// ========================================================================
+// JWKS key-search short-circuit regression (find_matching_key)
+//
+// `find_matching_key` used to `return JwkEntry::decoding_key_for(...)` on the
+// first selector-matching candidate, so an unbuildable key positioned before a
+// usable one in the JWKS aborted the search and returned `invalid_client` even
+// though a valid key existed later in the set. These tests exercise the full
+// token-endpoint path (client_auth.rs -> find_matching_key_with_refresh_client
+// -> find_matching_key) with a malformed key first, then the valid key.
+// ========================================================================
+
+/// Build a JWT client whose inline JWKS contains, in order, a metadata-complete
+/// but unbuildable EC key (missing `x`/`y`, same `kid`) and then the valid EC
+/// signing key. Reproduces the production-reachable scenario: `is_usable_for`
+/// does not check EC component presence, so the malformed key passes
+/// write-time validation and reaches the runtime matcher ahead of the valid
+/// key.
+async fn create_test_jwt_client_malformed_first(
+    store: &db::store::DocumentStore,
+    user_id: &str,
+) -> (TestOAuthClient, Vec<u8>) {
+    let (pkcs8_bytes, valid_jwk) = generate_es256_signing_key();
+    // Same kid as the valid key; metadata-complete but missing x/y -> unbuildable.
+    let malformed_jwk = serde_json::json!({
+        "kty": "EC",
+        "crv": "P-256",
+        "use": "sig",
+        "alg": "ES256",
+        "kid": "test-key-1"
+    });
+    let jwks_value = serde_json::json!({ "keys": [malformed_jwk, valid_jwk] });
+
+    let client = create_test_client(
+        store,
+        user_id,
+        TestClientSpec {
+            jwks: TestJwks::Custom(jwks_value),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    (client, pkcs8_bytes)
+}
+
+/// Sign a JWT assertion with an ES256 key and a caller-supplied JWS header
+/// (so the test can carry or omit `kid` to exercise both `find_matching_key`
+/// branches).
+fn sign_jwt_assertion_with_header(
+    pkcs8_bytes: &[u8],
+    header: &serde_json::Value,
+    client_id: &str,
+    audience: &str,
+    jti: Option<&str>,
+) -> String {
+    let now = jiff::Timestamp::now().as_second();
+    let claims = serde_json::json!({
+        "iss": client_id,
+        "sub": client_id,
+        "aud": audience,
+        "iat": now,
+        "exp": now + 60,
+        "jti": jti.map_or_else(|| uuid::Uuid::now_v7().to_string(), str::to_string)
+    });
+    sign_jwt_assertion(pkcs8_bytes, header, &claims)
+}
+
+// RFC 7517 §4: the algorithm-fallback branch (no `kid` in the JWS header) must
+// also skip an unbuildable `kty`-matched key and continue to a later valid key
+// of the same `kty`. This branch is reached whenever a JWT assertion carries no
+// `kid`, so a single malformed key ahead of a valid one reproduces the bug
+// without any duplicate-`kid` precondition.
+#[tokio::test]
+async fn test_rfc7523_private_key_jwt_alg_fallback_skips_unbuildable() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "jwt-malformed-nokid@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) =
+        create_test_jwt_client_malformed_first(&state.store, &user.id).await;
+
+    let code = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec::default(),
+    )
+    .await;
+
+    let token_endpoint = format!("{}/oauth/token", state.config().base_url);
+    // No kid in the header -> algorithm-fallback branch (kty = EC for ES256).
+    let header = serde_json::json!({ "alg": "ES256", "typ": "JWT" });
+    let assertion = sign_jwt_assertion_with_header(
+        &pkcs8_bytes,
+        &header,
+        &client.client_id,
+        &token_endpoint,
+        None,
+    );
+
+    let body = format!(
+        "grant_type=authorization_code&code={}&redirect_uri={}\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={}",
+        code,
+        urlencoding::encode("https://example.com/callback"),
+        assertion
+    );
+
+    let (status, resp_body) = http_post_form(&app, "/oauth/token", &body, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "private_key_jwt alg-fallback should skip the unbuildable first key and verify with the valid sibling: {resp_body}"
+    );
+    let response: serde_json::Value = serde_json::from_str(&resp_body).expect("Valid JSON");
+    assert!(response.get("access_token").is_some());
+}
+
+// RFC 7517 §4 (fail-closed): a JWKS containing ONLY an unbuildable key must
+// still fail client auth — the fix only adds the ability to find a usable key
+// later in the set; it never accepts a token that would not otherwise verify.
+#[tokio::test]
+async fn test_rfc7523_private_key_jwt_only_unbuildable_fails() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "jwt-only-malformed@example.com").await;
+    let (_pkcs8_bytes, _valid_jwk) = generate_es256_signing_key();
+    // JWKS with only the malformed (missing x/y) EC key.
+    let malformed_jwk = serde_json::json!({
+        "kty": "EC", "crv": "P-256", "use": "sig", "alg": "ES256", "kid": "test-key-1"
+    });
+    let jwks_value = serde_json::json!({ "keys": [malformed_jwk] });
+    let client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            jwks: TestJwks::Custom(jwks_value),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // Sign with a fresh key the server cannot verify — the point is that no
+    // usable key exists in the JWKS, so client auth must fail (fail-closed).
+    let (other_pkcs8, _other_jwk) = generate_es256_signing_key();
+    let token_endpoint = format!("{}/oauth/token", state.config().base_url);
+    let assertion = build_client_assertion(&client.client_id, &token_endpoint, &other_pkcs8, None);
+
+    let body = format!(
+        "grant_type=client_credentials\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={}",
+        assertion
+    );
+
+    let (status, resp_body) = http_post_form(&app, "/oauth/token", &body, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "a JWKS with only an unbuildable key must fail client auth (fail-closed): {resp_body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&resp_body).expect("Valid JSON");
+    assert_eq!(
+        error["error"], "invalid_client",
+        "only-unbuildable JWKS must map to invalid_client: {resp_body}"
+    );
+}
+
 #[tokio::test]
 async fn test_rfc7523_private_key_jwt_jti_replay_rejected() {
     // RFC 7523 Section 3: JTI replay must be rejected at the handler level.
@@ -260,32 +415,17 @@ async fn test_rfc7523_private_key_jwt_jti_replay_rejected() {
     let fixed_jti = "replay-test-jti-12345";
 
     // First request: issue code and exchange with JWT assertion
-    let scope_set = ScopeSet::parse("openid");
-    let code1 = issue_authorization_code(
+    let code1 = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            ..Default::default()
         },
     )
-    .await
-    .expect("Failed to issue code");
+    .await;
 
     let assertion1 = build_client_assertion(
         &client.client_id,
@@ -341,32 +481,17 @@ async fn test_rfc7523_private_key_jwt_expired_assertion_rejected() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
 
-    let scope_set = ScopeSet::parse("openid");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            ..Default::default()
         },
     )
-    .await
-    .expect("Failed to issue code");
+    .await;
 
     // Build an expired assertion (iat and exp in the past)
     let now = jiff::Timestamp::now().as_second();
@@ -410,32 +535,17 @@ async fn test_rfc7523_private_key_jwt_wrong_audience() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
 
-    let scope_set = ScopeSet::parse("openid");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            ..Default::default()
         },
     )
-    .await
-    .expect("Failed to issue code");
+    .await;
 
     // Build assertion with wrong audience
     let assertion = build_client_assertion(
@@ -480,32 +590,17 @@ async fn test_rfc7523_private_key_jwt_wrong_key() {
     // Generate a different key pair (not the one registered with the client)
     let (wrong_pkcs8, _wrong_jwk) = generate_es256_signing_key();
 
-    let scope_set = ScopeSet::parse("openid");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            ..Default::default()
         },
     )
-    .await
-    .expect("Failed to issue code");
+    .await;
 
     let token_endpoint = format!("{}/oauth/token", state.config().base_url);
     let assertion = build_client_assertion(&client.client_id, &token_endpoint, &wrong_pkcs8, None);
@@ -535,32 +630,17 @@ async fn test_rfc7523_private_key_jwt_iss_sub_mismatch() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
 
-    let scope_set = ScopeSet::parse("openid");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            ..Default::default()
         },
     )
-    .await
-    .expect("Failed to issue code");
+    .await;
 
     // Build assertion where iss != sub
     let now = jiff::Timestamp::now().as_second();
@@ -605,32 +685,17 @@ async fn test_rfc7521_mutual_exclusion_secret_and_assertion() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
 
-    let scope_set = ScopeSet::parse("openid");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            ..Default::default()
         },
     )
-    .await
-    .expect("Failed to issue code");
+    .await;
 
     let token_endpoint = format!("{}/oauth/token", state.config().base_url);
     let assertion = build_client_assertion(&client.client_id, &token_endpoint, &pkcs8_bytes, None);
@@ -684,7 +749,7 @@ async fn create_test_fapi_jwt_client(
         user_id,
         TestClientSpec {
             jwks: TestJwks::Custom(jwks_value),
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
             fapi_profile: Some(db::FapiProfile::Fapi2Security),
             dpop_bound_access_tokens: true,
             ..Default::default()
@@ -810,7 +875,7 @@ async fn test_fapi_client_rejects_rs256_assertion() {
         &user.id,
         TestClientSpec {
             jwks: TestJwks::Custom(jwks_value),
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
             fapi_profile: Some(db::FapiProfile::Fapi2Security),
             dpop_bound_access_tokens: true,
             ..Default::default()
@@ -855,7 +920,7 @@ async fn test_non_fapi_client_accepts_rs256_assertion() {
         &user.id,
         TestClientSpec {
             jwks: TestJwks::Custom(jwks_value),
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
             ..Default::default()
         },
     )
@@ -901,32 +966,17 @@ async fn test_rfc7523_authorization_code_grant_accepts_non_fapi_jwt_without_jti(
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
 
-    let scope_set = ScopeSet::parse("openid");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            ..Default::default()
         },
     )
-    .await
-    .expect("issue authorization code");
+    .await;
 
     let token_endpoint = format!("{}/oauth/token", state.config().base_url);
     let assertion =
@@ -1012,15 +1062,10 @@ async fn test_rfc7523_token_exchange_grant_accepts_non_fapi_jwt_without_jti() {
 // ========================================================================
 // Issue #391 — concurrent JTI replay must not produce multiple tokens.
 //
-// Before the fix, `commit_jti()` ran AFTER `exchange_*()`, so N concurrent
-// requests with the same JWT assertion could each persist a token before any
-// of them committed the JTI. One won the JTI insert and returned 200; the
-// others returned `invalid_client` but their tokens remained valid in the DB.
-//
-// The fix moves `commit_jti()` to immediately before `exchange_*()`, so the
-// atomic `(jti, client_id)` insert is the serialization point. Concurrent
-// replayers either win the JTI and proceed to exchange, or lose and return
-// `invalid_client` before any token is persisted.
+// `authenticate_client_jwt` commits the JTI, so the atomic `(jti, client_id)`
+// insert is the serialization point. Concurrent replayers either win the JTI
+// and proceed to exchange, or lose and return `invalid_client` before any
+// token is persisted.
 //
 // Each test below fires N concurrent requests with the same JWT assertion
 // (fixed `jti`) and asserts that AT MOST one HTTP 200 is returned and AT MOST
@@ -1068,7 +1113,7 @@ async fn enable_grant_types(store: &db::store::DocumentStore, client_id: &str, g
         .expect("Client not found");
     let grants: Vec<String> = grants.iter().map(|s| (*s).to_string()).collect();
     store
-        .modify::<crate::db::documents::oauth::OAuthClientDoc, _>(&oauth_client.id, |data| {
+        .modify::<OAuthClientDoc, _>(&oauth_client.id, |data| {
             data.grant_types = Some(grants.clone());
         })
         .await
@@ -1080,7 +1125,7 @@ async fn enable_grant_types(store: &db::store::DocumentStore, client_id: &str, g
 /// is the actual user's id.
 async fn count_sessions_for_user(store: &db::store::DocumentStore, user_id: &str) -> i64 {
     store
-        .count::<crate::db::documents::session::SessionDoc>("user_id", user_id)
+        .count::<SessionDoc>("user_id", user_id)
         .await
         .expect("count must not error")
 }
@@ -1142,32 +1187,17 @@ async fn test_jwt_assertion_jti_concurrent_replay_authorization_code() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
 
-    let scope_set = ScopeSet::parse("openid");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            ..Default::default()
         },
     )
-    .await
-    .expect("Failed to issue authorization code");
+    .await;
 
     let token_endpoint = format!("{}/oauth/token", state.config().base_url);
     let fixed_jti = "race-ac-jti-12345";
@@ -1225,32 +1255,17 @@ async fn test_jwt_assertion_jti_concurrent_replay_token_exchange() {
 
     // Seed an access token to use as subject_token via a one-shot
     // authorization_code exchange (single-use, unique JTI).
-    let scope_set = ScopeSet::parse("openid");
-    let seed_code = issue_authorization_code(
+    let seed_code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            ..Default::default()
         },
     )
-    .await
-    .expect("Failed to issue seed code");
+    .await;
 
     let token_endpoint = format!("{}/oauth/token", state.config().base_url);
     let seed_assertion =
@@ -1312,10 +1327,10 @@ async fn test_jwt_assertion_jti_concurrent_replay_fido2_assertion() {
     // The fido2-assertion grant requires a real WebAuthn signature, which
     // can't be faked in unit tests. We use a garbage assertion so that
     // `exchange_fido2_assertion` will fail with `invalid_grant` for any
-    // request that reaches it. The point of THIS test is to prove that
-    // `commit_jti` runs BEFORE `exchange_fido2_assertion`: with the fix, at
-    // most one of N concurrent requests can pass the JTI commit, so at most
-    // one can reach (and fail at) the exchange step, returning `invalid_grant`.
+    // request that reaches it. The JTI is committed before
+    // `exchange_fido2_assertion`, so at most one of N concurrent requests
+    // can pass the JTI commit and reach (and fail at) the exchange step,
+    // returning `invalid_grant`.
     // The other N-1 lose the JTI race and return `invalid_client`.
     let (app, state) = test_app().await;
 
@@ -1346,12 +1361,8 @@ async fn test_jwt_assertion_jti_concurrent_replay_fido2_assertion() {
 
     // No request can succeed (garbage assertion), but the SHAPE of errors
     // tells us where the JTI commit sat:
-    //   - With the fix: at most one `invalid_grant` (reached exchange), the
-    //     rest `invalid_client` (lost JTI race).
-    //   - Without the fix: all N would return `invalid_grant` because every
-    //     request reaches exchange before any one of them tries to commit,
-    //     and exchange fails for all of them on the garbage assertion before
-    //     `commit_jti` ever runs.
+    //   At most one `invalid_grant` (reached exchange); the rest
+    //   `invalid_client` (lost the JTI race).
     let invalid_grants = results
         .iter()
         .filter_map(|(_, body)| serde_json::from_str::<serde_json::Value>(body).ok())
@@ -1366,13 +1377,11 @@ async fn test_jwt_assertion_jti_concurrent_replay_fido2_assertion() {
 }
 
 // ========================================================================
-// Issue #391 — DPoP nonce retry MUST still leave the JTI unconsumed.
+// DPoP nonce retry leaves the JTI unconsumed.
 //
-// The fix moves `commit_jti()` to before `exchange_*()`, but DPoP nonce
-// validation runs even earlier in the handler. If a request is rejected
-// with `use_dpop_nonce` (RFC 9449 §4.3), the JTI must NOT have been
-// committed — so the client can retry with the same JWT assertion and a
-// DPoP proof that carries the new nonce.
+// DPoP validation runs before client authentication, so a request rejected
+// with `use_dpop_nonce` has not committed the JTI, and the client can retry
+// with the same JWT assertion and a DPoP proof that carries the new nonce.
 //
 // The pre-existing `test_rfc9449_dpop_nonce_required_retry_with_nonce_succeeds`
 // covers this for basic_auth clients. This test seals the contract for the
@@ -1437,38 +1446,22 @@ async fn test_jwt_assertion_dpop_use_nonce_retry_succeeds() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
 
-    let scope_set = ScopeSet::parse("openid");
-    let code = issue_authorization_code(
+    let code = issue_code(
         &state,
-        AuthorizationCodeParams {
-            client_id: &client.client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: &auth_id,
-            aaguid: None,
-            scope: &scope_set,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
-            dpop_jkt: None,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            ..Default::default()
         },
     )
-    .await
-    .expect("Failed to issue authorization code");
+    .await;
 
     let token_endpoint = format!("{}/oauth/token", state.config().base_url);
     let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
 
-    // The SAME JTI is used for both attempts. If `commit_jti` ran before
-    // DPoP validation, the second attempt would be rejected as a replay.
+    // The SAME JTI is used for both attempts.
     let fixed_jti = "dpop-retry-jti-12345";
     let assertion = build_client_assertion(
         &client.client_id,
@@ -1503,10 +1496,8 @@ async fn test_jwt_assertion_dpop_use_nonce_retry_succeeds() {
         .expect("DPoP-Nonce must be valid UTF-8")
         .to_string();
 
-    // Step 2: Retry with the server-provided nonce, SAME JWT assertion
-    // (same jti). If `commit_jti` had run on the first attempt, this would
-    // fail with `invalid_client` (replay). With the fix, the JTI is committed
-    // only after DPoP validation, so the retry succeeds.
+    // Step 2: Retry with the server-provided nonce and the SAME JWT
+    // assertion (same jti).
     let nonce_proof = create_dpop_proof(
         &dpop_key,
         &dpop_jwk,
@@ -1529,48 +1520,79 @@ async fn test_jwt_assertion_dpop_use_nonce_retry_succeeds() {
     );
 }
 
+/// The client_credentials, token-exchange, and fido2-assertion grants check
+/// DPoP before client authentication too: the nonce retry with the same
+/// assertion is not refused as a replay. The token-exchange subject token and
+/// the FIDO2 assertion are garbage, so those retries fail later, at the grant.
+#[tokio::test]
+async fn test_jwt_assertion_dpop_use_nonce_retry_reuses_assertion_for_every_grant() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "jti-dpop-retry-grants@example.com").await;
+    let token_endpoint = format!("{}/oauth/token", state.config().base_url);
+    let garbage = URL_SAFE_NO_PAD.encode(b"{}");
+    let grants = [
+        (
+            "client_credentials",
+            "grant_type=client_credentials".to_string(),
+        ),
+        (
+            "urn:ietf:params:oauth:grant-type:token-exchange",
+            format!(
+                "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+                 &subject_token={garbage}\
+                 &subject_token_type=urn:ietf:params:oauth:token-type:access_token"
+            ),
+        ),
+        (
+            "urn:ietf:params:oauth:grant-type:fido2-assertion",
+            format!(
+                "grant_type=urn:ietf:params:oauth:grant-type:fido2-assertion&assertion={garbage}"
+            ),
+        ),
+    ];
+    for (grant, grant_params) in grants {
+        let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
+        enable_grant_types(&state.store, &client.client_id, &[grant]).await;
+        let assertion = build_client_assertion(
+            &client.client_id,
+            &token_endpoint,
+            &pkcs8_bytes,
+            Some(&format!("dpop-retry-{}", client.client_id)),
+        );
+        let body = format!(
+            "{grant_params}\
+             &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+             &client_assertion={assertion}"
+        );
+        let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
+
+        let proof = create_dpop_proof(&dpop_key, &dpop_jwk, "POST", &token_endpoint, None);
+        let first = http_post_form_full(&app, "/oauth/token", &body, &[("DPoP", &proof)]).await;
+        let json: serde_json::Value = serde_json::from_str(&first.body).expect("Valid JSON");
+        assert_eq!(json["error"], "use_dpop_nonce", "{grant}: {}", first.body);
+        let nonce = first
+            .headers
+            .get("DPoP-Nonce")
+            .and_then(|v| v.to_str().ok())
+            .expect("DPoP-Nonce header")
+            .to_string();
+
+        let proof = create_dpop_proof(&dpop_key, &dpop_jwk, "POST", &token_endpoint, Some(&nonce));
+        let (status, resp) = http_post_form(&app, "/oauth/token", &body, &[("DPoP", &proof)]).await;
+        let json: serde_json::Value = serde_json::from_str(&resp).unwrap_or_default();
+        assert!(
+            status != StatusCode::UNAUTHORIZED && json["error"] != "invalid_client",
+            "{grant}: nonce retry with the same assertion was refused ({status}): {resp}"
+        );
+    }
+}
+
 // ========================================================================
 // RFC 7523 — private_key_jwt + DPoP at the token endpoint
 //
 // Covers vouch-conformance TOKEN_TEST_HANDOFF.md scenarios 18–21, 23
 // (private_key_jwt + DPoP-bound code, FAPI 2.0 sender-constraint check).
 // ========================================================================
-
-/// Issue an authorization code with optional dpop_jkt binding.
-async fn pkjwt_issue_code(
-    state: &std::sync::Arc<crate::AppState>,
-    client_id: &str,
-    user: &crate::db::User,
-    auth_id: &str,
-    dpop_jkt: Option<&str>,
-) -> String {
-    let scope = ScopeSet::parse("openid email");
-    issue_authorization_code(
-        state,
-        AuthorizationCodeParams {
-            client_id,
-            redirect_uri: "https://example.com/callback",
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: auth_id,
-            aaguid: None,
-            scope: &scope,
-            nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
-            resource: None,
-            acr_values: None,
-            dpop_jkt,
-            auth_code_lifetime_seconds:
-                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: None,
-            auth_time: None,
-            par: crate::db::ParConsumptionProof::not_pushed(),
-        },
-    )
-    .await
-    .expect("issue code")
-}
 
 /// Compute the RFC 7638 JWK thumbprint (jkt) for a DPoP JWK with EC P-256 members.
 fn pkjwt_dpop_jkt(jwk: &serde_json::Value) -> String {
@@ -1600,7 +1622,17 @@ async fn test_rfc7523_token_private_key_jwt_plus_dpop_succeeds() {
     let token_endpoint = format!("{}/oauth/token", state.config().base_url);
 
     // Authorization code carries the dpop_jkt binding.
-    let code = pkjwt_issue_code(&state, &client.client_id, &user, &auth_id, Some(&jkt)).await;
+    let code = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            dpop_jkt: Some(&jkt),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Acquire DPoP nonce via the throwaway proof.
     let throwaway = create_dpop_proof(&dpop_key, &dpop_jwk, "POST", &token_endpoint, None);
@@ -1662,7 +1694,17 @@ async fn test_rfc7523_token_private_key_jwt_plus_dpop_invalid_grant_jkt_mismatch
     // Authorization is bound to key A's jkt.
     let (_key_a, jwk_a) = generate_dpop_key_pair();
     let jkt_a = pkjwt_dpop_jkt(&jwk_a);
-    let code = pkjwt_issue_code(&state, &client.client_id, &user, &auth_id, Some(&jkt_a)).await;
+    let code = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            dpop_jkt: Some(&jkt_a),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Token request signs with key B.
     let (key_b, jwk_b) = generate_dpop_key_pair();
@@ -1719,7 +1761,17 @@ async fn test_rfc7523_token_private_key_jwt_plus_dpop_use_dpop_nonce() {
 
     let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
     let jkt = pkjwt_dpop_jkt(&dpop_jwk);
-    let code = pkjwt_issue_code(&state, &client.client_id, &user, &auth_id, Some(&jkt)).await;
+    let code = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            dpop_jkt: Some(&jkt),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let token_endpoint = format!("{}/oauth/token", state.config().base_url);
     // Proof carries no nonce — server must reject with use_dpop_nonce.
@@ -1760,7 +1812,17 @@ async fn test_rfc7523_token_private_key_jwt_plus_dpop_invalid_client_bad_jwt() {
 
     let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
     let jkt = pkjwt_dpop_jkt(&dpop_jwk);
-    let code = pkjwt_issue_code(&state, &client.client_id, &user, &auth_id, Some(&jkt)).await;
+    let code = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            dpop_jkt: Some(&jkt),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let token_endpoint = format!("{}/oauth/token", state.config().base_url);
     let throwaway = create_dpop_proof(&dpop_key, &dpop_jwk, "POST", &token_endpoint, None);
@@ -1823,14 +1885,21 @@ async fn test_rfc7523_token_fapi_client_invalid_request_no_dpop_or_mtls() {
         &user.id,
         TestClientSpec {
             jwks: TestJwks::Custom(jwks_value),
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
             fapi_profile: Some(db::FapiProfile::Fapi2Security),
             ..Default::default()
         },
     )
     .await;
 
-    let code = pkjwt_issue_code(&state, &client.client_id, &user, &auth_id, None).await;
+    let code = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec::default(),
+    )
+    .await;
     let issuer = &state.config().base_url;
     let assertion = build_client_assertion(&client.client_id, issuer, &pkcs8_bytes, None);
 
@@ -1856,5 +1925,469 @@ async fn test_rfc7523_token_fapi_client_invalid_request_no_dpop_or_mtls() {
             .unwrap_or("")
             .contains("sender-constrained"),
         "error_description must mention sender-constrained: {response_body}"
+    );
+}
+
+// ========================================================================
+// Regression: residual-window JTI replay after cleanup (RFC 7523 §3 item 7)
+//
+// The JTI replay-prevention record's `expires_at` MUST be derived from the
+// validated assertion's `exp` (`exp + CLOCK_SKEW_SECONDS`), not from
+// `now_commit + jwt_assertion_max_lifetime_seconds`. With the latter, an
+// assertion minted at the slice upper bound (`lifetime = max_lifetime`)
+// has its JTI record become cleanup-eligible at `commit_now + max_lifetime`
+// while the validator (`validate_jwt_assertion`) still accepts the
+// assertion until `exp + CLOCK_SKEW_SECONDS = commit_now + max_lifetime +
+// CLOCK_SKEW_SECONDS` — a ~10 s window in which a cleanup tick deletes the
+// row and a verbatim replay re-issues an access token.
+//
+// This test composes the full handler path through that residual window:
+// it waits until the OLD (buggy) `expires_at` would be cleanup-eligible,
+// runs the cleanup routine the periodic task runs, then replays the same
+// assertion. Under the fix: cleanup deletes nothing (`expires_at = exp +
+// skew` is still in the future) and the replay collides on the
+// still-present `(jti, client_id)` PRIMARY KEY → no second token. Under
+// the bug: cleanup deletes the row and the replay re-issues a second
+// access token.
+//
+// `jwt_assertion_max_lifetime_seconds` is overridden to 2 s to compress the
+// residual-window opening from ~300 s to ~2 s of real wall-clock so the
+// test is CI-tractable. The mechanism is config-independent (the arithmetic
+// holds for any `max_lifetime`); this exercises the slice upper bound
+// (`lifetime = max_lifetime`).
+// ========================================================================
+
+/// Build a JWT client assertion with explicit `iat`/`exp` (seconds since
+/// epoch) and a fixed `jti`, signed with the given ES256 key. The shared
+/// `build_client_assertion` helper hardcodes `exp = iat + 60`; the
+/// residual-window regression needs `exp = iat + max_lifetime` with a
+/// short `max_lifetime`, so the assertion is built inline.
+fn build_client_assertion_with_exp(
+    client_id: &str,
+    audience: &str,
+    pkcs8_bytes: &[u8],
+    iat: i64,
+    exp: i64,
+    jti: &str,
+) -> String {
+    let header = serde_json::json!({ "alg": "ES256", "typ": "JWT", "kid": "test-key-1" });
+    let claims = serde_json::json!({
+        "iss": client_id,
+        "sub": client_id,
+        "aud": audience,
+        "iat": iat,
+        "exp": exp,
+        "jti": jti
+    });
+    sign_jwt_assertion(pkcs8_bytes, &header, &claims)
+}
+
+/// Override `jwt_assertion_max_lifetime_seconds` on an already-built test
+/// app. The handler re-reads `state.config()` (an `ArcSwap`) on each
+/// request, so a post-build `store` takes effect for the very next token
+/// request.
+async fn override_jwt_assertion_max_lifetime(
+    state: &std::sync::Arc<crate::AppState>,
+    seconds: i64,
+) {
+    let mut new_config = (**state.config()).clone();
+    new_config.jwt_assertion_max_lifetime_seconds = seconds;
+    state.config.store(std::sync::Arc::new(new_config));
+}
+
+#[tokio::test]
+async fn test_rfc7523_private_key_jwt_jti_replay_rejected_after_cleanup_in_residual_window() {
+    // The regression: after a cleanup tick lands in the residual window,
+    // a verbatim replay MUST be rejected (under the bug it would succeed
+    // and re-issue a second access token).
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "residual-after@example.com").await;
+    let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
+    enable_grant_types(&state.store, &client.client_id, &["client_credentials"]).await;
+
+    // A zero max lifetime puts the residual window entirely in the past
+    // from the moment the JTI is committed, so no wall-clock time has to
+    // elapse for the buggy formula to become cleanup-eligible.
+    override_jwt_assertion_max_lifetime(&state, 0).await;
+
+    let token_endpoint = format!("{}/oauth/token", state.config().base_url);
+    let fixed_jti = "residual-window-replay-after-cleanup";
+    let now = jiff::Timestamp::now().as_second();
+    // `iat = exp = now` ⇒ `lifetime = 0 = max_lifetime`; the lifetime gate
+    // is a strict `>`, so the assertion is admitted, and the validator keeps
+    // accepting it until `exp + 10` (the full CLOCK_SKEW residual window).
+    let assertion = build_client_assertion_with_exp(
+        &client.client_id,
+        &token_endpoint,
+        &pkcs8_bytes,
+        now,
+        now,
+        fixed_jti,
+    );
+
+    let body = format!(
+        "grant_type=client_credentials\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}"
+    );
+
+    // First use: 200 + access_token. Authentication records the JTI with
+    // `expires_at = exp + CLOCK_SKEW_SECONDS`.
+    let (status1, resp1) = http_post_form(&app, "/oauth/token", &body, &[]).await;
+    assert_eq!(status1, StatusCode::OK, "first use must succeed: {resp1}");
+    let resp1_json: serde_json::Value = serde_json::from_str(&resp1).expect("Valid JSON");
+    let first_token = resp1_json["access_token"]
+        .as_str()
+        .expect("access_token")
+        .to_string();
+
+    // Run the same cleanup routine `infra/cleanup.rs:221` runs on a real
+    // tick. Under the fix, the row's `expires_at = exp + CLOCK_SKEW` is
+    // still ~10 s in the future, so cleanup deletes nothing — this
+    // assertion is the one that inverts under the bug (where `expires_at =
+    // commit_now + max_lifetime = commit_now` is already in the past and
+    // `deleted == 1`).
+    let deleted = db::delete_expired_jwt_assertion_jtis(&state.store)
+        .await
+        .expect("cleanup must not error");
+    assert_eq!(
+        deleted, 0,
+        "JTI committed at the slice upper bound MUST NOT be cleanup-eligible \
+         while the validator still accepts the assertion (RFC 7523 §3 item 7) \
+         — `expires_at` must be `exp + CLOCK_SKEW_SECONDS`, not \
+         `now_commit + max_lifetime`. `deleted == 1` here means the \
+         residual-window replay bug is present"
+    );
+
+    // Verbatim replay (same `jti`, same `exp`, same signature). The row is
+    // still present, so the deterministic `(jti, client_id)` PRIMARY KEY
+    // collision rejects the replay. Under the bug, the row was deleted and
+    // a second, distinct access token would be issued here.
+    let (status2, resp2) = http_post_form(&app, "/oauth/token", &body, &[]).await;
+    assert!(
+        status2 == StatusCode::UNAUTHORIZED || status2 == StatusCode::BAD_REQUEST,
+        "Verbatim replay after cleanup in the residual window MUST be \
+         rejected (RFC 7523 §3 item 7), got {status2}: {resp2}"
+    );
+    // Defensive: no second access token may have been issued.
+    if let Ok(resp2_json) = serde_json::from_str::<serde_json::Value>(&resp2) {
+        assert!(
+            resp2_json.get("access_token").is_none(),
+            "No access token may be issued for a verbatim replay after \
+             cleanup in the residual window: {resp2}"
+        );
+    }
+    // The first token is unaffected (defensive; this line mainly documents
+    // that the legitimate issuance is untouched).
+    assert!(!first_token.is_empty());
+}
+
+// ========================================================================
+// RFC 6749 §5.2 `unauthorized_client` — grant_types enforcement across every
+// grant handler that authenticates a client.
+//
+// RFC 6749 §5.2 defines the code as "The authenticated client is not
+// authorized to use this authorization grant type", and RFC 7591 §2 describes
+// `grant_types` as the grants "that the client can use at the token endpoint".
+// Neither document imposes a MUST on the server to enforce the list, so what
+// these tests pin is a local invariant rather than a conformance requirement:
+// every handler that resolves an authenticated client consults
+// `is_authorized_for_grant` before issuing anything.
+//
+// All five are covered — `client_credentials` in `exchange_client_credentials`,
+// `device_code` in `handlers/device.rs`, and token-exchange, fido2-assertion,
+// and authorization_code here. A client restricted to a list that omits the
+// grant it requests MUST receive `unauthorized_client`, and each test
+// pairs that with a control proving the gate — not client authentication — is
+// what rejected.
+// ========================================================================
+
+#[tokio::test]
+async fn test_grant_types_enforcement_rejects_token_exchange_for_unauthorized_client() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "grant-types-te@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
+    // Restrict the client to authorization_code only — the dynamic-registration
+    // default when `grant_types` is omitted. token-exchange is NOT authorized.
+    enable_grant_types(&state.store, &client.client_id, &["authorization_code"]).await;
+
+    let token_endpoint = format!("{}/oauth/token", state.config().base_url);
+
+    // Seed an access token via the authorization_code grant — which this client
+    // *is* registered for — to use as the exchange `subject_token`. This also
+    // proves the registered grant still works.
+    let seed_code = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            ..Default::default()
+        },
+    )
+    .await;
+    let seed_assertion =
+        build_client_assertion(&client.client_id, &token_endpoint, &pkcs8_bytes, None);
+    let seed_body = format!(
+        "grant_type=authorization_code&code={seed_code}&redirect_uri={}\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={seed_assertion}",
+        urlencoding::encode("https://example.com/callback")
+    );
+    let (seed_status, seed_resp) = http_post_form(&app, "/oauth/token", &seed_body, &[]).await;
+    assert_eq!(
+        seed_status,
+        StatusCode::OK,
+        "seed authorization_code exchange must succeed: {seed_resp}"
+    );
+    let seed_json: serde_json::Value = serde_json::from_str(&seed_resp).expect("Valid JSON");
+    let subject_token = seed_json["access_token"]
+        .as_str()
+        .expect("access_token")
+        .to_string();
+
+    // Attempt token-exchange with the authenticated-but-unauthorized client.
+    // RFC 8693 §2.2.2 routes errors to RFC 6749 §5.2, whose `unauthorized_client`
+    // is exactly "the authenticated client is not authorized to use this grant type."
+    let exchange_assertion =
+        build_client_assertion(&client.client_id, &token_endpoint, &pkcs8_bytes, None);
+    let exchange_body = format!(
+        "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+         &subject_token={subject_token}\
+         &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={exchange_assertion}"
+    );
+    let (exchange_status, exchange_resp) =
+        http_post_form(&app, "/oauth/token", &exchange_body, &[]).await;
+    assert_eq!(
+        exchange_status,
+        StatusCode::BAD_REQUEST,
+        "token_exchange must be rejected for a client not registered for it: {exchange_resp}"
+    );
+    let exchange_json: serde_json::Value =
+        serde_json::from_str(&exchange_resp).expect("Valid JSON");
+    assert_eq!(
+        exchange_json["error"], "unauthorized_client",
+        "token_exchange must return unauthorized_client: {exchange_resp}"
+    );
+
+    // Control: client_credentials is enforced the same way — the same
+    // restricted client must also be rejected there.
+    let cc_assertion =
+        build_client_assertion(&client.client_id, &token_endpoint, &pkcs8_bytes, None);
+    let cc_body = format!(
+        "grant_type=client_credentials\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={cc_assertion}"
+    );
+    let (cc_status, cc_resp) = http_post_form(&app, "/oauth/token", &cc_body, &[]).await;
+    assert_eq!(
+        cc_status,
+        StatusCode::BAD_REQUEST,
+        "client_credentials should reject a client not registered for it: {cc_resp}"
+    );
+    let cc_json: serde_json::Value = serde_json::from_str(&cc_resp).expect("Valid JSON");
+    assert_eq!(
+        cc_json["error"], "unauthorized_client",
+        "client_credentials should return unauthorized_client: {cc_resp}"
+    );
+}
+
+#[tokio::test]
+async fn test_grant_types_enforcement_rejects_fido2_assertion_for_unauthorized_client() {
+    // The fido2-assertion grant requires a real WebAuthn signature, which unit
+    // tests cannot fabricate. The point of THIS test is solely the grant_types
+    // authorization gate, which runs AFTER client auth but BEFORE the WebAuthn
+    // assertion is examined — so a garbage assertion never reaches
+    // `exchange_fido2_assertion`. A client restricted to `["authorization_code"]`
+    // MUST be rejected with `unauthorized_client` (not `invalid_grant`).
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "grant-types-fido2@example.com").await;
+    let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
+    enable_grant_types(&state.store, &client.client_id, &["authorization_code"]).await;
+
+    let token_endpoint = format!("{}/oauth/token", state.config().base_url);
+    let client_assertion =
+        build_client_assertion(&client.client_id, &token_endpoint, &pkcs8_bytes, None);
+
+    // Garbage FIDO2 assertion — irrelevant: the grant_types gate rejects first.
+    let garbage_assertion = URL_SAFE_NO_PAD.encode(b"{}");
+
+    let body = format!(
+        "grant_type=urn:ietf:params:oauth:grant-type:fido2-assertion\
+         &assertion={garbage_assertion}\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={client_assertion}"
+    );
+    let (status, resp) = http_post_form(&app, "/oauth/token", &body, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "fido2_assertion must be rejected for a client not registered for it: {resp}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+    assert_eq!(
+        json["error"], "unauthorized_client",
+        "fido2_assertion must return unauthorized_client, not invalid_grant: {resp}"
+    );
+
+    // Control: register the client for fido2_assertion and the same request
+    // MUST pass the grant_types gate (then fail on the garbage assertion with
+    // `invalid_grant`), proving the gate — not client auth — is what rejected.
+    enable_grant_types(
+        &state.store,
+        &client.client_id,
+        &["urn:ietf:params:oauth:grant-type:fido2-assertion"],
+    )
+    .await;
+    let client_assertion_2 =
+        build_client_assertion(&client.client_id, &token_endpoint, &pkcs8_bytes, None);
+    let body_2 = format!(
+        "grant_type=urn:ietf:params:oauth:grant-type:fido2-assertion\
+         &assertion={garbage_assertion}\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={client_assertion_2}"
+    );
+    let (status_2, resp_2) = http_post_form(&app, "/oauth/token", &body_2, &[]).await;
+    assert_ne!(
+        status_2,
+        StatusCode::UNAUTHORIZED,
+        "fido2_assertion with the grant registered must pass the grant_types gate: {resp_2}"
+    );
+    let json_2: serde_json::Value = serde_json::from_str(&resp_2).expect("Valid JSON");
+    assert_ne!(
+        json_2["error"], "unauthorized_client",
+        "authorized fido2 client must not be rejected as unauthorized_client: {resp_2}"
+    );
+}
+
+#[tokio::test]
+async fn test_grant_types_enforcement_rejects_authorization_code_for_unauthorized_client() {
+    // `handle_authorization_code_grant` was the one handler that authenticated
+    // a client without consulting `grant_types`, so an operator who scoped a
+    // client to machine-to-machine use could still redeem an authorization code
+    // with it and receive user-context tokens.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "grant-types-authcode@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
+    // Restrict the client to client_credentials — authorization_code is NOT
+    // authorized. The code itself is minted directly, so this exercises the
+    // token endpoint's gate rather than /authorize's.
+    enable_grant_types(&state.store, &client.client_id, &["client_credentials"]).await;
+
+    let token_endpoint = format!("{}/oauth/token", state.config().base_url);
+    let redeem = |code: String, assertion: String| {
+        format!(
+            "grant_type=authorization_code&code={code}&redirect_uri={}\
+             &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+             &client_assertion={assertion}",
+            urlencoding::encode("https://example.com/callback")
+        )
+    };
+
+    let code = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            ..Default::default()
+        },
+    )
+    .await;
+    let assertion = build_client_assertion(&client.client_id, &token_endpoint, &pkcs8_bytes, None);
+    let (status, resp) = http_post_form(&app, "/oauth/token", &redeem(code, assertion), &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "authorization_code must be rejected for a client_credentials-only client: {resp}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+    assert_eq!(
+        json["error"], "unauthorized_client",
+        "expected unauthorized_client, not invalid_grant: {resp}"
+    );
+
+    // Control: register the grant and the same exchange succeeds, proving the
+    // gate — not client auth, the code, or PKCE — is what rejected above. A
+    // fresh code is needed because the gate runs before the code is consumed,
+    // which is the point: an unauthorized client cannot burn a single-use code.
+    enable_grant_types(&state.store, &client.client_id, &["authorization_code"]).await;
+    let code_2 = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            ..Default::default()
+        },
+    )
+    .await;
+    let assertion_2 =
+        build_client_assertion(&client.client_id, &token_endpoint, &pkcs8_bytes, None);
+    let (status_2, resp_2) =
+        http_post_form(&app, "/oauth/token", &redeem(code_2, assertion_2), &[]).await;
+    assert_eq!(
+        status_2,
+        StatusCode::OK,
+        "authorization_code must still work once registered: {resp_2}"
+    );
+}
+
+/// A registration that omitted `grant_types` must keep working: RFC 7591 §2
+/// fixes the default at `["authorization_code"]`, so the new gate has nothing
+/// to reject. This is what makes the guard safe to add where #1330's
+/// device-code gate was not — there, the same default meant an absent list
+/// authorized nothing.
+#[tokio::test]
+async fn test_authorization_code_allowed_when_grant_types_absent() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "grant-types-absent@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
+
+    // Clear the stored list entirely, the shape a manually-managed row has.
+    state
+        .store
+        .modify::<OAuthClientDoc, _>(&client.client_id, |d| {
+            d.grant_types = None;
+        })
+        .await
+        .expect("clear grant_types");
+
+    let token_endpoint = format!("{}/oauth/token", state.config().base_url);
+    let code = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            ..Default::default()
+        },
+    )
+    .await;
+    let assertion = build_client_assertion(&client.client_id, &token_endpoint, &pkcs8_bytes, None);
+    let body = format!(
+        "grant_type=authorization_code&code={code}&redirect_uri={}\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}",
+        urlencoding::encode("https://example.com/callback")
+    );
+    let (status, resp) = http_post_form(&app, "/oauth/token", &body, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an absent grant_types list defaults to authorization_code (RFC 7591 §2): {resp}"
     );
 }

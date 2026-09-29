@@ -8,15 +8,16 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, MatchedPath, State},
-    http::{HeaderValue, Request, StatusCode, header},
-    middleware::Next,
+    extract::{DefaultBodyLimit, State},
+    http::{HeaderValue, StatusCode, header},
     response::IntoResponse,
-    routing::{delete, get, patch, post},
+    routing::{any, delete, get, patch, post},
 };
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::timeout::TimeoutLayer;
 
+use crate::arrival;
+use crate::infra::{csrf, i18n, org_host};
 use crate::{
     AppState, config, handlers,
     infra::{
@@ -24,6 +25,7 @@ use crate::{
         static_assets,
     },
 };
+use vouch_httpsig::middleware;
 
 /// Body limit for credential endpoints (SSH public key is ~500 bytes).
 const CREDENTIAL_BODY_LIMIT: usize = 8 * 1024;
@@ -46,6 +48,13 @@ const SAML_ACS_BODY_LIMIT: usize = 64 * 1024;
 /// Global body size limit (per-route overrides above are more restrictive).
 const GLOBAL_BODY_LIMIT: usize = 256 * 1024;
 
+/// Global request timeout; a request still running after this gets a 408.
+///
+/// Every upstream call a handler makes is bounded well inside it (the shared
+/// HTTP client's `SERVER_TOTAL`, the JWKS fetch, KMS, the database pool), so
+/// it only fires on a handler that has stalled.
+pub(crate) const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Build a rate limiter, or a no-op passthrough when certification test mode
 /// is active (`VOUCH_CERTIFICATION_TEST_TOKEN` is set).
 macro_rules! maybe_rate_limit {
@@ -53,7 +62,7 @@ macro_rules! maybe_rate_limit {
         tower::util::option_layer(if $config.certification_test_token.is_some() {
             None
         } else {
-            Some($builder(&$config.trusted_proxies)?)
+            Some($builder($config.forwarded_for_proxies())?)
         })
     };
 }
@@ -102,7 +111,7 @@ pub fn print_startup_banner() {
 pub fn build_app(state: Arc<AppState>, config: &config::ServerConfig) -> anyhow::Result<Router> {
     let httpsig_resolver = Arc::new(httpsig::OAuthClientKeyResolver::new(Arc::clone(&state)));
     let api_routes = build_api_routes(&state, config, Arc::clone(&httpsig_resolver))?;
-    let ui_routes = build_ui_routes(config)?;
+    let ui_routes = build_ui_routes(state.clone(), config)?;
     // Merged here rather than inside either group so that neither CORS layer
     // reaches the authorization endpoint -- see RFC 9700 §2.6 on the builder.
     let authorization_endpoint_routes = build_authorization_endpoint_routes(config)?;
@@ -115,7 +124,7 @@ pub fn build_app(state: Arc<AppState>, config: &config::ServerConfig) -> anyhow:
                 tracing::info!("Prometheus metrics enabled at /metrics (bearer token required)");
                 let metrics_state = Arc::new(metrics::MetricsState {
                     handle,
-                    bearer_token: token.clone(),
+                    bearer_token: token.as_secret().clone(),
                 });
                 Router::new().route(
                     "/metrics",
@@ -182,16 +191,16 @@ pub fn build_app(state: Arc<AppState>, config: &config::ServerConfig) -> anyhow:
     // `/oauth/callback` enrollment errors), so the layer is applied at the
     // merged-router level rather than only inside `build_ui_routes`. Adding
     // a new language is then just dropping an `i18n/<tag>/vouch-server.ftl` catalog.
-    .layer(axum::middleware::from_fn(crate::infra::i18n::i18n_layer))
+    .layer(axum::middleware::from_fn(i18n::i18n_layer))
     // Gate org issuer-subdomain hosts (`{label}.{primary_host}`) to the
     // WIF-only surface: discovery, JWKS, health. Primary-host requests and
     // NLB health checks (IP / NLB-DNS Host values) never match the shape,
     // so this layer is inert for all existing traffic.
     .layer(axum::middleware::from_fn_with_state(
         Arc::clone(&state),
-        crate::infra::org_host::org_host_gate,
+        org_host::org_host_gate,
     ))
-    // Global request timeout: 30 seconds.
+    // Global request timeout: `REQUEST_TIMEOUT`.
     //
     // The `TimeoutLayer` MUST be placed INSIDE (innermost relative to) the
     // observability middleware below. In tower/axum the last `.layer()` call
@@ -208,15 +217,19 @@ pub fn build_app(state: Arc<AppState>, config: &config::ServerConfig) -> anyhow:
     // See commit 7bbcbb0f for the regression that introduced this ordering bug.
     .layer(TimeoutLayer::with_status_code(
         StatusCode::REQUEST_TIMEOUT,
-        std::time::Duration::from_secs(30),
+        REQUEST_TIMEOUT,
     ))
-    .layer(axum::middleware::from_fn(metrics_middleware))
+    .layer(axum::middleware::from_fn(metrics::metrics_middleware))
     .layer(DefaultBodyLimit::max(GLOBAL_BODY_LIMIT))
     .layer(request_id::propagate_request_id_layer())
     .layer(axum::middleware::from_fn(
         request_id::request_span_middleware,
     ))
     .layer(request_id::set_request_id_layer())
+    // Outermost: every request-scoped time comparison downstream reads this
+    // one instant, so the stamp must be taken before any other layer can
+    // await. The last `.layer()` call is the outermost in tower/axum.
+    .layer(axum::middleware::from_fn(arrival::arrival_layer))
     .with_state(state))
 }
 
@@ -240,7 +253,7 @@ fn build_rate_limited_routes(
         )
         .layer(axum::middleware::from_fn_with_state(
             httpsig_resolver,
-            vouch_httpsig::middleware::require_signature::<httpsig::OAuthClientKeyResolver>,
+            middleware::require_signature::<httpsig::OAuthClientKeyResolver>,
         ));
 
     // RFC 7592 dynamic client registration MANAGEMENT endpoints
@@ -318,7 +331,7 @@ fn build_credential_routes(
         )
         .layer(axum::middleware::from_fn_with_state(
             httpsig_resolver,
-            vouch_httpsig::middleware::require_signature::<httpsig::OAuthClientKeyResolver>,
+            middleware::require_signature::<httpsig::OAuthClientKeyResolver>,
         ))
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(state),
@@ -383,33 +396,51 @@ fn build_authorization_endpoint_routes(
 
 /// Rate-limited general routes (SCIM, admin API).
 ///
-/// `/api/v1/org/*` and `/scim/v2/*` are OAuth 2.0 protected resources
-/// and get the RFC 9728 `resource_metadata` middleware.
+/// `/api/v1/org/*` and `/scim/v2/*` carry RFC 6750 Bearer tokens and get
+/// the RFC 9728 `resource_metadata` middleware on their 401 responses.
+/// Note `/scim/v2/*` is NOT an RFC 6749/9728 OAuth 2.0 protected resource
+/// (its tokens are admin-minted opaque credentials), so it is excluded
+/// from the per-resource metadata document allowlist — see
+/// [`crate::services::oidc::protected_resource::PROTECTED_RESOURCE_PREFIXES`].
+///
+/// The SCIM routes are a separate router so that only they get
+/// [`handlers::scim::extract::scim_error_body`]. Both routers take a clone of
+/// one rate-limit layer; the clones share the limiter's state, so a client
+/// draws on a single per-IP bucket across the two.
 fn build_general_limited_routes(
     state: &Arc<AppState>,
     config: &config::ServerConfig,
 ) -> anyhow::Result<Router<Arc<AppState>>> {
-    let protected_api_routes = Router::new()
-        // Org admin API (JSON, JWT Bearer auth)
+    let rate_limit = maybe_rate_limit!(rate_limit::build_general_rate_limiter, config);
+
+    let org_api_routes = Router::new()
+        // Org admin API (JSON; see handlers::api::org's module doc for auth per handler)
         .route(
             "/api/v1/org/scim-tokens",
-            get(handlers::admin::list_scim_tokens).post(handlers::admin::create_scim_token),
+            get(handlers::api::org::list_scim_tokens).post(handlers::api::org::create_scim_token),
         )
         .route(
             "/api/v1/org/scim-tokens/{id}",
-            delete(handlers::admin::delete_scim_token),
+            delete(handlers::api::org::delete_scim_token),
         )
         // Org-scoped audit event export (JSON/NDJSON/OCSF)
         .route(
             "/api/v1/org/audit-events",
-            get(handlers::admin::audit_events),
+            get(handlers::api::org::audit_events),
         )
         // Policy validation API (used by the admin policy editor)
         .route(
             "/api/v1/org/policies/validate",
-            post(handlers::admin::validate_policy_api),
+            post(handlers::api::org::validate_policy_api),
         )
-        // SCIM 2.0 endpoints (RFC 7643/7644)
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(state),
+            resource_metadata::layer,
+        ))
+        .layer(rate_limit.clone());
+
+    // SCIM 2.0 endpoints (RFC 7643/7644)
+    let scim_routes = Router::new()
         .route(
             "/scim/v2/ServiceProviderConfig",
             get(handlers::scim::service_provider_config),
@@ -426,6 +457,7 @@ fn build_general_limited_routes(
         .route(
             "/scim/v2/Users/{id}",
             get(handlers::scim::get_user)
+                .put(handlers::scim::put_user)
                 .patch(handlers::scim::patch_user)
                 .delete(handlers::scim::delete_user),
         )
@@ -436,19 +468,25 @@ fn build_general_limited_routes(
         .route(
             "/scim/v2/Groups/{id}",
             get(handlers::scim::get_group)
+                .put(handlers::scim::put_group)
                 .patch(handlers::scim::patch_group)
                 .delete(handlers::scim::delete_group),
+        )
+        .route(
+            "/scim/v2/{*path}",
+            any(handlers::scim::extract::unknown_endpoint),
         )
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(state),
             resource_metadata::layer,
+        ))
+        .layer(rate_limit)
+        .layer(axum::middleware::from_fn(
+            handlers::scim::extract::scim_error_body,
         ));
 
-    Ok(protected_api_routes
-        .layer(maybe_rate_limit!(
-            rate_limit::build_general_rate_limiter,
-            config
-        ))
+    Ok(org_api_routes
+        .merge(scim_routes)
         .layer(DefaultBodyLimit::max(SCIM_BODY_LIMIT)))
 }
 
@@ -593,7 +631,7 @@ fn build_api_management_routes(
         )
         .layer(axum::middleware::from_fn_with_state(
             httpsig_resolver,
-            vouch_httpsig::middleware::require_signature::<httpsig::OAuthClientKeyResolver>,
+            middleware::require_signature::<httpsig::OAuthClientKeyResolver>,
         ));
 
     // RFC 9728 protected-resource endpoints in this group. Layered with
@@ -607,27 +645,27 @@ fn build_api_management_routes(
         // Applications API (JSON)
         .route(
             "/api/v1/applications",
-            get(handlers::applications::list_applications_api)
-                .post(handlers::applications::create_application_api),
+            get(handlers::api::applications::list_applications_api)
+                .post(handlers::api::applications::create_application_api),
         )
         .route(
             "/api/v1/applications/{id}",
-            get(handlers::applications::get_application_api)
-                .patch(handlers::applications::update_application_api)
-                .delete(handlers::applications::delete_application_api),
+            get(handlers::api::applications::get_application_api)
+                .patch(handlers::api::applications::update_application_api)
+                .delete(handlers::api::applications::delete_application_api),
         )
         .route(
             "/api/v1/applications/{id}/secrets",
-            get(handlers::applications::list_secrets_api)
-                .post(handlers::applications::add_secret_api),
+            get(handlers::api::applications::list_secrets_api)
+                .post(handlers::api::applications::add_secret_api),
         )
         .route(
             "/api/v1/applications/{id}/secrets/{secret_id}",
-            delete(handlers::applications::delete_secret_api),
+            delete(handlers::api::applications::delete_secret_api),
         )
         .route(
             "/api/v1/applications/{id}/revoke",
-            post(handlers::applications::revoke_tokens_api),
+            post(handlers::api::applications::revoke_tokens_api),
         )
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(state),
@@ -785,8 +823,10 @@ fn build_admin_routes(config: &config::ServerConfig) -> anyhow::Result<Router<Ar
 /// Readiness probe handler.
 ///
 /// Checks database connectivity. Returns 200 if ready, 503 if not.
-/// Used by Kubernetes readiness and startup probes.
-async fn readiness_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+/// Used by Kubernetes readiness and startup probes. Also served on the port 80
+/// redirect listener, which never takes the PROXY protocol, so a probe keeps
+/// working when port 443 requires a PROXY header.
+pub(crate) async fn readiness_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     match state.db.is_healthy().await {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"status": "ready"}))),
         Err(e) => {
@@ -803,13 +843,16 @@ async fn readiness_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
 }
 
 /// Build all UI routes with UI CORS.
-fn build_ui_routes(config: &config::ServerConfig) -> anyhow::Result<Router<Arc<AppState>>> {
+fn build_ui_routes(
+    state: Arc<AppState>,
+    config: &config::ServerConfig,
+) -> anyhow::Result<Router<Arc<AppState>>> {
     Ok(Router::new()
         // Landing page with smart routing
         .route("/", get(handlers::home::home_page))
         .route("/install", get(handlers::install::install_page))
         // Client-side translation bundle (CSP script-src 'self'); cached via ETag.
-        .route("/i18n.js", get(crate::infra::i18n::i18n_js_handler))
+        .route("/i18n.js", get(i18n::i18n_js_handler))
         .route("/health", get(|| async { "ok" }))
         .route("/health/ready", get(readiness_handler))
         // Legal pages (redirect to vouch.sh)
@@ -890,41 +933,29 @@ fn build_ui_routes(config: &config::ServerConfig) -> anyhow::Result<Router<Arc<A
             "/applications/{id}/secrets/{secret_id}/delete",
             post(handlers::applications::delete_secret_form),
         )
-        // SAML 2.0 SP endpoints
+        // Admin member management UI (rate-limited)
+        .merge(build_admin_routes(config)?)
+        // Rate-limited browser WebAuthn routes
+        .merge(build_browser_auth_routes(config)?)
+        // Every route above authenticates with the session cookie, so
+        // state-changing methods must prove same-origin (RFC 9700 CSRF
+        // defense). Routes added below this layer are exempt.
+        .layer(axum::middleware::from_fn_with_state(
+            state,
+            csrf::same_origin,
+        ))
+        // SAML 2.0 SP endpoints — after the same-origin layer: the IdP
+        // delivers the ACS POST binding cross-origin by design.
         .route(
             "/saml/acs",
             post(handlers::saml::acs).layer(DefaultBodyLimit::max(SAML_ACS_BODY_LIMIT)),
         )
         .route("/saml/metadata", get(handlers::saml::metadata))
-        // Admin member management UI (rate-limited)
-        .merge(build_admin_routes(config)?)
-        // Rate-limited browser WebAuthn routes
-        .merge(build_browser_auth_routes(config)?)
         // Static file serving for CSS, JS, and assets
         .route("/static/{*path}", get(static_assets::static_handler))
         // Browsers request /favicon.ico at the root path
         .route("/favicon.ico", get(static_assets::favicon_handler))
         .layer(security_headers::build_ui_cors_layer(config)))
-}
-
-/// Middleware that records HTTP request metrics (counter + duration histogram).
-async fn metrics_middleware(req: Request<axum::body::Body>, next: Next) -> impl IntoResponse {
-    let method = req.method().to_string();
-    let path = req
-        .extensions()
-        .get::<MatchedPath>()
-        .map_or_else(|| req.uri().path().to_string(), |p| p.as_str().to_string());
-    let start = std::time::Instant::now();
-
-    let response = next.run(req).await;
-
-    let duration = start.elapsed().as_secs_f64();
-    let status = response.status().as_u16().to_string();
-    let labels = [("method", method), ("path", path), ("status", status)];
-    ::metrics::counter!("http_requests_total", &labels).increment(1);
-    ::metrics::histogram!("http_request_duration_seconds", &labels[..2]).record(duration);
-
-    response
 }
 
 #[cfg(test)]
@@ -936,7 +967,9 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    use crate::test_utils;
     use axum::body::Body;
+    use axum::http::Request;
     use tower::ServiceExt;
 
     /// Handler that never completes, used to trigger `TimeoutLayer`.
@@ -982,7 +1015,7 @@ mod tests {
                 StatusCode::REQUEST_TIMEOUT,
                 Duration::from_millis(50),
             ))
-            .layer(axum::middleware::from_fn(metrics_middleware));
+            .layer(axum::middleware::from_fn(metrics::metrics_middleware));
 
         let resp = router
             .oneshot(build_request("/slow-timeout-regression"))
@@ -1030,13 +1063,56 @@ mod tests {
             .find("TimeoutLayer::with_status_code")
             .expect("TimeoutLayer in build_app");
         let metrics_pos = build_app_src
-            .find("axum::middleware::from_fn(metrics_middleware)")
+            .find("axum::middleware::from_fn(metrics::metrics_middleware)")
             .expect("metrics_middleware in build_app");
         assert!(
             timeout_pos < metrics_pos,
             "TimeoutLayer must be applied before metrics_middleware in build_app \
              (innermost vs. outer observer); source order: TimeoutLayer at \
              {timeout_pos}, metrics at {metrics_pos}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ui_mutations_require_same_origin() {
+        let (app, _state) = test_utils::test_app().await;
+
+        // /logout has no per-handler origin check of its own; the layer is
+        // its only CSRF defense.
+        let (status, body) = test_utils::http_post_form(&app, "/logout", "", &[]).await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::FORBIDDEN,
+            "a state-changing UI request without an Origin must be refused: {body}"
+        );
+        assert!(body.contains("missing_origin"), "got: {body}");
+
+        let (status, body) = test_utils::http_post_form(
+            &app,
+            "/logout",
+            "",
+            &[("Origin", "https://evil.example.com")],
+        )
+        .await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::FORBIDDEN,
+            "a cross-site Origin must be refused: {body}"
+        );
+        assert!(body.contains("invalid_origin"), "got: {body}");
+
+        // The server's own origin passes through to the handler.
+        let (status, _body) = test_utils::http_post_form(
+            &app,
+            "/logout",
+            "",
+            &[("Origin", "https://test.example.com")],
+        )
+        .await;
+        assert_ne!(
+            status,
+            axum::http::StatusCode::FORBIDDEN,
+            "a same-origin request must reach the handler"
         );
     }
 }

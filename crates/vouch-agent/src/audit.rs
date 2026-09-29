@@ -12,6 +12,9 @@ use serde::Serialize;
 use std::io::Write;
 use std::path::PathBuf;
 use tracing::debug;
+use vouch_common::paths;
+
+use crate::socket::SocketKind;
 
 /// Maximum audit log file size (10 MB). When exceeded, the log is rotated.
 const MAX_LOG_SIZE: u64 = 10 * 1024 * 1024;
@@ -59,7 +62,7 @@ pub enum AuditEvent {
     /// A connection was rejected due to peer credential mismatch.
     ConnectionRejected {
         /// Which listener the connection arrived on (`ipc` or `ssh_agent`).
-        socket: crate::socket::SocketKind,
+        socket: SocketKind,
         /// UID of the rejected peer.
         peer_uid: u32,
         /// PID of the rejected peer (0 if unavailable).
@@ -96,8 +99,7 @@ pub(crate) fn log_event(event: AuditEvent) {
 
 /// Resolve the audit log path (`$XDG_STATE_HOME/vouch/audit.log`).
 fn audit_log_path() -> std::io::Result<PathBuf> {
-    vouch_common::paths::audit_log_file()
-        .ok_or_else(|| std::io::Error::other("cannot determine state directory"))
+    paths::audit_log_file().ok_or_else(|| std::io::Error::other("cannot determine state directory"))
 }
 
 /// Write a single audit event to the log file.
@@ -109,7 +111,7 @@ fn write_event(record: &AuditRecord) -> std::io::Result<()> {
 
     // Ensure the state directory exists, validated (lstat-first, no symlink,
     // owned by us) and owner-only.
-    vouch_common::paths::prepare_private_dir(dir)?;
+    paths::prepare_private_dir(dir)?;
 
     // Rotate if file exceeds max size
     if let Ok(metadata) = std::fs::metadata(&log_path)

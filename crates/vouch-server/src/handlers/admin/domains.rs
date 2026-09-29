@@ -11,14 +11,13 @@ use crate::db::documents::audit::{OrgDomainAdminData, OrgDomainRemovalData};
 use crate::error::ServiceError;
 use crate::filters;
 use crate::handlers::admin::flash;
-use crate::handlers::browser_login::validate_origin;
-use crate::handlers::session::{AuthContext, extract_org_admin, get_resource_auth_context};
+use crate::handlers::extractors::{AdminPage, OrgAdmin};
+use crate::handlers::session::AuthContext;
 use crate::impl_template_response;
 use crate::infra::dns;
 use crate::infra::i18n::Tr;
 use askama::Template;
-use axum::extract::{OriginalUri, Path, State};
-use axum::http::{HeaderMap, Method};
+use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::cookie::CookieJar;
 use jiff::Timestamp;
@@ -93,7 +92,7 @@ fn redirect_ok(jar: CookieJar, msg: impl Into<String>) -> Response {
 ///
 /// `row.domain` is interpolated directly into `/admin/domains/{domain}/...`
 /// action URLs in the template. That is safe without URL-encoding because
-/// every domain on the org has been through `normalize_domain`, which rejects
+/// every domain on the org has been through `Domain::parse`, which rejects
 /// anything outside `[a-z0-9.-]` — no `/`, `?`, `#`, `%`, or whitespace can
 /// reach the template.
 fn build_rows(org: &db::Organization) -> Vec<DomainRow> {
@@ -138,26 +137,13 @@ fn build_rows(org: &db::Organization) -> Vec<DomainRow> {
 pub(crate) async fn admin_domains_page(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
+    admin: AdminPage,
 ) -> Response {
-    let auth = get_resource_auth_context(&state, &jar).await;
-    if !auth.authenticated {
-        return Redirect::to("/enroll/start").into_response();
-    }
-    if !auth.is_org_admin {
-        return Redirect::to("/integrations").into_response();
-    }
-
-    let Some(user_id) = auth.user_id.clone() else {
-        return Redirect::to("/enroll/start").into_response();
-    };
-
-    let org_id = match db::get_user_by_id(&state.store, &user_id).await {
-        Ok(Some(user)) => match user.org_id {
-            Some(id) => id,
-            None => return Redirect::to("/integrations").into_response(),
-        },
-        _ => return Redirect::to("/integrations").into_response(),
-    };
+    let AdminPage {
+        auth,
+        user_id: _,
+        org_id,
+    } = admin;
 
     let org = match db::get_organization(&state.store, &org_id).await {
         Ok(Some(o)) => o,
@@ -189,16 +175,15 @@ pub(crate) async fn admin_domains_page(
 
 /// POST /admin/domains — add a pending additional domain.
 pub(crate) async fn admin_add_domain(
-    method: Method,
-    uri: OriginalUri,
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    admin: OrgAdmin,
     jar: CookieJar,
     axum::Form(form): axum::Form<AddDomainForm>,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-    let (admin, org_id) =
-        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
+    let OrgAdmin {
+        user: admin,
+        org_id,
+    } = admin;
 
     let result =
         db::add_additional_domain(&state.store, &org_id, &form.domain, &admin.id, &admin.email)
@@ -211,18 +196,15 @@ pub(crate) async fn admin_add_domain(
                 admin_user_id: &admin.id,
                 method: None,
             };
-            if let Err(e) = state
+            state
                 .audit
-                .insert_event(
+                .record_event(
                     db::AuditEventKind::OrgDomainAdded,
                     Some(&admin.id),
                     Some(&admin.email),
                     &data,
                 )
-                .await
-            {
-                tracing::warn!(error = %e, "failed to write org_domain_added audit event");
-            }
+                .await;
             tracing::info!(
                 admin_email = %admin.email,
                 org_id = %org_id,
@@ -314,18 +296,17 @@ pub(crate) async fn admin_add_domain(
 
 /// POST /admin/domains/{domain}/verify — fetch DNS TXT and mark verified.
 pub(crate) async fn admin_verify_domain(
-    method: Method,
-    uri: OriginalUri,
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    admin: OrgAdmin,
     jar: CookieJar,
     Path(domain): Path<String>,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-    let (admin, org_id) =
-        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
+    let OrgAdmin {
+        user: admin,
+        org_id,
+    } = admin;
 
-    let normalized = match db::normalize_domain(&domain) {
+    let normalized = match db::Domain::parse(&domain) {
         Ok(d) => d,
         Err(e) => {
             tracing::error!(error = %e, domain = %domain, "domain normalization failed in verify");
@@ -336,7 +317,8 @@ pub(crate) async fn admin_verify_domain(
         }
     };
 
-    let token = match db::get_verification_token(&state.store, &org_id, &normalized).await? {
+    let token = match db::get_verification_token(&state.store, &org_id, normalized.as_str()).await?
+    {
         Some(t) => t,
         None => {
             return Ok(redirect_error(
@@ -346,7 +328,7 @@ pub(crate) async fn admin_verify_domain(
         }
     };
 
-    let txt_ok = match dns::verify_txt_record(&normalized, token.expose_secret()).await {
+    let txt_ok = match dns::verify_txt_record(normalized.as_str(), token.expose_secret()).await {
         Ok(b) => b,
         Err(e) => {
             tracing::warn!(
@@ -368,26 +350,23 @@ pub(crate) async fn admin_verify_domain(
         ));
     }
 
-    match db::mark_additional_domain_verified(&state.store, &org_id, &normalized).await {
+    match db::mark_additional_domain_verified(&state.store, &org_id, normalized.as_str()).await {
         Ok(()) => {
             let data = OrgDomainAdminData {
                 action: "verify_org_domain",
-                domain: &normalized,
+                domain: normalized.as_str(),
                 admin_user_id: &admin.id,
                 method: Some("dns_txt"),
             };
-            if let Err(e) = state
+            state
                 .audit
-                .insert_event(
+                .record_event(
                     db::AuditEventKind::OrgDomainVerified,
                     Some(&admin.id),
                     Some(&admin.email),
                     &data,
                 )
-                .await
-            {
-                tracing::warn!(error = %e, "failed to write org_domain_verified audit event");
-            }
+                .await;
             tracing::info!(
                 admin_email = %admin.email,
                 org_id = %org_id,
@@ -422,18 +401,17 @@ pub(crate) async fn admin_verify_domain(
 
 /// POST /admin/domains/{domain}/remove — remove an additional domain.
 pub(crate) async fn admin_remove_domain(
-    method: Method,
-    uri: OriginalUri,
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    admin: OrgAdmin,
     jar: CookieJar,
     Path(domain): Path<String>,
 ) -> Result<Response, ServiceError> {
-    validate_origin(&headers, &state.config().base_url)?;
-    let (admin, org_id) =
-        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
+    let OrgAdmin {
+        user: admin,
+        org_id,
+    } = admin;
 
-    let normalized = match db::normalize_domain(&domain) {
+    let normalized = match db::Domain::parse(&domain) {
         Ok(d) => d,
         Err(e) => {
             tracing::error!(error = %e, domain = %domain, "domain normalization failed in remove");
@@ -444,30 +422,34 @@ pub(crate) async fn admin_remove_domain(
         }
     };
 
-    match db::remove_additional_domain(&state.store, &org_id, &normalized).await {
+    match db::remove_additional_domain(
+        &state.store,
+        &state.session_cache,
+        &org_id,
+        normalized.as_str(),
+    )
+    .await
+    {
         Ok(Some(summary)) => {
             let revoked = summary.revoked_user_count;
             let errored = summary.revocation_errored;
             let data = OrgDomainRemovalData {
                 action: "remove_org_domain",
-                domain: &normalized,
+                domain: normalized.as_str(),
                 admin_user_id: &admin.id,
                 revoked_user_session_count: revoked,
                 revocation_errored: errored,
                 released_subdomain: summary.released_subdomain.clone(),
             };
-            if let Err(e) = state
+            state
                 .audit
-                .insert_event(
+                .record_event(
                     db::AuditEventKind::OrgDomainRemoved,
                     Some(&admin.id),
                     Some(&admin.email),
                     &data,
                 )
-                .await
-            {
-                tracing::warn!(error = %e, "failed to write org_domain_removed audit event");
-            }
+                .await;
             tracing::info!(
                 admin_email = %admin.email,
                 org_id = %org_id,
@@ -512,5 +494,180 @@ pub(crate) async fn admin_remove_domain(
                 Tr::new("admin-domains-error-internal").to_string(),
             ))
         }
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
+mod tests {
+    use axum::http::StatusCode;
+
+    use crate::db::documents::user::UserDoc;
+    use crate::test_utils::*;
+    use crate::{crypto, db};
+
+    /// End-to-end (HTTP) regression for the session-cache invalidation bug:
+    /// removing a verified additional domain must evict the in-process
+    /// `SessionCache` for matching users on the same instance, so a victim's
+    /// bearer token stops authenticating immediately instead of after the
+    /// cache TTL. Drives the real `admin_remove_domain` handler through the
+    /// axum router (real `OrgAdmin` extractor + CSRF origin check), not just
+    /// the `db::` function.
+    #[tokio::test]
+    async fn admin_remove_domain_invalidates_session_cache_over_http() {
+        let (app, state) = test_app().await;
+
+        // Org owning primary "example.com" plus a VERIFIED additional domain
+        // "added.example.com". Verified directly via db::mark_additional_domain_verified
+        // (bypasses the DNS TXT lookup the admin_verify handler performs).
+        let org = create_test_org(&state.store, "example.com").await;
+        db::add_additional_domain(
+            &state.store,
+            &org.id,
+            "added.example.com",
+            "admin-id",
+            "admin@example.com",
+        )
+        .await
+        .expect("add additional domain");
+        db::mark_additional_domain_verified(&state.store, &org.id, "added.example.com")
+            .await
+            .expect("mark verified");
+
+        // Org admin (primary-domain email — NOT matched by the removal, so the
+        // admin keeps their session and the POST completes).
+        let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
+        let admin_auth = create_test_authenticator(&state.store, &admin.id).await;
+        let admin_token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &admin.id,
+                email: &admin.email,
+                auth_id: Some(&admin_auth),
+                ..Default::default()
+            },
+        )
+        .await;
+        let admin_cookie = format!("{}={admin_token}", vouch_common::SESSION_COOKIE_NAME);
+
+        // Victim on the additional domain — exactly the user set
+        // revoke_sessions_for_domain_users targets.
+        let victim =
+            create_test_user_in_org(&state.store, "victim@added.example.com", &org.id, false).await;
+        let victim_auth = create_test_authenticator(&state.store, &victim.id).await;
+        let victim_token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &victim.id,
+                email: &victim.email,
+                auth_id: Some(&victim_auth),
+                ..Default::default()
+            },
+        )
+        .await;
+        let victim_hash = crypto::hash_token(&victim_token);
+
+        // Peer on the primary domain — not matched; their cache Hit and DB row
+        // must survive per-user invalidation (no over-invalidation).
+        let peer = create_test_user_in_org(&state.store, "peer@example.com", &org.id, false).await;
+        let peer_auth = create_test_authenticator(&state.store, &peer.id).await;
+        let peer_token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &peer.id,
+                email: &peer.email,
+                auth_id: Some(&peer_auth),
+                ..Default::default()
+            },
+        )
+        .await;
+        let peer_hash = crypto::hash_token(&peer_token);
+
+        // Seed the per-process cache the way a prior request to this instance
+        // would: a first lookup hits the DB and inserts the session as a Hit.
+        assert!(
+            state
+                .session_cache
+                .get_session_by_token_hash(&state.store, &victim_hash, test_arrival())
+                .await
+                .expect("seed victim lookup")
+                .is_some(),
+            "victim session must exist in DB before seeding"
+        );
+        assert!(
+            state
+                .session_cache
+                .get_session_by_token_hash(&state.store, &peer_hash, test_arrival())
+                .await
+                .expect("seed peer lookup")
+                .is_some(),
+            "peer session must exist in DB before seeding"
+        );
+
+        // Production path: admin POSTs the remove form. Goes through the real
+        // router, OrgAdmin extractor, CSRF origin check, and the handler which
+        // threads state.session_cache into db::remove_additional_domain.
+        let (status, _body) = http_post_form(
+            &app,
+            "/admin/domains/added.example.com/remove",
+            "",
+            &[
+                ("Cookie", admin_cookie.as_str()),
+                ("Origin", "https://test.example.com"),
+            ],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::SEE_OTHER,
+            "admin remove should redirect on success"
+        );
+
+        // The fix (same-instance): the victim's stale cache Hit is evicted, so
+        // a bearer-token request with the revoked token is rejected (401)
+        // instead of succeeding for up to the cache TTL.
+        let victim_auth_hdr = format!("Bearer {victim_token}");
+        let (status, _body) = http_get(
+            &app,
+            "/oauth/userinfo",
+            &[("Authorization", victim_auth_hdr.as_str())],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "victim's revoked token must NOT authenticate after domain removal \
+             (cache must be evicted on this instance)"
+        );
+
+        // Negative control: the peer (primary domain) is unaffected. Their
+        // cache Hit survives per-user invalidation, so their token still
+        // authenticates immediately after the removal.
+        let peer_auth_hdr = format!("Bearer {peer_token}");
+        let (status, _body) = http_get(
+            &app,
+            "/oauth/userinfo",
+            &[("Authorization", peer_auth_hdr.as_str())],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "non-matching peer's token MUST still authenticate after per-user \
+             invalidation (no over-invalidation)"
+        );
+
+        // Membership contract: the victim keeps org_id (domain removal does
+        // not demote membership).
+        let victim_after = state
+            .store
+            .get::<UserDoc>(&victim.id)
+            .await
+            .expect("get victim")
+            .expect("victim exists");
+        assert_eq!(victim_after.data.org_id, Some(org.id.clone()));
     }
 }

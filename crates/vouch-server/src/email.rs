@@ -72,6 +72,48 @@ impl Email {
             .map(|(_, domain)| domain.to_ascii_lowercase())
             .filter(|domain| !domain.contains('\0'))
     }
+
+    /// Whether a raw address has the syntactic shape Vouch stores.
+    ///
+    /// A **shape check** (not full RFC 5321 validation): the local part must
+    /// be non-empty and free of whitespace and angle brackets, and the
+    /// domain must contain no NUL byte. This rejects the malformed `userName`
+    /// values a mis-mapped provisioning source can produce — `a b@d`,
+    /// `@d`, `Display Name <ada@d>` — that defeat [`Self::domain_of`]'s
+    /// suffix-only split, while leaving these cases to their existing
+    /// downstream gates:
+    ///
+    /// - an **empty domain** (`foo@`) returns `true` so the org-domain
+    ///   ownership check inside `create_scim_user` rejects it with the
+    ///   distinct `"Email domain is not verified"` message, as before;
+    /// - a **NUL in the local part** returns `true` so the store's
+    ///   index-value guard ([`super::store`'s `validate_index_entry`][v])
+    ///   rejects it, matching the contract pinned by
+    ///   `test_scim_create_user_rejects_nul_in_username_local_part`;
+    /// - **whitespace in the domain** (`foo@bar .com`) returns `true`: the
+    ///   whitespace rule inspects the local part only, so a domain-internal
+    ///   space (not a valid DNS domain) is left to each call site's domain
+    ///   gate — SCIM's in-transaction ownership check, and enrollment's
+    ///   domain-internal-whitespace gate in `complete_enrollment_after_identity`
+    ///   (the chokepoint whose comment names "whitespace-bearing" values) —
+    ///   matching the contract pinned by
+    ///   `is_valid_address_passes_whitespace_domain_to_downstream_gate`.
+    ///
+    /// Splits on the **last** `@` (same as [`Self::domain`]/[`Self::domain_of`])
+    /// so a quoted local part that itself contains `@` is not mis-split.
+    ///
+    /// [v]: crate::db::store
+    #[must_use]
+    pub fn is_valid_address(raw: &str) -> bool {
+        let Some((local, domain)) = raw.trim().rsplit_once('@') else {
+            return false;
+        };
+        !local.is_empty()
+            && !domain.contains('\0')
+            && !local
+                .chars()
+                .any(|c| c.is_whitespace() || c == '<' || c == '>')
+    }
 }
 
 impl<'de> Deserialize<'de> for Email {
@@ -86,18 +128,6 @@ impl<'de> Deserialize<'de> for Email {
 impl std::fmt::Display for Email {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
-    }
-}
-
-impl AsRef<str> for Email {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl From<Email> for String {
-    fn from(email: Email) -> Self {
-        email.0
     }
 }
 
@@ -162,6 +192,95 @@ mod tests {
             Some("example.com".to_string())
         );
         assert_eq!(Email::domain_of("no-domain"), None);
+    }
+
+    #[test]
+    fn is_valid_address_accepts_well_formed() {
+        assert!(Email::is_valid_address("alice@example.com"));
+        // Surrounding whitespace is trimmed, matching `Email::new`.
+        assert!(Email::is_valid_address("  Alice@Example.COM  "));
+        // A last-`@` split keeps a quoted local part containing `@` intact.
+        assert!(Email::is_valid_address("\"quoted@local\"@example.com"));
+        // Reserved-TLD / single-label domains are not re-validated here;
+        // ownership is the ownership layer's job.
+        assert!(Email::is_valid_address("alice@corp.internal"));
+    }
+
+    #[test]
+    fn is_valid_address_rejects_no_at() {
+        assert!(!Email::is_valid_address("not-an-email"));
+        assert!(!Email::is_valid_address(""));
+    }
+
+    #[test]
+    fn is_valid_address_rejects_empty_local_part() {
+        // `@example.com` has a clean domain suffix but no local part — the
+        // exact case the suffix-only `domain_of` check missed.
+        assert!(!Email::is_valid_address("@example.com"));
+    }
+
+    #[test]
+    fn is_valid_address_rejects_whitespace_in_local_part() {
+        assert!(!Email::is_valid_address("a b@example.com"));
+        // A tab is whitespace too.
+        assert!(!Email::is_valid_address("a\tb@example.com"));
+        // Display-name-wrapped address: local part spans the embedded name.
+        assert!(!Email::is_valid_address("Ada Lovelace ada@example.com"));
+    }
+
+    #[test]
+    fn is_valid_address_rejects_angle_brackets_in_local_part() {
+        // `<ada@example.com>` (no display name, no whitespace) is a
+        // display-name-wrapped address the whitespace rule alone misses.
+        assert!(!Email::is_valid_address("<ada@example.com>"));
+    }
+
+    #[test]
+    fn is_valid_address_passes_empty_domain_through_to_ownership_gate() {
+        // `foo@` has an empty domain suffix. This is NOT a local-part defect
+        // and is rejected by `create_scim_user`'s domain-ownership check
+        // with `"Email domain is not verified"`, so the shape check lets it
+        // through to preserve that distinct message.
+        assert!(
+            Email::is_valid_address("foo@"),
+            "empty-domain case must fall through to the ownership gate"
+        );
+    }
+
+    #[test]
+    fn is_valid_address_passes_whitespace_domain_to_downstream_gate() {
+        // The whitespace rule inspects the local part only, so internal
+        // whitespace in the domain (`foo@bar .com` — a tab too) is NOT a
+        // shape defect this gate rejects. It is left to each call site's
+        // domain gate: SCIM's in-transaction ownership check, and
+        // enrollment's domain-internal-whitespace gate in
+        // `complete_enrollment_after_identity`. Pinning the contract here
+        // documents why that enrollment gate is required and guards against
+        // a future change to `is_valid_address` silently dropping it.
+        assert!(
+            Email::is_valid_address("foo@bar .com"),
+            "whitespace in the domain must pass the shape check to the downstream gate"
+        );
+        assert!(
+            Email::is_valid_address("foo@bar\t.com"),
+            "a tab in the domain must pass the shape check to the downstream gate"
+        );
+    }
+
+    #[test]
+    fn is_valid_address_rejects_nul_in_domain() {
+        assert!(!Email::is_valid_address("alice@exa\0mple.com"));
+    }
+
+    #[test]
+    fn is_valid_address_passes_nul_in_local_part_to_store_guard() {
+        // A NUL confined to the local part is left to the store's index-value
+        // guard (`validate_index_entry`), matching the contract pinned by
+        // `test_scim_create_user_rejects_nul_in_username_local_part`.
+        assert!(
+            Email::is_valid_address("ali\0ce@example.com"),
+            "NUL in the local part must pass the shape check to the store guard"
+        );
     }
 
     #[test]

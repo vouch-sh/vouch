@@ -1,6 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
+use vouch_server::test_utils;
 
 // The runtime evaluation path: a validated policy set decided against an
 // arbitrary replayed history. This executes on every login and token
@@ -10,5 +11,5 @@ fuzz_target!(|rows: Vec<(String, String, String, i64)>| {
     if rows.len() > 64 {
         return;
     }
-    vouch_server::test_utils::fuzz_evaluate_history(&rows);
+    test_utils::fuzz_evaluate_history(&rows);
 });

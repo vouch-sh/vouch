@@ -9,11 +9,15 @@ use super::documents::oauth::{
     AccessScope, FapiProfile, OAuthClientDoc, OAuthClientSecretDoc, OAuthClientType,
     RegistrationSource, TokenEndpointAuthMethod,
 };
-use super::store::DocumentStore;
+use super::store::{DocumentStore, Transition};
 use crate::crypto::alg::JwsAlgorithm;
+use crate::db::documents::audit::GeoFields;
+use crate::db::documents::oauth;
 use crate::error::ServiceError;
 use anyhow::Result;
 use axum::http::StatusCode;
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
@@ -90,28 +94,6 @@ pub struct OAuthClient {
     pub post_logout_redirect_uris: Option<Vec<String>>,
 }
 
-/// Old↔new stored-row mapping: rows persisted while secretless client
-/// types still fell back to the RFC 7591 §2 default `client_secret_basic`
-/// are read as the public-client method `none`. No writer produces
-/// `spa`/`native` + `client_secret_basic` deliberately — manual
-/// registration derives the method from the application type, and dynamic
-/// registration infers `spa`/`native` only when the requested method is
-/// `none` (`determine_client_type`).
-///
-/// RFC 7591 §2 (<https://www.rfc-editor.org/rfc/rfc7591#section-2>):
-/// > "none": The client is a public client as defined in OAuth 2.0,
-/// > Section 2.1, and does not have a client secret.
-fn normalize_stored_auth_method(
-    application_type: OAuthClientType,
-    stored: TokenEndpointAuthMethod,
-) -> TokenEndpointAuthMethod {
-    if !application_type.requires_secret() && stored == TokenEndpointAuthMethod::ClientSecretBasic {
-        TokenEndpointAuthMethod::None
-    } else {
-        stored
-    }
-}
-
 impl From<Document<OAuthClientDoc>> for OAuthClient {
     fn from(doc: Document<OAuthClientDoc>) -> Self {
         Self {
@@ -130,10 +112,7 @@ impl From<Document<OAuthClientDoc>> for OAuthClient {
             org_id: doc.data.org_id,
             resource_uris: doc.data.resource_uris,
             keys: stored_client_keys(&doc.id, doc.data.jwks, doc.data.jwks_uri),
-            token_endpoint_auth_method: normalize_stored_auth_method(
-                doc.data.application_type,
-                doc.data.token_endpoint_auth_method,
-            ),
+            token_endpoint_auth_method: doc.data.token_endpoint_auth_method,
             request_object_signing_alg: doc.data.request_object_signing_alg,
             require_signed_request_object: doc.data.require_signed_request_object,
             fapi_profile: doc.data.fapi_profile,
@@ -219,6 +198,72 @@ impl OAuthClient {
             .as_deref()
             .is_some_and(|uris| uris.iter().any(|u| u == uri))
     }
+
+    /// Whether the client is registered (RFC 7591 §2 `grant_types`) for the
+    /// grant whose `grant_type` wire value is `grant`.
+    ///
+    /// A stored `None` is resolved from the client's `application_type` via
+    /// [`OAuthClientType::default_grant_types`], not from RFC 7591 §2's
+    /// registration default.
+    ///
+    /// RFC 7591 §2 fixes what an omitted `grant_types` means for a *dynamic
+    /// registration* — "If omitted, the default behavior is that the client
+    /// will use only the `authorization_code` Grant Type" — and
+    /// `register_client` materializes exactly that when the field is absent
+    /// (`services/oidc/registration.rs`). Because registration always writes
+    /// the field, a stored `None` can only be a self-service application,
+    /// whose creation form has no grant-types input at all. Applying the
+    /// registration default to it read a choice the operator was never
+    /// offered, and left every self-service Native application unable to use
+    /// the device flow and every Service application unable to use client
+    /// credentials.
+    ///
+    /// Callers pass the
+    /// [`crate::services::oidc::grant_type::OAuthGrantType::as_str`] wire value
+    /// so the comparison is against the same strings registration stores.
+    ///
+    /// RFC 6749 §5.2 `unauthorized_client`: "The authenticated client is not
+    /// authorized to use this authorization grant type."
+    #[must_use]
+    pub fn is_authorized_for_grant(&self, grant: &str) -> bool {
+        match self.grant_types.as_ref() {
+            Some(gts) => gts.iter().any(|g| g == grant),
+            None => self.application_type.default_grant_types().contains(&grant),
+        }
+    }
+
+    /// The RFC 6749 §2.1 client type, from the registered auth method.
+    ///
+    /// RFC 7591 §2: `"none": The client is a public client as defined in
+    /// OAuth 2.0, Section 2.1, and does not have a client secret.` Every
+    /// other method is a credential the client must present, which is what
+    /// makes it confidential. `application_type` is not consulted: RFC 8252
+    /// §8.4 lets a native app hold a per-instance secret, and a secret it
+    /// registered is a secret it is held to.
+    #[must_use]
+    pub fn client_type(&self) -> ClientType {
+        if self.token_endpoint_auth_method == TokenEndpointAuthMethod::None {
+            ClientType::Public
+        } else {
+            ClientType::Confidential
+        }
+    }
+}
+
+/// RFC 6749 §2.1: "OAuth defines two client types, based on their ability
+/// to authenticate securely with the authorization server (i.e., ability to
+/// maintain the confidentiality of their client credentials)".
+///
+/// Not the same axis as [`AccessScope::Public`], which says who may sign in
+/// through an application.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientType {
+    /// "Clients capable of maintaining the confidentiality of their
+    /// credentials".
+    Confidential,
+    /// "Clients incapable of maintaining the confidentiality of their
+    /// credentials".
+    Public,
 }
 
 // ============================================================================
@@ -498,14 +543,16 @@ pub fn is_valid_post_logout_redirect_uri_str(uri: &str) -> bool {
 /// A JSON Web Key Set (RFC 7517 Section 5).
 ///
 /// The typed representation shared by write-time acceptance checks (this
-/// module: `JwkSet::has_fapi_allowed_key`, `JwkSet::has_x5c`) and the runtime RFC
+/// module: `JwkSet::has_client_assertion_key`, `JwkSet::has_x5c`) and the runtime RFC
 /// 7523 client-assertion verifier (`services/oidc/jwt_bearer/jwks.rs`), so a
 /// member of the wrong JSON type (e.g. `"alg": true`) is rejected the same
 /// way in both places instead of silently read as absent by a separate,
-/// more lenient parser. Two other JWKS consumers still parse leniently from
-/// raw `serde_json::Value` and are unaffected by this type: the mTLS `x5c`
-/// matcher (`services/oidc/mtls.rs::verify_self_signed_tls_client_auth`) and
-/// the RFC 9421 signature key resolver (`infra/httpsig.rs`).
+/// more lenient parser. The RFC 9421 signature key resolver
+/// (`infra/httpsig.rs::OAuthClientKeyResolver`) also parses through this type
+/// (and selects via `JwkEntry::is_usable_for`), so it shares the same
+/// rejection semantics. One JWKS consumer still parses leniently from raw
+/// `serde_json::Value` and is unaffected by this type: the mTLS `x5c`
+/// matcher (`services/oidc/mtls.rs::verify_self_signed_tls_client_auth`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JwkSet {
     /// The keys in the set.
@@ -622,7 +669,7 @@ pub struct JwkEntry {
 /// this to reject a malformed submission outright. Callers evaluating a
 /// JWKS that may be pre-existing stored data (which could predate this
 /// check) should treat a parse failure as "no usable key" rather than a
-/// hard error — see `JwkSet::has_fapi_allowed_key`'s callers.
+/// hard error — see `JwkSet::has_client_assertion_key`'s callers.
 ///
 /// # Errors
 /// Returns the `serde_json` deserialization error on a shape mismatch.
@@ -649,38 +696,135 @@ impl KeyType {
     }
 }
 
+/// Why a JWK cannot verify signatures made with a given algorithm.
+///
+/// `Display` is the `error_description` the token endpoint returns for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum UnusableJwk {
+    /// The key is declared for another use or algorithm, or its `kty` cannot
+    /// carry the algorithm. A search skips it without recording why.
+    #[error("No matching key found in JWKS")]
+    NotSelectable,
+    /// A member the key type requires is absent.
+    #[error("{0}")]
+    MissingMember(&'static str),
+    /// An OKP key on a curve other than Ed25519.
+    #[error("EdDSA requires OKP key with Ed25519 curve")]
+    WrongCurve,
+    /// The members are present but do not form a public key.
+    #[error("Invalid key in JWKS")]
+    InvalidKey,
+}
+
+/// Decode a base64url (no padding) JWK member.
+fn jwk_member(value: &str) -> Result<Vec<u8>, UnusableJwk> {
+    URL_SAFE_NO_PAD
+        .decode(value)
+        .map_err(|_| UnusableJwk::InvalidKey)
+}
+
 impl JwkEntry {
-    /// Returns `true` when the runtime verifier could build a decoding key
-    /// from this key for `alg`.
+    /// The key that verifies `alg` signatures, if this entry can be one.
     ///
-    /// Mirrors what a verification actually needs, in the order the runtime
-    /// applies it (`jwt_bearer::jwks::find_matching_key` for selection, then
-    /// `build_decoding_key_from_jwk` for construction):
+    /// The one decision about whether a JWK is usable. The token endpoint's
+    /// key search (`services/oidc/jwt_bearer/jwks.rs`), the RFC 9421
+    /// resolver (`infra/httpsig.rs`), and every write path that checks a
+    /// client's inline JWKS all call this, so a key accepted at registration
+    /// is one the token endpoint can build.
     ///
-    /// - `use`, if present, must be `sig` — a key declared for encryption is
-    ///   skipped even when its `kid` matches.
-    /// - `alg`, if present, must equal the algorithm in question.
-    /// - `kty` must be the one [`KeyType::for_alg`] names. A key whose `kty`
-    ///   can't carry the algorithm is unmatchable however it is declared, so
-    ///   an absent `alg` does not make an `oct` key usable.
-    /// - For `EdDSA`, `crv` must be `Ed25519`: `build_decoding_key_from_jwk`
-    ///   refuses any other curve outright. No equivalent constraint exists on
-    ///   its `EC` or `RSA` arms, so none is imposed here.
+    /// - `use`, if present, must be `sig`; `alg`, if present, must equal
+    ///   `alg`; `kty` must be the one [`KeyType::for_alg`] names.
+    /// - EC: `x` and `y` are 32-byte coordinates of a point on P-256. RFC 7518
+    ///   §6.2.1.2: "The length of this octet string MUST be the full size of
+    ///   a coordinate for the curve specified in the "crv" parameter."
+    /// - RSA: RFC 7518 §6.3.1: "The following members MUST be present for
+    ///   RSA public keys" — `n` and `e`, each non-empty.
+    /// - OKP: RFC 8037 §2: "The parameter "crv" MUST be present" and "The
+    ///   parameter "x" MUST be present"; `crv` must be `Ed25519`, whose
+    ///   encoded point is "a little-endian string of 32 octets" (RFC 8032
+    ///   §5.1.2).
+    ///
+    /// # Errors
+    /// [`UnusableJwk`] naming the first rule the key fails.
+    pub fn decoding_key_for(
+        &self,
+        alg: JwsAlgorithm,
+    ) -> Result<jsonwebtoken::DecodingKey, UnusableJwk> {
+        if self.use_.as_deref().is_some_and(|u| u != "sig")
+            || self.alg.as_deref().is_some_and(|a| a != alg.as_str())
+            || self.kty != KeyType::for_alg(alg)
+        {
+            return Err(UnusableJwk::NotSelectable);
+        }
+        match alg {
+            JwsAlgorithm::Es256 => {
+                let x = self
+                    .x
+                    .as_deref()
+                    .ok_or(UnusableJwk::MissingMember("EC key missing x component"))?;
+                let y = self
+                    .y
+                    .as_deref()
+                    .ok_or(UnusableJwk::MissingMember("EC key missing y component"))?;
+                let x_bytes = jwk_member(x)?;
+                let y_bytes = jwk_member(y)?;
+                let (Ok(x_bytes), Ok(y_bytes)) = (
+                    <[u8; 32]>::try_from(x_bytes.as_slice()),
+                    <[u8; 32]>::try_from(y_bytes.as_slice()),
+                ) else {
+                    return Err(UnusableJwk::InvalidKey);
+                };
+                let point = p256::EncodedPoint::from_affine_coordinates(
+                    &x_bytes.into(),
+                    &y_bytes.into(),
+                    false,
+                );
+                if p256::PublicKey::from_sec1_bytes(point.as_bytes()).is_err() {
+                    return Err(UnusableJwk::InvalidKey);
+                }
+                jsonwebtoken::DecodingKey::from_ec_components(x, y)
+                    .map_err(|_| UnusableJwk::InvalidKey)
+            }
+            JwsAlgorithm::Rs256 | JwsAlgorithm::Ps256 => {
+                let n = self
+                    .n
+                    .as_deref()
+                    .ok_or(UnusableJwk::MissingMember("RSA key missing n component"))?;
+                let e = self
+                    .e
+                    .as_deref()
+                    .ok_or(UnusableJwk::MissingMember("RSA key missing e component"))?;
+                if jwk_member(n)?.is_empty() || jwk_member(e)?.is_empty() {
+                    return Err(UnusableJwk::InvalidKey);
+                }
+                jsonwebtoken::DecodingKey::from_rsa_components(n, e)
+                    .map_err(|_| UnusableJwk::InvalidKey)
+            }
+            JwsAlgorithm::EdDsa => {
+                let x = self
+                    .x
+                    .as_deref()
+                    .ok_or(UnusableJwk::MissingMember("OKP key missing x component"))?;
+                let crv = self
+                    .crv
+                    .as_deref()
+                    .ok_or(UnusableJwk::MissingMember("OKP key missing crv component"))?;
+                if crv != "Ed25519" {
+                    return Err(UnusableJwk::WrongCurve);
+                }
+                if jwk_member(x)?.len() != 32 {
+                    return Err(UnusableJwk::InvalidKey);
+                }
+                jsonwebtoken::DecodingKey::from_ed_components(x)
+                    .map_err(|_| UnusableJwk::InvalidKey)
+            }
+        }
+    }
+
+    /// Returns `true` when [`Self::decoding_key_for`] succeeds for `alg`.
     #[must_use]
     pub fn is_usable_for(&self, alg: JwsAlgorithm) -> bool {
-        if self.use_.as_deref().is_some_and(|u| u != "sig") {
-            return false;
-        }
-        if self.alg.as_deref().is_some_and(|a| a != alg.as_str()) {
-            return false;
-        }
-        if self.kty != KeyType::for_alg(alg) {
-            return false;
-        }
-        if alg == JwsAlgorithm::EdDsa && self.crv.as_deref() != Some("Ed25519") {
-            return false;
-        }
-        true
+        self.decoding_key_for(alg).is_ok()
     }
 }
 
@@ -704,26 +848,28 @@ impl JwkSet {
         self.keys.iter().any(|key| key.is_usable_for(alg))
     }
 
-    /// Returns `true` when the set contains at least one key the FAPI 2.0
-    /// client-assertion validator (`FapiProfile::client_assertion_algorithms`,
-    /// which yields `JwsAlgorithm::FAPI_ALLOWED` for
-    /// `FapiProfile::Fapi2Security`) could actually use.
+    /// Returns `true` when the set contains at least one key the RFC 7523
+    /// client-assertion validator could use for a client on `profile` —
+    /// [`JwkSet::has_key_for`] over `profile.client_assertion_algorithms()`,
+    /// the same allowlist `services/oidc/jwt_bearer/client_auth.rs` verifies
+    /// against.
     ///
-    /// A FAPI client authenticates with whichever of the allowed algorithms
-    /// it has a key for, so the question is whether *any* of them is
-    /// satisfiable — which is [`JwkSet::has_key_for`] over the allowlist. A
-    /// JWKS made only of `alg: RS256` keys leaves the client with no
-    /// algorithm it is both allowed to use and has a matching key for; one
-    /// made only of `use: "enc"` keys leaves it with no key the search
-    /// selects at all. Both are permanently unauthenticatable.
+    /// A client authenticates with whichever allowed algorithm it has a key
+    /// for, so the question is whether *any* of them is satisfiable. A FAPI
+    /// JWKS made only of `alg: RS256` keys, or any JWKS made only of
+    /// `use: "enc"` keys, leaves the client permanently unable to
+    /// authenticate.
     ///
-    /// Used at every point a FAPI 2.0 client's JWKS is accepted or replaced:
+    /// The profile is a parameter, not a baked-in allowlist, so a write path
+    /// cannot check a standard-profile client against nothing: every point a
+    /// `private_key_jwt` client's inline JWKS is accepted or replaced —
     /// application creation and update (`handlers/applications/validate.rs`)
     /// and RFC 7591/7592 dynamic client registration
-    /// (`services/oidc/registration.rs`).
+    /// (`services/oidc/registration.rs`) — names the profile it checks.
     #[must_use]
-    pub fn has_fapi_allowed_key(&self) -> bool {
-        JwsAlgorithm::FAPI_ALLOWED
+    pub fn has_client_assertion_key(&self, profile: FapiProfile) -> bool {
+        profile
+            .client_assertion_algorithms()
             .iter()
             .any(|alg| self.has_key_for(*alg))
     }
@@ -737,7 +883,7 @@ impl JwkSet {
     /// matches keys carrying an `x5c` entry and returns
     /// `CertificateNotRegistered` if none do — the same "accepted at
     /// registration, unusable forever after" class
-    /// [`JwkSet::has_fapi_allowed_key`] closes for `private_key_jwt`.
+    /// [`JwkSet::has_client_assertion_key`] closes for `private_key_jwt`.
     ///
     /// Used wherever a `self_signed_tls_client_auth` client's inline JWKS is
     /// accepted or replaced: application creation and update
@@ -980,6 +1126,89 @@ pub async fn delete_oauth_client(store: &DocumentStore, id: &str) -> Result<u64>
     })
 }
 
+/// Delete an OAuth client and revoke every access token it minted.
+///
+/// Deleting a client is a stronger revocation intent than the "revoke all
+/// tokens" endpoint, so it must revoke at least as much: [`delete_oauth_client`]
+/// alone removes the client row, its secrets, and its JWKS cache, but leaves
+/// every already-minted session validating at resource endpoints until `exp`.
+/// This chokepoint removes both session shapes before deleting the client:
+///
+/// * M2M (`client_credentials`) sessions, keyed by `user_id == client_id`
+///   (RFC 9068 §2.2), via
+///   [`delete_sessions_for_user`](super::sessions::delete_sessions_for_user);
+/// * user-issued sessions (`authorization_code`, `device_code`, RFC 8693
+///   `token_exchange`, FIDO2), keyed by the resource owner's `user_id` but
+///   tagged with the issuing client on the `client_id` index, via
+///   [`delete_sessions_for_oauth_client`](super::sessions::delete_sessions_for_oauth_client).
+///
+/// Ordering mirrors [`revoke_tokens_api`](crate::handlers::api::applications::revoke_tokens_api)
+/// to close the concurrent-issuance window as far as the storage layer allows:
+///
+/// 1. [`revoke_all_oauth_client_secrets`] sets `revoked_at` on every
+///    `OAuthClientSecretDoc` in its own committed transaction. After it
+///    commits, any *new* `validate_oauth_client_credentials` call's auto-commit
+///    `find_one` reads a revoked secret and returns `None`, closing the
+///    issuance commit for new validations. This must precede the session
+///    sweeps so a `client_credentials` request that has not yet validated the
+///    secret cannot begin validating after the sweeps have committed and
+///    insert a `SessionDoc` that escapes both sweeps.
+/// 2. The session sweeps kill already-minted tokens, each delete immediately
+///    followed by its companion cache invalidation so the cache and the DB
+///    stay consistent after every committed delete — a sweep failure then
+///    leaves no DB-deleted-but-cached token behind.
+/// 3. [`delete_oauth_client`] hard-deletes the secrets, JWKS cache, and the
+///    client row.
+///
+/// This narrows — but does not eliminate — the in-flight RFC 7009 race: an
+/// attacker request whose `validate_oauth_client_credentials` already returned
+/// `Ok(Some(client))` before step 1 commits still holds the in-memory
+/// `OAuthClient` and can run `create_oauth_access_token` → `create_session`. If
+/// that `store.insert` commits after step 2's second sweep commits, the
+/// session survives until `exp`. That residual window is shared with
+/// `revoke_tokens_api`; without the revoke-secrets step the delete path leaves
+/// the same residual *plus* a longer window in which new validations succeed.
+///
+/// On a partial failure after step 1 (secrets commit-revoked, then a session
+/// sweep errors), the client row still exists with every secret revoked, and
+/// already-minted access tokens still validate at the accepted-M2M surface
+/// until `exp`. The caller must surface this as a non-204 / retry-required
+/// outcome so the admin is not told the application is gone; the sweep and
+/// `delete_oauth_client` steps are idempotent on a missing row, so retry
+/// converges. Pre-migration sessions with `client_id == None` are not matched
+/// by the client-scoped delete and remain valid until `exp`, matching
+/// `revoke_tokens_api`.
+///
+/// * `id` is the client's document id; `client_id` is its OAuth `client_id`.
+pub async fn delete_oauth_client_and_revoke_sessions(
+    store: &DocumentStore,
+    session_cache: &super::sessions::SessionCache,
+    id: &str,
+    client_id: &str,
+) -> Result<u64> {
+    // Block new issuance before the session sweeps. `revoke_all_oauth_client_secrets`
+    // sets `revoked_at` on every `OAuthClientSecretDoc` in its own committed
+    // transaction; after it commits, any new `validate_oauth_client_credentials`
+    // call reads a revoked secret and returns `None`. Without this step a
+    // concurrent `client_credentials` request can validate the still-valid
+    // secret, let the session sweeps commit, then insert a `SessionDoc` that
+    // escapes both sweeps and survives until `exp`.
+    revoke_all_oauth_client_secrets(store, id).await?;
+
+    // Test-only seam: let db tests deterministically interleave a concurrent
+    // `validate_oauth_client_credentials` + `store.insert(SessionDoc)` attempt
+    // into the window the secret-revoke just closed, exercising the
+    // concurrent-mint race the fix narrows. Compiled out of non-test builds.
+    #[cfg(test)]
+    store.run_post_secret_revoke_test_hook(client_id).await;
+
+    super::sessions::delete_sessions_for_user(store, client_id).await?;
+    session_cache.invalidate_for_user(client_id);
+    super::sessions::delete_sessions_for_oauth_client(store, client_id).await?;
+    session_cache.invalidate_for_client(client_id);
+    delete_oauth_client(store, id).await
+}
+
 /// Update last used timestamp for an OAuth client.
 ///
 /// Performs a lightweight column-level UPDATE (no encrypt/decrypt).
@@ -1021,15 +1250,7 @@ impl OAuthClientSecret {
     /// Check if this secret is valid (not revoked/expired).
     #[must_use]
     pub fn is_valid(&self, now: &Timestamp) -> bool {
-        if self.revoked_at.is_some() {
-            return false;
-        }
-        if let Some(expires) = self.expires_at
-            && expires <= *now
-        {
-            return false;
-        }
-        true
+        oauth::is_secret_active(self.revoked_at, self.expires_at, now)
     }
 }
 
@@ -1067,6 +1288,10 @@ impl OAuthClientSecret {
 /// - `ServiceError::Api(409 "max_secrets_reached")` — cap already reached (terminal).
 /// - `ServiceError::Api(409 "conflict")` — OCC retry budget exhausted; caller may retry.
 /// - `ServiceError::Internal` — unexpected database or serialization error.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "stamps the secret's created_at and expires_at"
+)]
 pub async fn create_oauth_client_secret(
     store: &DocumentStore,
     oauth_client_id: &str,
@@ -1112,22 +1337,7 @@ pub async fn create_oauth_client_secret(
                 ServiceError::from_db_contention(e, "Failed to list secrets for secret create")
             })?;
 
-        // Filter directly on the doc fields to avoid a needless From conversion.
-        // Mirrors the `is_valid` predicate: not revoked, not expired.
-        let active_count = all_secrets
-            .iter()
-            .filter(|s| {
-                if s.data.revoked_at.is_some() {
-                    return false;
-                }
-                if let Some(exp) = s.data.expires_at
-                    && exp <= now
-                {
-                    return false;
-                }
-                true
-            })
-            .count();
+        let active_count = all_secrets.iter().filter(|s| s.data.is_valid(&now)).count();
 
         if active_count >= MAX_ACTIVE_SECRETS {
             // Terminal business error — do not retry.
@@ -1215,6 +1425,7 @@ pub async fn get_oauth_secret_by_hash(
 }
 
 /// Revoke all secrets for an OAuth client.
+#[expect(clippy::disallowed_methods, reason = "stamps the revocation time")]
 pub async fn revoke_all_oauth_client_secrets(
     store: &DocumentStore,
     oauth_client_id: &str,
@@ -1239,7 +1450,10 @@ pub async fn get_oauth_client_secret_by_id(
     Ok(doc.map(OAuthClientSecret::from))
 }
 
-/// Revoke a single secret (soft-delete), enforcing the ≥1 active floor.
+/// Revoke a single secret (soft-delete), enforcing the ≥1 active floor for a
+/// client whose secrets are credentials
+/// ([`TokenEndpointAuthMethod::secret_is_credential`]); any other client's
+/// secrets may be revoked down to zero.
 ///
 /// The entire operation runs inside a single transaction wrapped in
 /// `with_dsql_retry!`.  The transaction:
@@ -1250,9 +1464,11 @@ pub async fn get_oauth_client_secret_by_id(
 ///    for all secret-set mutations on this client).
 /// 4. Counts the *other* active secrets — those that would remain after this
 ///    revoke, excluding the target row itself (filter, not SQL COUNT — soft-deleted
-///    rows are retained).  If none remain, returns a terminal 409 `last_secret`.
-///    Excluding the target matters when it is expired-but-unrevoked: revoking it
-///    must still be allowed while a different valid secret exists.
+///    rows are retained).  If none remain, the client's secrets are credentials,
+///    *and* the target itself is still active, returns a terminal 409 `last_secret`.
+///    Excluding the target avoids double-counting it in `other_active_count`; the
+///    `target_active` term — not the exclude — is what keeps a dead (expired but
+///    unrevoked) target revocable even when it is the client's only secret.
 /// 5. Soft-deletes the secret (`revoked_at`) inside the transaction.
 /// 6. Bumps the client version via `compare_and_update`.  If another concurrent
 ///    revoke committed between our read and our commit, the version won't match
@@ -1268,9 +1484,14 @@ pub async fn get_oauth_client_secret_by_id(
 /// - `ServiceError::NotFound("Secret")` — secret does not exist, does not belong
 ///   to the given client, or is already revoked.
 /// - `ServiceError::NotFound("OAuth client")` — the owning client does not exist.
-/// - `ServiceError::Api(409 "last_secret")` — would leave zero active secrets (terminal).
+/// - `ServiceError::Api(409 "last_secret")` — would reduce the active secret count
+///   to zero: no *other* active secret remains, the client's secrets are
+///   credentials, and the target itself is still active.  Revoking a dead
+///   (expired-but-unrevoked) row when the client is already at zero active secrets
+///   does not reduce the count and is allowed (terminal).
 /// - `ServiceError::Api(409 "conflict")` — OCC retry budget exhausted; caller may retry.
 /// - `ServiceError::Internal` — unexpected database or serialization error.
+#[expect(clippy::disallowed_methods, reason = "stamps the revocation time")]
 pub async fn revoke_oauth_client_secret(
     store: &DocumentStore,
     secret_id: &str,
@@ -1322,29 +1543,27 @@ pub async fn revoke_oauth_client_secret(
                 ServiceError::from_db_contention(e, "Failed to list secrets for revoke")
             })?;
 
-        // Count the *other* active secrets — exclude the target row itself, so a
-        // revoke that leaves a valid secret behind is allowed even when the target
-        // is expired-but-unrevoked.  Mirrors the handler's pre-flight check.
+        // Count the *other* active secrets — exclude the target row itself so it
+        // is not double-counted by the floor guard below (`target_active` carries
+        // the dead-row exemption, not the exclude).  Mirrors the handler's
+        // pre-flight check.
         let other_active_count = all_secrets
             .iter()
-            .filter(|s| {
-                if s.id == secret_id {
-                    return false;
-                }
-                if s.data.revoked_at.is_some() {
-                    return false;
-                }
-                if let Some(exp) = s.data.expires_at
-                    && exp <= now
-                {
-                    return false;
-                }
-                true
-            })
+            .filter(|s| s.id != secret_id && s.data.is_valid(&now))
             .count();
 
-        // Floor guard: at least one *other* active secret must remain.
-        if other_active_count == 0 {
+        // Floor guard: at least one *other* active secret must remain, unless
+        // the client's secrets are not credentials at all.  The floor fires only
+        // when revoking the target would actually *reduce* the active count to
+        // zero — i.e. when the target itself is still an active credential.  A
+        // dead (expired-but-unrevoked) target leaves the active count unchanged,
+        // so it stays deletable even when it is the client's only secret.
+        let target_active = secret_doc.data.is_valid(&now);
+        let secret_is_credential = client_doc
+            .data
+            .token_endpoint_auth_method
+            .secret_is_credential(client_doc.data.fapi_profile);
+        if other_active_count == 0 && secret_is_credential && target_active {
             return Err(ServiceError::api(
                 StatusCode::CONFLICT,
                 "last_secret",
@@ -1432,14 +1651,53 @@ impl OAuthEventType {
     }
 }
 
+/// An OAuth event's org domain, as known to the caller.
+///
+/// Forces every call site of [`record_oauth_event`] to state whether it
+/// already resolved the domain (per the same "prefer user, fall back to
+/// client" rule as [`resolve_oauth_event_org_domain`]) so the common grant
+/// paths — which already hold both the user and the client in scope — skip
+/// re-deriving it from the database.
+#[derive(Debug, Clone, Copy)]
+pub enum RecordedOrgDomain<'a> {
+    /// No precomputed info — do the full lookup (today's behavior).
+    Unresolved,
+    /// Caller already resolved this per the same "prefer user, fall back
+    /// to client" rule (see [`resolve_oauth_event_org_domain`]'s doc comment).
+    Known(Option<&'a str>),
+}
+
 /// Parameters for [`record_oauth_event`].
 pub struct RecordOAuthEventParams<'a> {
     pub oauth_client_id: &'a str,
     pub event_type: OAuthEventType,
     pub user_id: Option<&'a str>,
-    pub ip_address: Option<std::net::IpAddr>,
-    pub user_agent: Option<&'a str>,
+    /// Transport metadata of the request that caused the event. Only the
+    /// `ClientInfo` extractor builds one, so every writer records the
+    /// resolved peer IP and `User-Agent` of the request in hand.
+    pub client: &'a super::ClientInfo,
     pub details: Option<&'a str>,
+    pub org_domain: RecordedOrgDomain<'a>,
+}
+
+/// Shared "prefer the acting user's org, else the client's own org" rule for
+/// an OAuth event's `email_domain`. Both inputs are already-resolved values —
+/// this makes no user or client lookups of its own, only the one conditional
+/// domain lookup when falling back to the client — so callers control
+/// whether the user/client rows get fetched at all.
+pub async fn resolve_event_org_domain(
+    store: &DocumentStore,
+    user_org_domain: Option<&str>,
+    client_org_id: Option<&str>,
+) -> Option<String> {
+    if let Some(domain) = user_org_domain {
+        return Some(domain.to_string());
+    }
+    let org_id = client_org_id?;
+    super::get_organization_domain(store, org_id)
+        .await
+        .ok()
+        .flatten()
 }
 
 /// Resolve the org domain to stamp on an OAuth event's `email_domain`.
@@ -1455,18 +1713,23 @@ async fn resolve_oauth_event_org_domain(
 ) -> Option<String> {
     if let Some(user_id) = params.user_id
         && let Ok(Some(user)) = super::get_user_by_id(store, user_id).await
-        && let Some(org_id) = user.org_id
-        && let Ok(Some(domain)) = super::get_organization_domain(store, &org_id).await
+        && let Some(org_id) = user.org_id.as_deref()
     {
-        return Some(domain);
+        // The doc's copy when present, else a plain lookup. No write-back
+        // here: audit recording must not add a write.
+        if let Some(domain) = user.org_domain.clone() {
+            return Some(domain);
+        }
+        if let Ok(Some(domain)) = super::get_organization_domain(store, org_id).await {
+            return Some(domain);
+        }
     }
-    if let Ok(Some(client)) = get_oauth_client_by_id(store, params.oauth_client_id).await
-        && let Some(org_id) = client.org_id
-        && let Ok(Some(domain)) = super::get_organization_domain(store, &org_id).await
-    {
-        return Some(domain);
-    }
-    None
+    let client_org_id = get_oauth_client_by_id(store, params.oauth_client_id)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|c| c.org_id);
+    resolve_event_org_domain(store, None, client_org_id.as_deref()).await
 }
 
 /// Record an OAuth usage event via the audit store.
@@ -1479,32 +1742,25 @@ pub async fn record_oauth_event(
     store: &DocumentStore,
     params: &RecordOAuthEventParams<'_>,
 ) {
-    let (country_code, asn, org_name) = crate::geo::audit_fields(params.ip_address);
     let data = OAuthUsageData {
         oauth_client_id: params.oauth_client_id.to_string(),
         details: params.details.map(String::from),
-        client_ip: params.ip_address.map(|ip| ip.to_string()),
-        user_agent: params.user_agent.map(String::from),
-        country_code,
-        asn,
-        org_name,
+        client_ip: params.client.client_ip().map(|ip| ip.to_string()),
+        user_agent: params.client.user_agent().map(String::from),
+        geo: GeoFields::from_ip(params.client.client_ip()),
     };
-    let org_domain = resolve_oauth_event_org_domain(store, params).await;
-    let result = audit
-        .insert_event_with_domain(
+    let org_domain = match params.org_domain {
+        RecordedOrgDomain::Known(domain) => domain.map(String::from),
+        RecordedOrgDomain::Unresolved => resolve_oauth_event_org_domain(store, params).await,
+    };
+    audit
+        .record_event_with_domain(
             params.event_type.kind(),
             params.user_id,
             org_domain.as_deref(),
             &data,
         )
         .await;
-    if let Err(e) = result {
-        tracing::warn!(
-            error = %e,
-            event_type = params.event_type.kind().as_str(),
-            "failed to record OAuth event"
-        );
-    }
 }
 
 /// OAuth usage statistics.
@@ -1521,7 +1777,6 @@ pub struct OAuthUsageStats {
 pub async fn get_oauth_usage_stats(
     audit: &AuditStore,
     oauth_client_id: &str,
-    since: Option<&str>,
 ) -> Result<Vec<OAuthUsageStats>> {
     let mut stats: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
 
@@ -1529,7 +1784,6 @@ pub async fn get_oauth_usage_stats(
         let audit_event_type = event_type.kind().as_str();
         let filter = AuditEventFilter {
             event_types: Some(vec![audit_event_type.to_string()]),
-            since: since.map(String::from),
             ..AuditEventFilter::default()
         };
         let events = audit.query_events(&filter).await?;
@@ -1587,6 +1841,19 @@ pub(super) mod test_helpers {
 }
 
 /// Parameters for updating a client via RFC 7592 PUT.
+///
+/// Every field here is a full replacement: RFC 7592 §2.2 states that "Valid
+/// values of client metadata fields in this request MUST replace, not augment,
+/// the values previously associated with this client" and that "Omitted fields
+/// MUST be treated as null or empty values by the server, indicating the
+/// client's request to delete them from the client's registration". A `None`
+/// therefore clears the stored value rather than preserving it.
+///
+/// The fields absent from this struct are the ones a PUT may not change:
+/// `client_id`, `token_endpoint_auth_method`, `application_type`,
+/// `fapi_profile`, and the two sender-constraining flags that derive it. The
+/// update path refuses a request that tries to change any of them instead of
+/// dropping the value silently.
 pub struct UpdateClientRegistrationParams<'a> {
     pub redirect_uris: &'a [String],
     pub grant_types: Option<&'a [String]>,
@@ -1599,17 +1866,66 @@ pub struct UpdateClientRegistrationParams<'a> {
     pub request_uris: Option<&'a [String]>,
     /// RP-Initiated Logout 1.0: Registered post-logout redirect URIs.
     pub post_logout_redirect_uris: Option<Vec<String>>,
+    /// RFC 7591 §2: Human-readable name of the client.
+    ///
+    /// `None` reverts to the registration default `"Unnamed Client"` rather
+    /// than clearing outright, because the `name` column is non-nullable —
+    /// the same fallback `register_client` applies to an omitted
+    /// `client_name`.
+    pub client_name: Option<&'a str>,
+    /// RFC 7591 §2: Unique identifier for the client software.
+    ///
+    /// Indexed, so a value carrying a NUL byte is refused by the store; the
+    /// caller maps that to `invalid_client_metadata`.
+    pub software_id: Option<&'a str>,
+    /// RFC 7591 §2: Version of the client software.
+    pub software_version: Option<&'a str>,
+    /// OIDC Core §3.1.3.7: ID token signing algorithm.
+    ///
+    /// Not an `Option`: the column is non-nullable and the caller has already
+    /// resolved an omitted field to the server default.
+    pub id_token_signed_response_alg: JwsAlgorithm,
+    /// JARM §2.3.2: signing algorithm for authorization responses.
+    pub authorization_signed_response_alg: Option<JwsAlgorithm>,
+    /// RFC 9701 §6.1: Introspection response signing algorithm.
+    pub introspection_signed_response_alg: Option<JwsAlgorithm>,
+    /// RFC 9101: Algorithm for Request Object signing.
+    pub request_object_signing_alg: Option<JwsAlgorithm>,
+    /// RFC 9101: Whether this client requires signed Request Objects.
+    pub require_signed_request_object: Option<bool>,
+    /// RFC 8705 §2.1.2: subject DN for `tls_client_auth`.
+    pub tls_client_auth_subject_dn: Option<&'a str>,
+    /// RFC 8705 §2.1.2: SAN DNS name for `tls_client_auth`.
+    pub tls_client_auth_san_dns: Option<&'a str>,
+    /// RFC 8705 §2.1.2: SAN URI for `tls_client_auth`.
+    pub tls_client_auth_san_uri: Option<&'a str>,
+    /// RFC 8705 §2.1.2: SAN IP for `tls_client_auth`.
+    pub tls_client_auth_san_ip: Option<&'a str>,
+    /// RFC 8705 §2.1.2: SAN email for `tls_client_auth`.
+    pub tls_client_auth_san_email: Option<&'a str>,
 }
 
 /// Update a dynamically registered OAuth client (RFC 7592 Section 2.2).
 ///
-/// Updates mutable registration fields. Immutable fields (client_id,
-/// token_endpoint_auth_method, fapi_profile) are preserved.
+/// Writes every mutable registration field as a full replacement. The fields
+/// that fix a client's security class — `client_id`,
+/// `token_endpoint_auth_method`, `application_type`, `fapi_profile`, and the
+/// `dpop_bound_access_tokens` / `tls_client_certificate_bound_access_tokens`
+/// pair that derives it — are preserved; the caller has already refused any
+/// request that tried to change them.
+///
+/// `presented_token_hash` is the hash of the registration access token that
+/// authorized the request. The write re-checks it against the stored hash, and
+/// requires the client to be active: a concurrent PUT that rotated the token,
+/// or a DELETE that consumed it, commits between the caller's verification and
+/// this write. RFC 7592 §2.2 requires an error for a token that is "not
+/// valid", so the write returns `Ok(None)` and changes nothing.
 pub async fn update_oauth_client_registration(
     store: &DocumentStore,
     id: &str,
+    presented_token_hash: &str,
     params: &UpdateClientRegistrationParams<'_>,
-) -> Result<OAuthClient> {
+) -> Result<Option<OAuthClient>> {
     // Check whether jwks_uri is changing BEFORE modifying the parent doc so we
     // can delete the stale cache first. A reader that races between the cache
     // delete and the parent update will re-fetch (safe). A reader that sees the
@@ -1627,8 +1943,11 @@ pub async fn update_oauth_client_registration(
         super::jwks_cache::delete_jwks_cache(store, id).await?;
     }
 
-    store
-        .modify::<OAuthClientDoc, _>(id, |data| {
+    let outcome = store
+        .transition::<OAuthClientDoc, (), (), _>(id, |data| {
+            if !data.active || !registration_token_is(data, presented_token_hash) {
+                return Err(());
+            }
             data.redirect_uris = params.redirect_uris.to_vec();
             if let Some(gt) = params.grant_types {
                 data.grant_types = Some(gt.to_vec());
@@ -1647,15 +1966,185 @@ pub async fn update_oauth_client_registration(
             data.userinfo_signed_response_alg = params.userinfo_signed_response_alg;
             data.request_uris = params.request_uris.map(|u| u.to_vec());
             data.post_logout_redirect_uris = params.post_logout_redirect_uris.clone();
+            // `client_name` maps to the non-nullable `name` column; an omitted
+            // value reverts to the registration default, the same fallback
+            // `register_client` applies for an initial registration.
+            data.name = params.client_name.unwrap_or("Unnamed Client").to_string();
+            data.software_id = params.software_id.map(String::from);
+            data.software_version = params.software_version.map(String::from);
+            data.id_token_signed_response_alg = params.id_token_signed_response_alg;
+            data.authorization_signed_response_alg = params.authorization_signed_response_alg;
+            data.introspection_signed_response_alg = params.introspection_signed_response_alg;
+            data.request_object_signing_alg = params.request_object_signing_alg;
+            data.require_signed_request_object = params.require_signed_request_object;
+            data.tls_client_auth_subject_dn = params.tls_client_auth_subject_dn.map(String::from);
+            data.tls_client_auth_san_dns = params.tls_client_auth_san_dns.map(String::from);
+            data.tls_client_auth_san_uri = params.tls_client_auth_san_uri.map(String::from);
+            data.tls_client_auth_san_ip = params.tls_client_auth_san_ip.map(String::from);
+            data.tls_client_auth_san_email = params.tls_client_auth_san_email.map(String::from);
+            Ok(())
         })
         .await?;
+    match outcome {
+        Transition::Applied(()) => {}
+        Transition::Rejected(()) | Transition::NotFound => return Ok(None),
+    }
 
     let updated = store
         .get::<OAuthClientDoc>(id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("Client not found after update"))?;
 
-    Ok(OAuthClient::from(updated))
+    Ok(Some(OAuthClient::from(updated)))
+}
+
+/// Whether `data` holds `token_hash` as its registration access token.
+fn registration_token_is(data: &OAuthClientDoc, token_hash: &str) -> bool {
+    use subtle::ConstantTimeEq;
+
+    data.registration_access_token_hash
+        .as_deref()
+        .is_some_and(|stored| bool::from(stored.as_bytes().ct_eq(token_hash.as_bytes())))
+}
+
+/// Proof that [`consume_registration_access_token`] cleared a client's
+/// registration access token, carrying what
+/// [`restore_registration_access_token`] needs to undo exactly that write.
+#[derive(Debug)]
+#[must_use = "a consumed registration token must be either spent or restored"]
+pub struct ConsumedRegistrationToken {
+    id: String,
+    token_hash: String,
+    /// The client document's version after the consume committed.
+    version: i32,
+}
+
+/// Consume a client's registration access token for an RFC 7592 DELETE.
+///
+/// Clears the stored hash only while the client is active and still holds
+/// `token_hash`. Of concurrent DELETEs, and of a DELETE racing a PUT that
+/// rotates the token, exactly one caller sees `Some`; the rest hold a token
+/// that is no longer valid. The caller deletes the client only on `Some`.
+pub async fn consume_registration_access_token(
+    store: &DocumentStore,
+    id: &str,
+    token_hash: &str,
+) -> Result<Option<ConsumedRegistrationToken>> {
+    let outcome = store
+        .transition_versioned::<OAuthClientDoc, (), (), _>(id, |data| {
+            if !data.active || !registration_token_is(data, token_hash) {
+                return Err(());
+            }
+            data.registration_access_token_hash = None;
+            Ok(())
+        })
+        .await?;
+    Ok(match outcome {
+        Transition::Applied(((), version)) => Some(ConsumedRegistrationToken {
+            id: id.to_string(),
+            token_hash: token_hash.to_string(),
+            version,
+        }),
+        Transition::Rejected(()) | Transition::NotFound => None,
+    })
+}
+
+/// Undo [`consume_registration_access_token`] after the RFC 7592 DELETE that
+/// consumed the token failed to delete the client.
+///
+/// The DELETE consumes the token in its own committed write and then runs
+/// [`delete_oauth_client_and_revoke_sessions`], whose steps commit
+/// separately. A failure after the consume but before the row is removed
+/// would otherwise leave the client in place with no registration access
+/// token and no way to get one back, so the owner could never retry the
+/// delete.
+///
+/// The restore is a single compare-and-set against the version the consume
+/// committed. Any write to the client since then wins and the token stays
+/// consumed. That matters because "the hash is `None`" cannot tell this
+/// consume apart from a revocation that happened after it: deleting,
+/// deactivating, or transferring away from the owner writes every client the
+/// owner holds (`revoke_owner_registration_tokens`, `reassign_client_owner`),
+/// so those revocations always move the version and a failed delete cannot
+/// put a revoked token back. The cost is that an unrelated concurrent write
+/// (an admin edit to the client in the same instant) also leaves the token
+/// consumed; that fails closed, and the owner registers again.
+///
+/// Returns whether the token was restored. Best-effort by construction: the
+/// caller has already failed the delete and reports that error.
+pub async fn restore_registration_access_token(
+    store: &DocumentStore,
+    consumed: ConsumedRegistrationToken,
+) -> Result<bool> {
+    let Some(doc) = store.get::<OAuthClientDoc>(&consumed.id).await? else {
+        return Ok(false);
+    };
+    if doc.version != consumed.version || doc.data.registration_access_token_hash.is_some() {
+        return Ok(false);
+    }
+    let mut data = doc.data;
+    data.registration_access_token_hash = Some(consumed.token_hash);
+    store
+        .compare_and_update(&consumed.id, consumed.version, &data)
+        .await
+}
+
+/// Revoke whichever client holds `token_hash` as its registration access token.
+///
+/// RFC 7592 §2.1/2.2/2.3: when a client configuration request names a
+/// `client_id` that does not exist, "the registration access token used to
+/// make this request SHOULD be immediately revoked". The presented token may still be
+/// a live credential for some *other* client, so it is looked up by hash and
+/// cleared wherever it is found.
+///
+/// The clear is performed inside the OCC-protected `modify` closure and is
+/// conditioned on the stored hash still equaling `token_hash`. The preceding
+/// `find_one` only *resolves* the presented hash to an owner id; it shares no
+/// transaction or version with the write, so a client that concurrently
+/// rotates its registration access token via a successful RFC 7592 PUT can
+/// commit a fresh hash between the lookup and `modify`'s internal re-read (or
+/// between that re-read and its compare-and-update, forcing a retry). Clearing
+/// unconditionally on retry would wipe the freshly rotated token — which the
+/// caller was never presented with — and lock the legitimate owner out of all
+/// RFC 7592 operations until an administrator reissues a token. Re-checking
+/// the hash inside the closure makes the revoke idempotent with respect to the
+/// presented token: a rotate-then-racing-revoke becomes a no-op, leaving the
+/// rotated token intact.
+///
+/// Returns the internal document id of the client whose token was cleared, or
+/// `None` when the hash matches no client — the overwhelmingly common case,
+/// since the caller reaches this path only after a `client_id` miss. The id
+/// is still returned when the closure turns out to be a no-op (the stored hash
+/// was rotated away before `modify` committed): the presented token *was*
+/// found to belong to that client, and the caller's log message ("revoked the
+/// registration access token of client {owner_id}") remains accurate — the
+/// token is no longer usable against its real owner either way, having been
+/// superseded by the rotation.
+pub async fn revoke_registration_access_token(
+    store: &DocumentStore,
+    token_hash: &str,
+) -> Result<Option<String>> {
+    let Some(doc) = store
+        .find_one::<OAuthClientDoc>("registration_access_token_hash", token_hash)
+        .await?
+    else {
+        return Ok(None);
+    };
+
+    let id = doc.id;
+    // Only clear the hash we were presented with. The closure is re-run on OCC
+    // retries against the latest document, so a concurrent rotation that has
+    // already replaced the hash turns this into a no-op rather than wiping the
+    // rotated credential.
+    store
+        .modify::<OAuthClientDoc, _>(&id, |data| {
+            if data.registration_access_token_hash.as_deref() == Some(token_hash) {
+                data.registration_access_token_hash = None;
+            }
+        })
+        .await?;
+
+    Ok(Some(id))
 }
 
 // ============================================================================
@@ -1766,10 +2255,16 @@ pub async fn delete_expired_jwt_assertion_jtis(store: &DocumentStore) -> Result<
 /// distinguishable from the HTTP client's perspective, and we never see
 /// the raw stored secret in application code. Do NOT replace this with
 /// a fetch-then-compare pattern; that would reintroduce a timing channel.
+///
+/// `now` decides the secret's validity window, so request-path callers pass
+/// the request's [`crate::arrival::ArrivalTime`] instant: this is the client
+/// authentication decision for the request, and it must read the same clock
+/// as the rest of that decision rather than one stamped later.
 pub async fn validate_oauth_client_credentials(
     store: &DocumentStore,
     client_id: &str,
     secret_hash: &str,
+    now: Timestamp,
 ) -> Result<Option<OAuthClient>> {
     let Some(client) = get_oauth_client_by_client_id(store, client_id).await? else {
         return Ok(None);
@@ -1787,12 +2282,9 @@ pub async fn validate_oauth_client_credentials(
         return Ok(None);
     }
 
-    let now = Timestamp::now();
     if !secret.is_valid(&now) {
         return Ok(None);
     }
-
-    update_oauth_client_last_used(store, &client.id).await?;
 
     Ok(Some(client))
 }
@@ -1809,6 +2301,107 @@ pub async fn validate_oauth_client_credentials(
 )]
 mod tests {
     use super::*;
+    use crate::crypto::document_crypto::DocumentCrypto;
+    use crate::db::pool::PoolConfig;
+    use crate::db::{self, ClientInfo};
+    use crate::test_utils::{self, TestClientSpec};
+    use crate::test_utils::{TEST_JWK_EC_X, TEST_JWK_EC_Y, TEST_JWK_ED25519_X, TEST_JWK_RSA_N};
+
+    /// A stored `None` resolves from the client's `application_type`, not from
+    /// RFC 7591 §2's registration default.
+    ///
+    /// Registration always writes the field (`register_client` materializes
+    /// the RFC 7591 §2 default when it is omitted), so `None` can only be a
+    /// self-service application — and its creation form has no grant-types
+    /// input. Resolving those rows as `["authorization_code"]` left every
+    /// Native application unable to use the device flow and every Service
+    /// application unable to use client credentials.
+    #[tokio::test]
+    async fn test_absent_grant_types_resolve_from_application_type() {
+        let store = test_store().await;
+        // `create_client_and_secret` registers a Web client with
+        // `grant_types: None` — exactly the absent-field row this is about.
+        let (mut client, _secret, _hash) = create_client_and_secret(&store).await;
+        assert!(
+            client.grant_types.is_none(),
+            "fixture precondition: the stored row has no grant_types"
+        );
+
+        // Web and SPA: the code grant and nothing else.
+        for app_type in [OAuthClientType::Web, OAuthClientType::Spa] {
+            client.application_type = app_type;
+            assert!(
+                client.is_authorized_for_grant("authorization_code"),
+                "{app_type:?} must keep the code grant"
+            );
+            for other in [
+                "client_credentials",
+                "urn:ietf:params:oauth:grant-type:device_code",
+                "urn:ietf:params:oauth:grant-type:token-exchange",
+            ] {
+                assert!(
+                    !client.is_authorized_for_grant(other),
+                    "{app_type:?} must reject {other}"
+                );
+            }
+        }
+
+        // Native: an installed app uses the code grant when a browser is
+        // available and RFC 8628 when one is not.
+        client.application_type = OAuthClientType::Native;
+        assert!(client.is_authorized_for_grant("authorization_code"));
+        assert!(
+            client.is_authorized_for_grant("urn:ietf:params:oauth:grant-type:device_code"),
+            "a Native application must be able to run the device flow"
+        );
+        assert!(!client.is_authorized_for_grant("client_credentials"));
+
+        // Service: machine-to-machine, so no user-present grant.
+        client.application_type = OAuthClientType::Service;
+        assert!(
+            client.is_authorized_for_grant("client_credentials"),
+            "a Service application must be able to use client credentials"
+        );
+        assert!(!client.is_authorized_for_grant("authorization_code"));
+        assert!(!client.is_authorized_for_grant("urn:ietf:params:oauth:grant-type:device_code"));
+
+        // No application type grants token exchange by default — the CLI
+        // declares it explicitly at registration.
+        for app_type in [
+            OAuthClientType::Web,
+            OAuthClientType::Spa,
+            OAuthClientType::Native,
+            OAuthClientType::Service,
+        ] {
+            client.application_type = app_type;
+            assert!(
+                !client.is_authorized_for_grant("urn:ietf:params:oauth:grant-type:token-exchange"),
+                "{app_type:?} must not get token exchange without declaring it"
+            );
+        }
+    }
+
+    /// An explicit list is honored verbatim — declaring `authorization_code`
+    /// is the same as omitting the field, and declaring something else does
+    /// not silently inherit the default.
+    #[tokio::test]
+    async fn test_explicit_grant_types_are_honored_verbatim() {
+        let store = test_store().await;
+        let (mut client, _secret, _hash) = create_client_and_secret(&store).await;
+
+        client.grant_types = Some(vec!["client_credentials".to_string()]);
+        assert!(client.is_authorized_for_grant("client_credentials"));
+        assert!(
+            !client.is_authorized_for_grant("authorization_code"),
+            "an explicit list that omits authorization_code must not inherit the default"
+        );
+
+        client.grant_types = Some(vec![]);
+        assert!(
+            !client.is_authorized_for_grant("authorization_code"),
+            "an explicitly empty list authorizes nothing — it is not the absent case"
+        );
+    }
 
     #[test]
     fn test_is_valid_post_logout_redirect_uri_str() {
@@ -1929,14 +2522,14 @@ mod tests {
         );
 
         let no_x5c = parse_jwks_set(&serde_json::json!({
-            "keys": [{"kty": "RSA", "n": "n", "e": "AQAB"}]
+            "keys": [{"kty": "RSA", "n": TEST_JWK_RSA_N, "e": "AQAB"}]
         }))
         .expect("valid fixture");
         assert!(!no_x5c.has_x5c());
 
         let mixed = parse_jwks_set(&serde_json::json!({
             "keys": [
-                {"kty": "RSA", "n": "n", "e": "AQAB"},
+                {"kty": "RSA", "n": TEST_JWK_RSA_N, "e": "AQAB"},
                 {"kty": "RSA", "x5c": ["ZmFrZS1jZXJ0"]}
             ]
         }))
@@ -1944,16 +2537,79 @@ mod tests {
         assert!(mixed.has_x5c(), "one x5c-bearing key is enough");
     }
 
+    // RFC 7518 §6.2.1.2: EC coordinates "MUST be the full size of a
+    // coordinate for the curve"; a point off P-256 is no public key at all.
+    // Checked at construction, so the token endpoint's search skips such a key
+    // and registration refuses it by the same rule.
+    #[test]
+    fn test_decoding_key_for_rejects_ec_keys_that_are_not_p256_points() {
+        let ec = |x: &str, y: &str| JwkEntry {
+            kty: KeyType::Ec,
+            kid: None,
+            alg: None,
+            use_: None,
+            crv: Some("P-256".to_string()),
+            x: Some(x.to_string()),
+            y: Some(y.to_string()),
+            n: None,
+            e: None,
+            x5c: None,
+        };
+        assert!(ec(TEST_JWK_EC_X, TEST_JWK_EC_Y).is_usable_for(JwsAlgorithm::Es256));
+        assert_eq!(
+            ec("f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRV", TEST_JWK_EC_Y)
+                .decoding_key_for(JwsAlgorithm::Es256)
+                .err(),
+            Some(UnusableJwk::InvalidKey),
+            "a 31-octet x coordinate"
+        );
+        assert_eq!(
+            ec(TEST_JWK_EC_X, TEST_JWK_EC_X)
+                .decoding_key_for(JwsAlgorithm::Es256)
+                .err(),
+            Some(UnusableJwk::InvalidKey),
+            "a point off the curve"
+        );
+        assert_eq!(
+            ec("x", "y").decoding_key_for(JwsAlgorithm::Es256).err(),
+            Some(UnusableJwk::InvalidKey),
+            "members that are not base64url"
+        );
+    }
+
+    // RFC 8037 §2: "The parameter "x" MUST be present and contain the public
+    // key"; an Ed25519 public key is a 32-octet encoded point.
+    #[test]
+    fn test_decoding_key_for_rejects_ed25519_keys_of_the_wrong_length() {
+        let okp = |x: &str| JwkEntry {
+            kty: KeyType::Okp,
+            kid: None,
+            alg: None,
+            use_: None,
+            crv: Some("Ed25519".to_string()),
+            x: Some(x.to_string()),
+            y: None,
+            n: None,
+            e: None,
+            x5c: None,
+        };
+        assert!(okp(TEST_JWK_ED25519_X).is_usable_for(JwsAlgorithm::EdDsa));
+        assert_eq!(
+            okp("AAAA").decoding_key_for(JwsAlgorithm::EdDsa).err(),
+            Some(UnusableJwk::InvalidKey)
+        );
+    }
+
     #[test]
     fn test_jwk_set_has_key_for_alg() {
         let set = |json| parse_jwks_set(&json).expect("valid fixture");
 
         // RS256 and PS256 share a key type, so an unpinned RSA key satisfies
-        // both. Neither is reachable through has_fapi_allowed_key (RS256 is
-        // not FAPI-allowed), but request_object_signing_alg admits RS256 for
+        // both. Only PS256 is reachable through the FAPI client-assertion
+        // allowlist (RS256 is not FAPI-allowed), but request_object_signing_alg admits RS256 for
         // a non-FAPI client.
         let unpinned_rsa =
-            set(serde_json::json!({"keys": [{"kty": "RSA", "n": "n", "e": "AQAB"}]}));
+            set(serde_json::json!({"keys": [{"kty": "RSA", "n": TEST_JWK_RSA_N, "e": "AQAB"}]}));
         assert!(unpinned_rsa.has_key_for(JwsAlgorithm::Rs256));
         assert!(unpinned_rsa.has_key_for(JwsAlgorithm::Ps256));
         assert!(!unpinned_rsa.has_key_for(JwsAlgorithm::Es256));
@@ -1961,7 +2617,7 @@ mod tests {
         // A declared alg pins the key to exactly that algorithm, even within
         // one key type.
         let rs256_pinned = set(
-            serde_json::json!({"keys": [{"kty": "RSA", "alg": "RS256", "n": "n", "e": "AQAB"}]}),
+            serde_json::json!({"keys": [{"kty": "RSA", "alg": "RS256", "n": TEST_JWK_RSA_N, "e": "AQAB"}]}),
         );
         assert!(rs256_pinned.has_key_for(JwsAlgorithm::Rs256));
         assert!(
@@ -1971,7 +2627,7 @@ mod tests {
 
         // The pairing from issue #1082: ES256 pinned against RSA-only keys.
         let rsa_only = set(serde_json::json!({
-            "keys": [{"kty": "RSA", "use": "sig", "kid": "k1", "n": "n", "e": "AQAB"}]
+            "keys": [{"kty": "RSA", "use": "sig", "kid": "k1", "n": TEST_JWK_RSA_N, "e": "AQAB"}]
         }));
         assert!(
             !rsa_only.has_key_for(JwsAlgorithm::Es256),
@@ -1979,15 +2635,16 @@ mod tests {
         );
 
         // `use` is honoured: an encryption key is never selected for signing.
-        let enc_only =
-            set(serde_json::json!({"keys": [{"kty": "EC", "use": "enc", "crv": "P-256"}]}));
+        let enc_only = set(
+            serde_json::json!({"keys": [{"kty": "EC", "x": TEST_JWK_EC_X, "y": TEST_JWK_EC_Y, "use": "enc", "crv": "P-256"}]}),
+        );
         assert!(!enc_only.has_key_for(JwsAlgorithm::Es256));
 
         // One usable key among unusable ones is enough.
         let mixed = set(serde_json::json!({
             "keys": [
-                {"kty": "RSA", "alg": "RS256", "n": "n", "e": "AQAB"},
-                {"kty": "EC", "crv": "P-256", "x": "x", "y": "y"}
+                {"kty": "RSA", "alg": "RS256", "n": TEST_JWK_RSA_N, "e": "AQAB"},
+                {"kty": "EC", "crv": "P-256", "x": TEST_JWK_EC_X, "y": TEST_JWK_EC_Y}
             ]
         }));
         assert!(mixed.has_key_for(JwsAlgorithm::Es256));
@@ -2067,19 +2724,6 @@ mod tests {
     }
 
     #[test]
-    fn test_access_scope_display_roundtrip() {
-        for scope in [
-            AccessScope::Organization,
-            AccessScope::Personal,
-            AccessScope::Public,
-        ] {
-            let display_str = scope.to_string();
-            let parsed: Result<AccessScope, _> = display_str.parse();
-            assert_eq!(parsed, Ok(scope));
-        }
-    }
-
-    #[test]
     fn test_token_endpoint_auth_method_from_str_basic() {
         let result: Result<TokenEndpointAuthMethod, _> = "client_secret_basic".parse();
         assert!(result.is_ok());
@@ -2114,21 +2758,6 @@ mod tests {
 
         let result2: Result<TokenEndpointAuthMethod, _> = "".parse();
         assert!(result2.is_err());
-    }
-
-    #[test]
-    fn test_token_endpoint_auth_method_display_roundtrip() {
-        let variants = [
-            TokenEndpointAuthMethod::ClientSecretBasic,
-            TokenEndpointAuthMethod::ClientSecretPost,
-            TokenEndpointAuthMethod::PrivateKeyJwt,
-            TokenEndpointAuthMethod::None,
-        ];
-        for variant in variants {
-            let display_str = variant.to_string();
-            let parsed: Result<TokenEndpointAuthMethod, _> = display_str.parse();
-            assert_eq!(parsed, Ok(variant));
-        }
     }
 
     #[test]
@@ -2213,7 +2842,7 @@ mod tests {
     use crate::db::Pool;
 
     async fn test_store() -> DocumentStore {
-        let pool = Pool::connect("sqlite::memory:", &crate::db::pool::PoolConfig::default())
+        let pool = Pool::connect("sqlite::memory:", &PoolConfig::default())
             .await
             .expect("Failed to create test database");
 
@@ -2228,8 +2857,7 @@ mod tests {
                 .expect("Failed to run migrations"),
         }
 
-        let crypto: Arc<dyn crate::crypto::document_crypto::DocumentCrypto> =
-            Arc::new(PlaintextDocumentCrypto);
+        let crypto: Arc<dyn DocumentCrypto> = Arc::new(PlaintextDocumentCrypto);
         DocumentStore::new(pool, crypto)
     }
 
@@ -2456,14 +3084,24 @@ mod tests {
             .await
             .expect("create second secret");
 
-        let result1 = validate_oauth_client_credentials(&store, &client.client_id, &hash1)
-            .await
-            .expect("validate with first");
+        let result1 = validate_oauth_client_credentials(
+            &store,
+            &client.client_id,
+            &hash1,
+            jiff::Timestamp::now(),
+        )
+        .await
+        .expect("validate with first");
         assert!(result1.is_some());
 
-        let result2 = validate_oauth_client_credentials(&store, &client.client_id, hash2)
-            .await
-            .expect("validate with second");
+        let result2 = validate_oauth_client_credentials(
+            &store,
+            &client.client_id,
+            hash2,
+            jiff::Timestamp::now(),
+        )
+        .await
+        .expect("validate with second");
         assert!(result2.is_some());
     }
 
@@ -2487,11 +3125,68 @@ mod tests {
             .await
             .expect("revoke");
 
-        let result = validate_oauth_client_credentials(&store, &client.client_id, &hash)
-            .await
-            .expect("validate");
+        let result = validate_oauth_client_credentials(
+            &store,
+            &client.client_id,
+            &hash,
+            jiff::Timestamp::now(),
+        )
+        .await
+        .expect("validate");
 
         assert!(result.is_none());
+    }
+
+    // `validate_oauth_client_credentials` must be pure credential validation:
+    // an observational `last_used_at` write that fails must NOT fail credential
+    // validation. The five sibling `last_used_at` callers (mTLS, public,
+    // private_key_jwt, two SCIM) keep the write separate and swallow it; before
+    // the fix the secret path bundled the write into this DB function with
+    // `.await?`, so a transient `last_used_at` UPDATE failure surfaced as
+    // `Err` — making a fully-authenticated secret-based confidential client get
+    // HTTP 500 / `server_error` while the other auth methods proceeded.
+    //
+    // `set_last_used_remaining_successes(0)` faults every
+    // `update_last_used_at` call with a non-retryable `Err` (it is not in
+    // `RETRYABLE_SQL_STATES`, so it escapes `with_dsql_retry!` immediately).
+    // Under the pre-fix code this test fails at `result.expect(...)`: the
+    // coupled `update_oauth_client_last_used(...).await?` propagated the
+    // faulty `Err` out of `validate_oauth_client_credentials`. Post-fix the
+    // function performs credential validation only — it never touches
+    // `update_last_used_at` — so the same fault is not even exercised and the
+    // call returns `Ok(Some(client))`.
+    #[tokio::test]
+    async fn test_validate_credentials_succeeds_when_last_used_update_fails() {
+        let mut store = test_store().await;
+        let (client, _secret, hash) = create_client_and_secret(&store).await;
+
+        // Fault every `update_last_used_at` write with a non-retryable `Err`.
+        store.set_last_used_remaining_successes(0);
+
+        let result = validate_oauth_client_credentials(
+            &store,
+            &client.client_id,
+            &hash,
+            jiff::Timestamp::now(),
+        )
+        .await
+        .expect("credential validation must not fail when the last_used_at write fails");
+        assert!(
+            result.is_some(),
+            "validated client must be returned even under an injected last_used_at fault"
+        );
+
+        // Control: with the fault cleared, validation still returns the client.
+        store.set_last_used_remaining_successes(u64::MAX);
+        let result = validate_oauth_client_credentials(
+            &store,
+            &client.client_id,
+            &hash,
+            jiff::Timestamp::now(),
+        )
+        .await
+        .expect("validate with fault cleared");
+        assert!(result.is_some());
     }
 
     #[tokio::test]
@@ -2508,9 +3203,9 @@ mod tests {
                     oauth_client_id: "oauth-client-1",
                     event_type,
                     user_id: Some("user-1"),
-                    ip_address: None,
-                    user_agent: None,
+                    client: &ClientInfo::default(),
                     details: Some("coverage test"),
+                    org_domain: RecordedOrgDomain::Unresolved,
                 },
             )
             .await;
@@ -2546,5 +3241,219 @@ mod tests {
                 event_type.kind().as_str()
             );
         }
+    }
+
+    // ========================================================================
+    // RecordedOrgDomain Parity
+    // ========================================================================
+    //
+    // A caller passing `RecordedOrgDomain::Known` must produce the exact same
+    // `email_domain` that `Unresolved` (the original full-lookup path) would
+    // have produced — the whole point of the hint is to skip redundant reads,
+    // not to change what gets audited.
+
+    // Records one event and returns the `email_domain` it was stamped with.
+    // Events are ordered newest-first (see `AuditEventFilter::before_id`
+    // doc comment); every caller below uses a distinct `user_id` per call, so
+    // the first row matching `user_id` is unambiguously the one just inserted.
+    async fn stamped_email_domain(
+        audit: &AuditStore,
+        store: &DocumentStore,
+        oauth_client_id: &str,
+        user_id: &str,
+        org_domain: RecordedOrgDomain<'_>,
+    ) -> Option<String> {
+        record_oauth_event(
+            audit,
+            store,
+            &RecordOAuthEventParams {
+                oauth_client_id,
+                event_type: OAuthEventType::TokenIssued,
+                user_id: Some(user_id),
+                client: &ClientInfo::default(),
+                details: None,
+                org_domain,
+            },
+        )
+        .await;
+        let events = audit
+            .query_events(&AuditEventFilter {
+                user_id: Some(user_id.to_string()),
+                ..AuditEventFilter::default()
+            })
+            .await
+            .expect("query oauth audit events");
+        events
+            .first()
+            .expect("event was just inserted for this user_id")
+            .email_domain
+            .clone()
+    }
+
+    #[tokio::test]
+    async fn test_known_domain_matches_unresolved_user_with_org() {
+        let store = test_store().await;
+        let audit = AuditStore::new(store.pool().clone(), store.crypto().clone());
+        let org = test_utils::create_test_org(&store, "user-org.example").await;
+        let user_a = test_utils::create_test_user_in_org(
+            &store,
+            "member-a@user-org.example",
+            &org.id,
+            false,
+        )
+        .await;
+        let user_b = test_utils::create_test_user_in_org(
+            &store,
+            "member-b@user-org.example",
+            &org.id,
+            false,
+        )
+        .await;
+        let (client, _secret, _hash) = create_client_and_secret(&store).await;
+
+        let unresolved = stamped_email_domain(
+            &audit,
+            &store,
+            &client.id,
+            &user_a.id,
+            RecordedOrgDomain::Unresolved,
+        )
+        .await;
+        let known = stamped_email_domain(
+            &audit,
+            &store,
+            &client.id,
+            &user_b.id,
+            RecordedOrgDomain::Known(Some("user-org.example")),
+        )
+        .await;
+
+        assert_eq!(unresolved.as_deref(), Some("user-org.example"));
+        assert_eq!(known, unresolved);
+    }
+
+    #[tokio::test]
+    async fn test_known_domain_matches_unresolved_personal_user_no_org_client() {
+        let store = test_store().await;
+        let audit = AuditStore::new(store.pool().clone(), store.crypto().clone());
+        let user_a = test_utils::create_test_user(&store, "solo-a@personal.example").await;
+        let user_b = test_utils::create_test_user(&store, "solo-b@personal.example").await;
+        let (client, _secret, _hash) = create_client_and_secret(&store).await;
+
+        let unresolved = stamped_email_domain(
+            &audit,
+            &store,
+            &client.id,
+            &user_a.id,
+            RecordedOrgDomain::Unresolved,
+        )
+        .await;
+        let known = stamped_email_domain(
+            &audit,
+            &store,
+            &client.id,
+            &user_b.id,
+            RecordedOrgDomain::Known(None),
+        )
+        .await;
+
+        assert_eq!(unresolved, None);
+        assert_eq!(known, unresolved);
+    }
+
+    // Parity edge case: a personal user (no org) authenticating against an
+    // org-owned client. `resolve_oauth_event_org_domain` falls through the
+    // user check (no org) to the client's own `org_id`. A caller passing
+    // `Known` must replicate that fallback itself rather than pass `None`.
+    #[tokio::test]
+    async fn test_known_domain_matches_unresolved_personal_user_on_org_owned_client() {
+        let store = test_store().await;
+        let audit = AuditStore::new(store.pool().clone(), store.crypto().clone());
+        let org = test_utils::create_test_org(&store, "org-owned.example").await;
+        let user_a = test_utils::create_test_user(&store, "solo-a@personal.example").await;
+        let user_b = test_utils::create_test_user(&store, "solo-b@personal.example").await;
+        let client = test_utils::create_test_client(
+            &store,
+            &user_a.id,
+            TestClientSpec {
+                org_id: Some(org.id.clone()),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let unresolved = stamped_email_domain(
+            &audit,
+            &store,
+            &client.app_id,
+            &user_a.id,
+            RecordedOrgDomain::Unresolved,
+        )
+        .await;
+
+        // Hot-path formula: the user has no org, so fall back to the
+        // client's own org_id (already in scope for every real call site).
+        let client_org_domain = db::get_organization_domain(&store, &org.id)
+            .await
+            .expect("lookup org domain")
+            .expect("org has a domain");
+        let known = stamped_email_domain(
+            &audit,
+            &store,
+            &client.app_id,
+            &user_b.id,
+            RecordedOrgDomain::Known(Some(&client_org_domain)),
+        )
+        .await;
+
+        assert_eq!(unresolved.as_deref(), Some("org-owned.example"));
+        assert_eq!(known, unresolved);
+    }
+
+    // Distinguishes the two `RecordedOrgDomain` arms: the parity tests above
+    // pass a `Known` value equal to what `Unresolved` would resolve, which
+    // would also pass if `Known` were silently ignored. This asserts `Known`
+    // is honored verbatim even when it disagrees with the full resolution —
+    // the only assertion that actually pins the hint is being used.
+    #[tokio::test]
+    async fn test_known_domain_is_honored_even_when_it_differs_from_full_resolution() {
+        let store = test_store().await;
+        let audit = AuditStore::new(store.pool().clone(), store.crypto().clone());
+        let org = test_utils::create_test_org(&store, "real-org.example").await;
+        let user_a = test_utils::create_test_user_in_org(
+            &store,
+            "member-a@real-org.example",
+            &org.id,
+            false,
+        )
+        .await;
+        let user_b = test_utils::create_test_user_in_org(
+            &store,
+            "member-b@real-org.example",
+            &org.id,
+            false,
+        )
+        .await;
+        let (client, _secret, _hash) = create_client_and_secret(&store).await;
+
+        let unresolved = stamped_email_domain(
+            &audit,
+            &store,
+            &client.id,
+            &user_a.id,
+            RecordedOrgDomain::Unresolved,
+        )
+        .await;
+        assert_eq!(unresolved.as_deref(), Some("real-org.example"));
+
+        let known = stamped_email_domain(
+            &audit,
+            &store,
+            &client.id,
+            &user_b.id,
+            RecordedOrgDomain::Known(Some("sentinel.example")),
+        )
+        .await;
+        assert_eq!(known.as_deref(), Some("sentinel.example"));
     }
 }

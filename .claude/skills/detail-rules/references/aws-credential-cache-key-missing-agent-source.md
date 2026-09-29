@@ -139,24 +139,17 @@ let data = cache::get_or_fetch(&cache_key, "EKS token", || async {
 **Correct CodeArtifact pattern** (`codeartifact.rs`):
 
 ```rust
-// Resolve the role BEFORE the cache lookup: `target.profile` is only the
-// configured anchor and is None when the account has to be inferred, so the
-// resolved role ARN — not the optional profile — is what disambiguates
-// accounts in the key.
-let role_arn =
-    resolve_vouch_profile(target.profile.as_deref(), ProfileOverride::Profile)?.role_arn;
-
 let agent_source = crate::commands::credential::aws::detect_agent_source();
-let cache_key = build_cache_key(target, &role_arn, agent_source.as_deref());
+let cache_key = build_cache_key(domain, domain_owner, region, agent_source.as_deref());
 
 let agent = agent_source;
 let data = cache::get_or_fetch(&cache_key, "CodeArtifact token", || async {
-    let token = fetch_token(server, target, &role_arn, agent.as_deref()).await?;
+    let token = fetch_token(server, domain, domain_owner, region, agent.as_deref()).await?;
     ...
 })
 ```
 
-Where `build_cache_key` produces `codeartifact:{domain}:{domain_owner}:{region}:{role_arn}` plus `:agent:{src}` when an agent is present. The resolved role ARN is part of the key (not the optional `target.profile`) so two invocations that resolve to different accounts never share an entry.
+Where `build_cache_key` produces `codeartifact:{domain}:{domain_owner}:{region}:agent:{src}` when an agent is present.
 
 ## Scope
 

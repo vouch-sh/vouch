@@ -7,6 +7,7 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 use tokio::net::{UnixListener, UnixStream};
 use tracing::{error, warn};
+use vouch_common::paths;
 
 /// Default socket filename.
 const SOCKET_FILENAME: &str = "agent.sock";
@@ -21,7 +22,7 @@ const SOCKET_FILENAME: &str = "agent.sock";
 ///
 /// Returns `AgentError::SocketPath` if the directory cannot be determined.
 pub(crate) fn vouch_dir() -> Result<PathBuf> {
-    vouch_common::paths::runtime_dir()
+    paths::runtime_dir()
         .ok_or_else(|| AgentError::SocketPath("could not determine runtime directory".to_string()))
 }
 
@@ -45,7 +46,7 @@ pub fn socket_path() -> Result<PathBuf> {
 /// fails validation (symlink, foreign owner, not a directory).
 pub fn prepare_vouch_dir() -> Result<()> {
     let dir = vouch_dir()?;
-    vouch_common::paths::prepare_private_dir(&dir)
+    paths::prepare_private_dir(&dir)
         .map_err(|e| AgentError::SocketPath(format!("runtime directory {}: {e}", dir.display())))
 }
 

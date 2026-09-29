@@ -45,12 +45,30 @@ Beyond ssh/aws/eks, credential helpers and setup commands cover many more integr
 
 The server has two distinct route groups sharing `AppState`:
 
-- **API routes** (`/v1/`, `/oauth/`, `/scim/`, `/api/v1/`) — JSON responses, JWT Bearer auth. Includes OIDC endpoints, credential issuance, SCIM provisioning, GitHub webhooks, and admin APIs.
+- **API routes** (`/v1/`, `/oauth/`, `/scim/`, `/api/v1/`) — JSON responses, token auth (JWT Bearer/DPoP; the `/api/v1/org/*` and `/api/v1/applications/*` handlers fall back to the session cookie via `extract_token_from_request`). Includes OIDC endpoints, credential issuance, SCIM provisioning, GitHub webhooks, and admin APIs.
 - **UI routes** (`/`, `/login`, `/enroll/*`, `/docs/*`, `/applications/*`, `/admin/*`) — HTML via Askama templates, cookie-based sessions. Static assets embedded via `rust-embed`.
 
 When TLS is configured, a separate HTTP→HTTPS redirect router runs on port 80 (308 redirects, except `/health`).
 
 **AppState** holds: `Pool` (db), `ArcSwap<ServerConfig>` (lock-free config reload), `Webauthn`, optional `SshCa`, optional `GitHubApp`, `DpopState`, and `OidcSigningKey`.
+
+**Request-scoped time** (`crates/vouch-server/src/arrival.rs`): `arrival_layer`
+is the outermost middleware in `build_app`; it stamps one `ArrivalTime` per
+request, and handlers take it as a `FromRequestParts` extractor and pass it
+down. Every time comparison that decides a request — JWT and Request Object
+temporal claims, DPoP freshness, session expiry, the RFC 8693 lifetime cap,
+OIDC `max_age`, SAML `Conditions`, policy history windows — reads that one
+instant, so two comparisons serving one decision cannot observe different
+clocks. `ArrivalTime` has no public constructor outside tests, so taking one is
+evidence the value came from the middleware.
+
+Ambient `Timestamp::now()` is still correct in four places, and a
+`disallowed_methods` entry in `.clippy.toml` (level raised to `warn` only in
+vouch-server's crate roots) forces each to say which it is via `#[expect]`:
+the arrival middleware itself; optimistic-concurrency retry closures, which
+need a fresh per-attempt reading rather than a stale captured one; `created_at`
+/ `expires_at` row stamping and artifact minting (id_token, JARM, auth-code and
+state-token expiries); and background tasks, which serve no request.
 
 **Services layer** (`crates/vouch-server/src/services/`): Business logic called by handlers — `oidc/` (authorization, token issuance, DPoP, discovery, JWKS, token exchange, per-org issuer keys + operator rotation), `integrations/` (AWS, GitHub App/OAuth/webhooks), `auth.rs` (WebAuthn verification).
 
@@ -126,7 +144,7 @@ make bake-all              # musl binaries via Docker Bake (also bake-cli, bake-
 
 **Running the server locally:** at least one upstream IdP must be configured via `VOUCH_IDPS` / `VOUCH_IDP_<SLUG>_*` (the server refuses to start without one), plus `VOUCH_RP_ID`, `VOUCH_JWT_SECRET`, and `VOUCH_DATABASE_URL`. See `AGENTS.md` for a minimum viable command and `docs/src/reference/environment-variables.md` for the full reference.
 
-**Toolchain:** Rust 1.97.1, edition 2024 (pinned in `rust-toolchain.toml`). Max line width 100 chars (`.rustfmt.toml`). Release profile uses `lto = true`, `codegen-units = 1`, `opt-level = "z"`, `panic = "abort"`, `strip = true`.
+**Toolchain:** Rust 1.98.0, edition 2024 (pinned in `rust-toolchain.toml`). Max line width 100 chars (`.rustfmt.toml`). Release profile uses `lto = true`, `codegen-units = 1`, `opt-level = "z"`, `panic = "abort"`, `strip = true`.
 
 ## Code Conventions
 
@@ -141,26 +159,6 @@ The workspace enforces panic-free code via clippy lints in `Cargo.toml`. Key cat
 - **Unsafe code**: denied at the Rust lint level
 
 See `Cargo.toml` for the complete list. The `vouch-tests` crate overrides these to allow unwrap/expect/panic in test code.
-
-### Rust Style
-
-```rust
-// Use explicit error types, not String
-pub fn authenticate(cred: &Credential) -> Result<Session, AuthError>
-
-// Prefer builders for complex construction
-let session = SessionBuilder::new()
-    .user_id(user.id)
-    .expires_in(Duration::hours(8))
-    .build()?;
-
-// Document public APIs with examples
-/// Authenticates using FIDO2 assertion.
-///
-/// # Errors
-/// Returns `AuthError::InvalidCredential` if assertion is invalid.
-pub fn authenticate(...) -> Result<...>
-```
 
 ### Dependencies
 
@@ -214,24 +212,9 @@ let key: Zeroizing<Vec<u8>> = derive_key()?;
 
 1. Create file in `crates/vouch-cli/src/commands/`
 2. Add to command enum in `crates/vouch-cli/src/commands/mod.rs`
-3. Implement `run()` function
+3. Implement a `pub(crate) async fn run(...) -> Result<()>`; mirror an existing
+   command such as `commands/logout.rs` or `commands/status.rs`
 4. Add tests
-
-```rust
-// crates/vouch-cli/src/commands/status.rs
-use clap::Args;
-
-#[derive(Args)]
-pub struct StatusArgs {
-    #[arg(short, long)]
-    verbose: bool,
-}
-
-pub async fn run(args: StatusArgs) -> Result<()> {
-    let session = agent::get_session().await?;
-    // ...
-}
-```
 
 ### Adding a Credential Type
 
@@ -253,17 +236,15 @@ The request locale is negotiated from `Accept-Language` automatically; no handle
 
 ### Working with FIDO2
 
+The CLI's FIDO2 layer is `crates/vouch-cli/src/fido2/` (`unix.rs`, `windows.rs`).
+
 ```rust
 use crate::fido2::{YubiKey, ensure_pin_configured};
 
-// Wait for YubiKey to be inserted
-let key = YubiKey::wait_for_device()?;
-
-// Check if PIN is set and prompt for setup if not (requires 8+ chars)
+let key = YubiKey::wait_for_device(timeout_secs)?;
+// Prompts for PIN setup when none is set (8+ chars); returns the PIN as SecretString
 let pin = ensure_pin_configured(&key)?;
-
-// Authenticate using discoverable credential
-let result = key.authenticate(&rp_id, &challenge, &pin)?;
+let result = key.authenticate(&rp_id, &challenge)?;
 ```
 
 **PIN Handling:**
@@ -297,6 +278,31 @@ covered without hardware through the `CoseVerifier` seam
   doc lists every submodule's scope — put new db tests in the file whose scope matches,
   and add a new file (listed in that doc) when none does.
 
+**Build fixtures from the spec structs, never from hand-rolled parameter
+literals.** `test_utils.rs` has one factory per fixture kind, each taking a
+spec struct whose `Default` is the ordinary case, so a test spells out only the
+axis it is about:
+
+- Sessions → `create_test_session_with(&state, TestSessionSpec { .. })`. Vary
+  `auth_id`, `client_id`, `audience`, `binding` (`TestBinding`), and
+  `verification` (`TestVerification`).
+- OAuth clients → `create_test_client(&store, &user_id, TestClientSpec { .. })`.
+
+If a field the test needs is missing, add it to the spec — do not reach past
+the factory to `CreateOAuthTokenParams` / `CreateOAuthClientParams`. Those
+literals are spelled out once, inside the factory, so adding a field to either
+does not touch a single test.
+
+**Tests never wait on the wall clock.** A `sleep` that stands in for a clock
+is a load-sensitive assertion. Pick the instant instead: `ArrivalTime::for_test`
+/ `for_test_second` for a service called directly, `TestVerification::Verified
+{ auth_time }` for an aged session, `AuditStore::insert_event_for_test` /
+`backdate_events_for_test` for rows behind the export lag window, the `ArcSwap`
+config override for a window constant, and `set_modify_test_hook` to place a
+write between two clock reads. The only sanctioned waits are ones whose subject
+*is* the real clock (`arrival.rs`) or that are cancelled by the thing under
+test (`TimeoutLayer`, slow fake servers).
+
 **Cite the requirement a test pins.** A test that verifies a normative
 statement names the spec and section in a comment above it or in its assertion
 message:
@@ -313,6 +319,8 @@ two. It is a ratchet: the existing backlog in `specs/coverage-baseline.tsv` is
 tolerated, but a statement that loses its citing test fails the build, and one
 that gains a citation fails until the baseline is pruned. See
 `specs/README.md` for the regeneration order.
+
+## What NOT to Do
 
 1. **Don't add dependencies without justification** — Each dep is attack surface
 2. **Don't store secrets in plain types** — Use `SecretString`, `Zeroizing`
@@ -365,7 +373,7 @@ that gains a citation fails until the baseline is pruned. See
 5. **Built-in SSH CA** — Ed25519 signing, no external dependencies
 6. **MDM for distribution** — Don't build what Jamf/Kandji already do
 7. **OIDC config is env-var only** — No admin UI for OIDC configuration
-8. **Org admin via JWT** — SCIM tokens and auth events at `/api/v1/org/*` use JWT Bearer auth from regular FIDO2 sessions
+8. **Org admin via access token** — SCIM tokens and auth events at `/api/v1/org/*` authorize with the access token from regular FIDO2 sessions (Bearer or DPoP, with session-cookie fallback — see `handlers/api/org`'s module doc)
 
 ## Questions to Ask
 

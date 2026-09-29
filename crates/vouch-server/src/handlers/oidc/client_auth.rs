@@ -5,10 +5,17 @@
 //! (RFC 6749 Section 3.2) and the PAR endpoint (RFC 9126 Section 2).
 
 use crate::AppState;
-use crate::error::{OAuthErrorCode, OAuthErrorResponse};
+use crate::arrival::ArrivalTime;
+use crate::db::{JwtAssertionJtiClaim, OAuthClient, TokenEndpointAuthMethod};
+use crate::error::{OAuthErrorCode, OAuthErrorResponse, ServiceError};
+use crate::handlers::extractors::OptionalClientCert;
+use crate::services::auth::{ClientAuthProof, JwtClientAuthProof, NoClientAuth};
 use crate::services::oidc::{
-    jwt_bearer::client_auth::{PendingJti, authenticate_client_jwt},
-    token::{AuthenticatedClient, ClientCredentials, authenticate_client},
+    jwt_bearer::client_auth::{JwtAuthSucceeded, authenticate_client_jwt},
+    token::{
+        ClientCredentials, ClientSecretVerification, MtlsCertVerification, authenticate_client,
+        authenticate_client_mtls,
+    },
 };
 use axum::{
     Json,
@@ -277,84 +284,161 @@ pub(crate) fn extract_client_auth<T: ClientAuthFields>(
 
 /// Result of a successful `complete_client_auth` dispatch.
 pub(crate) struct ClientAuthOutcome {
-    pub(crate) client: AuthenticatedClient,
+    pub(crate) client: OAuthClient,
     pub(crate) client_id: String,
-    /// `Some` only for JWT-authenticated clients — caller must commit.
-    pub(crate) pending_jti: Option<PendingJti>,
-    /// `Some` only for JWT-authenticated clients — pair with `pending_jti.commit()`
+    pub(crate) witnesses: ClientAuthWitnesses,
+}
+
+/// What a successful dispatch verified, separable from the client record so
+/// a handler can validate the client first and build the proof later.
+pub(crate) struct ClientAuthWitnesses {
+    /// The committed JTI of a JWT-authenticated client whose assertion
+    /// carried one.
+    pub(crate) jti_claim: Option<JwtAssertionJtiClaim>,
+    /// `Some` only for JWT-authenticated clients — pair with `jti_claim`
     /// to construct `ClientAuthProof::PrivateKeyJwt`. Independent of jti presence
     /// because RFC 7523 §3 makes `jti` OPTIONAL for non-FAPI clients.
-    pub(crate) jwt_auth: Option<crate::services::oidc::jwt_bearer::client_auth::JwtAuthSucceeded>,
+    pub(crate) jwt_auth: Option<JwtAuthSucceeded>,
     /// `Some` only when a `client_secret` was validated.
-    pub(crate) secret_verification: Option<crate::services::oidc::token::ClientSecretVerification>,
+    pub(crate) secret_verification: Option<ClientSecretVerification>,
+    /// `Some` only when the client is registered for `tls_client_auth` or
+    /// `self_signed_tls_client_auth` and its certificate verified.
+    pub(crate) mtls_verification: Option<MtlsCertVerification>,
 }
 
 /// Authenticate a client using any supported method.
 ///
-/// Dispatches to secret-based or JWT-based authentication depending on
-/// the extracted authentication method. Returns the verification witnesses
-/// produced by the dispatched method (JTI claim for JWT, secret-verification
-/// for client_secret_basic/post). mTLS verification is performed separately
-/// by the handler via [`validate_mtls_client_auth`] because it requires the
-/// client certificate from the request extractor.
+/// Dispatches on the extracted credentials and returns the verification
+/// witness the dispatched method produced: a JTI claim for `private_key_jwt`,
+/// a secret verification for `client_secret_basic`/`client_secret_post`, or a
+/// certificate verification for the two mTLS methods. RFC 8705 §2: "The
+/// authorization server MUST enforce the binding between client and
+/// certificate", so an mTLS-registered client that presents no certificate,
+/// or one that does not match its registration, fails here rather than in
+/// each caller.
+#[expect(
+    clippy::result_large_err,
+    reason = "Err is an HTTP Response; size is acceptable in error path"
+)]
 pub(crate) async fn complete_client_auth(
     state: &Arc<AppState>,
     auth: ExtractedClientAuth,
+    client_cert: &OptionalClientCert,
+    arrival: ArrivalTime,
 ) -> Result<Option<ClientAuthOutcome>, Response> {
-    match auth {
+    let (creds, presentation) = match auth {
         ExtractedClientAuth::Secret {
             creds,
             presentation,
-        } => {
-            let client_id = creds.client_id.clone();
-            match authenticate_client(state, &creds).await {
-                Ok((client, secret_verification)) => Ok(Some(ClientAuthOutcome {
-                    client,
-                    client_id,
-                    pending_jti: None,
-                    jwt_auth: None,
-                    secret_verification,
-                })),
-                Err(e) => Err(with_client_auth_challenge(
-                    presentation,
-                    e.into_service_error().into_oauth_response().into_response(),
-                )),
-            }
-        }
+        } => (creds, presentation),
         ExtractedClientAuth::JwtAssertion {
             client_assertion,
             client_id,
-        } => match authenticate_client_jwt(state, &client_assertion, client_id.as_deref()).await {
-            Ok((client, pending_jti, jwt_auth)) => {
-                let cid = client.client.client_id.clone();
-                Ok(Some(ClientAuthOutcome {
-                    client,
-                    client_id: cid,
-                    pending_jti: Some(pending_jti),
-                    jwt_auth: Some(jwt_auth),
-                    secret_verification: None,
-                }))
-            }
-            Err(e) => Err(e.into_service_error().into_oauth_response().into_response()),
-        },
-        ExtractedClientAuth::PublicClient { client_id } => {
-            // Public client — create credentials without a secret for authenticate_client
-            let creds = ClientCredentials {
-                client_id: client_id.clone(),
-                client_secret: None,
-            };
-            match authenticate_client(state, &creds).await {
-                Ok((client, secret_verification)) => Ok(Some(ClientAuthOutcome {
-                    client,
-                    client_id,
-                    pending_jti: None,
-                    jwt_auth: None,
-                    secret_verification,
-                })),
+        } => {
+            return match authenticate_client_jwt(
+                state,
+                &client_assertion,
+                client_id.as_deref(),
+                arrival,
+            )
+            .await
+            {
+                Ok((client, jti_claim, jwt_auth)) => {
+                    let cid = client.client_id.clone();
+                    Ok(Some(ClientAuthOutcome {
+                        client,
+                        client_id: cid,
+                        witnesses: ClientAuthWitnesses {
+                            jti_claim,
+                            jwt_auth: Some(jwt_auth),
+                            secret_verification: None,
+                            mtls_verification: None,
+                        },
+                    }))
+                }
                 Err(e) => Err(e.into_service_error().into_oauth_response().into_response()),
-            }
+            };
         }
-        ExtractedClientAuth::None => Ok(None),
+        ExtractedClientAuth::PublicClient { client_id } => (
+            ClientCredentials {
+                client_id,
+                client_secret: None,
+            },
+            ClientAuthPresentation::RequestBody,
+        ),
+        ExtractedClientAuth::None => return Ok(None),
+    };
+
+    let client_id = creds.client_id.clone();
+    let (client, secret_verification) =
+        authenticate_client(state, &creds, arrival)
+            .await
+            .map_err(|e| {
+                with_client_auth_challenge(
+                    presentation,
+                    e.into_service_error().into_oauth_response().into_response(),
+                )
+            })?;
+
+    // `authenticate_client` returns no secret verification for an
+    // mTLS-registered client; the certificate is its credential.
+    let mtls_verification =
+        authenticate_client_mtls(state, &client, client_cert.0.as_ref(), arrival)
+            .await
+            .map_err(|e| {
+                with_client_auth_challenge(
+                    presentation,
+                    e.into_service_error().into_oauth_response().into_response(),
+                )
+            })?;
+
+    Ok(Some(ClientAuthOutcome {
+        client,
+        client_id,
+        witnesses: ClientAuthWitnesses {
+            jti_claim: None,
+            jwt_auth: None,
+            secret_verification,
+            mtls_verification,
+        },
+    }))
+}
+
+/// Turn the witnesses of a successful dispatch into the [`ClientAuthProof`]
+/// token issuance requires.
+///
+/// Every proof carries the witness the dispatched method produced; a client
+/// with no witness must be registered public (RFC 6749 §2.1), which
+/// [`NoClientAuth::for_public_client`] checks.
+#[expect(
+    clippy::result_large_err,
+    reason = "Err is an HTTP Response; size is acceptable in error path"
+)]
+pub(crate) fn client_auth_proof(
+    witnesses: ClientAuthWitnesses,
+    client: &OAuthClient,
+) -> Result<ClientAuthProof, Response> {
+    // RFC 7523 §3: `jti` is OPTIONAL. Gate on the auth-succeeded witness, not
+    // on the claim — a non-FAPI client may omit `jti` and still have
+    // authenticated.
+    if let Some(auth) = witnesses.jwt_auth {
+        return Ok(ClientAuthProof::PrivateKeyJwt(JwtClientAuthProof::new(
+            auth,
+            witnesses.jti_claim,
+        )));
+    }
+    match (witnesses.secret_verification, witnesses.mtls_verification) {
+        (Some(_), Some(_)) => Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidClient,
+            "client presented multiple authentication methods (RFC 6749 §2.3 violation)",
+        )
+        .into_oauth_response()
+        .into_response()),
+        (Some(s), None) => Ok(ClientAuthProof::ClientSecret(s)),
+        (None, Some(m)) => Ok(ClientAuthProof::MutualTls(m)),
+        (None, None) => NoClientAuth::for_public_client(client)
+            .map(ClientAuthProof::NoAuth)
+            .map_err(|svc| svc.into_oauth_response().into_response()),
     }
 }
 
@@ -388,11 +472,11 @@ fn oauth_error_response(code: OAuthErrorCode, description: &str) -> Response {
 /// not distinguishable from the witness, and both are equally rejected for
 /// FAPI clients.
 pub(crate) fn actual_auth_method(
-    registered: crate::db::TokenEndpointAuthMethod,
+    registered: TokenEndpointAuthMethod,
     jwt_auth: bool,
     secret_auth: bool,
     mtls_auth: bool,
-) -> crate::db::TokenEndpointAuthMethod {
+) -> TokenEndpointAuthMethod {
     use crate::db::TokenEndpointAuthMethod;
     if jwt_auth {
         TokenEndpointAuthMethod::PrivateKeyJwt

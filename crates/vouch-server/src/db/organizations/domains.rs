@@ -9,10 +9,14 @@
 
 use super::ORG_SCAN_PAGE_SIZE;
 use super::issuer::{release_ineligible_subdomain, subdomain_to_release};
-use super::validation::{DomainValidationError, normalize_domain};
+use super::validation::{Domain, DomainValidationError};
+use crate::crypto;
 use crate::db::documents::organization::{
     AdditionalDomain, AdditionalDomainState, DomainClaimDoc, OrganizationDoc,
+    UNVERIFY_FAILURE_THRESHOLD,
 };
+use crate::db::pool::{self, RetryableError};
+use crate::db::sessions::{self, SessionCache};
 use crate::db::store::DocumentStore;
 use anyhow::Result;
 use jiff::Timestamp;
@@ -35,15 +39,6 @@ pub(crate) fn deterministic_domain_claim_id(domain: &str) -> String {
     hex::encode(ctx.finish().as_ref())
 }
 
-/// List additional domains for an organization.
-pub async fn list_additional_domains(
-    store: &DocumentStore,
-    org_id: &str,
-) -> Result<Vec<AdditionalDomain>> {
-    let doc = store.get::<OrganizationDoc>(org_id).await?;
-    Ok(doc.map(|d| d.data.additional_domains).unwrap_or_default())
-}
-
 /// Result of adding an additional domain.
 pub struct AddedDomain {
     pub domain: String,
@@ -63,7 +58,7 @@ impl std::fmt::Debug for AddedDomain {
 
 /// Generate a fresh verification token suitable for use in a DNS TXT record.
 fn generate_verification_token() -> Result<String> {
-    Ok(hex::encode(crate::crypto::generate_random_bytes(32)?))
+    Ok(hex::encode(crypto::generate_random_bytes(32)?))
 }
 
 /// Internal OCC-retry error for organization document CAS mutations.
@@ -85,11 +80,11 @@ enum OrgCasError {
     Other(#[from] anyhow::Error),
 }
 
-impl crate::db::pool::RetryableError for OrgCasError {
+impl RetryableError for OrgCasError {
     fn is_retryable(&self) -> bool {
         match self {
             Self::OccConflict => true,
-            Self::Other(e) => crate::db::pool::is_retryable_db_error(e),
+            Self::Other(e) => pool::is_retryable_db_error(e),
         }
     }
 }
@@ -148,11 +143,11 @@ pub enum AddDomainError {
     Other(#[from] anyhow::Error),
 }
 
-impl crate::db::pool::RetryableError for AddDomainError {
+impl RetryableError for AddDomainError {
     fn is_retryable(&self) -> bool {
         match self {
             Self::OccConflict => true,
-            Self::Other(e) => crate::db::pool::is_retryable_db_error(e),
+            Self::Other(e) => pool::is_retryable_db_error(e),
             Self::MaxDomains
             | Self::PrimaryDomain
             | Self::AlreadyAttached
@@ -186,11 +181,11 @@ pub enum MarkVerifiedError {
     Other(#[from] anyhow::Error),
 }
 
-impl crate::db::pool::RetryableError for MarkVerifiedError {
+impl RetryableError for MarkVerifiedError {
     fn is_retryable(&self) -> bool {
         match self {
             Self::OccConflict => true,
-            Self::Other(e) => crate::db::pool::is_retryable_db_error(e),
+            Self::Other(e) => pool::is_retryable_db_error(e),
             Self::ClaimedByOtherOrg => false,
         }
     }
@@ -202,6 +197,7 @@ impl crate::db::pool::RetryableError for MarkVerifiedError {
 /// TXT record before [`verify_additional_domain`] will mark the entry verified.
 /// Until then, the entry is stored on the org but is not indexed and does
 /// not participate in login matching.
+#[expect(clippy::disallowed_methods, reason = "stamps the row's added_at")]
 pub async fn add_additional_domain(
     store: &DocumentStore,
     org_id: &str,
@@ -209,7 +205,7 @@ pub async fn add_additional_domain(
     added_by_user_id: &str,
     added_by_email: &str,
 ) -> Result<AddedDomain, AddDomainError> {
-    let normalized = normalize_domain(domain)?;
+    let normalized = Domain::parse(domain)?;
 
     // Pending-claim conflict check (non-transactional courtesy check).
     //
@@ -224,7 +220,7 @@ pub async fn add_additional_domain(
     //
     // Folding this into the transaction would require a query path that
     // can scan pending entries; deferred until org count justifies it.
-    match find_conflicting_claim_in_other_org(store, org_id, &normalized).await? {
+    match find_conflicting_claim_in_other_org(store, org_id, normalized.as_str()).await? {
         None | Some(AdditionalDomainState::Verified { .. }) => {}
         Some(AdditionalDomainState::Pending) => {
             return Err(AddDomainError::PendingOtherOrg);
@@ -255,13 +251,13 @@ pub async fn add_additional_domain(
             return Err(AddDomainError::MaxDomains);
         }
 
-        if data.domain.eq_ignore_ascii_case(&normalized) {
+        if data.domain.eq_ignore_ascii_case(normalized.as_str()) {
             return Err(AddDomainError::PrimaryDomain);
         }
         if data
             .additional_domains
             .iter()
-            .any(|ad| ad.domain == normalized)
+            .any(|ad| ad.domain == normalized.as_str())
         {
             return Err(AddDomainError::AlreadyAttached);
         }
@@ -269,7 +265,7 @@ pub async fn add_additional_domain(
         // Conflict check against any other org's verified domain (primary or
         // additional). Verified entries appear in the document_indexes table.
         if let Some(other) = tx
-            .find_one::<OrganizationDoc>("domain", &normalized)
+            .find_one::<OrganizationDoc>("domain", normalized.as_str())
             .await?
             && other.id != org_id
         {
@@ -277,7 +273,7 @@ pub async fn add_additional_domain(
         }
 
         data.additional_domains.push(AdditionalDomain {
-            domain: normalized.clone(),
+            domain: normalized.as_str().to_string(),
             verification_token: token.clone().into(),
             added_at: now,
             added_by_user_id: added_by_user_id.to_string(),
@@ -292,7 +288,7 @@ pub async fn add_additional_domain(
         tx.commit().await?;
 
         Ok(AddedDomain {
-            domain: normalized.clone(),
+            domain: normalized.as_str().to_string(),
             verification_token: token.into(),
         })
     })
@@ -308,7 +304,7 @@ pub async fn get_verification_token(
     org_id: &str,
     domain: &str,
 ) -> Result<Option<secrecy::SecretString>> {
-    let normalized = normalize_domain(domain)?;
+    let normalized = Domain::parse(domain)?;
     let Some(doc) = store.get::<OrganizationDoc>(org_id).await? else {
         return Ok(None);
     };
@@ -317,7 +313,8 @@ pub async fn get_verification_token(
         .additional_domains
         .into_iter()
         .find(|ad| {
-            ad.domain == normalized && !matches!(ad.state, AdditionalDomainState::Verified { .. })
+            ad.domain == normalized.as_str()
+                && !matches!(ad.state, AdditionalDomainState::Verified { .. })
         })
         .map(|ad| ad.verification_token))
 }
@@ -330,12 +327,13 @@ pub async fn get_verification_token(
 /// the stored token. Re-runs the cross-org conflict check inside the
 /// transaction to guard against a TOCTOU race where another org verified
 /// the same domain between add and verify.
+#[expect(clippy::disallowed_methods, reason = "stamps the row's verified_at")]
 pub async fn mark_additional_domain_verified(
     store: &DocumentStore,
     org_id: &str,
     domain: &str,
 ) -> Result<(), MarkVerifiedError> {
-    let normalized = normalize_domain(domain).map_err(anyhow::Error::from)?;
+    let normalized = Domain::parse(domain).map_err(anyhow::Error::from)?;
 
     // Wrapped in `with_dsql_retry!` so that a version race on
     // `compare_and_update` retries from a fresh org-doc read rather than
@@ -353,7 +351,7 @@ pub async fn mark_additional_domain_verified(
         let entry = data
             .additional_domains
             .iter_mut()
-            .find(|ad| ad.domain == normalized)
+            .find(|ad| ad.domain == normalized.as_str())
             .ok_or_else(|| {
                 MarkVerifiedError::Other(anyhow::anyhow!(
                     "domain is not attached to this organization"
@@ -367,7 +365,7 @@ pub async fn mark_additional_domain_verified(
         }
 
         if let Some(other) = tx
-            .find_one::<OrganizationDoc>("domain", &normalized)
+            .find_one::<OrganizationDoc>("domain", normalized.as_str())
             .await?
             && other.id != org_id
         {
@@ -379,15 +377,15 @@ pub async fn mark_additional_domain_verified(
         // domain concurrently both see nothing and then version-bump their own
         // org document, which never conflicts. A shared primary key is what
         // makes them collide.
-        let claim_id = deterministic_domain_claim_id(&normalized);
+        let claim_id = deterministic_domain_claim_id(normalized.as_str());
         match tx.get::<DomainClaimDoc>(&claim_id).await? {
             None => {
                 let slot = DomainClaimDoc {
-                    domain: normalized.clone(),
+                    domain: normalized.as_str().to_string(),
                     org_id: org_id.to_string(),
                 };
                 if let Err(e) = tx.insert_with_id(&claim_id, &slot).await {
-                    if crate::db::pool::is_unique_violation(&e) {
+                    if pool::is_unique_violation(&e) {
                         return Err(MarkVerifiedError::ClaimedByOtherOrg);
                     }
                     return Err(MarkVerifiedError::Other(e));
@@ -447,10 +445,11 @@ pub struct DomainRemovalSummary {
 /// user lands wherever their email maps in the new state.
 pub async fn remove_additional_domain(
     store: &DocumentStore,
+    session_cache: &SessionCache,
     org_id: &str,
     domain: &str,
 ) -> Result<Option<DomainRemovalSummary>> {
-    let normalized = normalize_domain(domain)?;
+    let normalized = Domain::parse(domain)?;
 
     // The read + CAS (both transactional and plain paths) is wrapped in
     // `with_dsql_retry!` so that a version race retries from a fresh org-doc
@@ -470,11 +469,13 @@ pub async fn remove_additional_domain(
 
         // A verified entry holds a claim slot; a pending one never took one.
         let held_claim = data.additional_domains.iter().any(|ad| {
-            ad.domain == normalized && matches!(ad.state, AdditionalDomainState::Verified { .. })
+            ad.domain == normalized.as_str()
+                && matches!(ad.state, AdditionalDomainState::Verified { .. })
         });
 
         let original_len = data.additional_domains.len();
-        data.additional_domains.retain(|ad| ad.domain != normalized);
+        data.additional_domains
+            .retain(|ad| ad.domain != normalized.as_str());
         if data.additional_domains.len() == original_len {
             return Ok(None);
         }
@@ -498,7 +499,7 @@ pub async fn remove_additional_domain(
                 release_ineligible_subdomain(&mut tx, org_id, &mut data, label).await?;
             }
             if held_claim {
-                tx.delete(&deterministic_domain_claim_id(&normalized))
+                tx.delete(&deterministic_domain_claim_id(normalized.as_str()))
                     .await?;
             }
             if !tx.compare_and_update(org_id, version, &data).await? {
@@ -526,7 +527,9 @@ pub async fn remove_additional_domain(
     // different rows, and a failure here must not undo the removal (the
     // domain is already gone from login matching). Log and continue.
     let (revoked_user_count, revocation_errored) =
-        match revoke_sessions_for_domain_users(store, org_id, &normalized).await {
+        match revoke_sessions_for_domain_users(store, session_cache, org_id, normalized.as_str())
+            .await
+        {
             Ok(n) => (n, false),
             Err(e) => {
                 tracing::warn!(
@@ -548,8 +551,17 @@ pub async fn remove_additional_domain(
 /// Revoke active sessions for every user in `org_id` whose email's domain
 /// equals `domain` (case-insensitive). Returns the number of users whose
 /// sessions were deleted (count of users, not count of sessions).
+///
+/// `session_cache` is invalidated per affected user — a DB delete alone does
+/// not evict the in-process `SessionCache`, so without the companion
+/// [`SessionCache::invalidate_for_user`] a revoked session would keep serving
+/// as a `Hit` until the cache TTL elapsed. This mirrors the contract every
+/// other production `delete_sessions_for_user` caller follows
+/// (`revoke_user_access`, `revoke_token`, `revoke_tokens_api`,
+/// `delete_oauth_client_and_revoke_sessions`).
 async fn revoke_sessions_for_domain_users(
     store: &DocumentStore,
+    session_cache: &SessionCache,
     org_id: &str,
     domain: &str,
 ) -> Result<u64> {
@@ -565,8 +577,12 @@ async fn revoke_sessions_for_domain_users(
         if !matches {
             continue;
         }
-        match crate::db::sessions::delete_sessions_for_user(store, &user.id).await {
+        match sessions::delete_sessions_for_user(store, &user.id).await {
             Ok(_) => {
+                // Companion cache eviction: invalidate only after the DB
+                // delete committed, so a cache refill can't reintroduce the
+                // revoked session. Matches the other revocation paths.
+                session_cache.invalidate_for_user(&user.id);
                 tracing::info!(
                     user_id = %user.id,
                     org_id = %org_id,
@@ -854,13 +870,17 @@ pub async fn list_all_verified_additional_domains(
 ///
 /// Returns [`RecheckEffect::NotFound`] if the entry has been removed or is
 /// already unverified, so callers can stop tracking it.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "stamps the row's last-checked time"
+)]
 pub async fn record_recheck_result(
     store: &DocumentStore,
     org_id: &str,
     domain: &str,
     outcome: RecheckOutcome,
 ) -> Result<RecheckEffect> {
-    let normalized = normalize_domain(domain)?;
+    let normalized = Domain::parse(domain)?;
 
     // Wrapped in `with_dsql_retry!` so that transient DB aborts and OCC
     // version races retry from a fresh org-doc read rather than either
@@ -878,7 +898,7 @@ pub async fn record_recheck_result(
         let Some(entry) = data
             .additional_domains
             .iter_mut()
-            .find(|ad| ad.domain == normalized)
+            .find(|ad| ad.domain == normalized.as_str())
         else {
             return Ok(RecheckEffect::NotFound);
         };
@@ -901,9 +921,7 @@ pub async fn record_recheck_result(
             }
             RecheckOutcome::Failure => {
                 entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
-                if entry.consecutive_failures
-                    >= crate::db::documents::organization::UNVERIFY_FAILURE_THRESHOLD
-                {
+                if entry.consecutive_failures >= UNVERIFY_FAILURE_THRESHOLD {
                     entry.consecutive_failures = 0;
                     entry.state = AdditionalDomainState::Unverified {
                         verified_at,
@@ -943,7 +961,7 @@ pub async fn record_recheck_result(
                 release_ineligible_subdomain(&mut tx, org_id, &mut data, label).await?;
             }
             if flipped {
-                tx.delete(&deterministic_domain_claim_id(&normalized))
+                tx.delete(&deterministic_domain_claim_id(normalized.as_str()))
                     .await?;
             }
             if !tx.compare_and_update(org_id, version, &data).await? {
@@ -1022,8 +1040,21 @@ async fn find_conflicting_claim_in_other_org(
 mod tests {
     use secrecy::ExposeSecret;
 
-    use super::super::{create_organization, fresh_store};
     use super::*;
+    use crate::db::UNVERIFY_FAILURE_THRESHOLD;
+    use crate::db::documents::organization::OrganizationDoc;
+    use crate::db::organizations::{create_organization, fresh_store};
+    use crate::db::sessions::SessionCache;
+    use crate::email::Email;
+
+    /// Read back an organization's additional domains.
+    async fn list_additional_domains(
+        store: &DocumentStore,
+        org_id: &str,
+    ) -> Result<Vec<AdditionalDomain>> {
+        let doc = store.get::<OrganizationDoc>(org_id).await?;
+        Ok(doc.map(|d| d.data.additional_domains).unwrap_or_default())
+    }
 
     #[tokio::test]
     async fn add_additional_domain_succeeds_and_is_pending() {
@@ -1051,7 +1082,7 @@ mod tests {
 
         // Pending entry is not indexed — find_one("domain", "acme.co.uk") must return None.
         let found = store
-            .find_one::<crate::db::documents::organization::OrganizationDoc>("domain", "acme.co.uk")
+            .find_one::<OrganizationDoc>("domain", "acme.co.uk")
             .await
             .unwrap();
         assert!(
@@ -1168,7 +1199,7 @@ mod tests {
             .await
             .unwrap();
         // Drive the entry to auto-unverified via consecutive failures.
-        for _ in 0..crate::db::UNVERIFY_FAILURE_THRESHOLD {
+        for _ in 0..UNVERIFY_FAILURE_THRESHOLD {
             record_recheck_result(
                 &store,
                 &other.id,
@@ -1305,7 +1336,8 @@ mod tests {
             .await
             .unwrap();
 
-        remove_additional_domain(&store, &org_a.id, "shared.com")
+        let cache = SessionCache::new(100, 30);
+        remove_additional_domain(&store, &cache, &org_a.id, "shared.com")
             .await
             .unwrap()
             .expect("domain was attached");
@@ -1365,7 +1397,7 @@ mod tests {
         ));
 
         let found = store
-            .find_one::<crate::db::documents::organization::OrganizationDoc>("domain", "acme.co.uk")
+            .find_one::<OrganizationDoc>("domain", "acme.co.uk")
             .await
             .unwrap()
             .expect("verified domain must be indexed");
@@ -1391,7 +1423,8 @@ mod tests {
             .await
             .unwrap();
 
-        let summary = remove_additional_domain(&store, &org.id, "Acme.Co.UK")
+        let cache = SessionCache::new(100, 30);
+        let summary = remove_additional_domain(&store, &cache, &org.id, "Acme.Co.UK")
             .await
             .unwrap();
         let summary = summary.expect("entry was attached, must be removed");
@@ -1402,7 +1435,7 @@ mod tests {
 
         // No longer indexed.
         let found = store
-            .find_one::<crate::db::documents::organization::OrganizationDoc>("domain", "acme.co.uk")
+            .find_one::<OrganizationDoc>("domain", "acme.co.uk")
             .await
             .unwrap();
         assert!(found.is_none());
@@ -1481,7 +1514,7 @@ mod tests {
             .unwrap();
 
         let mut last_effect = RecheckEffect::StillVerified;
-        for _ in 0..crate::db::UNVERIFY_FAILURE_THRESHOLD {
+        for _ in 0..UNVERIFY_FAILURE_THRESHOLD {
             last_effect =
                 record_recheck_result(&store, &org.id, "acme.co.uk", RecheckOutcome::Failure)
                     .await
@@ -1502,7 +1535,7 @@ mod tests {
 
         // No longer indexed.
         let found = store
-            .find_one::<crate::db::documents::organization::OrganizationDoc>("domain", "acme.co.uk")
+            .find_one::<OrganizationDoc>("domain", "acme.co.uk")
             .await
             .unwrap();
         assert!(
@@ -1525,7 +1558,7 @@ mod tests {
             .unwrap();
 
         // Drive the entry to auto-unverified via consecutive failures.
-        for _ in 0..crate::db::UNVERIFY_FAILURE_THRESHOLD {
+        for _ in 0..UNVERIFY_FAILURE_THRESHOLD {
             record_recheck_result(&store, &org.id, "acme.co.uk", RecheckOutcome::Failure)
                 .await
                 .unwrap();
@@ -1568,7 +1601,7 @@ mod tests {
 
         // Indexed again.
         let found = store
-            .find_one::<crate::db::documents::organization::OrganizationDoc>("domain", "acme.co.uk")
+            .find_one::<OrganizationDoc>("domain", "acme.co.uk")
             .await
             .unwrap();
         assert!(found.is_some(), "re-verified domain must be re-indexed");
@@ -1906,7 +1939,8 @@ mod tests {
         let org = create_organization(&store, "acme.com", None, None)
             .await
             .unwrap();
-        let summary = remove_additional_domain(&store, &org.id, "never-added.example.com")
+        let cache = SessionCache::new(100, 30);
+        let summary = remove_additional_domain(&store, &cache, &org.id, "never-added.example.com")
             .await
             .unwrap();
         assert!(summary.is_none());
@@ -1936,9 +1970,10 @@ mod tests {
             .unwrap();
 
         let mk_user = |email: &str| UserDoc {
-            email: crate::email::Email::new(email),
+            email: Email::new(email),
             name: None,
             org_id: Some(org.id.clone()),
+            org_domain: Some(org.domain.clone()),
             is_org_admin: false,
             active: true,
             external_id: None,
@@ -1963,6 +1998,9 @@ mod tests {
             authorization_details: None,
             hardware_aaguid: None,
             org_domain: None,
+            client_id: None,
+            source_code_hash: None,
+            authenticated_at: None,
         };
         store
             .insert(&mk_session(
@@ -1981,7 +2019,8 @@ mod tests {
             .await
             .unwrap();
 
-        let summary = remove_additional_domain(&store, &org.id, "acme.co.uk")
+        let cache = SessionCache::new(100, 30);
+        let summary = remove_additional_domain(&store, &cache, &org.id, "acme.co.uk")
             .await
             .unwrap()
             .expect("entry was attached, must be removed");

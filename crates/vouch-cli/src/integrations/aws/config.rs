@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use ini::Ini;
 use std::path::PathBuf;
 use vouch_cli::{tr, tr_args};
+use vouch_common::{env, fs, paths};
 
 /// Represents an AWS profile configuration.
 #[derive(Debug, Clone, Default)]
@@ -41,7 +42,7 @@ pub(crate) struct AwsConfig {
 }
 
 impl AwsConfig {
-    /// Load AWS config from the default path (~/.aws/config).
+    /// Load AWS config from the path [`AwsConfig::default_path`] resolves.
     pub(crate) fn load() -> Result<Self> {
         let path = Self::default_path()?;
         Self::load_from(path)
@@ -67,6 +68,14 @@ impl AwsConfig {
         }
     }
 
+    /// The resolved file path this config is (or will be) written to.
+    ///
+    /// May differ from `~/.aws/config` when `AWS_CONFIG_FILE` is set.
+    #[must_use]
+    pub(crate) fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
     /// Check if a profile exists in the config.
     #[must_use]
     pub(crate) fn profile_exists(&self, name: &str) -> bool {
@@ -86,7 +95,7 @@ impl AwsConfig {
             // in `env_region` — an empty region would otherwise short-circuit
             // the fallback chain and build endpoints like
             // `https://sts..amazonaws.com`.
-            region: vouch_common::env::non_empty(section.get("region").map(|s| s.to_string())),
+            region: env::non_empty(section.get("region").map(|s| s.to_string())),
             output: section.get("output").map(|s| s.to_string()),
         })
     }
@@ -152,7 +161,7 @@ impl AwsConfig {
             name,
             credential_process: props.get("credential_process").map(|s| s.to_string()),
             // Bare `region =` means unset — see `get_profile`.
-            region: vouch_common::env::non_empty(props.get("region").map(|s| s.to_string())),
+            region: env::non_empty(props.get("region").map(|s| s.to_string())),
             output: props.get("output").map(|s| s.to_string()),
         }
     }
@@ -232,7 +241,7 @@ impl AwsConfig {
                 value = self.path.display().to_string()
             )
         })?;
-        vouch_common::fs::atomic_write(&self.path, &buf).with_context(|| {
+        fs::atomic_write(&self.path, &buf).with_context(|| {
             tr_args!(
                 "err-failed-write-5",
                 value = self.path.display().to_string()
@@ -263,10 +272,28 @@ impl AwsConfig {
         }
     }
 
-    /// Get the default AWS config path (~/.aws/config).
+    /// Get the AWS config path: `$AWS_CONFIG_FILE`, else `~/.aws/config`.
+    ///
+    /// `AWS_CONFIG_FILE` names the file itself. It is the only way to relocate
+    /// the config — the AWS CLI offers no equivalent command-line flag or
+    /// profile setting.
     pub(crate) fn default_path() -> Result<PathBuf> {
-        let home = dirs::home_dir().context(tr!("err-could-not-determine-home-directory"))?;
-        Ok(home.join(".aws").join("config"))
+        let home = paths::home_dir();
+        let env_file = std::env::var_os("AWS_CONFIG_FILE").filter(|v| !v.is_empty());
+        Self::config_path_from(env_file.as_deref(), home.as_deref())
+            .context(tr!("err-could-not-determine-home-directory"))
+    }
+
+    /// [`AwsConfig::default_path`] over explicit inputs, so the override is
+    /// testable without mutating the process environment.
+    fn config_path_from(
+        env_file: Option<&std::ffi::OsStr>,
+        home: Option<&std::path::Path>,
+    ) -> Option<PathBuf> {
+        match env_file {
+            Some(explicit) => Some(PathBuf::from(explicit)),
+            None => Some(home?.join(".aws").join("config")),
+        }
     }
 }
 
@@ -1033,5 +1060,59 @@ credential_process = vouch credential aws --role arn:aws:iam::222:role/Staging
         let config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
 
         assert_eq!(config.next_vouch_profile_name(), "vouch-3");
+    }
+
+    // -- config_path_from --
+    //
+    // `AWS_CONFIG_FILE` names the file itself, and the AWS CLI documents it as
+    // the only way to relocate the config: "You can't specify this value in a
+    // named profile setting or by using a command line parameter."
+    // <https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-envvars.html>
+
+    #[test]
+    fn aws_config_defaults_under_home() {
+        let home = std::path::Path::new("/home/alice");
+        let got = AwsConfig::config_path_from(None, Some(home));
+        assert_eq!(got, Some(home.join(".aws").join("config")));
+    }
+
+    #[test]
+    fn aws_config_env_is_the_file_itself() {
+        let got = AwsConfig::config_path_from(
+            Some(std::ffi::OsStr::new("/etc/aws/alt.ini")),
+            Some(std::path::Path::new("/home/alice")),
+        );
+        assert_eq!(got, Some(PathBuf::from("/etc/aws/alt.ini")));
+    }
+
+    #[test]
+    fn aws_config_needs_home_when_env_is_absent() {
+        assert_eq!(AwsConfig::config_path_from(None, None), None);
+    }
+
+    #[test]
+    fn aws_config_env_does_not_need_home() {
+        // With AWS_CONFIG_FILE set, the path is resolved from the env value
+        // alone — no home directory required. This is the case the fix in
+        // load_or_create_aws_config relies on: setup succeeds even when
+        // home_dir() returns None, as long as the override path is writable.
+        let got = AwsConfig::config_path_from(Some(std::ffi::OsStr::new("/etc/aws/alt.ini")), None);
+        assert_eq!(got, Some(PathBuf::from("/etc/aws/alt.ini")));
+    }
+
+    #[test]
+    fn aws_config_path_accessor_returns_resolved_path() {
+        let path = PathBuf::from("/custom/aws/config");
+        let config = AwsConfig::empty(path.clone());
+        assert_eq!(config.path(), path);
+    }
+
+    #[test]
+    fn aws_config_path_reflects_load_from() {
+        let file = create_temp_config(
+            "[profile vouch]\ncredential_process = vouch credential aws --role arn:aws:iam::1:role/R\n",
+        );
+        let config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
+        assert_eq!(config.path(), file.path());
     }
 }

@@ -8,6 +8,7 @@ use jiff::Timestamp;
 use std::sync::Arc;
 use tracing::{debug, info};
 
+use crate::audit::{self, AuditEvent};
 use crate::state::AgentState;
 
 /// Thresholds (in seconds) at which to send expiry warnings.
@@ -48,7 +49,7 @@ pub async fn run(state: Arc<AgentState>) {
             if threshold == 0 {
                 info!("Session has expired");
                 let email = state.current_user_email().await;
-                crate::audit::log_event(crate::audit::AuditEvent::SessionExpired { email });
+                audit::log_event(AuditEvent::SessionExpired { email });
                 send_notification(
                     "Vouch session expired",
                     "Your session has expired. Run 'vouch login' to re-authenticate.",

@@ -6,9 +6,10 @@
 //! - RFC 7662 - OAuth 2.0 Token Introspection
 
 use crate::AppState;
+use crate::arrival::ArrivalTime;
 use crate::crypto::hash_token;
 use crate::crypto::keys::OidcSigningKey;
-use crate::db;
+use crate::db::{self, ClientInfo};
 use crate::error::ServiceError;
 use crate::error::ServiceResult;
 use crate::redact_email;
@@ -57,7 +58,7 @@ pub struct IntrospectionResult {
     pub authorization_details: Option<serde_json::Value>,
     /// RFC 9449 §7: DPoP confirmation claim for sender-constrained tokens.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub cnf: Option<crate::services::oidc::dpop::CnfClaim>,
+    pub cnf: Option<CnfClaim>,
 }
 
 impl IntrospectionResult {
@@ -104,6 +105,10 @@ struct IntrospectionJwtClaims {
 /// - Token data inside `token_introspection` claim
 /// - For inactive tokens: `{"token_introspection": {"active": false}}`
 /// - No top-level `sub` or `exp` (RFC 9701 Section 5.4)
+#[expect(
+    clippy::disallowed_methods,
+    reason = "mints the introspection response JWT's iat"
+)]
 pub(crate) async fn sign_introspection_jwt(
     result: &IntrospectionResult,
     issuer: &str,
@@ -158,6 +163,7 @@ pub async fn introspect_token(
     token: &str,
     _token_type_hint: Option<&str>,
     caller_client_id: Option<&str>,
+    arrival: ArrivalTime,
 ) -> ServiceResult<IntrospectionResult> {
     // Decode the token as an ES256 RFC 9068 access token
     let config = state.config();
@@ -172,7 +178,7 @@ pub async fn introspect_token(
     let token_hash = hash_token(token);
     let session = match state
         .session_cache
-        .get_session_by_token_hash(&state.store, &token_hash)
+        .get_session_by_token_hash(&state.store, &token_hash, arrival)
         .await
         .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
     {
@@ -215,7 +221,7 @@ pub async fn introspect_token(
     }
 
     // RFC 9396: authorization_details from session (already a Value).
-    let authorization_details = session.authorization_details;
+    let authorization_details = session.authorization_details.clone();
 
     // RFC 7662 §2.2 `token_type`: derived from the confirmation claim the
     // token actually carries, by the same rule issuance used to advertise it.
@@ -255,11 +261,15 @@ pub async fn introspect_token(
 ///
 /// # Returns
 /// Revocation result (always succeeds per RFC 7009).
+#[expect(
+    clippy::too_many_lines,
+    reason = "RFC 7009 revocation: decode, delete by hash, then one audit row per token kind"
+)]
 pub async fn revoke_token(
     state: &Arc<AppState>,
     token: &str,
     _token_type_hint: Option<&str>,
-    client_info: crate::db::ClientInfo,
+    client_info: ClientInfo,
     caller_client_id: &str,
 ) -> RevocationResult {
     // Try to decode to get email for audit logging
@@ -280,10 +290,28 @@ pub async fn revoke_token(
     let sub = decoded.as_ref().map(|d| d.sub().to_string());
     let email = decoded.as_ref().and_then(|d| d.email().map(String::from));
 
+    // RFC 9068 §2.2 / RFC 6749 §4.4: M2M (`client_credentials`) access tokens
+    // carry the OAuth `client_id` as the JWT `sub` claim, and their sessions
+    // are persisted with `user_id == client_id` (one session per token — see
+    // `client_credentials.rs`). Revoking one such token via the per-user
+    // `delete_sessions_for_user(user_id)` path would delete EVERY concurrent
+    // M2M session for that client, violating RFC 7009 §2.1 which targets "the
+    // particular token" being revoked. Detect M2M tokens via JWT-intrinsic
+    // claims (`sub == client_id` and no `email` grant, which is the only
+    // access-token-issuing grant with that shape — see the grant table in
+    // `client_credentials.rs`) and route them to single-token deletion by
+    // hash, preserving the human "logout = full logout" behavior otherwise.
+    let is_m2m = matches!(
+        decoded,
+        Some(DecodedToken::AccessToken(ref claims)) if claims.sub == claims.client_id && claims.email.is_none()
+    );
+
     // When we know the user, revoke ALL their sessions (human presence
-    // attestation means logout = full logout). Fall back to single-token
-    // deletion when the token couldn't be decoded.
-    let revoked = if let Some(ref user_id) = sub {
+    // attestation means logout = full logout). M2M tokens, and tokens that
+    // couldn't be decoded, fall back to single-token deletion by hash.
+    let (revoked, deleted_row) = if let Some(ref user_id) = sub
+        && !is_m2m
+    {
         match db::delete_sessions_for_user(&state.store, user_id).await {
             Ok(count) => {
                 if count > 0 {
@@ -295,45 +323,158 @@ pub async fn revoke_token(
                             redact_email(email),
                         );
                     }
-                    true
-                } else {
-                    false
                 }
+                (count > 0, None)
             }
             Err(e) => {
                 tracing::warn!("Failed to delete sessions during revocation: {}", e,);
-                false
+                (false, None)
             }
         }
     } else {
-        // Token couldn't be decoded — best-effort delete by hash
+        // M2M token, or token that couldn't be decoded — revoke ONLY the
+        // named token per RFC 7009 §2.1.
         let token_hash = hash_token(token);
-        match db::delete_session_by_token_hash(&state.store, &token_hash).await {
-            Ok(deleted) => {
-                if deleted {
-                    state.session_cache.invalidate(&token_hash);
+
+        // RFC 7009 §2.1: the server "verifies whether the token was issued to
+        // the client making the revocation request". A token that no longer
+        // decodes (expired, or not a JWT) has no `client_id` claim to check
+        // above, so the session row's `client_id` is checked instead.
+        if decoded.is_none() {
+            match db::find_session_by_token_hash(&state.store, &token_hash).await {
+                Ok(Some(row))
+                    if row
+                        .client_id
+                        .as_deref()
+                        .is_some_and(|issued_to| issued_to != caller_client_id) =>
+                {
+                    return RevocationResult {
+                        revoked: false,
+                        user_email: None,
+                    };
                 }
-                deleted
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!("Failed to look up session during revocation: {}", e);
+                    return RevocationResult {
+                        revoked: false,
+                        user_email: None,
+                    };
+                }
             }
+        }
+
+        match db::delete_session_by_token_hash(&state.store, &token_hash).await {
+            Ok(Some(row)) => {
+                state.session_cache.invalidate(&token_hash);
+                (true, Some(row))
+            }
+            Ok(None) => (false, None),
             Err(e) => {
                 tracing::warn!("Failed to delete session during revocation: {}", e,);
-                false
+                (false, None)
             }
         }
     };
 
+    // M2M (`client_credentials`) revocation is an OAuth-family event, not a
+    // human `Logout`. Detection from the decoded JWT covers a live token; an
+    // expired token no longer decodes, so the detection above is false, but
+    // the session row it just deleted carries the `M2MAccessToken` purpose,
+    // which extends detection to that path.
+    let is_m2m = is_m2m
+        || deleted_row
+            .as_ref()
+            .is_some_and(|r| r.session_type == db::SessionPurpose::M2MAccessToken);
+
     if revoked {
-        // Fire-and-forget logout audit event
-        if let Some(ref user_id) = sub {
-            let params = db::AuthEventParams {
-                user_id: user_id.clone(),
-                event_type: db::AuthEventType::Logout,
-                success: true,
-                client: client_info,
-                ..Default::default()
+        if is_m2m {
+            // M2M revocation records an OAuth-family `OauthTokenRevoked`
+            // event, not an auth-family `Logout`. The JWT `sub` (and, for an
+            // expired row, the session's `user_id`) is the OAuth `client_id`,
+            // not a user, and there is no human email, so the event carries
+            // `user_id = None`, mirroring M2M issuance, which records
+            // `OauthTokenIssued` the same way. Resolving the client's own org
+            // domain for `email_domain` keeps the row in the org-scoped audit
+            // feed (SIEM API + admin UI); the `Logout` row this replaces had
+            // a NULL `email_domain` and was filtered out of both. The audit
+            // identifier is the application's document id (the value
+            // issuance and the admin revocation path stamp), so per-
+            // application usage stats, which filter only on
+            // `oauth_client_id`, count per-token revocations.
+            let (oauth_client_id, audit_org_domain): (String, Option<String>) =
+                match db::get_oauth_client_by_client_id(&state.store, caller_client_id).await {
+                    Ok(Some(client)) => {
+                        let domain = db::resolve_event_org_domain(
+                            &state.store,
+                            None,
+                            client.org_id.as_deref(),
+                        )
+                        .await;
+                        (client.id, domain)
+                    }
+                    // Best-effort fallback (should not occur post-
+                    // authentication): still record the correct event type
+                    // with `user_id = None` so retention and OCSF/doc-group
+                    // classification are right, even if the per-app stats key
+                    // and org domain are not.
+                    _ => (caller_client_id.to_string(), None),
+                };
+            let params = db::RecordOAuthEventParams {
+                oauth_client_id: &oauth_client_id,
+                event_type: db::OAuthEventType::TokenRevoked,
+                user_id: None,
+                client: &client_info,
+                details: None,
+                org_domain: db::RecordedOrgDomain::Known(audit_org_domain.as_deref()),
             };
-            db::spawn_audit_event(&state.audit, params, email.clone());
+            db::record_oauth_event(&state.audit, &state.store, &params).await;
+            return RevocationResult {
+                revoked: true,
+                user_email: None,
+            };
         }
+
+        // Human revocation: the decoded token names the user. A token that
+        // no longer decodes is attributed to the session row it deleted, so
+        // the `Logout` audit event is recorded whenever a row was deleted.
+        let principal = match (sub, deleted_row) {
+            (Some(user_id), _) => Some((user_id, email)),
+            (None, Some(row)) => Some((row.user_id, Some(row.user_email))),
+            (None, None) => None,
+        };
+        let Some((user_id, email)) = principal else {
+            return RevocationResult {
+                revoked: true,
+                user_email: None,
+            };
+        };
+        // A token minted without the `email` scope carries no email claim.
+        // The user record supplies it so the event stays in the org-scoped
+        // audit feed.
+        let email = match email {
+            None => match db::get_user_by_id(&state.store, &user_id).await {
+                Ok(user) => user.map(|u| u.email),
+                Err(e) => {
+                    tracing::warn!("Failed to load user for revocation audit: {e}");
+                    None
+                }
+            },
+            email => email,
+        };
+
+        // Best-effort logout audit event
+        let params = db::AuthEventParams {
+            user_id: db::Principal::Verified(user_id),
+            event_type: db::AuthEventType::Logout,
+            success: true,
+            client: client_info,
+            authenticator_id: None,
+            failure_reason: None,
+            client_id: None,
+            idp_issuer: None,
+        };
+        db::record_auth_event(&state.audit, params, email.clone()).await;
 
         return RevocationResult {
             revoked: true,
@@ -356,6 +497,7 @@ pub async fn revoke_token(
 )]
 mod tests {
     use super::*;
+    use crate::test_utils::test_arrival;
 
     #[test]
     fn test_inactive_result() {
@@ -492,7 +634,7 @@ mod tests {
         // mirroring the DB-error token test in handlers/oidc/tests).
         state.db.close().await;
 
-        let result = introspect_token(&state, &token, None, None).await;
+        let result = introspect_token(&state, &token, None, None, test_arrival()).await;
         assert!(
             matches!(result, Err(ServiceError::Internal(_))),
             "store failure must surface as ServiceError::Internal, got: {result:?}"

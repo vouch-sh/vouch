@@ -11,6 +11,7 @@ pub(crate) mod metadata;
 pub(crate) mod response;
 pub(crate) mod signature;
 
+use crate::infra::csp::CspOrigin;
 pub(crate) use metadata::IdpMetadata;
 
 /// SAML 2.0 Service Provider.
@@ -49,10 +50,10 @@ impl SamlProvider {
     /// auto-submitting POST form (HTTP-POST binding) and 303 redirect
     /// (HTTP-Redirect binding) are not blocked by Chromium-based browsers.
     #[must_use]
-    pub fn form_action_origins(&self) -> Vec<crate::infra::csp::CspOrigin> {
-        let mut origins: Vec<crate::infra::csp::CspOrigin> = Vec::new();
+    pub fn form_action_origins(&self) -> Vec<CspOrigin> {
+        let mut origins: Vec<CspOrigin> = Vec::new();
         let mut push = |raw: &str| {
-            if let Some(origin) = crate::infra::csp::CspOrigin::parse(raw)
+            if let Some(origin) = CspOrigin::parse(raw)
                 && !origins.iter().any(|existing| existing == &origin)
             {
                 origins.push(origin);

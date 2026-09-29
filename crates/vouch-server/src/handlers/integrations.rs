@@ -7,14 +7,14 @@
 //! - SSH (per-user, CLI setup)
 //! - EKS (via AWS IAM and EKS Access Entries)
 
+use crate::arrival::ArrivalTime;
 use crate::db;
-use crate::handlers::session::{
-    AuthContext, extract_session_from_cookie, get_resource_auth_context,
-};
+use crate::handlers::extractors::SignedInSession;
+use crate::handlers::session::{AuthContext, extract_session_from_cookie};
 use crate::{AppState, impl_template_response};
 use askama::Template;
 use axum::extract::State;
-use axum::response::{IntoResponse, Redirect, Response};
+use axum::response::{IntoResponse, Response};
 use axum_extra::extract::cookie::CookieJar;
 use std::sync::Arc;
 
@@ -44,15 +44,12 @@ impl_template_response!(IntegrationsTemplate);
 
 /// GET /integrations - Show integrations page.
 pub(crate) async fn integrations_page(
+    arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
+    session: SignedInSession,
 ) -> Response {
-    let auth = get_resource_auth_context(&state, &jar).await;
-
-    // Redirect unauthenticated users to enrollment
-    if !auth.authenticated {
-        return Redirect::to("/enroll/start").into_response();
-    }
+    let SignedInSession { auth } = session;
 
     // Check if GitHub App is configured on the server
     let github_configured = state.github_app.is_some();
@@ -62,7 +59,7 @@ pub(crate) async fn integrations_page(
 
     // Fetch session + user once for org-scoped lookups
     let org_context = if auth.has_org {
-        match extract_session_from_cookie(&state, &jar).await {
+        match extract_session_from_cookie(&state, &jar, arrival).await {
             Ok(session) => match db::get_user_by_id(&state.store, &session.sub).await {
                 Ok(Some(user)) => user.org_id.clone().map(|org_id| (user, org_id)),
                 Ok(None) => {

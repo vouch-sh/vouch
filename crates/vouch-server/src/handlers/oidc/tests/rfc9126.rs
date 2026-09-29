@@ -8,6 +8,16 @@
 //! Reference: <https://www.rfc-editor.org/rfc/rfc9126>
 
 use super::helpers::*;
+use crate::db::claim::ClaimError;
+use crate::db::documents::oauth::ResponseMode;
+use crate::db::store::DocumentStore;
+use crate::db::{
+    FapiProfile, ParConsumptionMode, ParConsumptionProof, ParRef, TokenEndpointAuthMethod,
+};
+use crate::infra::mtls_listener::PeerClientCert;
+use crate::services::auth::{ClientAuthProof, NoClientAuth, ParCreationProof};
+use crate::services::oidc::mtls;
+use crate::test_utils::{self, HttpResponse, TestOAuthClient};
 
 // ========================================================================
 // RFC 9126 Section 5 — Discovery Metadata
@@ -555,10 +565,11 @@ async fn test_rfc9126_par_rejects_unsupported_response_mode() {
 
 #[tokio::test]
 async fn test_rfc9126_par_rejects_unsupported_prompt_value() {
-    // OIDC Core Section 3.1.2.1: Unsupported prompt values must be rejected.
-    // Vouch supports "login", "none", and "consent"; the error description
-    // returned at the PAR endpoint must list all three supported values so
-    // developers are not misled into believing "consent" is unsupported.
+    // OIDC Core Section 3.1.2.1: a prompt value outside the defined set may be
+    // rejected — "it MAY return an error or it MAY ignore it" — and Vouch
+    // returns an error. Vouch honors "login", "none", and "consent"; the
+    // description must list all three so developers are not misled into
+    // believing "consent" is unsupported.
     let (app, state) = test_app().await;
 
     let user = create_test_user(&state.store, "par-badprompt@example.com").await;
@@ -572,7 +583,7 @@ async fn test_rfc9126_par_rejects_unsupported_prompt_value() {
          &code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM\
          &code_challenge_method=S256\
          &scope=openid\
-         &prompt=select_account",
+         &prompt=x_vendor_ext",
         client.client_id,
         urlencoding::encode("https://example.com/callback"),
     );
@@ -610,6 +621,111 @@ async fn test_rfc9126_par_rejects_unsupported_prompt_value() {
         description.contains("consent"),
         "error_description should mention 'consent': {description}"
     );
+}
+
+#[tokio::test]
+async fn test_rfc9126_par_translates_account_selection_required() {
+    // RFC 9126 Section 2.3: "Since initial processing of the pushed
+    // authorization request does not involve resource owner interaction, error
+    // codes related to user interaction, such as `consent_required` defined by
+    // [OIDC], are never returned." `prompt=select_account` is rejected under
+    // OIDC Core Section 3.1.2.1, but the code that rejection carries at the
+    // authorization endpoint — `account_selection_required` — is one of those,
+    // so PAR reports it under the default this section names instead.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "par-selectaccount@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let body = format!(
+        "response_type=code\
+         &client_id={}\
+         &redirect_uri={}\
+         &code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM\
+         &code_challenge_method=S256\
+         &scope=openid\
+         &prompt=select_account",
+        client.client_id,
+        urlencoding::encode("https://example.com/callback"),
+    );
+
+    let auth_header = client.basic_auth_header();
+    let (status, response_body) = http_post_form(
+        &app,
+        "/oauth/par",
+        &body,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "prompt=select_account must be rejected: {response_body}"
+    );
+
+    let json: serde_json::Value = serde_json::from_str(&response_body).expect("Valid JSON");
+    assert_eq!(
+        json["error"], "invalid_request",
+        "PAR must not answer with a user-interaction error code: {response_body}"
+    );
+}
+
+// OIDC Core Section 3.1.2.1: prompt is a "Space-delimited, case-sensitive list
+// of ASCII string values", so asking for two behaviors at once is a valid
+// request rather than an unrecognized value.
+#[tokio::test]
+async fn test_rfc9126_par_accepts_multiple_prompt_values() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "par-multiprompt@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let request_uri = create_par_request_with_prompt(&app, &client, Some("login consent")).await;
+    assert!(
+        request_uri.starts_with("urn:ietf:params:oauth:request_uri:"),
+        "prompt=\"login consent\" must be accepted, got {request_uri}"
+    );
+}
+
+// OIDC Core Section 3.1.2.1: "If this parameter contains none with any other
+// value, an error is returned."
+#[tokio::test]
+async fn test_rfc9126_par_rejects_none_combined_with_other_prompt_values() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "par-nonecombo@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let body = format!(
+        "response_type=code\
+         &client_id={}\
+         &redirect_uri={}\
+         &code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM\
+         &code_challenge_method=S256\
+         &scope=openid\
+         &prompt={}",
+        client.client_id,
+        urlencoding::encode("https://example.com/callback"),
+        urlencoding::encode("none login"),
+    );
+
+    let auth_header = client.basic_auth_header();
+    let (status, response_body) = http_post_form(
+        &app,
+        "/oauth/par",
+        &body,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "prompt=\"none login\" must be rejected: {response_body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&response_body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_request");
 }
 
 #[tokio::test]
@@ -742,7 +858,16 @@ async fn test_rfc9126_authorize_resolves_request_uri() {
     let user = create_test_user(&state.store, "par-resolve@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
-    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let request_uri = create_par_request_with_prompt(&app, &client, Some("none")).await;
 
@@ -847,7 +972,16 @@ async fn test_rfc9126_request_uri_is_single_use() {
     let user = create_test_user(&state.store, "par-single@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
-    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let request_uri = create_par_request_with_prompt(&app, &client, Some("none")).await;
 
@@ -908,7 +1042,16 @@ async fn test_rfc9126_request_uri_is_client_bound() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client_a = create_test_oauth_client(&state.store, &user.id).await;
     let client_b = create_test_oauth_client(&state.store, &user.id).await;
-    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Create PAR with client_a
     let request_uri = create_par_request(&app, &client_a).await;
@@ -948,7 +1091,16 @@ async fn test_rfc9126_client_binding_failure_does_not_consume() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client_a = create_test_oauth_client(&state.store, &user.id).await;
     let client_b = create_test_oauth_client(&state.store, &user.id).await;
-    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let request_uri = create_par_request(&app, &client_a).await;
 
@@ -998,7 +1150,16 @@ async fn test_rfc9126_authorize_rejects_expired_request_uri() {
     let user = create_test_user(&state.store, "par-expired@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
-    let _session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let _session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let request_uri = create_par_request_with_prompt(&app, &client, Some("none")).await;
 
@@ -1077,10 +1238,8 @@ async fn test_rfc9126_consume_par_with_stale_version_returns_false() {
             authorization_details: None,
             response_mode: Default::default(),
         },
-        crate::services::auth::ParCreationProof {
-            client_auth: crate::services::auth::ClientAuthProof::NoAuth(
-                crate::services::auth::NoClientAuth::internal_endpoint(),
-            ),
+        ParCreationProof {
+            client_auth: ClientAuthProof::NoAuth(NoClientAuth::internal_endpoint()),
         },
     )
     .await
@@ -1094,6 +1253,7 @@ async fn test_rfc9126_consume_par_with_stale_version_returns_false() {
             client_id: &client.client_id,
             mode: db::ParConsumptionMode::EnforceExpiry,
         },
+        jiff::Timestamp::now(),
     )
     .await
     .expect("First consumption should succeed");
@@ -1118,10 +1278,11 @@ async fn test_rfc9126_consume_par_with_stale_version_returns_false() {
             client_id: &client.client_id,
             mode: db::ParConsumptionMode::EnforceExpiry,
         },
+        jiff::Timestamp::now(),
     )
     .await;
     assert!(
-        matches!(result, Err(crate::db::claim::ClaimError::AlreadyConsumed)),
+        matches!(result, Err(ClaimError::AlreadyConsumed)),
         "Second consumption should fail with AlreadyConsumed, got: {result:?}"
     );
 }
@@ -1157,10 +1318,8 @@ async fn test_rfc9126_consume_par_concurrent_replay() {
             authorization_details: None,
             response_mode: Default::default(),
         },
-        crate::services::auth::ParCreationProof {
-            client_auth: crate::services::auth::ClientAuthProof::NoAuth(
-                crate::services::auth::NoClientAuth::internal_endpoint(),
-            ),
+        ParCreationProof {
+            client_auth: ClientAuthProof::NoAuth(NoClientAuth::internal_endpoint()),
         },
     )
     .await
@@ -1181,6 +1340,7 @@ async fn test_rfc9126_consume_par_concurrent_replay() {
                     client_id: &client_id_a,
                     mode: db::ParConsumptionMode::EnforceExpiry,
                 },
+                jiff::Timestamp::now(),
             )
             .await
         },
@@ -1192,6 +1352,7 @@ async fn test_rfc9126_consume_par_concurrent_replay() {
                     client_id: &client_id_b,
                     mode: db::ParConsumptionMode::EnforceExpiry,
                 },
+                jiff::Timestamp::now(),
             )
             .await
         },
@@ -1343,7 +1504,16 @@ async fn test_rfc9126_par_not_consumed_when_reauth_required() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
     // User has a valid session — but PAR flow always requires re-auth.
-    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Create PAR without prompt=none — will trigger re-auth under ReauthPolicy::Always.
     let request_uri = create_par_request(&app, &client).await;
@@ -1399,7 +1569,16 @@ async fn test_rfc9126_par_consumed_when_code_issued_after_login() {
     let user = create_test_user(&state.store, "par-deferred@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
-    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let request_uri = create_par_request(&app, &client).await;
     let cookie = format!("__Host-vouch_session={session_token}");
@@ -1424,11 +1603,23 @@ async fn test_rfc9126_par_consumed_when_code_issued_after_login() {
         .expect("login redirect carries the pending auth id")
         .to_string();
 
-    // Return trip from login: the code is issued here.
+    // Return trip from login: the code is issued here. The login leaves a
+    // session whose ceremony follows the pending record; the resume path
+    // refuses the pre-login cookie for a re-authentication it forced.
+    let fresh_session = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let completed = http_get_full(
         &app,
         &format!("/oauth/authorize?pending_auth={pending_id}"),
-        &[("Cookie", &cookie)],
+        &[("Cookie", &format!("__Host-vouch_session={fresh_session}"))],
     )
     .await;
     let completed_location = completed
@@ -1488,7 +1679,16 @@ async fn test_rfc9126_par_reuse_succeeds_after_reauth_redirect() {
     let user = create_test_user(&state.store, "par-reauth-replay@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
-    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let request_uri = create_par_request(&app, &client).await;
 
@@ -1553,13 +1753,14 @@ async fn test_rfc9126_par_already_consumed_returns_error_not_login() {
     let request_uri = create_par_request(&app, &client).await;
 
     // Consume the PAR directly via DB before the authorize request arrives.
-    let _proof = crate::db::ParConsumptionProof::consume(
+    let _proof = ParConsumptionProof::consume(
         &state.store,
-        crate::db::ParRef {
+        ParRef {
             request_uri: &request_uri,
             client_id: &client.client_id,
-            mode: crate::db::ParConsumptionMode::EnforceExpiry,
+            mode: ParConsumptionMode::EnforceExpiry,
         },
+        jiff::Timestamp::now(),
     )
     .await
     .expect("Pre-consumption should succeed");
@@ -1739,7 +1940,7 @@ async fn test_rfc9126_par_jti_replay_returns_invalid_client() {
 
 /// Register an OAuth client with `tls_client_auth` bound to the given subject DN.
 async fn create_mtls_oauth_client(
-    store: &crate::db::store::DocumentStore,
+    store: &DocumentStore,
     user_id: &str,
     subject_dn: &str,
 ) -> String {
@@ -1764,9 +1965,8 @@ async fn test_rfc9126_par_accepts_mtls_with_matching_cert() {
     let user = create_test_user(&state.store, "par-mtls-ok@example.com").await;
     let _auth_id = create_test_authenticator(&state.store, &user.id).await;
 
-    let cert_der = make_test_cert_der("par-mtls-client");
-    let parsed = crate::services::oidc::mtls::parse_client_certificate(&cert_der)
-        .expect("parse generated cert");
+    let cert_der = test_client_ca().issue("par-mtls-client");
+    let parsed = mtls::parse_client_certificate(&cert_der).expect("parse generated cert");
     let subject_dn = parsed.subject_dn.expect("generated cert has subject DN");
 
     let client_id = create_mtls_oauth_client(&state.store, &user.id, &subject_dn).await;
@@ -1801,9 +2001,8 @@ async fn test_rfc9126_par_rejects_mtls_without_cert() {
     let user = create_test_user(&state.store, "par-mtls-nocert@example.com").await;
     let _auth_id = create_test_authenticator(&state.store, &user.id).await;
 
-    let cert_der = make_test_cert_der("par-mtls-nocert-client");
-    let parsed = crate::services::oidc::mtls::parse_client_certificate(&cert_der)
-        .expect("parse generated cert");
+    let cert_der = test_client_ca().issue("par-mtls-nocert-client");
+    let parsed = mtls::parse_client_certificate(&cert_der).expect("parse generated cert");
     let subject_dn = parsed.subject_dn.expect("generated cert has subject DN");
 
     let client_id = create_mtls_oauth_client(&state.store, &user.id, &subject_dn).await;
@@ -1836,14 +2035,13 @@ async fn test_rfc9126_par_rejects_mtls_with_non_matching_cert() {
     let _auth_id = create_test_authenticator(&state.store, &user.id).await;
 
     // Client is registered against cert A's subject DN.
-    let cert_a_der = make_test_cert_der("par-mtls-registered");
-    let parsed_a =
-        crate::services::oidc::mtls::parse_client_certificate(&cert_a_der).expect("parse cert A");
+    let cert_a_der = test_client_ca().issue("par-mtls-registered");
+    let parsed_a = mtls::parse_client_certificate(&cert_a_der).expect("parse cert A");
     let subject_dn_a = parsed_a.subject_dn.expect("cert A has subject DN");
     let client_id = create_mtls_oauth_client(&state.store, &user.id, &subject_dn_a).await;
 
     // Caller presents cert B — different subject DN.
-    let cert_b_der = make_test_cert_der("par-mtls-imposter");
+    let cert_b_der = test_client_ca().issue("par-mtls-imposter");
 
     let body = format!(
         "response_type=code\
@@ -1894,8 +2092,8 @@ async fn create_fapi_jwt_client(
         user_id,
         TestClientSpec {
             jwks: TestJwks::Custom(jwks_value),
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
-            fapi_profile: Some(crate::db::FapiProfile::Fapi2Security),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
+            fapi_profile: Some(FapiProfile::Fapi2Security),
             ..Default::default()
         },
     )
@@ -1917,8 +2115,8 @@ async fn create_fapi_jwt_client_requiring_request_object(
         user_id,
         TestClientSpec {
             jwks: TestJwks::Custom(jwks_value),
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
-            fapi_profile: Some(crate::db::FapiProfile::Fapi2Security),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
+            fapi_profile: Some(FapiProfile::Fapi2Security),
             require_signed_request_object: Some(true),
             ..Default::default()
         },
@@ -2064,7 +2262,7 @@ async fn par_post_full(
     dpop_proof: Option<&str>,
     cert_der: Option<Vec<u8>>,
     extra_headers: &[(&str, &str)],
-) -> crate::test_utils::HttpResponse {
+) -> HttpResponse {
     use tower::ServiceExt;
 
     let mut req_builder = axum::http::Request::builder()
@@ -2081,15 +2279,16 @@ async fn par_post_full(
         .body(axum::body::Body::from(body.to_string()))
         .expect("Failed to build request");
     let (mut parts, body_inner) = request.into_parts();
+    // Simulate the real mTLS port: axum injects a single `ConnectInfo<T>` per
+    // connection — `ConnectInfo<PeerClientCert>` here — so no separate
+    // `ConnectInfo<SocketAddr>` is present. The peer address rides on
+    // `PeerClientCert.peer_addr` and is resolved via `connection_peer`.
     parts
         .extensions
-        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
-            [127, 0, 0, 1],
-            0,
-        ))));
-    parts.extensions.insert(axum::extract::ConnectInfo(
-        crate::infra::mtls_listener::PeerClientCert(cert_der),
-    ));
+        .insert(axum::extract::ConnectInfo(PeerClientCert {
+            peer_chain_der: cert_der.into_iter().collect(),
+            peer_addr: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
+        }));
     let request = axum::http::Request::from_parts(parts, body_inner);
     let response = app
         .clone()
@@ -2101,7 +2300,7 @@ async fn par_post_full(
     let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("Failed to read response body");
-    crate::test_utils::HttpResponse {
+    HttpResponse {
         status,
         body: String::from_utf8_lossy(&body_bytes).to_string(),
         headers: response_headers,
@@ -2562,6 +2761,107 @@ async fn test_rfc9126_par_rejects_dpop_jkt_jar_claim_mismatch() {
     );
 }
 
+// RFC 9449 Section 10: `dpop_jkt` is a free-form string persisted verbatim into
+// the PAR record, so it is bounded like every other free-form authorization
+// request parameter. With no `DPoP` header the proof cross-check is skipped,
+// isolating the length cap; an oversized form value must be rejected as
+// `invalid_request` before any PAR document is written.
+#[tokio::test]
+async fn test_rfc9126_par_rejects_oversized_dpop_jkt_form_param() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "par-oversized-dpop-jkt@example.com").await;
+    let (client, pkcs8_bytes) = create_fapi_jwt_client(&state.store, &user.id).await;
+
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = sha256_base64url(verifier);
+    let assertion = build_client_assertion(
+        &client.client_id,
+        &state.config().base_url,
+        &pkcs8_bytes,
+        None,
+    );
+    let body = format!(
+        "response_type=code\
+         &client_id={}\
+         &redirect_uri={}\
+         &scope=openid\
+         &code_challenge={challenge}\
+         &code_challenge_method=S256\
+         &dpop_jkt={}\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}",
+        client.client_id,
+        urlencoding::encode("https://example.com/callback"),
+        "a".repeat(257),
+    );
+
+    // No `DPoP` header: cross-check is skipped, only the length cap fires.
+    let (status, response_body) = http_post_form(&app, "/oauth/par", &body, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "oversized dpop_jkt form param must be rejected: {response_body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&response_body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_request");
+    assert_eq!(
+        json["error_description"],
+        "dpop_jkt exceeds maximum length of 256"
+    );
+}
+
+// RFC 9449 Section 10 / RFC 9101: an oversized `dpop_jkt` carried as a JAR
+// Request Object claim must be rejected when `validate_authorize_request` runs
+// on the rebuilt params. Mirrors `test_rfc9126_par_rejects_nonce_over_max_length_in_request_object`.
+#[tokio::test]
+async fn test_rfc9126_par_rejects_oversized_dpop_jkt_in_request_object() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "par-oversized-dpop-jkt-jar@example.com").await;
+    let (client, pkcs8_bytes) = create_fapi_jwt_client(&state.store, &user.id).await;
+
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = sha256_base64url(verifier);
+    let oversized_dpop_jkt = "a".repeat(257);
+    let request_jwt = build_fapi_request_object(
+        &client.client_id,
+        &state.config().base_url,
+        &pkcs8_bytes,
+        &challenge,
+        |claims| {
+            claims["dpop_jkt"] = serde_json::Value::String(oversized_dpop_jkt.clone());
+        },
+    );
+    let assertion = build_client_assertion(
+        &client.client_id,
+        &state.config().base_url,
+        &pkcs8_bytes,
+        None,
+    );
+
+    let body = format!(
+        "request={request_jwt}\
+         &client_id={}\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}",
+        client.client_id,
+    );
+
+    let (status, response_body) = http_post_form(&app, "/oauth/par", &body, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "oversized dpop_jkt in Request Object must be rejected: {response_body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&response_body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_request");
+    assert_eq!(
+        json["error_description"],
+        "dpop_jkt exceeds maximum length of 256"
+    );
+}
+
 #[tokio::test]
 async fn test_rfc9126_par_requires_dpop_nonce_returns_use_dpop_nonce() {
     // RFC 9449 §8: The token endpoint (and PAR, which shares DPoP enforcement)
@@ -2602,13 +2902,9 @@ async fn test_rfc9126_par_requires_dpop_nonce_returns_use_dpop_nonce() {
         urlencoding::encode("https://example.com/callback"),
     );
 
-    let response = crate::test_utils::http_post_form_full(
-        &app,
-        "/oauth/par",
-        &body,
-        &[("DPoP", proof.as_str())],
-    )
-    .await;
+    let response =
+        test_utils::http_post_form_full(&app, "/oauth/par", &body, &[("DPoP", proof.as_str())])
+            .await;
     assert_eq!(
         response.status,
         StatusCode::BAD_REQUEST,
@@ -2624,6 +2920,26 @@ async fn test_rfc9126_par_requires_dpop_nonce_returns_use_dpop_nonce() {
     assert_eq!(
         json["error_description"],
         "Authorization server requires nonce in DPoP proof"
+    );
+
+    // RFC 9449 §8: "The client will typically retry the request with the new
+    // nonce value". The retry reuses the same client assertion, whose `jti`
+    // the nonce rejection did not spend.
+    let nonce = response
+        .headers
+        .get("dpop-nonce")
+        .and_then(|v| v.to_str().ok())
+        .expect("DPoP-Nonce header")
+        .to_string();
+    let (proof, _jkt) = build_dpop_proof_with_jkt(&dpop_key, "POST", &par_uri, Some(&nonce));
+    let retry =
+        test_utils::http_post_form_full(&app, "/oauth/par", &body, &[("DPoP", proof.as_str())])
+            .await;
+    assert_eq!(
+        retry.status,
+        StatusCode::CREATED,
+        "nonce retry with the same assertion: {}",
+        retry.body
     );
 }
 
@@ -2686,8 +3002,8 @@ async fn test_rfc9126_par_rejects_fapi_client_rs256_assertion() {
         &user.id,
         TestClientSpec {
             jwks: TestJwks::Custom(jwks_value),
-            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::PrivateKeyJwt),
-            fapi_profile: Some(crate::db::FapiProfile::Fapi2Security),
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
+            fapi_profile: Some(FapiProfile::Fapi2Security),
             dpop_bound_access_tokens: true,
             ..Default::default()
         },
@@ -2973,9 +3289,8 @@ async fn test_rfc9126_par_accepts_mtls_with_request_object() {
     let user = create_test_user(&state.store, "par-mtls-ro@example.com").await;
     let _auth_id = create_test_authenticator(&state.store, &user.id).await;
 
-    let cert_der = make_test_cert_der("par-mtls-ro-client");
-    let parsed = crate::services::oidc::mtls::parse_client_certificate(&cert_der)
-        .expect("parse generated cert");
+    let cert_der = test_client_ca().issue("par-mtls-ro-client");
+    let parsed = mtls::parse_client_certificate(&cert_der).expect("parse generated cert");
     let subject_dn = parsed.subject_dn.expect("generated cert has subject DN");
 
     let (client_id, pkcs8_bytes) =
@@ -3012,9 +3327,8 @@ async fn test_rfc9126_par_accepts_mtls_with_dpop_and_pkce() {
     let user = create_test_user(&state.store, "par-mtls-dpop-pkce@example.com").await;
     let _auth_id = create_test_authenticator(&state.store, &user.id).await;
 
-    let cert_der = make_test_cert_der("par-mtls-dpop-client");
-    let parsed = crate::services::oidc::mtls::parse_client_certificate(&cert_der)
-        .expect("parse generated cert");
+    let cert_der = test_client_ca().issue("par-mtls-dpop-client");
+    let parsed = mtls::parse_client_certificate(&cert_der).expect("parse generated cert");
     let subject_dn = parsed.subject_dn.expect("generated cert has subject DN");
 
     let (client_id, _pkcs8) = create_fapi_mtls_client(&state.store, &user.id, &subject_dn).await;
@@ -3248,7 +3562,16 @@ async fn test_rfc9126_authorize_extends_par_ttl_and_survives_cleanup() {
 
     // Step 4: Complete the deferred flow — return to /oauth/authorize?pending_auth=<id>
     // with a valid session cookie. complete_pending_auth must consume the PAR and issue a code.
-    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
     let completion = http_get_full(
         &app,
         &format!(
@@ -3311,10 +3634,8 @@ async fn test_rfc9126_par_deleted_by_cleanup_breaks_deferred_flow() {
             authorization_details: None,
             response_mode: db::ResponseMode::Query,
         },
-        crate::services::auth::ParCreationProof {
-            client_auth: crate::services::auth::ClientAuthProof::NoAuth(
-                crate::services::auth::NoClientAuth::internal_endpoint(),
-            ),
+        ParCreationProof {
+            client_auth: ClientAuthProof::NoAuth(NoClientAuth::internal_endpoint()),
         },
     )
     .await
@@ -3416,5 +3737,474 @@ async fn test_par_empty_parameter_is_treated_as_omitted() {
     assert!(
         empty.get("request_uri").is_some(),
         "the pushed request must be accepted: {empty_body}"
+    );
+}
+
+// ========================================================================
+// `response_mode` of rejections from the registered-`response_types` gate
+//
+// A PAR or pending-authorization request's `response_mode` lives in its stored
+// record, not on the `/oauth/authorize` URL. OAuth 2.0 Multiple Response Type
+// Encoding Practices §2.1
+// (specs/openid/oauth-v2-multiple-response-types-1_0.txt) defines
+// `response_mode` as "the mechanism to be used for returning Authorization
+// Response parameters from the Authorization Endpoint", and RFC 6749 §4.1.2.1
+// defines the error response as an Authorization Response, so a rejection is
+// encoded in the negotiated mode.
+// ========================================================================
+
+/// Assert an `/oauth/authorize` rejection is rendered as a `form_post` HTML
+/// auto-submitting form (OAuth 2.0 Form Post Response Mode §2) carrying the
+/// `unauthorized_client` error and echoing `state` — and NOT as a query-string
+/// redirect.
+fn assert_rejection_is_form_post(response: &HttpResponse, state_value: &str) {
+    assert_eq!(
+        response.status,
+        StatusCode::OK,
+        "form_post rejection must be HTTP 200, not a redirect: status={} body={}",
+        response.status,
+        response.body,
+    );
+    assert!(
+        response
+            .headers
+            .get("Content-Type")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|ct| ct.contains("text/html")),
+        "form_post must carry a text/html body, got Content-Type: {:?}",
+        response.headers.get("Content-Type"),
+    );
+    let query_redirect = response
+        .headers
+        .get("Location")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|loc| loc.contains("error="));
+    assert!(
+        !query_redirect,
+        "form_post must not redirect with a query string: {:?}",
+        response.headers.get("Location"),
+    );
+    assert!(
+        response.body.contains(r#"method="post""#),
+        "form_post must contain a POST form: {}",
+        response.body,
+    );
+    assert!(
+        response.body.contains("https://example.com/callback"),
+        "form must target the registered redirect_uri: {}",
+        response.body,
+    );
+    assert!(
+        response.body.contains(r#"name="error""#) && response.body.contains("unauthorized_client"),
+        "form must carry error=unauthorized_client: {}",
+        response.body,
+    );
+    assert!(
+        response.body.contains(r#"name="error_description""#)
+            && response.body.contains("is not registered for the"),
+        "form must carry the gate's error_description: {}",
+        response.body,
+    );
+    assert!(
+        response.body.contains(r#"name="iss""#),
+        "form must include iss (RFC 9207): {}",
+        response.body,
+    );
+    assert!(
+        response.body.contains(state_value),
+        "form must echo the state parameter: {}",
+        response.body,
+    );
+}
+
+/// Assert an `/oauth/authorize` rejection is rendered as a `Query` mode
+/// redirect (303/302 to `redirect_uri?error=...&state=...`) and NOT as a
+/// `form_post` HTML form — the gate's `Query` baseline, so the fix did not
+/// collapse every mode onto `form_post`.
+fn assert_rejection_is_query_redirect(response: &HttpResponse, state_value: &str) {
+    assert!(
+        response.status == StatusCode::SEE_OTHER || response.status == StatusCode::FOUND,
+        "query rejection must be a 3xx redirect, got: {} body: {}",
+        response.status,
+        response.body,
+    );
+    let location = response
+        .headers
+        .get("Location")
+        .expect("query rejection has a Location header")
+        .to_str()
+        .expect("Location is ASCII");
+    assert!(
+        location.starts_with("https://example.com/callback?"),
+        "query rejection must target the redirect_uri: {location}",
+    );
+    assert!(
+        location.contains("error=unauthorized_client") && !location.contains("code="),
+        "query rejection must carry error=unauthorized_client, no code: {location}",
+    );
+    assert!(
+        location.contains(&format!("state={state_value}")),
+        "query rejection must echo the state parameter: {location}",
+    );
+    let description = url::Url::parse(location)
+        .expect("Location is a URL")
+        .query_pairs()
+        .find(|(k, _)| k == "error_description")
+        .map(|(_, v)| v.into_owned());
+    assert_eq!(
+        description.as_deref(),
+        Some("Client is not registered for the 'code' response type"),
+        "query rejection must carry the gate's error_description: {location}",
+    );
+    assert!(
+        !response.body.contains(r#"method="post""#),
+        "query rejection must NOT render a form_post body: {}",
+        response.body,
+    );
+}
+
+/// Build a PAR body with the given `response_mode` and `state`, pushing a
+/// `response_type=code` request with PKCE for `client_id`.
+fn par_body_with_mode(client_id: &str, response_mode: &str, state: &str) -> String {
+    let challenge = sha256_base64url("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk");
+    format!(
+        "response_type=code\
+         &client_id={client_id}\
+         &redirect_uri={redirect_uri}\
+         &response_mode={response_mode}\
+         &scope=openid\
+         &state={state}\
+         &code_challenge={challenge}\
+         &code_challenge_method=S256",
+        redirect_uri = urlencoding::encode("https://example.com/callback"),
+    )
+}
+
+/// Push a PAR and return the `request_uri`, asserting the push succeeds.
+async fn push_par(app: &axum::Router, client: &TestOAuthClient, body: &str) -> String {
+    let (status, response_body) = http_post_form(
+        app,
+        "/oauth/par",
+        body,
+        &[("Authorization", &client.basic_auth_header())],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "PAR push must succeed: {response_body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&response_body).unwrap();
+    json["request_uri"].as_str().unwrap().to_string()
+}
+
+/// Hit `/oauth/authorize` with a PAR `request_uri` and no session, so the
+/// `for_authorize` gate inside `AuthorizeResponseTarget::resolve` fires before
+/// any session check.
+async fn authorize_with_par(
+    app: &axum::Router,
+    client_id: &str,
+    request_uri: &str,
+) -> HttpResponse {
+    http_get_full(
+        app,
+        &format!(
+            "/oauth/authorize?client_id={client_id}&request_uri={}",
+            urlencoding::encode(request_uri),
+        ),
+        &[],
+    )
+    .await
+}
+
+/// A client whose stored `response_types` is an explicit empty list — the one
+/// configuration `ValidatedOAuthClient::for_authorize` rejects (it accepts
+/// `None` or a list containing `"code"`). Registration reachable via
+/// `/oauth/register` accepts `grant_types: ["client_credentials"]` +
+/// `response_types: []`; the test seam stores the same shape directly.
+async fn client_not_registered_for_code(
+    state: &std::sync::Arc<crate::AppState>,
+) -> TestOAuthClient {
+    let user = create_test_user(&state.store, "par-mode-gate@example.com").await;
+    create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            response_types: Some(vec![]),
+            ..Default::default()
+        },
+    )
+    .await
+}
+
+/// A `form_post` PAR whose client the `for_authorize` gate rejects answers
+/// with a `form_post` form, not a query redirect.
+#[tokio::test]
+async fn test_par_form_post_gate_rejection_renders_in_form_post_mode() {
+    let (app, state) = test_app().await;
+    let client = client_not_registered_for_code(&state).await;
+
+    let body = par_body_with_mode(&client.client_id, "form_post", "par-formpost-state");
+    let request_uri = push_par(&app, &client, &body).await;
+
+    let response = authorize_with_par(&app, &client.client_id, &request_uri).await;
+
+    assert_rejection_is_form_post(&response, "par-formpost-state");
+}
+
+/// A `query` PAR rejected by the same gate still answers with a query
+/// redirect, so the stored mode is used rather than `form_post` forced.
+#[tokio::test]
+async fn test_par_query_gate_rejection_still_uses_query_redirect() {
+    let (app, state) = test_app().await;
+    let client = client_not_registered_for_code(&state).await;
+
+    let body = par_body_with_mode(&client.client_id, "query", "par-query-state");
+    let request_uri = push_par(&app, &client, &body).await;
+
+    let response = authorize_with_par(&app, &client.client_id, &request_uri).await;
+
+    assert_rejection_is_query_redirect(&response, "par-query-state");
+}
+
+/// Decode the JARM `response` JWT from a redirect `Location` without
+/// verifying it; the claims are what these tests pin.
+fn jarm_claims_from_location(location: &str) -> serde_json::Value {
+    use base64::Engine as _;
+    let url = url::Url::parse(location).expect("Location is a URL");
+    let jwt = url
+        .query_pairs()
+        .find(|(k, _)| k == "response")
+        .map(|(_, v)| v.into_owned())
+        .expect("JARM redirect carries a `response` parameter");
+    let payload = jwt.split('.').nth(1).expect("JWT has a payload segment");
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .expect("payload is base64url");
+    serde_json::from_slice(&bytes).expect("payload is JSON")
+}
+
+/// A `jwt` PAR whose client the `for_authorize` gate rejects answers with a
+/// signed JARM `response`, not plain error parameters (JARM §2.1).
+#[tokio::test]
+async fn test_par_jwt_gate_rejection_renders_as_jarm() {
+    let (app, state) = test_app().await;
+    let client = client_not_registered_for_code(&state).await;
+
+    let body = par_body_with_mode(&client.client_id, "jwt", "par-jwt-state");
+    let request_uri = push_par(&app, &client, &body).await;
+
+    let response = authorize_with_par(&app, &client.client_id, &request_uri).await;
+
+    assert!(
+        response.status.is_redirection(),
+        "jwt-mode rejection must redirect with a JARM response: status={} body={}",
+        response.status,
+        response.body,
+    );
+    let location = response
+        .headers
+        .get("Location")
+        .and_then(|v| v.to_str().ok())
+        .expect("Location header");
+    let url = url::Url::parse(location).expect("Location is a URL");
+    assert!(
+        url.query_pairs().all(|(k, _)| k == "response"),
+        "JARM §2.1: the error must be inside the JWT, not plain parameters: {location}",
+    );
+    let claims = jarm_claims_from_location(location);
+    assert_eq!(claims["error"], "unauthorized_client", "claims: {claims}");
+    assert_eq!(
+        claims["error_description"], "Client is not registered for the 'code' response type",
+        "claims: {claims}"
+    );
+    assert_eq!(claims["state"], "par-jwt-state", "claims: {claims}");
+}
+
+/// A pending authorization stored with `form_post`, returned to after login,
+/// whose client the `for_authorize` gate rejects answers with a `form_post`
+/// form: the stored mode applies to this rejection as it does to the PAR one.
+#[tokio::test]
+async fn test_pending_auth_gate_rejection_renders_in_stored_mode() {
+    let (app, state) = test_app().await;
+    let client = client_not_registered_for_code(&state).await;
+
+    let pending_id = create_test_pending_auth(
+        &state.store,
+        TestPendingAuthSpec {
+            client_id: &client.client_id,
+            response_mode: ResponseMode::FormPost,
+            state: Some("pending-formpost-state"),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let response = http_get_full(
+        &app,
+        &format!("/oauth/authorize?pending_auth={pending_id}"),
+        &[],
+    )
+    .await;
+
+    assert_rejection_is_form_post(&response, "pending-formpost-state");
+}
+
+// ========================================================================
+// Check-before-spend for the pending claim on the PAR consume rejection site
+//
+// `complete_pending_auth` consumes the PAR via `ParConsumptionProof::consume`
+// after `validate_code_request_constraints`. If the PAR is already consumed
+// (e.g. a concurrent resume won the PAR race), the resume rejects with
+// `error=invalid_request`. Before the pending-claim fix, `handle_pending_auth`
+// had already burned the single-use pending id *before* `complete_pending_auth`
+// ran, so a retry of the same resume link rendered the "Authorization session
+// expired" page rather than re-rendering the PAR denial. The pending consume
+// now runs as the last step before code issuance, so the PAR-loser denial
+// leaves the pending claim intact and a retry re-renders the same
+// `error=invalid_request` denial.
+// ========================================================================
+
+#[tokio::test]
+async fn test_rfc9126_pending_resume_retry_re_renders_par_already_consumed_not_session_expired() {
+    // Push a PAR, start authorize with no session → pending stored + /login.
+    // Consume the PAR out-of-band (simulating a concurrent resume that won the
+    // PAR race and issued a code). Resume the pending → the PAR consume in
+    // complete_pending_auth hits AlreadyConsumed → error=invalid_request.
+    // Retry the SAME resume link → the pending claim is still unspent (the
+    // PAR denial did not burn it), so the retry re-renders the same
+    // error=invalid_request denial rather than the "session expired" page.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "par-retry-race@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let request_uri = create_par_request(&app, &client).await;
+
+    // No session → pending stored (carrying the par_request_uri) + /login.
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?client_id={}&request_uri={}",
+            client.client_id,
+            urlencoding::encode(&request_uri),
+        ),
+        &[],
+    )
+    .await;
+    assert!(
+        response.status == StatusCode::FOUND || response.status == StatusCode::SEE_OTHER,
+        "unauthenticated PAR authorize must redirect to /login, got: {}",
+        response.status
+    );
+    let location = response
+        .headers
+        .get("Location")
+        .expect("Must have Location header")
+        .to_str()
+        .expect("Valid UTF-8");
+    assert!(
+        location.starts_with("/login?pending_auth="),
+        "PAR authorize must redirect to /login?pending_auth=: {location}"
+    );
+    let pending_id = location
+        .strip_prefix("/login?pending_auth=")
+        .and_then(|id| urlencoding::decode(id).ok())
+        .map(|s| s.into_owned())
+        .expect("redirect must carry a pending_auth id");
+
+    // Simulate a concurrent resume winning the PAR race: consume the PAR
+    // out-of-band so this resume's PAR consume in complete_pending_auth
+    // returns AlreadyConsumed.
+    let _proof = ParConsumptionProof::consume(
+        &state.store,
+        ParRef {
+            request_uri: &request_uri,
+            client_id: &client.client_id,
+            mode: ParConsumptionMode::SkipExpiry,
+        },
+        jiff::Timestamp::now(),
+    )
+    .await
+    .expect("out-of-band PAR consume should succeed");
+
+    // Simulate login: create a session.
+    let session_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let cookie = format!("__Host-vouch_session={session_token}");
+
+    // First resume → PAR already consumed → error=invalid_request redirect.
+    let completion = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?pending_auth={}",
+            urlencoding::encode(&pending_id)
+        ),
+        &[("Cookie", &cookie)],
+    )
+    .await;
+    assert!(
+        completion.status == StatusCode::FOUND || completion.status == StatusCode::SEE_OTHER,
+        "first resume must redirect with the authorization error, got: {} body: {}",
+        completion.status,
+        completion.body
+    );
+    let first_location = completion
+        .headers
+        .get("Location")
+        .expect("completion must have Location header")
+        .to_str()
+        .expect("Valid UTF-8");
+    assert!(
+        first_location.contains("error=invalid_request"),
+        "first resume must reject an already-consumed PAR with error=invalid_request: {first_location}"
+    );
+    assert!(
+        !first_location.contains("code="),
+        "first resume must NOT issue a code: {first_location}"
+    );
+
+    // Retry the SAME resume link. The pending claim is still unspent (the PAR
+    // denial did not burn it), so the retry re-renders the same
+    // error=invalid_request denial — NOT the "Authorization session expired"
+    // page that a burned id would render (200 OK, no Location redirect).
+    let retry = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?pending_auth={}",
+            urlencoding::encode(&pending_id)
+        ),
+        &[("Cookie", &cookie)],
+    )
+    .await;
+    assert!(
+        retry.status == StatusCode::FOUND || retry.status == StatusCode::SEE_OTHER,
+        "retry must redirect with the authorization error (not render the session-expired \
+         page), got: {} body: {}",
+        retry.status,
+        retry.body
+    );
+    let retry_location = retry
+        .headers
+        .get("Location")
+        .expect("retry must have Location header")
+        .to_str()
+        .expect("Valid UTF-8");
+    assert!(
+        retry_location.contains("error=invalid_request"),
+        "retry must re-render the same PAR already-consumed denial, got: {retry_location}"
+    );
+    assert!(
+        !retry_location.contains("code="),
+        "retry must NOT issue a code: {retry_location}"
     );
 }

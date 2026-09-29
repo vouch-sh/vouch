@@ -21,6 +21,17 @@ use vouch_common::fido2_types::CredentialId;
 
 use super::{AuthenticationResult, ClientData, FidoDevice, RegistrationResult};
 
+/// Minimum PIN length in Unicode characters. CTAP 2.0 §5.5.5: "Platform
+/// checks the Unicode character length of "newPinUnicode" against the minimum
+/// 4 Unicode character requirement and returns CTAP2_ERR_PIN_POLICY_VIOLATION
+/// if the check fails." Vouch raises that floor from 4 to 8.
+const MIN_PIN_CHARS: usize = 8;
+
+/// Maximum PIN length in UTF-8 bytes. CTAP 2.0 §5.5.5: "Platform checks the
+/// byte length of "newPin" against the max UTF-8 representation limit of 63
+/// bytes and returns CTAP2_ERR_PIN_POLICY_VIOLATION if the check fails."
+const MAX_PIN_BYTES: usize = 63;
+
 // ---------------------------------------------------------------------------
 // Suppress spurious stdout from ctap-hid-fido2
 //
@@ -516,8 +527,9 @@ fn translate_fido2_error(err: anyhow::Error, operation: &str) -> anyhow::Error {
 /// Prompt for a new PIN with confirmation.
 ///
 /// Validates PIN requirements:
-/// - Minimum 8 characters (Vouch security requirement)
-/// - Maximum 63 characters (FIDO2 limit)
+/// - Minimum 8 Unicode characters (Vouch security requirement)
+/// - Maximum 63 UTF-8 bytes (CTAP 2.0 §5.5.5 bounds the UTF-8 representation,
+///   not the character count)
 ///
 /// Returns the PIN wrapped in `SecretString` for memory protection.
 fn prompt_new_pin() -> Result<SecretString> {
@@ -529,12 +541,14 @@ fn prompt_new_pin() -> Result<SecretString> {
         stderr().flush().ok();
         let pin = rpassword::read_password().with_context(|| tr!("fido2-err-read-pin"))?;
 
-        // Validate PIN length
-        if pin.len() < 8 {
+        // CTAP 2.0 §5.5.5 checks the minimum against the Unicode character
+        // length and the maximum against the UTF-8 byte length, so the two
+        // bounds are measured in different units.
+        if pin.chars().count() < MIN_PIN_CHARS {
             tr_eprintln!("fido2-pin-err-too-short");
             continue;
         }
-        if pin.len() > 63 {
+        if pin.len() > MAX_PIN_BYTES {
             tr_eprintln!("fido2-pin-err-too-long");
             continue;
         }
