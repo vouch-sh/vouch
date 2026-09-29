@@ -430,8 +430,8 @@ pub(crate) async fn device_token(
             let sender_constraint = match SenderConstraintProof::validate(
                 &oauth_client,
                 SenderConstraints {
-                    dpop: dpop_proof.is_some(),
-                    mtls_cert: client_cert.0.is_some(),
+                    dpop: dpop_proof.as_ref(),
+                    mtls_cert: client_cert.thumbprint(),
                 },
             ) {
                 Ok(witness) => witness,

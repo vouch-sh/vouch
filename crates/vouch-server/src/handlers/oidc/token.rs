@@ -787,14 +787,12 @@ async fn handle_authorization_code_grant(
         Err(e) => return e.into_oauth_response().into_response(),
     };
 
-    let has_mtls_cert = client_cert.0.is_some();
-
     // Every sender-constraint requirement registered for this client.
     let sender_constraint = match SenderConstraintProof::validate(
         &authenticated_client,
         SenderConstraints {
-            dpop: dpop_proof.is_some(),
-            mtls_cert: has_mtls_cert,
+            dpop: dpop_proof.as_ref(),
+            mtls_cert: client_cert.thumbprint(),
         },
     ) {
         Ok(witness) => witness,
@@ -945,8 +943,8 @@ async fn handle_client_credentials_grant(
     let sender_constraint = match SenderConstraintProof::validate(
         &authenticated_client,
         SenderConstraints {
-            dpop: dpop_proof.is_some(),
-            mtls_cert: client_cert.0.is_some(),
+            dpop: dpop_proof.as_ref(),
+            mtls_cert: client_cert.thumbprint(),
         },
     ) {
         Ok(witness) => witness,
@@ -1267,23 +1265,20 @@ async fn handle_token_exchange_grant(
         Err(e) => return e.into_oauth_response().into_response(),
     };
 
-    // RFC 8705 Section 3: Bind access token to cert thumbprint only when opted in.
-    let mtls_thumbprint = extract_mtls_thumbprint(&authenticated_client, &client_cert);
-
     // FAPI 2.0 Section 5.3.2.1: sender-constrained access tokens required
-    // (DPoP or mTLS) on every grant a FAPI client can use — without this, a
-    // FAPI client could exchange a bound subject_token for an unbound one.
-    // Mirrors `handle_authorization_code_grant`.
-    let sender_constraint = match SenderConstraintProof::validate(
-        &authenticated_client,
-        SenderConstraints {
-            dpop: dpop_proof.is_some(),
-            mtls_cert: client_cert.0.is_some(),
-        },
-    ) {
-        Ok(witness) => witness,
-        Err(e) => return e.into_oauth_response().into_response(),
+    // (DPoP or mTLS) on every grant a FAPI client can use, even when the
+    // subject token is unbound. `exchange_token` enforces a bound subject or
+    // actor token's own key for every client and derives the issued binding. Mirrors
+    // `handle_authorization_code_grant`.
+    let sender_constraints = SenderConstraints {
+        dpop: dpop_proof.as_ref(),
+        mtls_cert: client_cert.thumbprint(),
     };
+    let sender_constraint =
+        match SenderConstraintProof::validate(&authenticated_client, sender_constraints) {
+            Ok(witness) => witness,
+            Err(e) => return e.into_oauth_response().into_response(),
+        };
 
     // Resolve the effective audience. This call is the chokepoint that
     // enforces the client's `resource_uris` allowlist (RFC 8707) on the
@@ -1310,7 +1305,7 @@ async fn handle_token_exchange_grant(
         scope: params.scope.as_deref(),
         requested_token_type: tokens.requested_token_type,
         client: &authenticated_client,
-        binding: TokenBinding::new(dpop_proof.as_ref(), mtls_thumbprint.as_ref()),
+        presented: sender_constraints,
         authorization_details: params.authorization_details.as_deref(),
         client_info: &client_info,
     };
@@ -1477,14 +1472,12 @@ async fn handle_fido2_assertion_grant(
             Err(e) => return e.into_oauth_response().into_response(),
         };
 
-    let has_mtls_cert = client_cert.0.is_some();
-
     // FAPI 2.0: Require sender-constrained tokens (DPoP or mTLS)
     let sender_constraint = match SenderConstraintProof::validate(
         &jwt_authenticated,
         SenderConstraints {
-            dpop: dpop_proof.is_some(),
-            mtls_cert: has_mtls_cert,
+            dpop: dpop_proof.as_ref(),
+            mtls_cert: client_cert.thumbprint(),
         },
     ) {
         Ok(witness) => witness,

@@ -1,8 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! OIDC token claims for cloud provider identity federation.
 
+use crate::error::{OAuthErrorCode, ServiceError};
+use crate::services::auth::TokenBinding;
+use crate::services::oidc::dpop::ValidatedDpopProof;
+use crate::services::oidc::fapi::SenderConstraints;
+use crate::services::oidc::mtls::CertThumbprint;
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq;
 use vouch_common::protocol;
 
 /// Confirmation claim for sender-constrained token binding.
@@ -40,6 +46,110 @@ impl CnfClaim {
         } else {
             protocol::ACCESS_TOKEN_TYPE_BEARER
         }
+    }
+
+    /// Whether `proof` was signed by the key this claim confirms.
+    ///
+    /// RFC 9449 §7.1: a resource server MUST "check that the public key of
+    /// the DPoP proof matches the public key to which the access token is
+    /// bound".
+    #[must_use]
+    pub(crate) fn confirms_dpop(&self, proof: &ValidatedDpopProof) -> bool {
+        self.jkt
+            .as_deref()
+            .is_some_and(|jkt| proof.jkt.as_bytes().ct_eq(jkt.as_bytes()).into())
+    }
+
+    /// Whether `cert` is the client certificate this claim confirms
+    /// (RFC 8705 §3).
+    #[must_use]
+    pub(crate) fn confirms_certificate(&self, cert: &CertThumbprint) -> bool {
+        self.x5t_s256
+            .as_deref()
+            .is_some_and(|x5t| cert.as_str().as_bytes().ct_eq(x5t.as_bytes()).into())
+    }
+
+    /// The binding this claim confirms, proven by the keys a request
+    /// presented, or `None` when the claim names no key.
+    ///
+    /// A token derived from a sender-constrained token must stay bound to the
+    /// same key, and only its holder may derive it. The returned binding
+    /// borrows the presented proof, so it cannot name a key the request did
+    /// not prove. DPoP takes precedence over mTLS, matching
+    /// [`TokenBinding::new`] and resource access.
+    ///
+    /// # Errors
+    ///
+    /// [`PossessionError`] when the request lacks the confirmed key or proves
+    /// a different one.
+    pub(crate) fn confirmed_binding<'a>(
+        &self,
+        presented: SenderConstraints<'a>,
+    ) -> Result<Option<TokenBinding<'a>>, PossessionError> {
+        if self.jkt.is_some() {
+            let proof = presented.dpop.ok_or(PossessionError::MissingDpopProof)?;
+            if !self.confirms_dpop(proof) {
+                return Err(PossessionError::DpopKeyMismatch);
+            }
+            return Ok(Some(TokenBinding::Dpop(proof)));
+        }
+        if self.x5t_s256.is_some() {
+            let cert = presented
+                .mtls_cert
+                .ok_or(PossessionError::MissingClientCertificate)?;
+            if !self.confirms_certificate(cert) {
+                return Err(PossessionError::ClientCertificateMismatch);
+            }
+            return Ok(Some(TokenBinding::MutualTls(cert)));
+        }
+        Ok(None)
+    }
+}
+
+/// Why a request failed to prove possession of the key a `cnf` claim names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PossessionError {
+    /// The token is DPoP-bound and the request carried no DPoP proof.
+    MissingDpopProof,
+    /// The DPoP proof was signed by a key other than `cnf.jkt`.
+    DpopKeyMismatch,
+    /// The token is certificate-bound and the request presented no
+    /// certificate.
+    MissingClientCertificate,
+    /// The presented certificate is not the one `cnf.x5t#S256` names.
+    ClientCertificateMismatch,
+    /// The token is certificate-bound and the requesting client registered
+    /// for DPoP-bound tokens only.
+    DpopRequired,
+}
+
+impl PossessionError {
+    /// The error description, ASCII per RFC 6749 §5.2.
+    #[must_use]
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::MissingDpopProof => "Missing DPoP proof header for sender-constrained token",
+            Self::DpopKeyMismatch => "DPoP proof key does not match token binding",
+            Self::MissingClientCertificate => {
+                "mTLS certificate required for certificate-bound token"
+            }
+            Self::ClientCertificateMismatch => "Client certificate does not match token binding",
+            Self::DpopRequired => {
+                "client requires DPoP-bound access tokens, but the token is certificate-bound"
+            }
+        }
+    }
+
+    /// The token-exchange error for the `parameter` whose token failed.
+    ///
+    /// RFC 8693 §2.2.2: a subject or actor token that is "unacceptable based
+    /// on policy" MUST be reported with the `invalid_request` error code.
+    #[must_use]
+    pub(crate) fn for_exchange(self, parameter: &str) -> ServiceError {
+        ServiceError::oauth(
+            OAuthErrorCode::InvalidRequest,
+            format!("{parameter}: {}", self.as_str()),
+        )
     }
 }
 

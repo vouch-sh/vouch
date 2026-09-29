@@ -1548,3 +1548,37 @@ async fn test_rfc8705_tls_client_auth_accepts_ca_issued_cert_with_matching_dn() 
     let token: serde_json::Value = serde_json::from_str(&resp).expect("JSON");
     assert!(token["access_token"].is_string(), "{resp}");
 }
+
+/// A cookie arrives with no client certificate, so a certificate-bound access
+/// token in the session cookie proves nothing about who holds the
+/// certificate. `/oauth/authorize` treats it as signed out and issues no code.
+#[tokio::test]
+async fn test_authorize_ignores_certificate_bound_session_cookie() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "authorize-mtls-cookie@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let thumbprint = cert_thumbprint(&test_client_ca().issue("authorize-mtls-cookie"));
+    let session = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Mtls(&thumbprint),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let location = authorize_location_with_session(&app, &client.client_id, &session).await;
+
+    assert!(
+        location.starts_with("/login?pending_auth="),
+        "a certificate-bound session cookie must not authenticate /oauth/authorize: {location}"
+    );
+    assert!(
+        !location.contains("code="),
+        "no code may be issued: {location}"
+    );
+}

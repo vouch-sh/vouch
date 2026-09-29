@@ -17,7 +17,8 @@ use crate::services::auth::{
 };
 use crate::services::oidc::ScopeSet;
 use crate::services::oidc::authorization_details::AuthorizationDetails;
-use crate::services::oidc::claims::OidcIdTokenClaimsBuilder;
+use crate::services::oidc::claims::{OidcIdTokenClaimsBuilder, PossessionError};
+use crate::services::oidc::fapi::SenderConstraints;
 use crate::services::oidc::validated_client::ValidatedOAuthClient;
 use crate::services::policy;
 use jiff::Timestamp;
@@ -229,10 +230,11 @@ pub struct TokenExchangeParams<'a> {
     pub requested_token_type: Option<RequestedTokenType>,
     /// The requesting client, checked for the token-exchange grant.
     pub client: &'a ValidatedOAuthClient,
-    /// RFC 9449 §6 / RFC 8705 §3: how the issued token is bound. The DPoP
-    /// witness travels instead of its thumbprint so an exchanged token cannot
-    /// be sender-constrained to a key that was never proven.
-    pub binding: TokenBinding<'a>,
+    /// The keys the request proved possession of. A sender-constrained
+    /// subject or actor token is accepted only with the key its `cnf` names,
+    /// and the issued token is bound only to a proven key: the witnesses
+    /// travel instead of their thumbprints.
+    pub presented: SenderConstraints<'a>,
     /// The request's transport metadata, from the `ClientInfo` extractor:
     /// the client IP feeds the exchange policies (e.g. IP consistency), and
     /// the IP and User-Agent are recorded on the token-exchange audit row,
@@ -327,6 +329,31 @@ pub(crate) async fn exchange_token(
             )
         })?;
 
+    // A sender-constrained subject token is accepted only from the holder of
+    // its key, and the issued token stays bound to that key. Otherwise
+    // anyone holding a stolen DPoP-bound token could exchange it for a
+    // bearer token, or rebind it to a key of their own. RFC 8693 §1 leaves
+    // proof-of-possession to deployment policy; this applies the key match
+    // of the RFC 9449 §7.1 resource-server check. A token-endpoint proof
+    // carries no `ath`, so it is not tied to the subject token itself.
+    //
+    // In delegation the requester is the actor, which does not hold the
+    // subject's key. RFC 8693 §4.4 `may_act` is the claim that would
+    // authorize it, and Vouch does not implement `may_act`, so a
+    // sender-constrained subject token cannot be delegated.
+    let subject_binding = match subject_decoded.cnf() {
+        Some(_) if params.actor.is_some() => {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidRequest,
+                "subject_token: a sender-constrained subject token cannot be delegated",
+            ));
+        }
+        Some(cnf) => cnf
+            .confirmed_binding(params.presented)
+            .map_err(|e| e.for_exchange("subject_token"))?,
+        None => None,
+    };
+
     // Verify the subject token's session exists
     let subject_token_hash = hash_token(subject_token);
     let subject_session = state
@@ -393,7 +420,7 @@ pub(crate) async fn exchange_token(
     let subject_email = &subject_user.email;
 
     // Handle actor token if present (for delegation chains)
-    let (actor_claim, actor_user_id) = if let Some(actor) = params.actor {
+    let (actor_claim, actor_user_id, actor_binding) = if let Some(actor) = params.actor {
         let actor_token = actor.token().expose_secret();
 
         // Decode actor token (supports both HS256 and ES256)
@@ -401,6 +428,12 @@ pub(crate) async fn exchange_token(
             .ok_or_else(|| {
                 ServiceError::oauth(OAuthErrorCode::InvalidRequest, "Invalid actor token")
             })?;
+        let actor_binding = actor_decoded
+            .cnf()
+            .map(|cnf| cnf.confirmed_binding(params.presented))
+            .transpose()
+            .map_err(|e| e.for_exchange("actor_token"))?
+            .flatten();
 
         // Block self-delegation: actor and subject must be different users
         if actor_decoded.sub() == subject_decoded.sub() {
@@ -495,10 +528,38 @@ pub(crate) async fn exchange_token(
             ));
         }
 
-        (Some(actor), Some(actor_user_id))
+        (Some(actor), Some(actor_user_id), actor_binding)
     } else {
-        (None, None)
+        (None, None, None)
     };
+
+    // The issued token is bound to the key of the party that uses it: the
+    // actor when one is present (RFC 8693 §2.1: the actor "will be the party
+    // that is authorized to use the requested security token"), otherwise the
+    // subject. With neither bound, the client's own proof binds it, and a
+    // certificate binds it only when the client opted in (RFC 8705 §3).
+    let inherited = subject_binding
+        .map(|binding| ("subject_token", binding))
+        .or(actor_binding.map(|binding| ("actor_token", binding)));
+    // RFC 9449 §5: a client registered with `dpop_bound_access_tokens` gets
+    // only DPoP-bound tokens, so it cannot take over a certificate binding.
+    if let Some((parameter, TokenBinding::MutualTls(_))) = inherited
+        && params.client.dpop_bound_access_tokens
+    {
+        return Err(PossessionError::DpopRequired.for_exchange(parameter));
+    }
+    let binding = inherited.map_or_else(
+        || {
+            TokenBinding::new(
+                params.presented.dpop,
+                params
+                    .presented
+                    .mtls_cert
+                    .filter(|_| params.client.tls_client_certificate_bound_access_tokens),
+            )
+        },
+        |(_, binding)| binding,
+    );
 
     // Calculate granted scope (intersection of requested and available).
     // For FIDO2 sessions (scope: None), require explicit scope in the request
@@ -620,7 +681,7 @@ pub(crate) async fn exchange_token(
             authenticator_id,
             client_id: &params.client.client_id,
             scope: granted_scope.clone(),
-            binding: params.binding,
+            binding,
             act: actor_claim,
             audience,
             // Thread the subject-TTL cap into the issued token: `expires_in`
