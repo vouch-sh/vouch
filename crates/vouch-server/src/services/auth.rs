@@ -1108,6 +1108,8 @@ pub(crate) struct ValidatedResourceToken {
     pub hardware_verified: bool,
     /// Authentication time (`auth_time` claim).
     pub auth_time: Option<i64>,
+    /// RFC 7519 §4.1.4 expiration time (`exp` claim), Unix seconds.
+    pub exp: i64,
     /// SHA-256 hash of the access token (for DB lookups/revocation).
     pub token_hash: String,
     /// AI coding agent identifier from DPoP proof custom claim (e.g., "claude-code").

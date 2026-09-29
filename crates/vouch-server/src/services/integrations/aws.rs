@@ -354,6 +354,7 @@ mod tests {
             authenticator_id: None,
             hardware_verified: true,
             auth_time: None,
+            exp: 0,
             token_hash: String::new(),
             dpop_source,
             hardware_aaguid,

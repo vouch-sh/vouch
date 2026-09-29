@@ -13,7 +13,7 @@
 )]
 
 use vouch_common::dns::{DohConfig, DohResolver, install_process_resolver, process_resolver};
-use vouch_common::http::{agent_client, credential_client, server_client};
+use vouch_common::http::{credential_client, server_client};
 
 #[test]
 fn install_process_resolver_wires_through_all_factories() {
@@ -41,7 +41,6 @@ fn install_process_resolver_wires_through_all_factories() {
     // wouldn't catch a silent skip — but a build failure here would
     // surface a misuse of the resolver type or feature flags.
     credential_client("test-credential/1.0").expect("credential_client builds");
-    agent_client("test-agent/1.0").expect("agent_client builds");
     server_client("test-server/1.0", None).expect("server_client builds");
 
     // Idempotency: a second install must NOT replace the state. Attempt

@@ -5,49 +5,41 @@ use crate::AppState;
 use crate::arrival::ArrivalTime;
 use crate::db;
 use crate::error::ServiceError;
-use crate::services::auth::AccessTokenClaims;
 use axum::{
     Json,
     body::Body,
     extract::State,
-    http::{HeaderMap, StatusCode, header},
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
 use std::sync::Arc;
-use vouch_common::{SessionStatus, protocol};
+use vouch_common::SessionStatus;
 
+use super::session::OptionalAuthenticatedToken;
 use super::{clear_session_cookie, hash_token};
 use crate::db::ClientInfo;
-use crate::http;
-use crate::services::auth::{self, DecodedToken};
 
 /// Get current session status.
 ///
-/// Accepts an OAuth access token (Bearer or DPoP scheme) and returns
-/// authenticated status, email, expiration, and device name.
+/// Validates the `Authorization` header token like any resource request,
+/// sender constraint included. RFC 9449 §7.2: a protected resource supporting
+/// both schemes "MUST reject a DPoP-bound access token received as a bearer
+/// token". A missing or rejected token yields `authenticated: false` rather
+/// than a 401, except `use_dpop_nonce`, whose fresh `DPoP-Nonce` the client
+/// needs to retry (RFC 9449 §8).
 pub(crate) async fn status(
     arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    token: Result<OptionalAuthenticatedToken, ServiceError>,
 ) -> Result<Json<SessionStatus>, ServiceError> {
-    // Get Authorization header (Bearer or DPoP)
-    let auth_header = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|h| h.to_str().ok());
-
-    // RFC 9110 Section 11.1: the auth-scheme token is case-insensitive, so
-    // `BEARER`, `bearer`, and `BeArEr` must all match like `Bearer`, and
-    // likewise for `DPoP`. Split on the first space and compare the scheme
-    // with `eq_ignore_ascii_case` rather than hard-coding casings via
-    // `starts_with`. An unrecognized scheme (or no header at all) yields
-    // `authenticated: false` — this endpoint never 401s.
-    let token = match auth_header.and_then(|h| {
-        http::strip_auth_scheme(h, protocol::AUTH_SCHEME_BEARER)
-            .or_else(|| http::strip_auth_scheme(h, protocol::AUTH_SCHEME_DPOP))
-    }) {
-        Some(tok) => tok,
-        None => {
+    let token = match token {
+        Ok(OptionalAuthenticatedToken(Some(token))) => token,
+        Ok(OptionalAuthenticatedToken(None))
+        | Err(ServiceError::Api {
+            status: StatusCode::UNAUTHORIZED,
+            ..
+        }) => {
             return Ok(Json(SessionStatus {
                 authenticated: false,
                 email: None,
@@ -55,54 +47,10 @@ pub(crate) async fn status(
                 device_name: None,
             }));
         }
+        Err(e) => return Err(e),
     };
 
-    if token.is_empty() {
-        return Ok(Json(SessionStatus {
-            authenticated: false,
-            email: None,
-            expires_in_seconds: None,
-            device_name: None,
-        }));
-    }
-
-    // Validate as OAuth access token (ES256, at+jwt)
-    let config = state.config();
-    let decoded = match auth::decode_token(token, &state.oidc_key, &config.base_url) {
-        Some(d) => d,
-        None => {
-            return Ok(Json(SessionStatus {
-                authenticated: false,
-                email: None,
-                expires_in_seconds: None,
-                device_name: None,
-            }));
-        }
-    };
-
-    let DecodedToken::AccessToken(access_claims) = decoded;
-
-    // Check session exists in database
-    let token_hash = hash_token(token);
-    let session = state
-        .session_cache
-        .get_session_by_token_hash(&state.store, &token_hash, arrival)
-        .await?;
-
-    if session.is_none() {
-        return Ok(Json(SessionStatus {
-            authenticated: false,
-            email: None,
-            expires_in_seconds: None,
-            device_name: None,
-        }));
-    }
-
-    // Get authenticator name from server-side session record
-    let device_name = match session
-        .as_deref()
-        .and_then(|s| s.authenticator_id.as_deref())
-    {
+    let device_name = match token.authenticator_id.as_deref() {
         Some(auth_id) => db::get_authenticator_by_id(&state.store, auth_id)
             .await
             .ok()
@@ -111,7 +59,12 @@ pub(crate) async fn status(
         None => None,
     };
 
-    Ok(Json(build_status(&access_claims, device_name, arrival)))
+    Ok(Json(build_status(
+        token.exp,
+        token.email,
+        device_name,
+        arrival,
+    )))
 }
 
 /// Build the [`SessionStatus`] for the success path of [`status`].
@@ -124,13 +77,14 @@ pub(crate) async fn status(
 /// carries no "if authenticated" qualifier in the contract and is returned
 /// unconditionally.
 fn build_status(
-    access_claims: &AccessTokenClaims,
+    exp: i64,
+    email: Option<String>,
     device_name: Option<String>,
     arrival: ArrivalTime,
 ) -> SessionStatus {
     let now = arrival.as_second();
-    let expires_in = if access_claims.exp > now {
-        u64::try_from(access_claims.exp.saturating_sub(now)).ok()
+    let expires_in = if exp > now {
+        u64::try_from(exp.saturating_sub(now)).ok()
     } else {
         None
     };
@@ -138,11 +92,7 @@ fn build_status(
     let authenticated = expires_in.is_some();
     SessionStatus {
         authenticated,
-        email: if authenticated {
-            access_claims.email.clone()
-        } else {
-            None
-        },
+        email: email.filter(|_| authenticated),
         expires_in_seconds: expires_in,
         device_name,
     }
@@ -208,7 +158,7 @@ mod tests {
     use crate::arrival::ArrivalTime;
     use crate::crypto;
     use crate::db::{self, AuditEvent, AuditEventFilter, AuditEventKind, SessionPurpose};
-    use crate::services::auth::AccessTokenClaims;
+    use crate::services::oidc::mtls::compute_cert_thumbprint;
     use crate::test_utils::*;
     use axum::http::StatusCode;
 
@@ -310,37 +260,18 @@ mod tests {
         assert!(json["email"].is_null());
     }
 
-    fn claims_with_exp(exp: i64, email: Option<&str>) -> AccessTokenClaims {
-        use crate::services::oidc::ScopeSet;
-        AccessTokenClaims {
-            iss: "test-issuer".to_string(),
-            sub: "user-123".to_string(),
-            aud: "client-abc".to_string(),
-            exp,
-            iat: exp.saturating_sub(3600),
-            nbf: None,
-            jti: "jti-1".to_string(),
-            client_id: "client-abc".to_string(),
-            scope: Some(ScopeSet::parse("openid email")),
-            email: email.map(str::to_string),
-            email_verified: Some(true),
-            hardware_verified: true,
-            cnf: None,
-            auth_time: None,
-            act: None,
-            amr: None,
-            acr: None,
-        }
-    }
-
     /// A fixed instant, so a test about the `exp == now` edge compares against
     /// exactly the second it constructed its claims from.
     const FIXED: i64 = 1_800_000_000;
 
     #[test]
     fn build_status_email_is_none_at_exp_boundary() {
-        let claims = claims_with_exp(FIXED, Some("user@example.com"));
-        let status = super::build_status(&claims, None, ArrivalTime::for_test_second(FIXED));
+        let status = super::build_status(
+            FIXED,
+            Some("user@example.com".to_string()),
+            None,
+            ArrivalTime::for_test_second(FIXED),
+        );
         // `exp == now` is the sharp edge of the strict `exp > now` re-check:
         // jsonwebtoken accepts it, but the server's authoritative rule rejects
         // it, so `authenticated == false` and `email` must be `None`.
@@ -355,8 +286,12 @@ mod tests {
 
     #[test]
     fn build_status_email_is_some_when_authenticated() {
-        let claims = claims_with_exp(FIXED.saturating_add(3600), Some("user@example.com"));
-        let status = super::build_status(&claims, None, ArrivalTime::for_test_second(FIXED));
+        let status = super::build_status(
+            FIXED.saturating_add(3600),
+            Some("user@example.com".to_string()),
+            None,
+            ArrivalTime::for_test_second(FIXED),
+        );
         assert!(status.authenticated);
         assert_eq!(status.email.as_deref(), Some("user@example.com"));
         assert!(status.expires_in_seconds.unwrap_or(0) > 0);
@@ -365,7 +300,8 @@ mod tests {
     #[test]
     fn build_status_device_name_returned_regardless_of_auth() {
         let live = super::build_status(
-            &claims_with_exp(FIXED.saturating_add(3600), Some("user@example.com")),
+            FIXED.saturating_add(3600),
+            Some("user@example.com".to_string()),
             Some("YubiKey 5C".to_string()),
             ArrivalTime::for_test_second(FIXED),
         );
@@ -373,7 +309,8 @@ mod tests {
         assert_eq!(live.device_name.as_deref(), Some("YubiKey 5C"));
 
         let expired = super::build_status(
-            &claims_with_exp(FIXED.saturating_sub(3600), Some("user@example.com")),
+            FIXED.saturating_sub(3600),
+            Some("user@example.com".to_string()),
             Some("YubiKey 5C".to_string()),
             ArrivalTime::for_test_second(FIXED),
         );
@@ -625,5 +562,185 @@ mod tests {
             events.is_empty(),
             "no Logout audit event when there is no session to delete"
         );
+    }
+
+    /// A DPoP-bound token and the key it is bound to.
+    async fn dpop_bound_status_token(
+        state: &crate::AppState,
+        email: &str,
+    ) -> (
+        aws_lc_rs::signature::EcdsaKeyPair,
+        serde_json::Value,
+        String,
+    ) {
+        let user = create_test_user(&state.store, email).await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let (key, jwk) = generate_dpop_key_pair();
+        let jkt = dpop_jkt(&jwk);
+        let token = create_test_session_with(
+            state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                binding: TestBinding::Dpop(&jkt),
+                ..Default::default()
+            },
+        )
+        .await;
+        (key, jwk, token)
+    }
+
+    fn status_json(status: StatusCode, body: &str) -> serde_json::Value {
+        assert_eq!(status, StatusCode::OK, "{body}");
+        serde_json::from_str(body).expect("valid JSON")
+    }
+
+    // RFC 9449 §7.2: a protected resource supporting both schemes "MUST
+    // reject a DPoP-bound access token received as a bearer token".
+    #[tokio::test]
+    async fn test_auth_status_rejects_dpop_bound_token_as_bearer() {
+        let (app, state) = test_app().await;
+        let (_key, _jwk, token) =
+            dpop_bound_status_token(&state, "status-bound-bearer@example.com").await;
+
+        let (status, body) = http_get(
+            &app,
+            "/v1/auth/status",
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        let json = status_json(status, &body);
+        assert_eq!(json["authenticated"], false, "{body}");
+        assert!(json["email"].is_null(), "{body}");
+        assert!(json["device_name"].is_null(), "{body}");
+    }
+
+    // RFC 9449 §7.1: a DPoP-bound token is sent with the DPoP scheme and a
+    // proof whose key matches the binding.
+    #[tokio::test]
+    async fn test_auth_status_accepts_dpop_bound_token_with_proof() {
+        let (app, state) = test_app().await;
+        let (key, jwk, token) =
+            dpop_bound_status_token(&state, "status-bound-proof@example.com").await;
+        let uri = format!("{}/v1/auth/status", state.config().base_url);
+        let proof = create_dpop_proof(&key, &jwk, "GET", &uri, None, Some(&token));
+
+        let (status, body) = http_get(
+            &app,
+            "/v1/auth/status",
+            &[
+                ("Authorization", &format!("DPoP {token}")),
+                ("DPoP", &proof),
+            ],
+        )
+        .await;
+
+        let json = status_json(status, &body);
+        assert_eq!(json["authenticated"], true, "{body}");
+        assert_eq!(json["email"], "status-bound-proof@example.com", "{body}");
+    }
+
+    #[tokio::test]
+    async fn test_auth_status_rejects_dpop_scheme_without_proof() {
+        let (app, state) = test_app().await;
+        let (_key, _jwk, token) =
+            dpop_bound_status_token(&state, "status-bound-no-proof@example.com").await;
+
+        let (status, body) = http_get(
+            &app,
+            "/v1/auth/status",
+            &[("Authorization", &format!("DPoP {token}"))],
+        )
+        .await;
+
+        assert_eq!(status_json(status, &body)["authenticated"], false, "{body}");
+    }
+
+    #[tokio::test]
+    async fn test_auth_status_rejects_proof_from_other_key() {
+        let (app, state) = test_app().await;
+        let (_key, _jwk, token) =
+            dpop_bound_status_token(&state, "status-bound-other-key@example.com").await;
+        let (other_key, other_jwk) = generate_dpop_key_pair();
+        let uri = format!("{}/v1/auth/status", state.config().base_url);
+        let proof = create_dpop_proof(&other_key, &other_jwk, "GET", &uri, None, Some(&token));
+
+        let (status, body) = http_get(
+            &app,
+            "/v1/auth/status",
+            &[
+                ("Authorization", &format!("DPoP {token}")),
+                ("DPoP", &proof),
+            ],
+        )
+        .await;
+
+        assert_eq!(status_json(status, &body)["authenticated"], false, "{body}");
+    }
+
+    // RFC 9449 §8: a proof carrying a nonce the server does not hold gets
+    // `use_dpop_nonce` and a fresh `DPoP-Nonce`, so the client can retry.
+    #[tokio::test]
+    async fn test_auth_status_passes_use_dpop_nonce_through() {
+        let (app, state) = test_app().await;
+        let (key, jwk, token) =
+            dpop_bound_status_token(&state, "status-bound-nonce@example.com").await;
+        let uri = format!("{}/v1/auth/status", state.config().base_url);
+        let proof = create_dpop_proof(&key, &jwk, "GET", &uri, Some("unknown"), Some(&token));
+
+        let response = http_get_full(
+            &app,
+            "/v1/auth/status",
+            &[
+                ("Authorization", &format!("DPoP {token}")),
+                ("DPoP", &proof),
+            ],
+        )
+        .await;
+
+        assert_eq!(
+            response.status,
+            StatusCode::UNAUTHORIZED,
+            "{}",
+            response.body
+        );
+        assert!(
+            response.headers.contains_key("dpop-nonce"),
+            "use_dpop_nonce must carry a fresh DPoP-Nonce: {}",
+            response.body
+        );
+    }
+
+    // RFC 8705 §3: a certificate-bound token is valid only with the
+    // certificate it names.
+    #[tokio::test]
+    async fn test_auth_status_rejects_certificate_bound_token_without_certificate() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "status-bound-mtls@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let thumbprint = compute_cert_thumbprint(&test_client_ca().issue("status-bound-mtls"));
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                binding: TestBinding::Mtls(&thumbprint),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let (status, body) = http_get_with_cert(
+            &app,
+            "/v1/auth/status",
+            &[("Authorization", &format!("Bearer {token}"))],
+            None,
+        )
+        .await;
+
+        assert_eq!(status_json(status, &body)["authenticated"], false, "{body}");
     }
 }

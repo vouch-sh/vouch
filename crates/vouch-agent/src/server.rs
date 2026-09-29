@@ -79,9 +79,13 @@ impl AgentServer {
     }
 
     /// Accept loop and graceful-drain core, separated from [`run`](Self::run)
-    /// so tests can drive it against a temporary listener without touching
-    /// `XDG_RUNTIME_DIR`.
-    async fn run_listener(&self, listener: UnixListener) -> Result<()> {
+    /// so tests can drive it against a listener they bound themselves, which
+    /// makes the socket ready before the server task starts.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if accepting a connection fails fatally.
+    pub async fn run_listener(&self, listener: UnixListener) -> Result<()> {
         let mut shutdown = self.shutdown_rx.clone();
         let semaphore = Arc::new(Semaphore::new(MAX_CONNECTIONS));
         let mut tasks: JoinSet<()> = JoinSet::new();

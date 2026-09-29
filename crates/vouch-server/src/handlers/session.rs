@@ -277,6 +277,7 @@ async fn extract_resource_token(
         authenticator_id: session.authenticator_id.clone(),
         hardware_verified: access_claims.hardware_verified,
         auth_time: access_claims.auth_time,
+        exp: access_claims.exp,
         token_hash,
         dpop_source,
         hardware_aaguid: session.hardware_aaguid.clone(),

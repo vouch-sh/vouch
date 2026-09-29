@@ -2474,3 +2474,78 @@ pub fn test_tls_acceptor() -> tokio_rustls::TlsAcceptor {
     .expect("build server config");
     tokio_rustls::TlsAcceptor::from(Arc::new(config))
 }
+
+/// Generate an EC P-256 DPoP key pair and return the signer + public JWK.
+pub fn generate_dpop_key_pair() -> (aws_lc_rs::signature::EcdsaKeyPair, serde_json::Value) {
+    use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, KeyPair};
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    let rng = aws_lc_rs::rand::SystemRandom::new();
+    let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng)
+        .expect("generate DPoP key");
+    let key_pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref())
+        .expect("parse DPoP key");
+    let pub_bytes = key_pair.public_key().as_ref();
+    let x = URL_SAFE_NO_PAD.encode(pub_bytes.get(1..33).expect("x coordinate"));
+    let y = URL_SAFE_NO_PAD.encode(pub_bytes.get(33..65).expect("y coordinate"));
+    let jwk = serde_json::json!({ "kty": "EC", "crv": "P-256", "x": x, "y": y });
+    (key_pair, jwk)
+}
+
+/// RFC 7638 JWK thumbprint for a DPoP public JWK (canonical JSON of
+/// crv, kty, x, y → base64url SHA-256).
+pub fn dpop_jkt(jwk: &serde_json::Value) -> String {
+    vouch_common::jwk::JwkThumbprintKey::from_json(jwk)
+        .expect("test JWK carries the required members")
+        .thumbprint()
+}
+
+/// Build and sign a DPoP proof JWT (RFC 9449 §4.2) for the given method,
+/// URI, optional nonce, and optional access token (for `ath`).
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test fixtures construct their own instants"
+)]
+pub fn create_dpop_proof(
+    key: &aws_lc_rs::signature::EcdsaKeyPair,
+    jwk: &serde_json::Value,
+    method: &str,
+    uri: &str,
+    nonce: Option<&str>,
+    access_token: Option<&str>,
+) -> String {
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    let header = serde_json::json!({ "typ": "dpop+jwt", "alg": "ES256", "jwk": jwk });
+    let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).expect("serialize header"));
+
+    let mut claims = serde_json::json!({
+        "jti": uuid::Uuid::now_v7().to_string(),
+        "htm": method,
+        "htu": uri,
+        "iat": jiff::Timestamp::now().as_second(),
+    });
+    if let Some(obj) = claims.as_object_mut() {
+        if let Some(n) = nonce {
+            obj.insert("nonce".to_string(), serde_json::json!(n));
+        }
+        if let Some(tok) = access_token {
+            let ath = URL_SAFE_NO_PAD.encode(aws_lc_rs::digest::digest(
+                &aws_lc_rs::digest::SHA256,
+                tok.as_bytes(),
+            ));
+            obj.insert("ath".to_string(), serde_json::json!(ath));
+        }
+    }
+    let claims_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).expect("serialize claims"));
+
+    let signing_input = format!("{header_b64}.{claims_b64}");
+    let rng = aws_lc_rs::rand::SystemRandom::new();
+    let sig = key
+        .sign(&rng, signing_input.as_bytes())
+        .expect("sign DPoP proof");
+    let sig_b64 = URL_SAFE_NO_PAD.encode(sig);
+    format!("{signing_input}.{sig_b64}")
+}
