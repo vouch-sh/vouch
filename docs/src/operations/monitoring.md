@@ -92,7 +92,7 @@ ceiling that no request can raise:
 > The metrics carry no `HELP` or `TYPE` descriptions in the scrape output. This page is the
 > reference for what they mean.
 
-There are no gauges, and no metrics for database pool saturation, cleanup runs, or rate-limit
+There are no metrics for database pool saturation, cleanup runs, or rate-limit
 rejections specifically. Use `http_requests_total{status="429"}` to observe rate limiting, and your
 database's own monitoring for pool health.
 
