@@ -457,14 +457,14 @@ mod tests {
 
     /// What a fake server saw on each `/v1/auth/status` request: the
     /// `Authorization` value and whether a `DPoP` header was present.
-    #[cfg(feature = "test-utils")]
+    #[cfg(all(unix, feature = "test-utils"))]
     type SeenRequests = std::sync::Arc<std::sync::Mutex<Vec<(String, bool)>>>;
 
     /// Resolve a session stored only in `config.json`, against a fake server
     /// that answers `/v1/auth/status` with `status`, with or without an empty
     /// agent running. Returns the agent's session afterwards (`None` when it
     /// holds none or is not running) and the requests the server received.
-    #[cfg(feature = "test-utils")]
+    #[cfg(all(unix, feature = "test-utils"))]
     #[expect(
         unsafe_code,
         reason = "env mutation under ENV_LOCK; the prior values are restored before returning"
@@ -584,7 +584,7 @@ mod tests {
     /// The agent keeps no session across a restart. The first command after
     /// one checks the stored token with the server, signed with the CLI's
     /// DPoP key (RFC 9449 §7.1), and hands the session back to the agent.
-    #[cfg(feature = "test-utils")]
+    #[cfg(all(unix, feature = "test-utils"))]
     #[tokio::test]
     async fn stored_session_is_checked_with_dpop_and_restored_to_the_agent() {
         let (agent_session, seen) = restore_from_config(
@@ -611,7 +611,7 @@ mod tests {
     }
 
     /// A token the server no longer accepts is not handed to the agent.
-    #[cfg(feature = "test-utils")]
+    #[cfg(all(unix, feature = "test-utils"))]
     #[tokio::test]
     async fn rejected_stored_session_is_not_restored() {
         let (agent_session, seen) = restore_from_config(
@@ -631,7 +631,7 @@ mod tests {
 
     /// With no agent running there is nothing to restore, so the token is
     /// not sent anywhere.
-    #[cfg(feature = "test-utils")]
+    #[cfg(all(unix, feature = "test-utils"))]
     #[tokio::test]
     async fn stored_session_is_not_checked_without_an_agent() {
         let (_, seen) = restore_from_config(
