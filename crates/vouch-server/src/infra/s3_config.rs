@@ -407,6 +407,48 @@ pub struct S3Config {
 }
 
 // Custom Debug that redacts secrets to prevent accidental log exposure.
+impl S3Config {
+    /// Parse the S3 config document. A member whose value is an empty string
+    /// is dropped first, at any depth, so `"oidc_signing_key": ""` behaves
+    /// exactly like an absent key, as an empty environment value does (see
+    /// `Args::unset_empty_values`): it never installs an empty key or turns a
+    /// feature on, and it never overrides a value set in the environment.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the bytes are not JSON or do not describe an
+    /// `S3Config`.
+    pub fn parse(raw: &[u8]) -> Result<Self> {
+        let mut document: serde_json::Value =
+            serde_json::from_slice(raw).context("Failed to parse S3 config JSON")?;
+        Self::drop_empty_strings(&mut document);
+        serde_json::from_value(document).context("Failed to parse S3 config JSON")
+    }
+
+    /// Remove every object member whose value is `""`, recursing into
+    /// objects and arrays. Array elements are kept, so a list's length never
+    /// changes.
+    fn drop_empty_strings(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(members) => {
+                members.retain(|_, member| member.as_str() != Some(""));
+                for member in members.values_mut() {
+                    Self::drop_empty_strings(member);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    Self::drop_empty_strings(item);
+                }
+            }
+            serde_json::Value::Null
+            | serde_json::Value::Bool(_)
+            | serde_json::Value::Number(_)
+            | serde_json::Value::String(_) => {}
+        }
+    }
+}
+
 impl std::fmt::Debug for S3Config {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("S3Config")
@@ -561,8 +603,7 @@ pub async fn fetch_s3_config(
 ) -> Result<(S3Config, String, Option<DocumentKeyMaterial>)> {
     let (raw_bytes, etag) = fetch_s3_raw(s3_client, source).await?;
 
-    let config: S3Config =
-        serde_json::from_slice(&raw_bytes).context("Failed to parse S3 config JSON")?;
+    let config = S3Config::parse(&raw_bytes)?;
 
     let doc_keys = if let Some(doc_key_config) = &config.document_key {
         let kms = kms_client.ok_or_else(|| {
@@ -677,8 +718,7 @@ async fn fetch_runtime_config(
     source: &S3ConfigSource,
 ) -> Result<(S3Config, String)> {
     let (raw_bytes, etag) = fetch_s3_raw(s3_client, source).await?;
-    let config: S3Config =
-        serde_json::from_slice(&raw_bytes).context("Failed to parse S3 config JSON")?;
+    let config = S3Config::parse(&raw_bytes)?;
     Ok((config, etag))
 }
 
@@ -884,16 +924,15 @@ impl ServerConfig {
             if let Some(v) = &github.app_key {
                 self.github_app_key = Some(v.clone());
             }
-            // An empty S3 value is treated as absent (no override), the same
-            // as an empty env value: it must never install an empty HMAC key.
+            // `S3Config::parse` drops an empty value, so this never installs
+            // an empty HMAC key; the type states it for any other source.
             if let Some(v) = github.webhook_secret.clone().and_then(NonEmptySecret::new) {
                 self.github_webhook_secret = Some(v);
             }
             if let Some(v) = &github.client_id {
                 self.github_app_client_id = Some(v.clone());
             }
-            // Empty is absent here too: the client secret switches GitHub
-            // OAuth on by being present.
+            // The client secret switches GitHub OAuth on by being present.
             if let Some(v) = github.client_secret.clone().and_then(NonEmptySecret::new) {
                 self.github_app_client_secret = Some(v);
             }
@@ -1137,6 +1176,50 @@ mod tests {
         assert_eq!(config.github_app_id, Some(12345));
         assert_eq!(config.github_app_name, Some("my-app".to_string()));
         assert!(config.github_app_key.is_some());
+    }
+
+    // An empty member anywhere in the S3 document is dropped at parse time,
+    // so it neither installs an empty key nor overrides the environment.
+    #[test]
+    fn test_parse_drops_empty_values_at_every_depth() {
+        let s3 = S3Config::parse(
+            br#"{
+                "oidc_signing_key": "",
+                "oidc_rsa_signing_key": "",
+                "ssh_ca_key": "",
+                "org_name": "",
+                "tls": {"key": ""},
+                "github": {"app_key": "", "webhook_secret": ""}
+            }"#,
+        )
+        .unwrap();
+
+        let mut config = test_utils::test_config();
+        config.oidc_signing_key = Some(SecretString::from("env-key"));
+        let org_name = config.org_name.clone();
+        config.merge_s3_config(&s3, false).unwrap();
+
+        assert_eq!(
+            config
+                .oidc_signing_key
+                .as_ref()
+                .map(ExposeSecret::expose_secret),
+            Some("env-key"),
+            "an empty S3 value does not override the environment"
+        );
+        assert!(config.oidc_rsa_signing_key.is_none());
+        assert!(config.ssh_ca_key.is_none());
+        assert_eq!(config.org_name, org_name);
+        assert!(config.tls_key.is_none());
+        assert!(config.github_app_key.is_none());
+        assert!(config.github_webhook_secret.is_none());
+    }
+
+    #[test]
+    fn test_parse_keeps_empty_strings_inside_arrays() {
+        let mut value = serde_json::json!({"a": ["", "x"], "b": ""});
+        S3Config::drop_empty_strings(&mut value);
+        assert_eq!(value, serde_json::json!({"a": ["", "x"]}));
     }
 
     #[test]
