@@ -78,9 +78,11 @@ the kernel backlog instead of being accepted and dropped. Every listener shares 
 `ConnCaps`, so a client cannot multiply its allowance by spreading across ports. The
 per-client cap counts an IPv6 client per /64.
 
-**The peer's source decides the exemption.** The per-client cap exempts a TCP peer
-inside `VOUCH_TRUSTED_PROXIES`, because behind a TLS-terminating proxy every client
-shares the proxy's address. It never exempts an address from a PROXY header. That
+**The peer's source and the listener's role decide the exemption.** The per-client
+cap exempts a TCP peer inside `VOUCH_TRUSTED_PROXIES` on the HTTPS port and port 80,
+because behind a TLS-terminating proxy every client shares the proxy's address. The
+mTLS port terminates TLS itself, so its TCP peer is the client and is never exempt,
+even inside the trusted range. It never exempts an address from a PROXY header. That
 address is the client, even when it falls inside the trusted range. A PROXY `LOCAL`
 header keeps the TCP peer, and so keeps its exemption.
 

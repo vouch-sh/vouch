@@ -164,8 +164,8 @@ explicitly.
 | HTTP/1 request head, and idle keep-alive between requests | 10 seconds (connection closed) |
 | HTTP/2 connection with no request in flight | 10 seconds (GOAWAY, then closed) |
 | HTTP/2 keep-alive ping | every 20 seconds; closed if unacknowledged for 20 seconds |
-| Open connections, all listeners | 10,000 (`VOUCH_MAX_CONNECTIONS`); further connections wait to be accepted |
-| Open connections per client address (IPv6: per /64) | 64 (`VOUCH_MAX_CONNECTIONS_PER_IP`); further connections closed. Trusted proxies exempt as the connection's peer; a PROXY header's source never is |
+| Open connections (HTTPS and mTLS) | 10,000 (`VOUCH_MAX_CONNECTIONS`); further connections wait to be accepted. Port 80 draws from its own pool |
+| Open connections per client address (IPv6: per /64) | 64 (`VOUCH_MAX_CONNECTIONS_PER_IP`); further connections closed. Trusted TCP peers exempt on the HTTPS port and port 80; the mTLS port never exempts its TCP peer. A PROXY header's source is never exempt |
 
 ## Server-side request forgery
 
