@@ -6,8 +6,9 @@ use super::documents::authenticator::AuthenticatorDoc;
 use super::documents::device_auth::{DeviceAuthRequestDoc, DeviceAuthStatus};
 use super::documents::session::SessionDoc;
 use super::sessions::DeletedSessions;
-use super::store::{DocumentStore, StoreTransaction};
+use super::store::{DocumentStore, StoreTransaction, Transition};
 use super::users::User;
+use crate::crypto::webauthn_verify::SignCounter;
 use anyhow::{Context, Result};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -186,40 +187,55 @@ pub async fn get_authenticator_by_id(
     doc.map(Authenticator::try_from).transpose()
 }
 
-/// Update authenticator counter.
+/// What committing a verified assertion's signature counter found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CounterCommit {
+    /// The counter was stored; the assertion stands.
+    Committed,
+    /// The stored counter no longer admits the assertion's: another
+    /// assertion with the same or a higher counter committed first.
+    NotIncreasing,
+    /// The authenticator was deleted after it was looked up.
+    KeyDeleted,
+}
+
+/// Store the signature counter a verified assertion reported, re-making the
+/// verifier's [`SignCounter::admits`] decision against the row it writes.
 ///
-/// Uses optimistic concurrency (`store.modify`) and takes the max of the
-/// stored counter and the incoming value so that concurrent updates from
-/// parallel authentication flows never regress the counter. A missing
-/// authenticator is warned and ignored (the caller should not fail an
-/// ongoing authentication solely due to a missing counter record).
+/// The verifier judged the counter against the value read at lookup. Two
+/// assertions carrying the same counter (two copies of one credential,
+/// which clone detection exists to catch) can both pass that check, and a
+/// key can be deleted after it was read. Deciding again here, under
+/// optimistic concurrency, makes the write the decision: only one of two
+/// equal counters commits, and a deleted key commits nothing.
 ///
-/// The max runs in `u32` space. WebAuthn `signCount` is a `u32`
+/// The comparison runs in `u32` space. WebAuthn `signCount` is a `u32`
 /// (WebAuthn L2 §6.1) stored bit-identically in an `i32` column via
-/// `cast_signed`, so every value at or above 2^31 is a negative `i32`.
-/// Comparing those as signed inverts the order across that boundary: a
-/// stored `0x7FFF_FFFF` would beat an incoming `0x8000_0000`, freezing the
-/// counter at 2^31-1 for the rest of the credential's life, and a stored
-/// high-bit value would lose to any low incoming one, regressing the
-/// baseline the clone-detection guard compares against.
-pub async fn update_authenticator_counter(
+/// `cast_signed`, so every value at or above 2^31 is a negative `i32`;
+/// comparing those as signed would invert the order across that boundary.
+///
+/// # Errors
+///
+/// Returns the store error; nothing was committed.
+pub async fn commit_authenticator_counter(
     store: &DocumentStore,
     authenticator_id: &str,
-    counter: i32,
-) -> Result<()> {
-    let found = store
-        .modify::<AuthenticatorDoc, _>(authenticator_id, |data| {
-            data.counter =
-                std::cmp::max(data.counter.cast_unsigned(), counter.cast_unsigned()).cast_signed();
+    presented: u32,
+) -> Result<CounterCommit> {
+    let outcome = store
+        .transition::<AuthenticatorDoc, (), (), _>(authenticator_id, |data| {
+            if !SignCounter(data.counter.cast_unsigned()).admits(presented) {
+                return Err(());
+            }
+            data.counter = presented.cast_signed();
+            Ok(())
         })
         .await?;
-    if !found {
-        tracing::warn!(
-            authenticator_id,
-            "update_authenticator_counter: authenticator not found"
-        );
-    }
-    Ok(())
+    Ok(match outcome {
+        Transition::Applied(()) => CounterCommit::Committed,
+        Transition::Rejected(()) => CounterCommit::NotIncreasing,
+        Transition::NotFound => CounterCommit::KeyDeleted,
+    })
 }
 
 /// Count the number of authenticators for a user.

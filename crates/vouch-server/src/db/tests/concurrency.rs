@@ -821,15 +821,21 @@ async fn test_update_authenticator_counter_high_concurrency_no_lost_update() {
     .expect("create authenticator");
 
     // Part 1 — sequential regression guard.
-    // Set the counter to 50, then apply lower values and confirm no regression.
-    update_authenticator_counter(&store, &auth_id, 50)
-        .await
-        .expect("set counter to 50");
-
-    for lower in (1_i32..50).rev() {
-        update_authenticator_counter(&store, &auth_id, lower)
+    // Set the counter to 50, then present lower values: each is refused.
+    assert_eq!(
+        commit_authenticator_counter(&store, &auth_id, 50)
             .await
-            .expect("apply lower value");
+            .expect("set counter to 50"),
+        CounterCommit::Committed
+    );
+
+    for lower in (1_u32..50).rev() {
+        assert_eq!(
+            commit_authenticator_counter(&store, &auth_id, lower)
+                .await
+                .expect("apply lower value"),
+            CounterCommit::NotIncreasing
+        );
     }
 
     let auth = get_authenticator_by_id(&store, &auth_id)
@@ -843,16 +849,17 @@ async fn test_update_authenticator_counter_high_concurrency_no_lost_update() {
     );
 
     // Part 2 — concurrent burst (4 tasks, within the 3-retry budget for
-    // in-memory SQLite). Each task tries to set a value; the stored result
-    // must equal the maximum attempted value.
-    let target = 100_i32;
+    // in-memory SQLite). Each task re-decides against the row it writes, so
+    // a lower value that lands after a higher one is refused, and the stored
+    // result is the maximum attempted value.
+    let target = 100_u32;
     let handles: Vec<_> = [target, 51, 52, 53]
         .iter()
         .map(|&i| {
             let store = store.clone();
             let auth_id = auth_id.clone();
             tokio::spawn(async move {
-                update_authenticator_counter(&store, &auth_id, i)
+                commit_authenticator_counter(&store, &auth_id, i)
                     .await
                     .expect("concurrent counter update")
             })
@@ -869,18 +876,19 @@ async fn test_update_authenticator_counter_high_concurrency_no_lost_update() {
         .expect("authenticator must exist");
 
     assert_eq!(
-        auth.counter, target,
+        auth.counter.cast_unsigned(),
+        target,
         "counter must equal the max value applied in the concurrent burst"
     );
 }
 
 /// Deterministic companion to the #545 burst test above (whose contention
 /// depends on scheduling): a higher counter written inside the OCC window via
-/// the modify test seam must win over the in-flight lower value — the retry
-/// re-reads the fresh counter and `max()` keeps it. A blind write would
-/// regress the counter to 50.
+/// the modify test seam wins over the in-flight lower value — the retry
+/// re-reads the fresh counter and refuses 50 as not increasing. A blind write
+/// would regress the counter to 50.
 #[tokio::test]
-async fn test_update_authenticator_counter_concurrent_higher_value_wins() {
+async fn test_commit_authenticator_counter_refuses_a_value_overtaken_mid_write() {
     use crate::db::documents::authenticator::AuthenticatorDoc;
 
     let (store, _audit) = test_db().await;
@@ -923,9 +931,13 @@ async fn test_update_authenticator_counter_concurrent_higher_value_wins() {
         })
     }));
 
-    update_authenticator_counter(&hooked, &auth_id, 50)
-        .await
-        .expect("counter update must not error");
+    assert_eq!(
+        commit_authenticator_counter(&hooked, &auth_id, 50)
+            .await
+            .expect("counter update must not error"),
+        CounterCommit::NotIncreasing,
+        "a counter overtaken in the OCC window is refused, not merged"
+    );
 
     let auth = get_authenticator_by_id(&store, &auth_id)
         .await

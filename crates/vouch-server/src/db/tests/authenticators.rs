@@ -71,9 +71,12 @@ async fn test_authenticator_crud() {
     assert_eq!(auths.len(), 1);
 
     // Update counter
-    update_authenticator_counter(&store, &auth_id, 42)
-        .await
-        .expect("Failed to update counter");
+    assert_eq!(
+        commit_authenticator_counter(&store, &auth_id, 42)
+            .await
+            .expect("Failed to update counter"),
+        CounterCommit::Committed
+    );
 
     let auth = get_authenticator_by_id(&store, &auth_id)
         .await
@@ -269,9 +272,12 @@ async fn test_counter_advances_across_the_high_bit_boundary() {
 
     // The next signCount a real authenticator would emit after i32::MAX.
     let next: u32 = 0x8000_0000;
-    update_authenticator_counter(&store, &auth_id, next.cast_signed())
-        .await
-        .expect("counter update");
+    assert_eq!(
+        commit_authenticator_counter(&store, &auth_id, next)
+            .await
+            .expect("counter update"),
+        CounterCommit::Committed
+    );
 
     let auth = get_authenticator_by_id(&store, &auth_id)
         .await
@@ -291,9 +297,13 @@ async fn test_high_bit_counter_is_not_regressed_by_a_lower_value() {
     let auth_id = seed_authenticator_at(&store, "boundary-down@example.com", high).await;
 
     // A replayed or cloned assertion carrying a far lower count must not win.
-    update_authenticator_counter(&store, &auth_id, 5i32)
-        .await
-        .expect("counter update");
+    assert_eq!(
+        commit_authenticator_counter(&store, &auth_id, 5)
+            .await
+            .expect("counter update"),
+        CounterCommit::NotIncreasing,
+        "a lower counter than a high-bit stored one is refused, not committed"
+    );
 
     let auth = get_authenticator_by_id(&store, &auth_id)
         .await
