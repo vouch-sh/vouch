@@ -67,9 +67,23 @@ with the standard `WWW-Authenticate` challenge, and the rejection is logged
 with the client ID, audience, and request path.
 
 Per their RFCs, the authorization-server endpoints remain audience-agnostic:
-`/oauth/userinfo` accepts tokens from any client, `/oauth/introspect` and
-`/oauth/revoke` answer about any token the server issued, and token exchange
-accepts narrowed subject tokens (re-scoping them is its purpose).
+`/oauth/userinfo` accepts tokens from any client, and `/oauth/introspect` and
+`/oauth/revoke` answer about any token the server issued. Token exchange
+accepts narrowed subject tokens, since re-scoping them is its purpose, but
+keeps them narrowed, the way it keeps a bound subject token bound. Without an
+`audience` or `resource` the exchanged token carries the subject's audience,
+and a request for an audience Vouch itself accepts (the exchanging client's
+default, or any resource on this deployment) is refused with
+`invalid_request` unless it is the subject's own. A narrowed token can
+therefore be re-scoped to another external service, but never turned back
+into one Vouch's endpoints accept.
+
+The `__Host-vouch_session` cookie holds only a browser session: a token
+issued to this deployment itself (browser sign-in, enrollment, and
+certification all mint one), covering the whole deployment, and not
+sender-constrained. The UI pages and `/oauth/authorize` treat any other token
+in the cookie, such as an access token issued to an OAuth client or narrowed
+to a resource, as signed out.
 
 Clients registered without `resource_uris` may request any `resource` value
 at issuance. This is safe under enforcement: a token narrowed to an external

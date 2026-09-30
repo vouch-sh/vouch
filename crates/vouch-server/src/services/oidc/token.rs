@@ -1271,7 +1271,7 @@ pub async fn validate_dpop_if_present(
     uri: &str,
     arrival: ArrivalTime,
 ) -> Result<Option<ValidatedDpopProof>, DpopError> {
-    let dpop_proof = match dpop::single_dpop_header(headers)? {
+    let dpop_proof = match dpop::DpopProofHeader::from_headers(headers)? {
         Some(proof) => proof,
         None => return Ok(None), // No DPoP header, use Bearer token
     };
@@ -1352,10 +1352,11 @@ pub struct OidcValidatedSession {
     pub scope: Option<ScopeSet>,
     /// The OAuth client_id from the access token (used for signed userinfo lookup).
     pub client_id: Option<String>,
-    /// The token's confirmation claim (RFC 7800). A caller that received the
-    /// token without a DPoP proof or client certificate must refuse it when
-    /// this is present.
-    pub cnf: Option<CnfClaim>,
+    /// Whether the token is a Vouch browser session
+    /// ([`crate::services::auth::AccessTokenClaims::is_browser_session`]): issued for this
+    /// deployment itself and unbound. A caller that read the token from the
+    /// session cookie must refuse it otherwise.
+    pub browser_session: bool,
 }
 
 /// Validate a session token and return the user, session, and authenticator.
@@ -1411,9 +1412,10 @@ pub async fn validate_session_token(
     // `authenticator` comes from the server-side session record, not the
     // JWT, which omits it to avoid leaking it.
 
-    let (client_id, hardware_verified) = match &decoded {
-        DecodedToken::AccessToken(c) => (Some(c.client_id.clone()), c.hardware_verified),
-    };
+    let DecodedToken::AccessToken(ref claims) = decoded;
+    let client_id = Some(claims.client_id.clone());
+    let hardware_verified = claims.hardware_verified;
+    let browser_session = claims.is_browser_session(&config.base_url);
 
     Ok(Some(OidcValidatedSession {
         user,
@@ -1421,7 +1423,7 @@ pub async fn validate_session_token(
         scope: decoded.scope().cloned(),
         client_id,
         hardware_verified,
-        cnf: decoded.cnf().cloned(),
+        browser_session,
         // Only a verified session can carry a ceremony instant; an unverified
         // token never reports one, whatever its row holds.
         authenticated_at: session.authenticated_at.filter(|_| hardware_verified),

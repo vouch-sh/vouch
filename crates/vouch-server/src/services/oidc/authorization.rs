@@ -863,16 +863,20 @@ pub async fn check_session_for_authorization(
     };
 
     match validate_session_token(state, token, arrival).await? {
-        // A cookie carries no DPoP proof and the browser connection no client
-        // certificate, so a sender-constrained access token in the session
-        // cookie proves nothing about who holds its key. Accepting it would
-        // let a stolen token mint a code for any client and redeem it
-        // unbound. Browser sign-in issues unbound session tokens.
-        Some(validated) if validated.cnf.is_some() => {
+        // Only a browser session token may stand in the cookie. A cookie
+        // carries no DPoP proof and the browser connection no client
+        // certificate, so a sender-constrained token there proves nothing
+        // about who holds its key; and a token issued to another client or
+        // narrowed to another resource is not a sign-in to Vouch (RFC 8725
+        // §3.9: reject a JWT whose audience is "not associated with the
+        // recipient"). Accepting either would let it mint a code for any
+        // client. Browser sign-in, enrollment, and certification all set
+        // unbound tokens issued for this deployment.
+        Some(validated) if !validated.browser_session => {
             tracing::info!(
                 target: "security",
                 user_id = %validated.user.id,
-                "authorization refused a sender-constrained token in the session cookie"
+                "authorization refused a session cookie that does not hold a browser session"
             );
             Ok(AuthorizationSessionState::NeedsAuth)
         }

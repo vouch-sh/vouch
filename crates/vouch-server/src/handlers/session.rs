@@ -5,15 +5,14 @@ use crate::AppState;
 use crate::arrival::ArrivalTime;
 use crate::crypto::hash_token;
 use crate::db;
-use crate::error::{OAuthErrorCode, ServiceError};
+use crate::error::ServiceError;
 use crate::handlers::extractors::OptionalClientCert;
 use crate::http::strip_auth_scheme;
-use crate::services::auth::{self, AccessTokenClaims, DecodedToken, ValidatedResourceToken};
+use crate::services::auth::{self, DecodedToken, ValidatedResourceToken};
 use crate::services::keys as key_svc;
 use crate::services::oidc::claims::PossessionError;
 use crate::services::oidc::dpop::{self, DpopError};
 use crate::services::oidc::mtls::ClientCertificate;
-use crate::services::oidc::resource;
 use axum::extract::FromRequestParts;
 use axum::http::StatusCode;
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
@@ -109,8 +108,20 @@ async fn extract_resource_token(
 
     let DecodedToken::AccessToken(access_claims) = decoded;
 
-    // 2b. Audience coverage for resource-narrowed tokens.
-    enforce_audience_coverage(&access_claims, &config.base_url, uri)?;
+    // 2b. Audience coverage for resource-narrowed tokens (RFC 8725 §3.9).
+    if !access_claims.audience_covers(&config.base_url, uri) {
+        tracing::warn!(
+            client_id = %access_claims.client_id,
+            aud = %access_claims.aud,
+            path = %uri,
+            "rejected access token: audience does not cover resource"
+        );
+        return Err(ServiceError::api(
+            StatusCode::UNAUTHORIZED,
+            "invalid_token",
+            "Access token audience does not cover this resource",
+        ));
+    }
 
     // 3. The session must be live: its row exists, and the security key it
     //    was established with has not been deleted.
@@ -126,100 +137,67 @@ async fn extract_resource_token(
         })?
         .session;
 
-    // 4. DPoP validation for sender-constrained tokens
-    if let Some(ref cnf) = access_claims.cnf
-        && cnf.jkt.is_some()
-    {
-        // Token has cnf.jkt → it's DPoP sender-constrained
-        match auth_scheme {
-            AuthScheme::DPoP => {
-                // Validate DPoP proof header against cnf.jkt
-                let full_uri = format!("{}{}", config.base_url, uri);
-                match dpop::validate_dpop_at_resource(
-                    &token,
-                    headers,
-                    method,
-                    &full_uri,
-                    &state.store,
-                    config.dpop_max_age_seconds,
-                    arrival,
-                )
-                .await
-                {
-                    Ok(validated) => {
-                        if !cnf.confirms_dpop(&validated) {
-                            return Err(ServiceError::api(
-                                StatusCode::UNAUTHORIZED,
-                                "invalid_token",
-                                PossessionError::DpopKeyMismatch.as_str(),
-                            ));
-                        }
-                        dpop_source = validated.source;
-                    }
-                    Err(e @ DpopError::Database(_)) => {
-                        tracing::error!("DPoP backend failure: {e}");
-                        return Err(ServiceError::api(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            "server_error",
-                            "DPoP validation backend error",
-                        ));
-                    }
-                    Err(DpopError::UseNonce(nonce)) => {
-                        // RFC 9449 §7.2: When the server requires (or
-                        // reissues) a nonce, the error response MUST carry
-                        // a fresh `DPoP-Nonce` header so the client can
-                        // retry the proof. At resource endpoints this fires
-                        // when a client replays an already-consumed nonce;
-                        // the fresh nonce lets the caller retry once.
-                        return Err(ServiceError::api_with_header(
-                            StatusCode::UNAUTHORIZED,
-                            OAuthErrorCode::UseDpopNonce.as_str(),
-                            "Authorization server requires nonce in DPoP proof",
-                            (protocol::HEADER_DPOP_NONCE, nonce.as_str()),
-                        ));
-                    }
-                    Err(DpopError::MissingProof) => {
-                        return Err(ServiceError::api(
-                            StatusCode::UNAUTHORIZED,
-                            "invalid_token",
-                            PossessionError::MissingDpopProof.as_str(),
-                        ));
-                    }
-                    Err(e) => {
-                        tracing::debug!("DPoP validation failed: {e}");
-                        return Err(ServiceError::api(
-                            StatusCode::UNAUTHORIZED,
-                            "invalid_token",
-                            "Invalid DPoP proof",
-                        ));
-                    }
-                }
-            }
-            AuthScheme::Bearer => {
-                // RFC 9449: Token has cnf.jkt but sent as Bearer → reject
-                tracing::debug!(
-                    sub = %access_claims.sub,
-                    uri = %uri,
-                    "Rejected Bearer auth for sender-constrained token \
-                     (client must use DPoP scheme)"
-                );
+    // 4. The scheme the token arrived under must fit what the token is. A
+    //    cookie holds only a browser session. The DPoP scheme is for a
+    //    DPoP-bound token, whose proof RFC 9449 §7.1 requires; the RFC is
+    //    silent on an unbound token under it, and it is refused here as at
+    //    `/oauth/userinfo`. The Bearer scheme refuses a DPoP-bound token.
+    let dpop_cnf = access_claims.cnf.as_ref().filter(|cnf| cnf.jkt.is_some());
+    match (auth_scheme, dpop_cnf) {
+        (AuthScheme::Cookie, _) => {
+            if !access_claims.is_browser_session(&config.base_url) {
                 return Err(ServiceError::api(
                     StatusCode::UNAUTHORIZED,
                     "invalid_token",
-                    "Sender-constrained tokens must use DPoP authorization scheme",
-                ));
-            }
-            AuthScheme::Cookie => {
-                // A token with cnf.jkt is sender-constrained and must be
-                // presented with a DPoP proof. If it arrives via cookie,
-                // either the token was stolen or misused — reject it.
-                return Err(ServiceError::api(
-                    StatusCode::UNAUTHORIZED,
-                    "invalid_token",
-                    "Sender-constrained tokens cannot be used via cookie",
+                    "The session cookie does not hold a browser session",
                 ));
             }
         }
+        (AuthScheme::DPoP, None) => {
+            return Err(ServiceError::api(
+                StatusCode::UNAUTHORIZED,
+                "invalid_token",
+                PossessionError::NotDpopBound.as_str(),
+            ));
+        }
+        (AuthScheme::DPoP, Some(cnf)) => {
+            // Validate DPoP proof header against cnf.jkt
+            let full_uri = format!("{}{}", config.base_url, uri);
+            let validated = dpop::validate_dpop_at_resource(
+                &token,
+                headers,
+                method,
+                &full_uri,
+                &state.store,
+                config.dpop_max_age_seconds,
+                arrival,
+            )
+            .await
+            .map_err(DpopError::at_resource)?;
+            if !cnf.confirms_dpop(&validated) {
+                return Err(ServiceError::api(
+                    StatusCode::UNAUTHORIZED,
+                    "invalid_token",
+                    PossessionError::DpopKeyMismatch.as_str(),
+                ));
+            }
+            dpop_source = validated.source;
+        }
+        (AuthScheme::Bearer, Some(_)) => {
+            // RFC 9449 §7.2: a DPoP-bound token sent as Bearer is refused.
+            tracing::debug!(
+                sub = %access_claims.sub,
+                uri = %uri,
+                "Rejected Bearer auth for sender-constrained token \
+                 (client must use DPoP scheme)"
+            );
+            return Err(ServiceError::api(
+                StatusCode::UNAUTHORIZED,
+                "invalid_token",
+                "Sender-constrained tokens must use DPoP authorization scheme",
+            ));
+        }
+        (AuthScheme::Bearer, None) => {}
     }
 
     // 4b. mTLS certificate binding validation (RFC 8705 Section 3)
@@ -259,38 +237,6 @@ async fn extract_resource_token(
         hardware_aaguid: session.hardware_aaguid.clone(),
         org_domain: session.org_domain.clone(),
     })
-}
-
-/// Reject a resource-narrowed access token whose audience does not cover
-/// the requested resource (RFC 8725 §3.9 / RFC 8707).
-///
-/// Tokens with the default audience (`aud == client_id`, i.e. never
-/// resource-narrowed) are deployment-wide and always pass. Narrowed tokens
-/// pass only when
-/// [`crate::services::oidc::resource::audience_covers_resource`] accepts
-/// the audience for this deployment and request path.
-fn enforce_audience_coverage(
-    access_claims: &AccessTokenClaims,
-    base_url: &str,
-    uri: &str,
-) -> Result<(), ServiceError> {
-    if access_claims.aud == access_claims.client_id
-        || resource::audience_covers_resource(&access_claims.aud, base_url, uri)
-    {
-        return Ok(());
-    }
-
-    tracing::warn!(
-        client_id = %access_claims.client_id,
-        aud = %access_claims.aud,
-        path = %uri,
-        "rejected access token: audience does not cover resource"
-    );
-    Err(ServiceError::api(
-        StatusCode::UNAUTHORIZED,
-        "invalid_token",
-        "Access token audience does not cover this resource",
-    ))
 }
 
 // ============================================================================
