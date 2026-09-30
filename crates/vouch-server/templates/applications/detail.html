@@ -198,14 +198,17 @@
                     <div class="flex items-center justify-between bg-vouch-raised border border-vouch-border rounded-md px-3 py-2">
                         <div class="text-sm">
                             <span class="text-gray-300">{% match secret.description %}{% when Some with (desc) %}{{ desc }}{% when None %}{{ self.tr("apps-detail-secret-default") }}{% endmatch %}</span>
-                            {% if secret.active %}
+                            {% match secret.status %}
+                            {% when SecretStatus::Active %}
                             <span class="ml-2 px-1.5 inline-flex text-xs leading-5 font-semibold rounded bg-vouch-success-bg text-vouch-success">{{ self.tr("apps-detail-secret-active") }}</span>
-                            {% else %}
+                            {% when SecretStatus::Expired %}
+                            <span class="ml-2 px-1.5 inline-flex text-xs leading-5 font-semibold rounded bg-vouch-warning-bg text-vouch-warning">{{ self.tr("apps-detail-secret-expired") }}</span>
+                            {% when SecretStatus::Revoked %}
                             <span class="ml-2 px-1.5 inline-flex text-xs leading-5 font-semibold rounded bg-vouch-error-bg text-vouch-error">{{ self.tr("apps-detail-secret-revoked") }}</span>
-                            {% endif %}
+                            {% endmatch %}
                             <span class="ml-2 text-xs text-gray-400">{{ self.tr("apps-detail-created") }} <time datetime="{{ secret.created_at }}" data-localize-time>{{ secret.created_at|humandatetime }}</time></span>
                         </div>
-                        {% if secret.active && (!app.secret_is_credential || secrets_count > 1) %}
+                        {% if secret.status == SecretStatus::Expired || (secret.status == SecretStatus::Active && (!app.secret_is_credential || secrets_count > 1)) %}
                         <form action="/applications/{{ app.id }}/secrets/{{ secret.id }}/delete" method="POST">
                             <button type="submit" data-confirm="{{ self.tr("apps-detail-revoke-confirm") }}"
                                 class="px-2 py-1 text-vouch-error hover:opacity-80 text-xs font-medium">

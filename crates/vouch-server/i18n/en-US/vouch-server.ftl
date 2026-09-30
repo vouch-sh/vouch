@@ -141,6 +141,7 @@ apps-detail-no-secrets = No secrets configured.
 apps-detail-secret-default = Secret
 apps-detail-secret-active = active
 apps-detail-secret-revoked = revoked
+apps-detail-secret-expired = expired
 apps-detail-revoke = Revoke
 apps-detail-revoke-confirm = Revoke this secret? It will no longer be accepted for authentication.
 apps-detail-usage-stats = Usage Statistics

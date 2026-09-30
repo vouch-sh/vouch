@@ -439,7 +439,7 @@ async fn test_list_secrets_single() {
     let s = &secrets[0];
     assert!(s.get("id").is_some());
     assert!(s.get("created_at").is_some());
-    assert_eq!(s["active"], true);
+    assert_eq!(s["status"], "active");
     // secret_hash must NOT be exposed
     assert!(s.get("secret_hash").is_none());
 }
@@ -483,8 +483,8 @@ async fn test_list_secrets_shows_revoked() {
     let secrets = json["secrets"].as_array().unwrap();
     assert_eq!(secrets.len(), 2);
 
-    let active_count = secrets.iter().filter(|s| s["active"] == true).count();
-    let revoked_count = secrets.iter().filter(|s| s["active"] == false).count();
+    let active_count = secrets.iter().filter(|s| s["status"] == "active").count();
+    let revoked_count = secrets.iter().filter(|s| s["status"] == "revoked").count();
     assert_eq!(active_count, 1);
     assert_eq!(revoked_count, 1);
 }
@@ -559,7 +559,7 @@ async fn test_delete_secret_success() {
     let json: serde_json::Value = serde_json::from_str(&body).unwrap();
     let secrets = json["secrets"].as_array().unwrap();
     let deleted = secrets.iter().find(|s| s["id"] == second_id).unwrap();
-    assert_eq!(deleted["active"], false);
+    assert_eq!(deleted["status"], "revoked");
 }
 
 #[tokio::test]
@@ -746,7 +746,7 @@ async fn test_cannot_delete_sole_active_when_other_revoked() {
     let secrets = json["secrets"].as_array().unwrap();
     let active_secret = secrets
         .iter()
-        .find(|s| s["active"] == true)
+        .find(|s| s["status"] == "active")
         .expect("should have 1 active secret");
     let active_id = active_secret["id"].as_str().unwrap();
 
@@ -2350,11 +2350,10 @@ async fn test_update_application_preserves_jwks_when_fapi_profile_absent() {
     );
 }
 
-// Complement: explicitly setting `fapi_profile: "none"` on a non-FAPI
-// Clearing JWKS on a `private_key_jwt` client would leave it unable to
-// authenticate, with no way back through this endpoint. Refuse it end to end.
+// Restating the standard profile on a standard `private_key_jwt` client is a
+// no-op: it answers 200 and keeps the keys the client authenticates with.
 #[tokio::test]
-async fn test_update_application_rejects_clearing_jwks_for_pkjwt_client() {
+async fn test_update_application_restating_standard_profile_keeps_pkjwt_keys() {
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "pkjwt-clear@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
@@ -2395,11 +2394,7 @@ async fn test_update_application_rejects_clearing_jwks_for_pkjwt_client() {
     )
     .await;
 
-    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
-    assert!(
-        body.contains("missing_jwks"),
-        "error code should identify the missing keys: {body}"
-    );
+    assert_eq!(status, StatusCode::OK, "body: {body}");
 
     let persisted = db::get_oauth_client_by_id(&state.store, &client.app_id)
         .await
@@ -2410,7 +2405,7 @@ async fn test_update_application_rejects_clearing_jwks_for_pkjwt_client() {
             .keys
             .as_ref()
             .is_some_and(|k| k.inline().is_some()),
-        "a rejected update must leave the client's keys intact"
+        "restating the profile must leave the client's keys intact"
     );
 }
 
@@ -4536,3 +4531,147 @@ async fn mtls_port_audit_row_records_peer_cert_addr() {
 mod fapi_signing_alg;
 
 mod fapi_jwks_repair;
+
+// ========================================================================
+// An update is decided against the client as it is written
+// ========================================================================
+
+/// A rename built from a read taken before a concurrent RFC 7592 key
+/// rotation must not write the old keys back. RFC 7592 §2.2: the client's
+/// values "MUST replace, not augment, the values previously associated with
+/// this client", so the rotation stays in effect.
+#[tokio::test]
+async fn test_update_application_rename_keeps_concurrent_key_rotation() {
+    use crate::db::documents::oauth::OAuthClientDoc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    let target: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let fired = Arc::new(AtomicBool::new(false));
+    let rotated = serde_json::json!({
+        "keys": [{"kty": "EC", "crv": "P-256", "kid": "rotated", "x": TEST_JWK_EC_X, "y": TEST_JWK_EC_Y}]
+    });
+    let hook_target = Arc::clone(&target);
+    let hook_fired = Arc::clone(&fired);
+    let (app, state) = test_app_with_modify_hook(move |store| {
+        // A second handle without the hook plays the RFC 7592 writer.
+        let writer = store.clone();
+        store.set_compare_and_update_test_hook(Arc::new(move |doc_id: &str| {
+            let writer = writer.clone();
+            let doc_id = doc_id.to_string();
+            let target = Arc::clone(&hook_target);
+            let fired = Arc::clone(&hook_fired);
+            let rotated = rotated.clone();
+            Box::pin(async move {
+                if target.lock().unwrap().as_deref() != Some(doc_id.as_str())
+                    || fired.swap(true, Ordering::SeqCst)
+                {
+                    return;
+                }
+                let doc = writer
+                    .get::<OAuthClientDoc>(&doc_id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let mut data = doc.data;
+                data.jwks = Some(rotated);
+                writer.update(&doc_id, &data).await.unwrap();
+            })
+        }));
+    })
+    .await;
+
+    let user = create_test_user(&state.store, "rename-rotation@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
+            jwks: TestJwks::Shared,
+            with_secret: false,
+            ..Default::default()
+        },
+    )
+    .await;
+    *target.lock().unwrap() = Some(client.app_id.clone());
+
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/api/v1/applications/{}", client.app_id),
+        Some(r#"{"name": "Renamed"}"#.to_string()),
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", &bearer(&token)),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert!(fired.load(Ordering::SeqCst), "the rotation ran mid-update");
+
+    let persisted = db::get_oauth_client_by_id(&state.store, &client.app_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(persisted.name, "Renamed");
+    let kid = persisted
+        .keys
+        .as_ref()
+        .and_then(db::ClientKeys::inline)
+        .and_then(|set| set.keys.first())
+        .and_then(|key| key.kid.clone());
+    assert_eq!(
+        kid.as_deref(),
+        Some("rotated"),
+        "the rename must not restore the keys the client rotated out"
+    );
+}
+
+/// A `client_secret_basic` application has no use for keys, so a submitted
+/// JWKS is not kept on update, exactly as on create.
+#[tokio::test]
+async fn test_update_application_does_not_keep_jwks_on_secret_client() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "secret-jwks@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let client = create_test_client(&state.store, &user.id, TestClientSpec::default()).await;
+    let jwks = serde_json::json!({
+        "keys": [{"kty": "EC", "crv": "P-256", "x": TEST_JWK_EC_X, "y": TEST_JWK_EC_Y}]
+    });
+
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/api/v1/applications/{}", client.app_id),
+        Some(serde_json::json!({"jwks": jwks.to_string()}).to_string()),
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", &bearer(&token)),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["jwks_configured"], false, "body: {body}");
+}

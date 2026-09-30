@@ -7,7 +7,8 @@
 
 use crate::AppState;
 use crate::arrival::ArrivalTime;
-use crate::db::{self, AccessScope, OAuthEventType, UpdateOAuthClientParams};
+use crate::db::store::Transition;
+use crate::db::{self, AccessScope, OAuthEventType};
 use axum::{Json, extract::State, http::StatusCode};
 use std::sync::Arc;
 
@@ -19,9 +20,8 @@ use crate::handlers::applications::types::{
     UpdateApplicationRequest,
 };
 use crate::handlers::applications::validate::{
-    CreateAppContext, CreateAppInput, UpdateAppInput, build_create_params,
-    compute_fapi_update_fields, validate_create_application, validate_update_fapi,
-    validate_update_format,
+    CreateAppContext, CreateAppInput, UpdateAppInput, UpdateRefusal, build_create_params,
+    validate_create_application, validate_update_format,
 };
 use crate::handlers::hash_token;
 use crate::handlers::session::AuthenticatedToken;
@@ -271,6 +271,8 @@ pub(crate) async fn update_application_api(
     // ── Pure format validation first — no DB cost for malformed requests ──
 
     let validated = validate_update_format(UpdateAppInput {
+        name: req.name.as_deref(),
+        description: req.description.as_deref(),
         redirect_uris: req.redirect_uris.as_deref(),
         resource_uris: req.resource_uris.as_deref(),
         post_logout_redirect_uris: req.post_logout_redirect_uris.as_deref(),
@@ -289,32 +291,8 @@ pub(crate) async fn update_application_api(
     let access_scope = validated.access_scope;
     let wants_org_scope = access_scope == Some(AccessScope::Organization);
 
-    // Get existing application
-    let client = db::get_oauth_client_by_id(&state.store, &app_id)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to get application for update: {e}");
-            ServiceError::api(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                "Internal database error",
-            )
-        })?
-        .ok_or_else(|| {
-            ServiceError::api(StatusCode::NOT_FOUND, "not_found", "Application not found")
-        })?;
-
-    // Verify ownership
-    if client.user_id.as_deref() != Some(token.sub.as_str()) {
-        return Err(ServiceError::api(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            "Application not found",
-        ));
-    }
-
-    // Org-scope validation stays after the ownership check, preserving the
-    // existing behavior for active non-org users.
+    // Depends only on the caller, so it runs before the stored client is
+    // read and reveals nothing about which applications exist.
     validate_org_scope_membership(&user, wants_org_scope)?;
 
     // Set org_id only for organization-scoped apps
@@ -324,52 +302,16 @@ pub(crate) async fn update_application_api(
         None
     };
 
-    // Apply updates (merge request values with existing client record).
-    // Reject an explicitly provided empty/whitespace name; absent (None)
-    // means "keep the existing name" and is always accepted.
-    if let Some(new_name) = req.name.as_deref()
-        && new_name.trim().is_empty()
-    {
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_name",
-            "Application name is required",
-        ));
-    }
-    let name = req.name.as_deref().map_or(client.name.as_str(), str::trim);
-    let description = req.description.as_deref().or(client.description.as_deref());
-    let redirect_uris = req
-        .redirect_uris
-        .clone()
-        .unwrap_or_else(|| client.redirect_uris.clone());
-
-    // RFC 8707: Resource URIs default to existing if not provided.
-    let resource_uris = req
-        .resource_uris
-        .as_deref()
-        .map_or_else(|| client.resource_uris.clone(), <[String]>::to_vec);
-
-    // FAPI rules that depend on the existing client record
-    validate_update_fapi(&validated, &client)?;
-    let fapi = compute_fapi_update_fields(&validated, &client)?;
-
-    db::update_oauth_client(
-        &state.store,
-        &UpdateOAuthClientParams {
-            id: &app_id,
-            name,
-            description,
-            redirect_uris: &redirect_uris,
-            access_scope,
-            org_id,
-            resource_uris: &resource_uris,
-            token_endpoint_auth_method: fapi.token_endpoint_auth_method,
-            keys: fapi.keys,
-            fapi_profile: fapi.fapi_profile,
-            dpop_bound_access_tokens: fapi.dpop_bound_access_tokens,
-            post_logout_redirect_uris: validated.post_logout_redirect_uris.map(<[String]>::to_vec),
-        },
-    )
+    // Decided against the client as stored at the write, so a field this
+    // request leaves out keeps what a concurrent writer put there.
+    let outcome = db::update_oauth_client(&state.store, &app_id, |current| {
+        if current.user_id.as_deref() != Some(token.sub.as_str()) {
+            return Err(UpdateRefusal::NotFound);
+        }
+        validated
+            .apply_to(current, org_id)
+            .map_err(UpdateRefusal::Invalid)
+    })
     .await
     .map_err(|e| {
         tracing::error!("Failed to update OAuth client: {e}");
@@ -379,6 +321,17 @@ pub(crate) async fn update_application_api(
             "Internal database error",
         )
     })?;
+    match outcome {
+        Transition::Applied(()) => {}
+        Transition::NotFound | Transition::Rejected(UpdateRefusal::NotFound) => {
+            return Err(ServiceError::api(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "Application not found",
+            ));
+        }
+        Transition::Rejected(UpdateRefusal::Invalid(e)) => return Err(e.into()),
+    }
 
     // Fetch updated client
     let updated = db::get_oauth_client_by_id(&state.store, &app_id)
@@ -395,7 +348,11 @@ pub(crate) async fn update_application_api(
             ServiceError::api(StatusCode::NOT_FOUND, "not_found", "Application not found")
         })?;
 
-    tracing::info!("Updated OAuth application: {} ({})", name, client.client_id);
+    tracing::info!(
+        "Updated OAuth application: {} ({})",
+        updated.name,
+        updated.client_id
+    );
 
     Ok(Json(ApplicationResponse::from(updated)))
 }
@@ -609,7 +566,7 @@ pub(crate) async fn list_secrets_api(
     let secret_infos = secrets
         .into_iter()
         .map(|s| SecretInfo {
-            active: s.is_valid(&now),
+            status: s.status(&now),
             id: s.id,
             description: s.description,
             created_at: s.created_at,

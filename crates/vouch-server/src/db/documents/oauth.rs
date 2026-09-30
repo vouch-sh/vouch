@@ -229,6 +229,16 @@ impl TokenEndpointAuthMethod {
         self.uses_client_secret() && fapi_profile == FapiProfile::None
     }
 
+    /// Returns `true` for the methods that authenticate with the client's key
+    /// material: `private_key_jwt` signs its client assertion with a key from
+    /// `jwks`/`jwks_uri`, and `self_signed_tls_client_auth` carries its
+    /// certificate in a key's `x5c` member (RFC 8705 §2.2.2). A client using
+    /// either cannot authenticate without keys.
+    #[must_use]
+    pub fn authenticates_with_keys(self) -> bool {
+        matches!(self, Self::PrivateKeyJwt | Self::SelfSignedTlsClientAuth)
+    }
+
     /// Returns `true` for the auth methods FAPI 2.0 clients may use:
     /// `private_key_jwt` (client-assertion signing) or mTLS
     /// (`tls_client_auth`, `self_signed_tls_client_auth`).
@@ -585,26 +595,47 @@ pub struct OAuthClientSecretDoc {
 
 impl OAuthClientSecretDoc {
     /// Whether this secret is active: not revoked and not expired at `now`.
-    ///
-    /// The single definition of "active secret". The cap and floor guards in
-    /// `db::oauth` and `OAuthClientSecret::is_valid` all call it, so the
-    /// counted set and the authenticating set cannot drift apart.
     #[must_use]
     pub fn is_valid(&self, now: &Timestamp) -> bool {
-        is_secret_active(self.revoked_at, self.expires_at, now)
+        SecretStatus::at(self.revoked_at, self.expires_at, now) == SecretStatus::Active
     }
 }
 
-/// Shared "active secret" predicate over the two fields that decide it.
+/// Where a client secret stands at an instant.
 ///
-/// A secret expiring exactly at `now` is already inactive.
-#[must_use]
-pub(crate) fn is_secret_active(
-    revoked_at: Option<Timestamp>,
-    expires_at: Option<Timestamp>,
-    now: &Timestamp,
-) -> bool {
-    revoked_at.is_none() && expires_at.is_none_or(|exp| exp > *now)
+/// The single definition of "active secret": the cap and floor guards in
+/// `db::oauth`, authentication, and the console all read it, so the counted
+/// set, the authenticating set, and what an owner is shown cannot drift
+/// apart. Only an active secret authenticates; an expired one was never
+/// revoked and can still be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SecretStatus {
+    /// Neither revoked nor expired.
+    Active,
+    /// Past its `expires_at` and never revoked.
+    Expired,
+    /// Revoked, whatever its expiry.
+    Revoked,
+}
+
+impl SecretStatus {
+    /// The status of a secret with these two fields at `now`. A secret
+    /// expiring exactly at `now` is already expired.
+    #[must_use]
+    pub(crate) fn at(
+        revoked_at: Option<Timestamp>,
+        expires_at: Option<Timestamp>,
+        now: &Timestamp,
+    ) -> Self {
+        if revoked_at.is_some() {
+            Self::Revoked
+        } else if expires_at.is_some_and(|exp| exp <= *now) {
+            Self::Expired
+        } else {
+            Self::Active
+        }
+    }
 }
 
 impl DocumentType for OAuthClientSecretDoc {

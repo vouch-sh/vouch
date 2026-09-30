@@ -4,7 +4,7 @@
 //! Contains all structs, enums, templates, and their implementations used by
 //! both the web UI and API handlers.
 
-use crate::db::{AccessScope, OAuthClient};
+use crate::db::{AccessScope, OAuthClient, SecretStatus};
 use crate::impl_template_response;
 use askama::Template;
 use jiff::Timestamp;
@@ -443,7 +443,7 @@ pub(crate) struct SecretInfo {
     pub description: Option<String>,
     pub created_at: Timestamp,
     pub expires_at: Option<Timestamp>,
-    pub active: bool,
+    pub status: SecretStatus,
 }
 
 /// API response for listing secrets.

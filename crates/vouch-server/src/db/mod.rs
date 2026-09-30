@@ -147,7 +147,7 @@ pub use documents::audit::{
     TOKEN_ISSUED, TokenExchangeDetails,
 };
 pub use documents::oauth::{
-    AccessScope, FapiProfile, OAuthClientType, RegistrationSource, ResponseMode,
+    AccessScope, FapiProfile, OAuthClientType, RegistrationSource, ResponseMode, SecretStatus,
     TokenEndpointAuthMethod,
 };
 
@@ -156,8 +156,8 @@ pub(crate) use oauth::JwtAssertionJtiClaim;
 pub use oauth::{
     ClientKeys, ClientKeysError, ClientType, ConsumedRegistrationToken, CreateOAuthClientParams,
     JwkEntry, JwkSet, KeyType, MAX_ACTIVE_SECRETS, MAX_POST_LOGOUT_REDIRECT_URIS, OAuthClient,
-    OAuthClientSecret, OAuthEventType, OAuthUsageStats, RecordOAuthEventParams, RecordedOrgDomain,
-    RedirectUriError, UnusableJwk, UpdateClientRegistrationParams, UpdateOAuthClientParams,
+    OAuthClientSecret, OAuthClientUpdate, OAuthEventType, OAuthUsageStats, RecordOAuthEventParams,
+    RecordedOrgDomain, RedirectUriError, UnusableJwk, UpdateClientRegistrationParams,
     client_keys_to_stored, consume_registration_access_token, create_oauth_client,
     create_oauth_client_secret, delete_expired_jwt_assertion_jtis, delete_oauth_client,
     delete_oauth_client_and_revoke_sessions, get_oauth_client_by_client_id, get_oauth_client_by_id,

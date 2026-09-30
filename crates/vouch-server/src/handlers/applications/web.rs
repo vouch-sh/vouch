@@ -6,7 +6,8 @@
 
 use crate::AppState;
 use crate::arrival::ArrivalTime;
-use crate::db::{self, AccessScope, UpdateOAuthClientParams};
+use crate::db::store::Transition;
+use crate::db::{self, AccessScope};
 use axum::{
     Form,
     extract::{Path, State},
@@ -20,9 +21,8 @@ use super::types::{
     SecretAddedTemplate, SecretInfo, UpdateApplicationForm, UsageStat,
 };
 use super::validate::{
-    AppValidationError, CreateAppContext, CreateAppInput, UpdateAppInput, build_create_params,
-    compute_fapi_update_fields, validate_create_application, validate_update_fapi,
-    validate_update_format,
+    AppValidationError, CreateAppContext, CreateAppInput, UpdateAppInput, UpdateRefusal,
+    build_create_params, validate_create_application, validate_update_format,
 };
 use super::{generate_client_secret, parse_redirect_uris, parse_resource_uris};
 use crate::error::ServiceError;
@@ -312,10 +312,13 @@ pub(crate) async fn detail_application_page(
             description: s.description.clone(),
             created_at: s.created_at,
             expires_at: s.expires_at,
-            active: s.is_valid(&now),
+            status: s.status(&now),
         })
         .collect();
-    let secrets_count = secrets.iter().filter(|s| s.active).count();
+    let secrets_count = secrets
+        .iter()
+        .filter(|s| s.status == db::SecretStatus::Active)
+        .count();
 
     // Get usage stats. A failure renders the page without them rather than
     // failing the whole detail view, but "no usage" and "stats unavailable"
@@ -356,27 +359,6 @@ pub(crate) async fn update_application_form(
 
     let user_id = auth.user_id.as_deref().unwrap_or_default();
 
-    // Verify ownership
-    let client = match db::get_oauth_client_by_id(&state.store, &app_id).await {
-        Ok(Some(c)) if c.user_id.as_deref() == Some(user_id) => c,
-        _ => {
-            return error_page(
-                Tr::new("apps-error-title-not-found"),
-                Tr::new("apps-error-app-not-found"),
-                "/applications",
-            );
-        }
-    };
-
-    // Validate inputs
-    let name = form.name.trim();
-    if name.is_empty() {
-        return validation_error_response(
-            &AppValidationError::EmptyName,
-            format!("/applications/{}", app_id),
-        );
-    }
-
     // Parse textarea inputs, then run the shared format validation.
     // The web form always submits the post_logout_redirect_uris field, so
     // empty textarea = explicitly clear (Some(&[])), not absent (None).
@@ -389,6 +371,10 @@ pub(crate) async fn update_application_form(
     );
 
     let validated = match validate_update_format(UpdateAppInput {
+        name: Some(&form.name),
+        // Fall back to the stored value, matching the API path: a request
+        // that omits the field is not asking to erase it.
+        description: form.description.as_deref(),
         redirect_uris: Some(&redirect_uris),
         resource_uris: Some(&resource_uris),
         // Always Some: empty vec = explicitly clear; validation rejects invalid URIs.
@@ -447,56 +433,42 @@ pub(crate) async fn update_application_form(
     // yields the org for org-scoped updates and `None` otherwise.
     let org_id = user_org_id.as_deref();
 
-    // FAPI rules that depend on the existing client record
-    if let Err(e) = validate_update_fapi(&validated, &client) {
-        return validation_error_response(&e, format!("/applications/{}", app_id));
-    }
-
-    // Merge FAPI-related fields against the existing client record. The form's
+    // Decided against the client as stored at the write, so a field this
+    // request leaves out keeps what a concurrent writer put there. The form's
     // security-profile radio group always submits fapi_profile; selecting
-    // Standard for a client that is already FAPI is rejected above, so what
-    // reaches here either enables FAPI or leaves a non-FAPI client standard.
-    let fapi = match compute_fapi_update_fields(&validated, &client) {
-        Ok(fapi) => fapi,
-        Err(e) => {
+    // Standard for a client that is already FAPI is refused.
+    let outcome = db::update_oauth_client(&state.store, &app_id, |current| {
+        if current.user_id.as_deref() != Some(user_id) {
+            return Err(UpdateRefusal::NotFound);
+        }
+        validated
+            .apply_to(current, org_id)
+            .map_err(UpdateRefusal::Invalid)
+    })
+    .await;
+    match outcome {
+        Ok(Transition::Applied(())) => {}
+        Ok(Transition::NotFound | Transition::Rejected(UpdateRefusal::NotFound)) => {
+            return error_page(
+                Tr::new("apps-error-title-not-found"),
+                Tr::new("apps-error-app-not-found"),
+                "/applications",
+            );
+        }
+        Ok(Transition::Rejected(UpdateRefusal::Invalid(e))) => {
             return validation_error_response(&e, format!("/applications/{}", app_id));
         }
-    };
-
-    // Update the application
-    if let Err(e) = db::update_oauth_client(
-        &state.store,
-        &UpdateOAuthClientParams {
-            id: &app_id,
-            name,
-            // Fall back to the stored value, matching the API path: a request
-            // that omits the field is not asking to erase it.
-            description: form
-                .description
-                .as_deref()
-                .or(client.description.as_deref()),
-            redirect_uris: &redirect_uris,
-            access_scope,
-            org_id,
-            resource_uris: &resource_uris,
-            token_endpoint_auth_method: fapi.token_endpoint_auth_method,
-            keys: fapi.keys,
-            fapi_profile: fapi.fapi_profile,
-            dpop_bound_access_tokens: fapi.dpop_bound_access_tokens,
-            post_logout_redirect_uris: validated.post_logout_redirect_uris.map(<[String]>::to_vec),
-        },
-    )
-    .await
-    {
-        tracing::error!("Failed to update application: {}", e);
-        return error_page(
-            Tr::new("apps-error-title-error"),
-            Tr::new("apps-error-update-failed"),
-            format!("/applications/{}", app_id),
-        );
+        Err(e) => {
+            tracing::error!("Failed to update application: {}", e);
+            return error_page(
+                Tr::new("apps-error-title-error"),
+                Tr::new("apps-error-update-failed"),
+                format!("/applications/{}", app_id),
+            );
+        }
     }
 
-    tracing::info!("Updated OAuth application: {} ({})", name, client.client_id);
+    tracing::info!("Updated OAuth application: {app_id}");
 
     Redirect::to(&format!("/applications/{}", app_id)).into_response()
 }
@@ -2614,6 +2586,97 @@ mod tests {
     // must not fire.  Before the fix the web `delete_secret_form` rendered the
     // `apps-error-secret-last-active` error page for this case.  Regression for
     // the missing `target_active` condition in the web pre-flight check.
+    /// The detail page tells an expired secret from a revoked one: an expired
+    /// secret was never revoked, so it is labelled expired and keeps its
+    /// Revoke form, which `delete_secret_form` accepts for it; a revoked one
+    /// has no form.
+    #[tokio::test]
+    async fn test_web_detail_labels_expired_secret_and_offers_revoke() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "web-expired-label@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let session_token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let cookie = format!("__Host-vouch_session={session_token}");
+        let client = create_test_client(
+            &state.store,
+            &user.id,
+            TestClientSpec {
+                with_secret: false,
+                ..Default::default()
+            },
+        )
+        .await;
+        let app_id = client.app_id;
+
+        let past: jiff::Timestamp = "2020-01-01T00:00:00Z"
+            .parse()
+            .expect("static past timestamp parses");
+        let expired = db::create_oauth_client_secret(
+            &state.store,
+            &app_id,
+            &super::hash_token("web-expired-label-secret"),
+            Some("expired one"),
+            Some(past),
+        )
+        .await
+        .expect("create expired secret");
+        let revoked = db::create_oauth_client_secret(
+            &state.store,
+            &app_id,
+            &super::hash_token("web-revoked-label-secret"),
+            Some("revoked one"),
+            None,
+        )
+        .await
+        .expect("create secret");
+        // A live secret keeps the credential client above its one-active floor.
+        db::create_oauth_client_secret(
+            &state.store,
+            &app_id,
+            &super::hash_token("web-live-label-secret"),
+            Some("live one"),
+            None,
+        )
+        .await
+        .expect("create live secret");
+        db::revoke_oauth_client_secret(&state.store, &revoked.id, &app_id)
+            .await
+            .expect("revoke secret");
+
+        let (status, body) = http_get(
+            &app,
+            &format!("/applications/{app_id}"),
+            &[("Cookie", &cookie)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body.contains(">expired</span>"), "expired badge: {body}");
+        assert!(body.contains(">revoked</span>"), "revoked badge: {body}");
+        assert!(
+            body.contains(&format!(
+                "/applications/{app_id}/secrets/{}/delete",
+                expired.id
+            )),
+            "an expired secret keeps its Revoke form"
+        );
+        assert!(
+            !body.contains(&format!(
+                "/applications/{app_id}/secrets/{}/delete",
+                revoked.id
+            )),
+            "a revoked secret has no Revoke form"
+        );
+    }
+
     #[tokio::test]
     async fn test_web_delete_sole_expired_secret_allowed() {
         let (app, state) = test_app().await;

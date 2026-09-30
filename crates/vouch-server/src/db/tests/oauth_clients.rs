@@ -92,23 +92,20 @@ async fn test_oauth_client_crud() {
         "https://example.com/callback".to_string(),
         "https://example.com/callback2".to_string(),
     ];
-    update_oauth_client(
-        &store,
-        &UpdateOAuthClientParams {
-            id: &client.id,
-            name: "My Updated App",
-            description: Some("Updated desc"),
-            redirect_uris: &new_redirect_uris,
+    update_oauth_client(&store, &client.id, |current| {
+        Ok::<_, std::convert::Infallible>(OAuthClientUpdate {
+            name: "My Updated App".to_string(),
+            description: Some("Updated desc".to_string()),
+            redirect_uris: new_redirect_uris.clone(),
             access_scope: None,
-            org_id: None,
-            resource_uris: &[],
-            token_endpoint_auth_method: client.token_endpoint_auth_method,
-            keys: client.keys.as_ref(),
-            fapi_profile: client.fapi_profile,
-            dpop_bound_access_tokens: client.dpop_bound_access_tokens,
+            resource_uris: Vec::new(),
+            token_endpoint_auth_method: current.token_endpoint_auth_method,
+            keys: current.keys.clone(),
+            fapi_profile: current.fapi_profile,
+            dpop_bound_access_tokens: current.dpop_bound_access_tokens,
             post_logout_redirect_uris: None,
-        },
-    )
+        })
+    })
     .await
     .expect("Failed to update client");
 

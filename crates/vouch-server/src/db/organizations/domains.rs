@@ -15,7 +15,7 @@ use crate::db::documents::organization::{
     AdditionalDomain, AdditionalDomainState, DomainClaimDoc, OrganizationDoc,
     UNVERIFY_FAILURE_THRESHOLD,
 };
-use crate::db::pool::{self, RetryableError};
+use crate::db::pool::{self, CasError, RetryableError};
 use crate::db::sessions::SessionCache;
 use crate::db::store::DocumentStore;
 use anyhow::Result;
@@ -61,39 +61,11 @@ fn generate_verification_token() -> Result<String> {
     Ok(hex::encode(crypto::generate_random_bytes(32)?))
 }
 
-/// Internal OCC-retry error for organization document CAS mutations.
-///
-/// Used as the concrete error type inside `with_dsql_retry!` blocks for
-/// functions that CAS the org doc as their serialization point. Business
-/// rejections use `Other(anyhow::anyhow!(...))` — a plain `anyhow::Error`
-/// has no retryable DB error code, so the retry macro lets them through
-/// immediately. `OccConflict` is the application-level CAS conflict
-/// (`compare_and_update` returned `false`).
-#[derive(Debug, thiserror::Error)]
-enum OrgCasError {
-    /// Application-level OCC version race; retried by `with_dsql_retry!`.
-    #[error("organization was modified concurrently; please retry")]
-    OccConflict,
-    /// Business rejection or infrastructure failure.  Not retried unless the
-    /// wrapped `anyhow::Error` carries a retryable DB error code.
-    #[error(transparent)]
-    Other(#[from] anyhow::Error),
-}
-
-impl RetryableError for OrgCasError {
-    fn is_retryable(&self) -> bool {
-        match self {
-            Self::OccConflict => true,
-            Self::Other(e) => pool::is_retryable_db_error(e),
-        }
-    }
-}
-
 /// Slot CAS conflicts from the subdomain auto-release hook must stay
 /// retryable through the org-doc retry loop; everything else is terminal
 /// (unwrapping `Other` keeps any retryable DB error code visible to
 /// `is_retryable_db_error`).
-impl From<super::issuer::SubdomainClaimError> for OrgCasError {
+impl From<super::issuer::SubdomainClaimError> for CasError {
     fn from(e: super::issuer::SubdomainClaimError) -> Self {
         use super::issuer::SubdomainClaimError;
         match e {
@@ -459,11 +431,11 @@ pub async fn remove_additional_domain(
     //
     // Returns `None` when the domain is not attached, or `Some(released)`
     // where `released: Option<String>` is any auto-released subdomain label.
-    let result: Result<Option<Option<String>>, OrgCasError> = crate::with_dsql_retry!(async {
+    let result: Result<Option<Option<String>>, CasError> = crate::with_dsql_retry!(async {
         let org_doc = store
             .get::<OrganizationDoc>(org_id)
             .await?
-            .ok_or_else(|| OrgCasError::Other(anyhow::anyhow!("organization not found")))?;
+            .ok_or_else(|| CasError::Other(anyhow::anyhow!("organization not found")))?;
         let version = org_doc.version;
         let mut data = org_doc.data;
 
@@ -503,13 +475,13 @@ pub async fn remove_additional_domain(
                     .await?;
             }
             if !tx.compare_and_update(org_id, version, &data).await? {
-                return Err(OrgCasError::OccConflict);
+                return Err(CasError::OccConflict);
             }
             tx.commit().await?;
             subdomain
         } else {
             if !store.compare_and_update(org_id, version, &data).await? {
-                return Err(OrgCasError::OccConflict);
+                return Err(CasError::OccConflict);
             }
             None
         };
@@ -884,7 +856,7 @@ pub async fn record_recheck_result(
     // retry budget is exhausted (extreme contention), the final
     // `OccConflict` is mapped back to `Ok(StillVerified)` — no flip was
     // performed by this background task, which is the correct outcome.
-    let result: Result<RecheckEffect, OrgCasError> = crate::with_dsql_retry!(async {
+    let result: Result<RecheckEffect, CasError> = crate::with_dsql_retry!(async {
         let Some(org_doc) = store.get::<OrganizationDoc>(org_id).await? else {
             return Ok(RecheckEffect::NotFound);
         };
@@ -961,14 +933,14 @@ pub async fn record_recheck_result(
                     .await?;
             }
             if !tx.compare_and_update(org_id, version, &data).await? {
-                return Err(OrgCasError::OccConflict);
+                return Err(CasError::OccConflict);
             }
             tx.commit().await?;
             if let RecheckEffect::FlippedToUnverified { released_subdomain } = &mut effect {
                 *released_subdomain = to_release;
             }
         } else if !store.compare_and_update(org_id, version, &data).await? {
-            return Err(OrgCasError::OccConflict);
+            return Err(CasError::OccConflict);
         }
 
         Ok(effect)
@@ -980,8 +952,8 @@ pub async fn record_recheck_result(
     // are surfaced so the operator can investigate.
     match result {
         Ok(effect) => Ok(effect),
-        Err(OrgCasError::OccConflict) => Ok(RecheckEffect::StillVerified),
-        Err(OrgCasError::Other(e)) => Err(e),
+        Err(CasError::OccConflict) => Ok(RecheckEffect::StillVerified),
+        Err(CasError::Other(e)) => Err(e),
     }
 }
 
@@ -2055,8 +2027,8 @@ mod tests {
     fn org_cas_error_retryability() {
         use crate::db::pool::RetryableError;
 
-        assert!(OrgCasError::OccConflict.is_retryable());
-        assert!(!OrgCasError::Other(anyhow::anyhow!("domain is already attached")).is_retryable());
+        assert!(CasError::OccConflict.is_retryable());
+        assert!(!CasError::Other(anyhow::anyhow!("domain is already attached")).is_retryable());
     }
 
     /// A slot CAS loss inside the subdomain auto-release hook must convert to
@@ -2067,11 +2039,11 @@ mod tests {
         use crate::db::organizations::issuer::SubdomainClaimError;
         use crate::db::pool::RetryableError;
 
-        assert!(OrgCasError::from(SubdomainClaimError::OccConflict).is_retryable());
+        assert!(CasError::from(SubdomainClaimError::OccConflict).is_retryable());
         assert!(
-            !OrgCasError::from(SubdomainClaimError::Other(anyhow::anyhow!("boom"))).is_retryable()
+            !CasError::from(SubdomainClaimError::Other(anyhow::anyhow!("boom"))).is_retryable()
         );
-        assert!(!OrgCasError::from(SubdomainClaimError::NotEligible).is_retryable());
+        assert!(!CasError::from(SubdomainClaimError::NotEligible).is_retryable());
     }
 
     /// All business-rejection variants of `AddDomainError` are terminal; only
@@ -2108,11 +2080,11 @@ mod tests {
     /// is the ground truth.
     #[test]
     fn record_recheck_occ_exhaustion_maps_to_still_verified() {
-        let result: Result<RecheckEffect, OrgCasError> = Err(OrgCasError::OccConflict);
+        let result: Result<RecheckEffect, CasError> = Err(CasError::OccConflict);
         let effect = match result {
             Ok(e) => e,
-            Err(OrgCasError::OccConflict) => RecheckEffect::StillVerified,
-            Err(OrgCasError::Other(_)) => RecheckEffect::NotFound,
+            Err(CasError::OccConflict) => RecheckEffect::StillVerified,
+            Err(CasError::Other(_)) => RecheckEffect::NotFound,
         };
         assert_eq!(effect, RecheckEffect::StillVerified);
     }
