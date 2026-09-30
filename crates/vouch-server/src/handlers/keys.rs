@@ -147,7 +147,7 @@ impl RegistrationCompletion {
 )]
 pub(crate) async fn register_start(
     State(state): State<Arc<AppState>>,
-    AuthenticatedToken(token): AuthenticatedToken,
+    AuthenticatedToken { token, user }: AuthenticatedToken,
     Json(req): Json<RegisterStartRequest>,
 ) -> Result<Json<RegisterStartResponse>, ServiceError> {
     let user_id = Uuid::parse_str(&token.sub).map_err(|e| {
@@ -157,8 +157,6 @@ pub(crate) async fn register_start(
             e.to_string(),
         )
     })?;
-
-    let user = super::session::load_active_user(&state, &token.sub).await?;
 
     tracing::info!(
         "Registration start for authenticated user: {} (adding key: {})",
@@ -242,7 +240,7 @@ pub(crate) async fn register_start(
 pub(crate) async fn register_complete(
     arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
-    AuthenticatedToken(token): AuthenticatedToken,
+    AuthenticatedToken { token, .. }: AuthenticatedToken,
     client_info: db::ClientInfo,
     ValidJson(req): ValidJson<RegisterCompleteRequest>,
 ) -> Result<Json<RegisterCompleteResponse>, ServiceError> {
@@ -265,19 +263,10 @@ pub(crate) async fn register_complete(
         return Err(ServiceError::Forbidden("state_user_mismatch"));
     }
 
-    // Account must be active. A user deactivated — or hard-deleted — in the
-    // window between `register_start` (which issued the state, valid for five
-    // minutes) and this completion must not register a new hardware key
-    // (issue #846, plus the in-flight `delete_user` race that leaves
-    // `db::get_user_by_id` returning `Ok(None)`). Routing through
-    // `load_active_user` rejects both `Ok(None)` (deleted) and `active=false`
-    // (deactivated) and keeps this completion consistent with `register_start`,
-    // `rename_key`, and `delete_key`, all of which enforce the invariant the
-    // same way. The previous inline `if let Some(account) = account` guard only
-    // caught `Some(active=false)` and silently let `Ok(None)` through to the
-    // single-use consume and WebAuthn verification, which (with a valid
-    // attestation) committed an orphan `AuthenticatorDoc` for a deleted user.
-    super::session::load_active_user(&state, &checked.reg_state.user_id.to_string()).await?;
+    // The account is active: `AuthenticatedToken` loaded it for this request,
+    // and the state's user is the caller. A user deactivated or deleted in
+    // the five minutes between `register_start` and this completion is
+    // refused before the state is consumed (issue #846).
 
     // Single-use enforcement: consume the state token before any WebAuthn work.
     // A captured state JWT cannot be replayed within the 5-minute validity window.
@@ -431,7 +420,7 @@ pub(crate) async fn register_complete(
 /// List all registered keys for the authenticated user.
 pub(crate) async fn list_keys(
     State(state): State<Arc<AppState>>,
-    AuthenticatedToken(token): AuthenticatedToken,
+    AuthenticatedToken { token, .. }: AuthenticatedToken,
 ) -> Result<Json<ListKeysResponse>, ServiceError> {
     let keys =
         key_svc::list_keys_for_user(&state.store, &token.sub, token.authenticator_id.as_deref())
@@ -443,7 +432,7 @@ pub(crate) async fn list_keys(
 /// Rename a registered key.
 pub(crate) async fn rename_key(
     State(state): State<Arc<AppState>>,
-    AuthenticatedToken(token): AuthenticatedToken,
+    AuthenticatedToken { token, user }: AuthenticatedToken,
     client_info: db::ClientInfo,
     Path(key_id): Path<String>,
     Json(req): Json<RenameKeyRequest>,
@@ -463,13 +452,6 @@ pub(crate) async fn rename_key(
             "Key name must be between 1 and 100 characters",
         )
     })?;
-
-    // Defense-in-depth active-user gate. `AuthenticatedToken` establishes
-    // token validity only — it does not load the user record — so a
-    // deactivated user holding a live session would otherwise reach the
-    // state-changing rename below. Mirrors `delete_key` and `register_start`
-    // in this file; see `session::load_active_user`.
-    let user = super::session::load_active_user(&state, &token.sub).await?;
 
     let message = key_svc::rename_key(&state.store, &token.sub, &key_id, &name).await?;
 
@@ -491,7 +473,7 @@ pub(crate) async fn rename_key(
 /// Delete a registered key.
 pub(crate) async fn delete_key(
     State(state): State<Arc<AppState>>,
-    SteppedUpToken(token): SteppedUpToken,
+    SteppedUpToken { token, user }: SteppedUpToken,
     client_info: db::ClientInfo,
     Path(key_id): Path<String>,
 ) -> Result<Json<DeleteKeyResponse>, ServiceError> {
@@ -503,14 +485,6 @@ pub(crate) async fn delete_key(
             "Key ID must be a valid UUID",
         ));
     }
-
-    // Defense-in-depth active-user gate. `SteppedUpToken` establishes token
-    // validity and recent hardware verification but does not load the user
-    // record, so a deactivated user holding a live session (e.g. one produced
-    // by a writer that bypasses `services::auth::revoke_then_persist`) would
-    // otherwise reach the destructive delete below. Mirrors `register_start`
-    // and the credentials/device handlers; see `session::load_active_user`.
-    let user = super::session::load_active_user(&state, &token.sub).await?;
 
     // Whether the deleted key is the authenticator the current session is
     // bound to (browser uses this to decide whether to re-authenticate).
@@ -1260,24 +1234,19 @@ mod tests {
     // A user hard-deleted in the window between `register_start` (which
     // issued the state, valid for five minutes) and this completion must be
     // rejected — not proceed to the single-use consume and WebAuthn
-    // verification. The `AuthenticatedToken` extractor validates the session
-    // via `session_cache.get_session_by_token_hash` and does NOT call
-    // `get_user_by_id`; the handler's `load_active_user` read is the ONLY
-    // `get_user_by_id` on this path (mirrors the org-scoped OAuth app race in
-    // `handlers/applications/web.rs`, fixed via the same
-    // `get_user_by_id_test_hook` seam). Before the `load_active_user` fix the
-    // inline `if let Some(account) = account` guard admitted `Ok(None)` and
-    // the request reached WebAuthn, returning 400 invalid_attestation — the
-    // smoking gun that a deleted user was being treated like an active user.
+    // verification. The `AuthenticatedToken` extractor's `load_active_user`
+    // read is the ONLY `get_user_by_id` on this path (the org-scoped OAuth app
+    // race in `handlers/applications/web.rs` uses the same
+    // `get_user_by_id_test_hook` seam). A 400 invalid_attestation would mean
+    // a deleted user reached WebAuthn as if active.
 
     /// Install a `get_user_by_id_test_hook` that forces `Ok(None)` (the
     /// "user vanished mid-request" outcome) for `target` once it has been
     /// set. While `target` is `None` (during test setup) every read runs for
     /// real, so `create_test_user` / `create_test_session_with` work normally.
     /// Returns a counter that is bumped on each forced read so the test can
-    /// assert the forced `Ok(None)` landed on the handler's read (the
-    /// extractor makes no `get_user_by_id` call on this path, so the count
-    /// must be exactly one).
+    /// assert the forced `Ok(None)` landed on the extractor's read, the only
+    /// `get_user_by_id` call on this path, so the count must be exactly one.
     fn install_user_vanish_hook(
         target: Arc<Mutex<Option<String>>>,
     ) -> (Arc<AtomicU32>, GetUserByIdTestHook) {
@@ -1289,9 +1258,9 @@ mod tests {
                 return false;
             }
             calls_for_hook.fetch_add(1, Ordering::SeqCst);
-            // Every handler-path read for the target user is forced to
-            // `Ok(None)`. The CLI completion path's `load_active_user` makes
-            // exactly one `get_user_by_id` read, so this forces it on the
+            // Every read for the target user is forced to `Ok(None)`. The
+            // extractor's `load_active_user` makes exactly one
+            // `get_user_by_id` read on this path, so this forces it on the
             // first (and only) call.
             true
         });
@@ -1824,9 +1793,8 @@ mod tests {
     }
 
     /// A deactivated user holding a live session must not rename a security
-    /// key. `AuthenticatedToken` validates the token only, so the handler
-    /// must reject deactivated accounts itself — same fixture and expected
-    /// response as `test_delete_key_rejects_deactivated_user` below.
+    /// key: `AuthenticatedToken` refuses the account — same fixture and
+    /// expected response as `test_delete_key_rejects_deactivated_user` below.
     #[tokio::test]
     async fn test_rename_key_rejects_deactivated_user() {
         let (app, state) = test_app().await;
@@ -2381,13 +2349,10 @@ mod tests {
     }
 
     /// A deactivated user holding a live stepped-up session must not delete a
-    /// security key. `SteppedUpToken` enforces token validity and recent
-    /// hardware verification but does not load the user record, so the
-    /// handler must reject deactivated accounts itself before reaching the
-    /// destructive `key_svc::delete_key`. Production deactivation flows revoke
-    /// sessions before persisting `active=false` (#1151), but the
-    /// deactivated-with-live-session state is still defended per-handler by
-    /// every sibling in this file (`register_start`, `register_complete`).
+    /// security key: `SteppedUpToken` refuses the account before the handler
+    /// reaches the destructive `key_svc::delete_key`. Production deactivation
+    /// flows revoke sessions before persisting `active=false` (#1151), but the
+    /// deactivated-with-live-session state is still refused at extraction.
     /// This fixture is the exact one those siblings test against:
     /// `update_user_active_status(false)` with the session row left intact.
     #[tokio::test]

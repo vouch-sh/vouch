@@ -332,20 +332,18 @@ impl FromRequestParts<Arc<AppState>> for SignedInSession {
         let Ok(arrival) = ArrivalTime::from_request_parts(parts, state).await else {
             return Err(StatusCode::INTERNAL_SERVER_ERROR.into_response());
         };
-        let Ok(session) = session::extract_session_from_cookie(state, &jar, arrival).await else {
-            return Err(sign_in());
-        };
-
-        // Missing or deactivated users are unauthenticated — the active-account
-        // invariant is enforced once, in `load_active_user`.
-        let Ok(user) = session::load_active_user(state, &session.sub).await else {
+        // Missing or deactivated users are unauthenticated: the cookie
+        // extraction refuses them.
+        let Ok(session::AuthenticatedToken { token, user }) =
+            session::extract_session_from_cookie(state, &jar, arrival).await
+        else {
             return Err(sign_in());
         };
 
         Ok(Self {
             auth: AuthContext {
                 authenticated: true,
-                user_id: Some(session.sub),
+                user_id: Some(token.sub),
                 user_email: Some(user.email),
                 has_org: user.org_id.is_some(),
                 is_org_admin: user.is_org_admin,

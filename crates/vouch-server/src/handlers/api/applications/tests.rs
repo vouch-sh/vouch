@@ -9,6 +9,7 @@
 use axum::http::StatusCode;
 
 use crate::arrival::ArrivalTime;
+use crate::crypto::hash_token;
 use crate::db::documents::session::SessionDoc;
 use crate::db::store::DocumentStore;
 use crate::db::{
@@ -1476,15 +1477,10 @@ async fn test_update_application_rejects_deactivated_user() {
     assert_eq!(error["message"], "User account is deactivated");
 }
 
-/// Regression for the gate-ordering outlier: a deactivated user holding a
-/// live session who PATCHes an app they do **not** own must get
-/// `401 "User account is deactivated"`, matching `delete_application_api` and
-/// the other state-changing handlers that gate first via
-/// `load_active_owned_client`. Before the fix the ownership check ran before
-/// the active-user gate and returned `404 "Application not found"`, making
-/// `update_application_api` the sole gate-after-ownership outlier among the
-/// write handlers — observable divergence: `PATCH` non-owned → 404 while
-/// `DELETE` on the same app → 401.
+/// A deactivated user holding a live session who PATCHes an app they do
+/// **not** own gets `401 "User account is deactivated"`, like every other
+/// handler: `AuthenticatedToken` refuses the account before the ownership
+/// check could answer 404.
 #[tokio::test]
 async fn test_update_non_owned_application_rejects_deactivated_user() {
     let (app, state) = test_app().await;
@@ -1740,17 +1736,18 @@ async fn test_delete_application_revokes_minted_sessions() {
 // (regression for the (A)-OK / (B)-Err arm through the real axum router)
 // ========================================================================
 
-/// Probe whether an access token still validates at `GET /v1/keys`. 200 means
-/// the session is live (the cache served a `Hit` or missed through to a live
-/// DB row); 401 means the session has been revoked (cache evicted and DB row
-/// gone). M2M (`client_credentials`) tokens with the default audience
-/// (`aud == client_id`) reach this handler: `enforce_audience_coverage`
-/// fast-paths that case, and `list_keys` does not call `load_active_user`, so
-/// an M2M token with `sub == client_id` and no user row returns 200 (empty key
-/// list) rather than 401.
-async fn v1_keys_status(app: &axum::Router, token: &str) -> StatusCode {
-    let (status, _) = http_get(app, "/v1/keys", &[("Authorization", &bearer(token))]).await;
-    status
+/// Whether the session cache still serves a session for `token`: a cached
+/// `Hit`, or a miss through to a live DB row. `false` means the session is
+/// revoked (cache evicted and DB row gone). Resource routes load the token's
+/// user, which an M2M (`client_credentials`) token does not have, so the probe
+/// goes to the cache every resource request consults first.
+async fn m2m_session_live(state: &crate::AppState, token: &str) -> bool {
+    state
+        .session_cache
+        .get_session_by_token_hash(&state.store, &hash_token(token), test_arrival())
+        .await
+        .expect("session lookup")
+        .is_some()
 }
 
 /// End-to-end regression for the cache/DB desync on the chokepoint's
@@ -1762,12 +1759,11 @@ async fn v1_keys_status(app: &axum::Router, token: &str) -> StatusCode {
 /// 2. The admin deletes the OAuth application; the chokepoint's second
 ///    `delete_by_index` (the `client_id`-indexed delete) faults, so the
 ///    request returns 500.
-/// 3. The attacker's next `GET /v1/keys` within the cache TTL must NOT
-///    authenticate from a stale cache `Hit`: with the fix,
-///    `invalidate_for_user` ran between the two deletes and evicted the M2M
-///    entry, so the cache misses through to the DB (row gone) and returns 401.
-///    Under the bug both invalidations are skipped and this probe returns 200
-///    from the stale `Hit` until the TTL elapses.
+/// 3. The attacker's next session lookup within the cache TTL must NOT
+///    succeed from a stale cache `Hit`: `invalidate_for_user` ran between the
+///    two deletes and evicted the M2M entry, so the cache misses through to
+///    the DB (row gone). Without the eviction the lookup succeeds from the
+///    stale `Hit` until the TTL elapses.
 ///
 /// `set_delete_by_index_remaining_successes(1)` faults exactly the chokepoint's
 /// second `delete_by_index` while letting the first commit. A sibling client's
@@ -1805,13 +1801,6 @@ async fn test_delete_application_partial_failure_revokes_m2m_token_from_cache() 
         &user.id,
         TestClientSpec {
             name: "Partial E2E App".to_string(),
-            // Register the shared test httpsig JWKS so the auto-signed
-            // `/v1/keys` probe's signature verifies against this client's
-            // keys (the httpsig resolver looks up the verification key by
-            // the Bearer token's `client_id` claim). Without this the
-            // M2M token's `/v1/keys` probe is rejected by the httpsig
-            // middleware before reaching the handler.
-            jwks: TestJwks::Shared,
             with_secret: false,
             ..Default::default()
         },
@@ -1840,7 +1829,6 @@ async fn test_delete_application_partial_failure_revokes_m2m_token_from_cache() 
         &user.id,
         TestClientSpec {
             name: "Partial E2E Sibling".to_string(),
-            jwks: TestJwks::Shared,
             with_secret: false,
             ..Default::default()
         },
@@ -1858,21 +1846,16 @@ async fn test_delete_application_partial_failure_revokes_m2m_token_from_cache() 
     )
     .await;
 
-    // Step 1: warm the session cache for both M2M tokens by hitting the
-    // resource endpoint, exactly as an attacker would before the admin's
-    // delete. 200 confirms the token authenticates and the cache now holds a
-    // `Hit` for its hash.
-    let (warm_status, warm_body) =
-        http_get(&app, "/v1/keys", &[("Authorization", &bearer(&m2m_token))]).await;
-    assert_eq!(
-        warm_status,
-        StatusCode::OK,
-        "attacker's M2M token must authenticate (and warm the cache) before the delete: {warm_body}"
+    // Step 1: warm the session cache for both M2M tokens, as a resource
+    // request before the admin's delete would. A found session confirms the
+    // token is live and the cache now holds a `Hit` for its hash.
+    assert!(
+        m2m_session_live(&state, &m2m_token).await,
+        "attacker's M2M session must be live (and warm the cache) before the delete"
     );
-    assert_eq!(
-        v1_keys_status(&app, &other_m2m_token).await,
-        StatusCode::OK,
-        "sibling M2M token must authenticate (and warm the cache) before the delete"
+    assert!(
+        m2m_session_live(&state, &other_m2m_token).await,
+        "sibling M2M session must be live (and warm the cache) before the delete"
     );
 
     // Step 2: admin deletes the application. The chokepoint's second
@@ -1890,25 +1873,22 @@ async fn test_delete_application_partial_failure_revokes_m2m_token_from_cache() 
         "the (B)-delete failure must surface as 500, not 204"
     );
 
-    // Step 3: the attacker's next probe within the cache TTL must NOT
-    // authenticate. With the fix, `invalidate_for_user` evicted the M2M entry
-    // between the two deletes, so the cache misses through to the DB (row
-    // gone) and returns 401. Under the bug both invalidations are skipped and
-    // this probe returns 200 from the stale `Hit` — the exploit.
-    assert_eq!(
-        v1_keys_status(&app, &m2m_token).await,
-        StatusCode::UNAUTHORIZED,
-        "the attacker's DB-revoked M2M token must not authenticate from a stale \
+    // Step 3: the attacker's next lookup within the cache TTL must NOT find
+    // the session. `invalidate_for_user` evicted the M2M entry between the
+    // two deletes, so the cache misses through to the DB (row gone). Without
+    // the eviction the lookup succeeds from the stale `Hit`.
+    assert!(
+        !m2m_session_live(&state, &m2m_token).await,
+        "the attacker's DB-revoked M2M session must not be served from a stale \
          cache Hit within the TTL after the delete returned 500"
     );
 
     // No over-revocation: the sibling client's M2M token is untouched (its
     // `user_id`/`client_id` are a different client), so it stays cached and
     // keeps authenticating.
-    assert_eq!(
-        v1_keys_status(&app, &other_m2m_token).await,
-        StatusCode::OK,
-        "a sibling client's M2M token must keep validating after the faulted delete"
+    assert!(
+        m2m_session_live(&state, &other_m2m_token).await,
+        "a sibling client's M2M session must stay live after the faulted delete"
     );
 }
 
@@ -3859,9 +3839,8 @@ async fn test_delete_last_secret_allowed_for_non_fapi_mtls_client() {
 // Deactivated-user gate — delete/secret/revoke handlers
 // ========================================================================
 //
-// `AuthenticatedToken` validates the token only, so each state-changing
-// handler must reject a deactivated account itself (via
-// `load_active_owned_client`). Fixture: deactivate WITHOUT deleting the
+// `AuthenticatedToken` refuses a deactivated account before any handler
+// runs. Fixture: deactivate WITHOUT deleting the
 // session — the exact deactivated-with-live-session state the
 // `test_create_application_rejects_deactivated_user` sibling above uses.
 
@@ -4302,7 +4281,7 @@ async fn delete_application_api_deactivated_owner_writes_no_audit_event() {
         &[("Authorization", &bearer(&token))],
     )
     .await;
-    // The handler's `load_active_owned_client` gates on an active user first.
+    // `AuthenticatedToken` refuses the deactivated account first.
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
     let events = state

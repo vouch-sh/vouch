@@ -85,10 +85,6 @@ pub(crate) enum GitHubError {
     #[error("This GitHub callback does not match your current session")]
     SessionMismatch,
 
-    /// User not found.
-    #[error("User not found")]
-    UserNotFound,
-
     /// Organization required (personal account not supported).
     #[error("GitHub integration requires an organization account")]
     OrganizationRequired,
@@ -135,7 +131,6 @@ impl GitHubError {
             Self::WrongFlowType => "Invalid Flow",
             Self::SessionRequired => "Sign In Required",
             Self::SessionMismatch => "Session Mismatch",
-            Self::UserNotFound => "Error",
             Self::OrganizationRequired => "Organization Required",
             Self::NotOrgAdmin => "Admin Required",
             Self::GitHubAccountNotLinked => "GitHub Account Required",

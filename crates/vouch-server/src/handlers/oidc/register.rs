@@ -14,7 +14,7 @@
 
 use crate::db::ClientInfo;
 use crate::error::ServiceError;
-use crate::handlers::session::{self, OptionalAuthenticatedToken};
+use crate::handlers::session::{AuthenticatedToken, OptionalAuthenticatedToken};
 use crate::services::oidc::registration::{
     RegistrationRequest, delete_client_configuration, read_client_configuration, register_client,
     update_client_configuration,
@@ -48,27 +48,9 @@ pub(crate) async fn register(
     // a `WWW-Authenticate` challenge — propagate it rather than falling back to
     // open registration.
     let user_id = match token {
-        Ok(OptionalAuthenticatedToken(Some(token))) => {
-            // A deactivated account "cannot authenticate anywhere"
-            // (`load_active_user`), so its still-live token is invalid "for
-            // other reasons" (RFC 6750 §3.1 `invalid_token`) and cannot own a
-            // client. A database error stays a 500.
-            match session::load_active_user(&state, &token.sub).await {
-                Ok(user) => Some(user.id),
-                Err(ServiceError::Api {
-                    status: StatusCode::UNAUTHORIZED,
-                    message,
-                    ..
-                }) => {
-                    return into_registration_response(ServiceError::api(
-                        StatusCode::UNAUTHORIZED,
-                        "invalid_token",
-                        message,
-                    ));
-                }
-                Err(e) => return into_registration_response(e),
-            }
-        }
+        // A deactivated account's still-live token is refused by the extractor
+        // as `invalid_token` (RFC 6750 §3.1), so it cannot own a client.
+        Ok(OptionalAuthenticatedToken(Some(AuthenticatedToken { user, .. }))) => Some(user.id),
         Ok(OptionalAuthenticatedToken(None)) => None,
         Err(e) => return into_registration_response(e),
     };

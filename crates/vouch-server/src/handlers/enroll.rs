@@ -28,7 +28,7 @@ use vouch_common::fido2_types::{Challenge, CredentialId, UserHandle};
 use vouch_common::{BrowserRegisterCompleteRequest, BrowserRegisterStartResponse, protocol};
 
 use super::extractors::ValidJson;
-use super::session::{AuthContext, session_cookie_max_age};
+use super::session::{AuthContext, AuthenticatedToken, session_cookie_max_age};
 use super::{ClientDataError, ClientDataProof};
 use super::{
     create_session_cookie, extract_session_from_cookie, hash_token,
@@ -1205,7 +1205,7 @@ pub(crate) async fn enroll_keys_page(
 
     // Get session from cookie
     match extract_session_from_cookie(&state, &jar, arrival).await {
-        Ok(token) => {
+        Ok(AuthenticatedToken { token, user }) => {
             let email = token.email.clone().unwrap_or_default();
             tracing::debug!(
                 "enroll_keys_page: found valid session for {}",
@@ -1224,17 +1224,12 @@ pub(crate) async fn enroll_keys_page(
                     }
                 };
 
-            // Look up user to check org membership
-            let (has_org, is_org_admin) = match db::get_user_by_id(&state.store, &token.sub).await {
-                Ok(Some(user)) => (user.org_id.is_some(), user.is_org_admin),
-                _ => (false, false),
-            };
             let auth = AuthContext {
                 authenticated: true,
                 user_id: Some(token.sub),
                 user_email: Some(email),
-                has_org,
-                is_org_admin,
+                has_org: user.org_id.is_some(),
+                is_org_admin: user.is_org_admin,
             };
 
             // Consume any flash error set by a prior failed form POST (rename),
@@ -1278,8 +1273,10 @@ pub(crate) async fn browser_register_start(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
 ) -> Result<Json<BrowserRegisterStartResponse>, ServiceError> {
-    // Get session from cookie
-    let token = extract_session_from_cookie(&state, &jar, arrival)
+    // Get session from cookie. A deactivated or deleted user's surviving
+    // enrollment cookie is refused here, so it cannot begin new hardware-key
+    // registration.
+    let AuthenticatedToken { token, .. } = extract_session_from_cookie(&state, &jar, arrival)
         .await
         .map_err(|_| {
             ServiceError::api(
@@ -1298,14 +1295,6 @@ pub(crate) async fn browser_register_start(
     })?;
 
     let user_email = token.email.clone().unwrap_or_default();
-
-    // A deactivated or deleted user's surviving enrollment cookie must not
-    // begin new hardware-key registration. `extract_session_from_cookie`
-    // deliberately skips the `active` check, so this mutating endpoint carries
-    // its own guard. It uses `load_active_user`, like `browser_register_complete`
-    // and the CLI `register_start`/`register_complete`, so a missing user
-    // (`Ok(None)`) is refused the same way as `active=false`.
-    super::session::load_active_user(&state, &token.sub).await?;
 
     // Get device_auth_id from enrollment session if available (for CLI polling).
     // Look up by session token hash, since oidc_callback stores the
@@ -1481,7 +1470,13 @@ pub(crate) async fn browser_register_complete(
     // caller is rejected here, *before* the single-use consume, so the
     // legitimate holder can still complete the enrollment with the same
     // state token.
-    let session = extract_session_from_cookie(&state, &jar, arrival).await?;
+    // The cookie extraction also refuses a user deactivated or deleted after
+    // obtaining the registration state (valid for five minutes, issue #846).
+    // `account` is reused below for the org-domain snapshot.
+    let AuthenticatedToken {
+        token: session,
+        user: account,
+    } = extract_session_from_cookie(&state, &jar, arrival).await?;
     if session.sub != checked.reg_state.user_id.to_string() {
         tracing::warn!(
             caller_sub = %session.sub,
@@ -1490,19 +1485,6 @@ pub(crate) async fn browser_register_complete(
         );
         return Err(ServiceError::Forbidden("state_user_mismatch"));
     }
-
-    // A user deactivated — or hard-deleted — after obtaining the registration
-    // state (valid for five minutes) must not register a new hardware key. Like
-    // the CLI `register_complete`, this routes through `load_active_user`, which
-    // rejects both `Ok(None)` (deleted, the in-flight `delete_user` race) and
-    // `active=false` (deactivated, issue #846) and keeps the two halves of the
-    // enrollment flow consistent. The previous inline `if let Some(ref account)`
-    // guard only caught `Some(active=false)` and silently let `Ok(None)` through
-    // to the single-use consume and WebAuthn verification (and, for the browser
-    // path, on to `create_oauth_access_token`). The returned `User` is reused
-    // below for the org-domain snapshot, preserving the single-read semantics.
-    let account =
-        super::session::load_active_user(&state, &checked.reg_state.user_id.to_string()).await?;
 
     // Consume the state token before any WebAuthn work so that a captured
     // state JWT cannot be replayed within the 5-minute validity window.
@@ -1710,10 +1692,8 @@ pub(crate) async fn browser_register_complete(
             Tr::new("enroll-error-browser-session-create-failed").to_string(),
         )
     };
-    // `load_active_user` returns an active `User` (not `Option<User>`), so the
-    // deleted-user (`Ok(None)`) arm that used to fall through to `None` here is
-    // no longer reachable — a vanished user is rejected above before this
-    // point.
+    // `account` is the active `User` the cookie extraction loaded, so a
+    // vanished user was rejected before this point.
     let org_domain = match account.org_id.as_deref() {
         Some(org_id) => db::get_user_org_domain(
             &state.store,

@@ -153,9 +153,8 @@ pub(crate) async fn create_application_form(
     // unmanageable (every management endpoint gates on `client.user_id ==
     // caller`, and a concurrent `delete_user` between the extractor's
     // `load_active_user` read and this second `get_user_by_id` read is the one
-    // path that returns `Ok(None)` here). Mirrors `load_active_user_for_scope`
-    // in the JSON API path, which makes the existence and org-membership
-    // decisions on the same load the `org_id` comes from.
+    // path that returns `Ok(None)` here). The JSON API path likewise makes the
+    // org-membership decision on the same load the `org_id` comes from.
     let user_org_id = if access_scope == AccessScope::Organization {
         match db::get_user_by_id(&state.store, user_id).await {
             Ok(Some(user)) if user.org_id.is_some() => user.org_id,
@@ -422,10 +421,9 @@ pub(crate) async fn update_application_form(
     // detach an existing org-scoped app from its owning org — and for a
     // concurrent `delete_user` between the extractor's `load_active_user` read
     // and this second `get_user_by_id` read, that is the only path that
-    // returns `Ok(None)` here. Mirrors the create path and
-    // `load_active_user_for_scope` in the JSON API path, which makes the
-    // existence and org-membership decisions on the same load the `org_id`
-    // comes from.
+    // returns `Ok(None)` here. Mirrors the create path; the JSON API path
+    // likewise makes the org-membership decision on the same load the
+    // `org_id` comes from.
     let user_org_id = if access_scope == Some(AccessScope::Organization) {
         match db::get_user_by_id(&state.store, user_id).await {
             Ok(Some(user)) if user.org_id.is_some() => user.org_id,

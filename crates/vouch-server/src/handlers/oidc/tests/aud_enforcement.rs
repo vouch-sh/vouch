@@ -473,6 +473,7 @@ async fn test_cookie_only_path_rejects_narrowed_token() {
     let result = handlers::extract_session_from_cookie(&state, &jar, test_arrival()).await;
     assert!(
         result.is_ok(),
-        "deployment-root audience must be accepted on cookie-only paths: {result:?}"
+        "deployment-root audience must be accepted on cookie-only paths: {:?}",
+        result.as_ref().err()
     );
 }

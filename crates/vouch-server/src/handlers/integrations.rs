@@ -10,7 +10,7 @@
 use crate::arrival::ArrivalTime;
 use crate::db;
 use crate::handlers::extractors::SignedInSession;
-use crate::handlers::session::{AuthContext, extract_session_from_cookie};
+use crate::handlers::session::{AuthContext, AuthenticatedToken, extract_session_from_cookie};
 use crate::{AppState, impl_template_response};
 use askama::Template;
 use axum::extract::State;
@@ -60,17 +60,7 @@ pub(crate) async fn integrations_page(
     // Fetch session + user once for org-scoped lookups
     let org_context = if auth.has_org {
         match extract_session_from_cookie(&state, &jar, arrival).await {
-            Ok(session) => match db::get_user_by_id(&state.store, &session.sub).await {
-                Ok(Some(user)) => user.org_id.clone().map(|org_id| (user, org_id)),
-                Ok(None) => {
-                    tracing::error!("Session user not found: {}", session.sub);
-                    None
-                }
-                Err(e) => {
-                    tracing::error!("Failed to load user for integrations page: {e}");
-                    None
-                }
-            },
+            Ok(AuthenticatedToken { user, .. }) => user.org_id.clone().map(|org_id| (user, org_id)),
             Err(e) => {
                 tracing::error!("Failed to extract session for integrations page: {e}");
                 None

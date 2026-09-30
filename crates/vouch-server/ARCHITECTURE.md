@@ -420,7 +420,11 @@ server-side request forgery (SSRF) into private networks.
 
 The handler signature states the authentication a route demands.
 `extract_resource_token` is private to its module, so a handler obtains a validated
-token through one of four extractors. The choice declares the strength required.
+token through one of four extractors, or `extract_session_from_cookie` on browser
+routes. The choice declares the strength required. Every one of them also loads the
+token's account through `load_active_user` and hands it to the handler with the token,
+so a missing or deactivated account is refused before any handler runs, including in
+the window between deactivation and session deletion, which commit separately.
 
 - `AuthenticatedToken`: the token validated. An enrollment bootstrap session satisfies
   it. `/v1/credentials/github/status` is a public read route and names it.
@@ -434,7 +438,8 @@ token through one of four extractors. The choice declares the strength required.
 - `OptionalAuthenticatedToken`: for routes where authentication is optional. It reads
   only the `Authorization` header, never the cookie. No header yields `None`, but a
   header carrying a rejected token is an error, not a downgrade to anonymous, and a
-  bound token still needs its proof. Both callers take it as a `Result` and decide:
+  bound token still needs its proof. A deactivated account's token is rejected as
+  `invalid_token` (RFC 6750 §3.1). Both callers take it as a `Result` and decide:
   RFC 7591 registration returns the rejection, and `/v1/auth/status` answers
   `authenticated: false` for a 401 but passes `use_dpop_nonce` through.
 
@@ -454,7 +459,9 @@ flowchart TB
   jkt -- "yes" --> hw
   bind -- "none" --> hw
   hw{"hardware_verified claim"} -- "false" --> r403["403 hardware_required"]
-  hw -- "true" --> tokty["HardwareVerifiedToken"]
+  hw -- "true" --> active{"load_active_user"}
+  active -- "missing or deactivated" --> r401u["401 unauthorized"]
+  active -- "active" --> tokty["HardwareVerifiedToken<br/>token + user"]
   tokty --> h["handler"]
   h --> ssh["SshCa::sign_certificate<br/>Ed25519, on a blocking thread"]
   ssh --> rec[("record issuance for revocation")]

@@ -16,7 +16,7 @@ use axum_extra::extract::cookie::CookieJar;
 use std::sync::Arc;
 use vouch_common::SessionStatus;
 
-use super::session::OptionalAuthenticatedToken;
+use super::session::{AuthenticatedToken, OptionalAuthenticatedToken};
 use super::{clear_session_cookie, hash_token};
 use crate::db::ClientInfo;
 
@@ -25,8 +25,8 @@ use crate::db::ClientInfo;
 /// Validates the `Authorization` header token like any resource request,
 /// sender constraint included. RFC 9449 §7.2: a protected resource supporting
 /// both schemes "MUST reject a DPoP-bound access token received as a bearer
-/// token". A missing or rejected token yields `authenticated: false` rather
-/// than a 401, except `use_dpop_nonce`, whose fresh `DPoP-Nonce` the client
+/// token". A missing or rejected token, or one whose account is missing or
+/// deactivated, yields `authenticated: false` rather than a 401, except `use_dpop_nonce`, whose fresh `DPoP-Nonce` the client
 /// needs to retry (RFC 9449 §8).
 pub(crate) async fn status(
     arrival: ArrivalTime,
@@ -34,7 +34,7 @@ pub(crate) async fn status(
     token: Result<OptionalAuthenticatedToken, ServiceError>,
 ) -> Result<Json<SessionStatus>, ServiceError> {
     let token = match token {
-        Ok(OptionalAuthenticatedToken(Some(token))) => token,
+        Ok(OptionalAuthenticatedToken(Some(AuthenticatedToken { token, .. }))) => token,
         Ok(OptionalAuthenticatedToken(None))
         | Err(ServiceError::Api {
             status: StatusCode::UNAUTHORIZED,

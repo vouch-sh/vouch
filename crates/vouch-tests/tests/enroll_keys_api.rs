@@ -614,16 +614,12 @@ async fn delete_rejects_deactivated_user() {
         resp.body
     );
 
-    // Both keys must survive the rejected deletion.
-    let list = list_keys(&harness, &token).await;
-    let body: Value = serde_json::from_str(&list.body).expect("json body");
-    let ids: Vec<&str> = body
-        .get("keys")
-        .and_then(Value::as_array)
-        .expect("keys[]")
-        .iter()
-        .map(|k| k.get("id").and_then(Value::as_str).unwrap_or(""))
-        .collect();
+    // Both keys must survive the rejected deletion. Read them from the store:
+    // the deactivated account's cookie cannot list them.
+    let auths = db::get_authenticators_for_user(&harness.state.store, &user.id)
+        .await
+        .expect("list authenticators");
+    let ids: Vec<&str> = auths.iter().map(|a| a.id.as_str()).collect();
     assert!(
         ids.contains(&kept.as_str()) && ids.contains(&doomed.as_str()),
         "both keys must survive the rejected deletion, got ids: {ids:?}"
