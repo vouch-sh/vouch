@@ -5,6 +5,11 @@ variable, as an equivalent `--kebab-case` command-line flag, and as a field in t
 [S3 configuration document](s3-config-schema.md). An explicit flag beats the environment variable;
 S3 configuration beats both. See [Configuration Sources](../configuration/sources.md).
 
+An empty value is the same as no value for every setting whose default is _(none)_: `VOUCH_X=""`,
+`--x=`, and `"x": ""` in the S3 document all leave the setting unset. An empty key therefore makes
+the server generate one (with the startup warning that says so) rather than load an empty key, an
+empty secret leaves its feature off, and an empty S3 value does not override the environment.
+
 A few variables the server reads are not `VOUCH_`-prefixed — `RUST_LOG`, the `OTEL_*` and `AWS_*`
 families, and `DSQL_USER`. They are listed in their relevant sections below.
 

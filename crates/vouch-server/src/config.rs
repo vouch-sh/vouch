@@ -617,6 +617,65 @@ pub struct Args {
     pub session_cache_ttl_secs: u64,
 }
 
+impl Args {
+    /// Every optional string setting, in one place, so none is missed when
+    /// empty values are unset.
+    fn optional_strings(&mut self) -> [&mut Option<String>; 37] {
+        [
+            &mut self.idps,
+            &mut self.base_url,
+            &mut self.allowed_domains,
+            &mut self.org_name,
+            &mut self.resource_name,
+            &mut self.resource_documentation,
+            &mut self.resource_policy_uri,
+            &mut self.resource_tos_uri,
+            &mut self.security_contact,
+            &mut self.cli_download_macos,
+            &mut self.cli_download_linux,
+            &mut self.cli_download_windows,
+            &mut self.ssh_ca_key,
+            &mut self.ssh_ca_kms_key_id,
+            &mut self.oidc_signing_key,
+            &mut self.oidc_signing_kms_key_id,
+            &mut self.oidc_rsa_signing_key,
+            &mut self.oidc_rsa_signing_kms_key_id,
+            &mut self.jwt_hmac_kms_key_id,
+            &mut self.cors_origins,
+            &mut self.github_app_name,
+            &mut self.github_app_key,
+            &mut self.github_webhook_secret,
+            &mut self.github_app_client_id,
+            &mut self.github_app_client_secret,
+            &mut self.tls_cert,
+            &mut self.tls_key,
+            &mut self.s3_config_bucket,
+            &mut self.s3_config_region,
+            &mut self.aws_region,
+            &mut self.aws_az,
+            &mut self.aws_partition,
+            &mut self.aws_use_fips_endpoint,
+            &mut self.metrics_bearer_token,
+            &mut self.certification_test_token,
+            &mut self.extra_ca_certs,
+            &mut self.mtls_client_ca_certs,
+        ]
+    }
+
+    /// Unset every setting given an empty value. `VAR=""` (or `--flag=`) is
+    /// how a secret injector or a template says "no value", so each setting
+    /// behaves exactly as when it is absent: a key is generated rather than
+    /// loaded from `""`, a feature a value switches on stays off, and a
+    /// fallback applies. No reader of a setting has to filter `""` itself.
+    fn unset_empty_values(&mut self) {
+        for value in self.optional_strings() {
+            if value.as_deref() == Some("") {
+                *value = None;
+            }
+        }
+    }
+}
+
 // ============================================================================
 // Bootstrap Overlay
 // ============================================================================
@@ -1026,25 +1085,29 @@ impl ServerConfig {
     /// `instance` carries IMDS-discovered facts (region, availability zone,
     /// partition) used only as a fallback beneath `AWS_REGION`/`AWS_AZ`/
     /// `AWS_PARTITION` — see `infra::bootstrap`.
-    pub fn from_args(args: Args, instance: Option<&Bootstrap>) -> Result<Self> {
+    pub fn from_args(mut args: Args, instance: Option<&Bootstrap>) -> Result<Self> {
+        args.unset_empty_values();
+
         // Note: Validation of rp_id and jwt_secret is deferred to validate()
         // to allow these values to come from S3 config.
 
-        // Empty strings are treated as unset so the fallback chain can
-        // progress to IMDS-derived values and the AWS SDK default region
-        // provider chain (env / shared config / IMDS) is not overridden with
-        // a blank `Region::new("")` — see `aws_config_loader`. The same
-        // empty-means-unset pattern is already used by `ssh_ca_key_path` and
-        // `allowed_domains` below.
-        let aws_region = env::non_empty(args.aws_region)
+        // An empty value is unset by now, so the fallback chain progresses to
+        // IMDS-derived values and the AWS SDK default region provider chain
+        // (env / shared config / IMDS) is not overridden with a blank
+        // `Region::new("")` — see `aws_config_loader`.
+        let aws_region = args
+            .aws_region
             .or_else(|| env::non_empty_env("AWS_DEFAULT_REGION"))
             .or_else(|| instance.map(|b| b.region.clone()));
-        let aws_az =
-            env::non_empty(args.aws_az).or_else(|| instance.map(|b| b.availability_zone.clone()));
-        let aws_partition = env::non_empty(args.aws_partition)
+        let aws_az = args
+            .aws_az
+            .or_else(|| instance.map(|b| b.availability_zone.clone()));
+        let aws_partition = args
+            .aws_partition
             .or_else(|| instance.and_then(|b| b.partition.clone()));
-        let aws_use_fips_endpoint =
-            env::non_empty(args.aws_use_fips_endpoint).map(|v| v.eq_ignore_ascii_case("true"));
+        let aws_use_fips_endpoint = args
+            .aws_use_fips_endpoint
+            .map(|v| v.eq_ignore_ascii_case("true"));
 
         // Normalize: strip any trailing slashes so the issuer and every
         // endpoint derived from `base_url` (OIDC discovery, JWT `iss`, DPoP
@@ -1117,7 +1180,8 @@ impl ServerConfig {
             resource_tos_uri: args
                 .resource_tos_uri
                 .or_else(|| Some("https://vouch.sh/terms/".to_string())),
-            security_contact: env::non_empty(args.security_contact)
+            security_contact: args
+                .security_contact
                 .unwrap_or_else(|| "security@vouch.sh".to_string()),
             cli_download_macos: args.cli_download_macos,
             cli_download_linux: args.cli_download_linux,
@@ -1147,7 +1211,7 @@ impl ServerConfig {
             tls_key: args.tls_key.map(SecretString::from),
             s3_config_bucket: args.s3_config_bucket,
             s3_config_key: args.s3_config_key,
-            s3_config_region: env::non_empty(args.s3_config_region),
+            s3_config_region: args.s3_config_region,
             s3_config_poll_interval: args.s3_config_poll_interval,
             aws_region,
             aws_az,
@@ -2331,5 +2395,51 @@ mod tests {
             mismatches.is_empty(),
             "stale defaults in environment-variables.md: {mismatches:#?}"
         );
+    }
+
+    // ========================================================================
+    // An empty setting loads as unset
+    // ========================================================================
+
+    #[test]
+    fn empty_key_settings_load_as_unset() {
+        let args = Args::try_parse_from([
+            "vouch-server",
+            "--oidc-signing-key=",
+            "--oidc-rsa-signing-key=",
+            "--ssh-ca-key=",
+            "--tls-key=",
+            "--github-app-key=",
+        ])
+        .expect("parse with empty keys");
+        let config = ServerConfig::from_args(args, None).expect("config builds");
+        assert!(
+            config.oidc_signing_key.is_none(),
+            "an empty OIDC signing key is unset, so startup warns about the ephemeral key"
+        );
+        assert!(config.oidc_rsa_signing_key.is_none());
+        assert!(config.ssh_ca_key.is_none());
+        assert!(config.tls_key.is_none());
+        assert!(config.github_app_key.is_none());
+    }
+
+    /// `Args::optional_strings` must name every optional string argument, or
+    /// an empty value of the one it misses loads as set. Counted from clap's
+    /// own description of the arguments; `github_app_id` is the one optional
+    /// argument that is not a string (an empty value fails to parse).
+    #[test]
+    fn every_optional_string_argument_is_unset_when_empty() {
+        let command = Args::command();
+        let optional_values = command
+            .get_arguments()
+            .filter(|arg| {
+                arg.get_action().takes_values()
+                    && !arg.is_required_set()
+                    && arg.get_default_values().is_empty()
+                    && arg.get_id() != "github_app_id"
+            })
+            .count();
+        let mut args = Args::try_parse_from(["vouch-server"]).expect("parse");
+        assert_eq!(args.optional_strings().len(), optional_values);
     }
 }
