@@ -1149,23 +1149,20 @@ async fn test_delete_user_client_reassignment_writes_against_latest_version() {
     // reassignment must read and re-write the LATEST state, not version 1.
     let occ_redirects = vec!["https://occ.example.com/callback".to_string()];
     for name in ["OCC Org App v2", "OCC Org App v3"] {
-        update_oauth_client(
-            &store,
-            &UpdateOAuthClientParams {
-                id: &org_app,
-                name,
-                description: Some("occ regression fixture"),
-                redirect_uris: &occ_redirects,
+        update_oauth_client(&store, &org_app, |_| {
+            Ok::<_, std::convert::Infallible>(OAuthClientUpdate {
+                name: name.to_string(),
+                description: Some("occ regression fixture".to_string()),
+                redirect_uris: occ_redirects.clone(),
                 access_scope: None,
-                org_id: None,
-                resource_uris: &[],
+                resource_uris: Vec::new(),
                 token_endpoint_auth_method: TokenEndpointAuthMethod::default(),
                 keys: None,
                 fapi_profile: FapiProfile::None,
                 dpop_bound_access_tokens: false,
                 post_logout_redirect_uris: None,
-            },
-        )
+            })
+        })
         .await
         .expect("update client");
     }

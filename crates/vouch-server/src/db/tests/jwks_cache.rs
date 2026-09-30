@@ -185,25 +185,22 @@ async fn test_admin_update_oauth_client_jwks_uri_clears_cache() {
         "cache should be populated before URI change"
     );
 
-    update_oauth_client(
-        &store,
-        &UpdateOAuthClientParams {
-            id: &client.id,
-            name: "Admin JWKS URI Clear Test",
+    update_oauth_client(&store, &client.id, |_| {
+        Ok::<_, std::convert::Infallible>(OAuthClientUpdate {
+            name: "Admin JWKS URI Clear Test".to_string(),
             description: None,
-            redirect_uris: &[],
+            redirect_uris: Vec::new(),
             access_scope: None,
-            org_id: None,
-            resource_uris: &[],
+            resource_uris: Vec::new(),
             token_endpoint_auth_method: TokenEndpointAuthMethod::ClientSecretBasic,
-            keys: Some(&ClientKeys::Uri(
+            keys: Some(ClientKeys::Uri(
                 "https://rotated.example.com/jwks".to_string(),
             )),
             fapi_profile: FapiProfile::None,
             dpop_bound_access_tokens: false,
             post_logout_redirect_uris: None,
-        },
-    )
+        })
+    })
     .await
     .expect("update_oauth_client failed");
 
@@ -272,25 +269,22 @@ async fn test_admin_update_oauth_client_preserves_cache_when_jwks_uri_unchanged(
         .await
         .expect("upsert_jwks_cache failed");
 
-    update_oauth_client(
-        &store,
-        &UpdateOAuthClientParams {
-            id: &client.id,
-            name: "Renamed, Same URI",
+    update_oauth_client(&store, &client.id, |_| {
+        Ok::<_, std::convert::Infallible>(OAuthClientUpdate {
+            name: "Renamed, Same URI".to_string(),
             description: None,
-            redirect_uris: &[],
+            redirect_uris: Vec::new(),
             access_scope: None,
-            org_id: None,
-            resource_uris: &[],
+            resource_uris: Vec::new(),
             token_endpoint_auth_method: TokenEndpointAuthMethod::ClientSecretBasic,
-            keys: Some(&ClientKeys::Uri(
+            keys: Some(ClientKeys::Uri(
                 "https://unchanged.example.com/jwks".to_string(),
             )),
             fapi_profile: FapiProfile::None,
             dpop_bound_access_tokens: false,
             post_logout_redirect_uris: None,
-        },
-    )
+        })
+    })
     .await
     .expect("update_oauth_client failed");
 

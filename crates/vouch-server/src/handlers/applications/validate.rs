@@ -381,7 +381,7 @@ pub(crate) fn validate_create_application<'a>(
 
     let token_endpoint_auth_method =
         create_auth_method(input.token_endpoint_auth_method, app_type, is_fapi)?;
-    let uses_keys = token_endpoint_auth_method == TokenEndpointAuthMethod::PrivateKeyJwt;
+    let uses_keys = token_endpoint_auth_method.authenticates_with_keys();
 
     let jwks_trimmed = trim_nonempty(input.jwks);
     let jwks_uri = trim_nonempty(input.jwks_uri);
@@ -513,6 +513,10 @@ fn client_keys(
 /// `None` means the field was not provided (API PATCH semantics); web form
 /// handlers pass `Some` for fields the form always submits.
 pub(crate) struct UpdateAppInput<'a> {
+    /// `None` keeps the stored name; a blank name is refused.
+    pub name: Option<&'a str>,
+    /// `None` keeps the stored description.
+    pub description: Option<&'a str>,
     pub redirect_uris: Option<&'a [String]>,
     pub resource_uris: Option<&'a [String]>,
     /// `None` = field absent (preserve existing). `Some(&[])` = explicitly clear the list.
@@ -526,6 +530,12 @@ pub(crate) struct UpdateAppInput<'a> {
 /// Validated update fields (format phase only).
 #[derive(Debug)]
 pub(crate) struct ValidatedUpdateApp<'a> {
+    /// Trimmed, non-empty name (`None` = field absent, preserve existing).
+    pub name: Option<&'a str>,
+    /// Description (`None` = field absent, preserve existing).
+    pub description: Option<&'a str>,
+    /// Resource URIs (`None` = field absent, preserve existing).
+    pub resource_uris: Option<&'a [String]>,
     pub is_fapi: bool,
     /// Whether `fapi_profile` was present in the request at all. A provided
     /// non-FAPI value is an explicit transition away from FAPI; an absent
@@ -554,6 +564,11 @@ pub(crate) fn validate_update_format<'a>(
     // Redirect URIs are validated in `validate_update_fapi`, which is the stage
     // that has the persisted client type — the type decides whether a custom
     // URI scheme may be registered, and an update cannot change it.
+
+    let name = input.name.map(str::trim);
+    if name.is_some_and(str::is_empty) {
+        return Err(AppValidationError::EmptyName);
+    }
 
     if let Some(uris) = input.resource_uris {
         validate_resource_uris(uris)?;
@@ -584,6 +599,9 @@ pub(crate) fn validate_update_format<'a>(
     validate_jwks_uri(jwks_uri)?;
 
     Ok(ValidatedUpdateApp {
+        name,
+        description: input.description,
+        resource_uris: input.resource_uris,
         is_fapi,
         fapi_profile_provided: input.fapi_profile.is_some(),
         access_scope,
@@ -640,11 +658,16 @@ fn effective_token_endpoint_auth_method(
     }
 }
 
-/// The key material the client will have once this update is applied:
-/// submitted keys replace the stored ones, whether inline or a `jwks_uri`
+/// The key material the client will have once this update is applied.
+///
+/// Submitted keys replace the stored ones, whether inline or a `jwks_uri`
 /// (RFC 7592 §2.2: values "MUST replace, not augment, the values previously
-/// associated with this client"); leaving the FAPI profile clears them;
-/// otherwise the stored keys stay.
+/// associated with this client"), when the client has a use for keys: its
+/// auth method authenticates with them, or it pins a
+/// `request_object_signing_alg` (RFC 9101 §4) that signs with them. Otherwise
+/// they are not kept, as on create, and the stored keys stay. Restating the
+/// current profile changes nothing; leaving FAPI is refused by
+/// [`validate_update_fapi`], so no update clears keys.
 ///
 /// Shared by [`validate_update_fapi`] (to check the keys the client will
 /// hold) and [`compute_fapi_update_fields`] (to persist them), so the check
@@ -654,12 +677,12 @@ fn effective_keys<'a>(
     validated: &'a ValidatedUpdateApp<'_>,
     client: &'a OAuthClient,
 ) -> Option<&'a ClientKeys> {
-    if validated.keys.is_some() {
-        validated.keys.as_ref()
-    } else if !validated.is_fapi && validated.fapi_profile_provided {
-        None
-    } else {
-        client.keys.as_ref()
+    let keys_have_a_use = effective_token_endpoint_auth_method(validated, client)
+        .authenticates_with_keys()
+        || client.request_object_signing_alg.is_some();
+    match validated.keys.as_ref() {
+        Some(keys) if keys_have_a_use => Some(keys),
+        _ => client.keys.as_ref(),
     }
 }
 
@@ -668,7 +691,7 @@ fn effective_keys<'a>(
 /// Call after authentication and the ownership check.  This covers rules that
 /// depend on persisted state (e.g. the client's application_type) and
 /// therefore cannot run in the pre-auth format pass.
-pub(crate) fn validate_update_fapi(
+fn validate_update_fapi(
     validated: &ValidatedUpdateApp<'_>,
     client: &OAuthClient,
 ) -> Result<(), AppValidationError> {
@@ -874,7 +897,7 @@ pub(crate) struct FapiUpdateFields<'a> {
 /// forcing rule. A provided non-FAPI value clears the profile, JWKS, and
 /// DPoP binding of a client that was not already FAPI; downgrading a FAPI
 /// client is rejected upstream by [`validate_update_fapi`].
-pub(crate) fn compute_fapi_update_fields<'a>(
+fn compute_fapi_update_fields<'a>(
     validated: &'a ValidatedUpdateApp<'_>,
     client: &'a OAuthClient,
 ) -> Result<FapiUpdateFields<'a>, AppValidationError> {
@@ -902,11 +925,7 @@ pub(crate) fn compute_fapi_update_fields<'a>(
     // result with neither `jwks` nor `jwks_uri` can never authenticate again
     // and cannot be repaired through this endpoint. Refuse rather than
     // persist it, whatever combination of fields produced it.
-    if matches!(
-        token_endpoint_auth_method,
-        TokenEndpointAuthMethod::PrivateKeyJwt | TokenEndpointAuthMethod::SelfSignedTlsClientAuth
-    ) && keys.is_none()
-    {
+    if token_endpoint_auth_method.authenticates_with_keys() && keys.is_none() {
         return Err(AppValidationError::AuthMethodMissingJwks);
     }
 
@@ -932,6 +951,54 @@ pub(crate) fn compute_fapi_update_fields<'a>(
         keys,
         dpop_bound_access_tokens,
     })
+}
+
+impl ValidatedUpdateApp<'_> {
+    /// The edit this update makes to `client`, validated against it.
+    ///
+    /// `client` is the row as [`db::update_oauth_client`] reads it for the
+    /// write, so the rules that depend on stored state judge what the edit
+    /// overwrites, and every field the request leaves out keeps its current
+    /// value rather than one read earlier. `org_id` is the caller's
+    /// organization, stored with an organization access scope.
+    pub(crate) fn apply_to(
+        &self,
+        client: &OAuthClient,
+        org_id: Option<&str>,
+    ) -> Result<db::OAuthClientUpdate, AppValidationError> {
+        validate_update_fapi(self, client)?;
+        let fapi = compute_fapi_update_fields(self, client)?;
+        Ok(db::OAuthClientUpdate {
+            name: self.name.unwrap_or(&client.name).to_string(),
+            description: self
+                .description
+                .or(client.description.as_deref())
+                .map(String::from),
+            redirect_uris: self
+                .redirect_uris
+                .map_or_else(|| client.redirect_uris.clone(), <[String]>::to_vec),
+            access_scope: self
+                .access_scope
+                .map(|scope| (scope, org_id.map(String::from))),
+            resource_uris: self
+                .resource_uris
+                .map_or_else(|| client.resource_uris.clone(), <[String]>::to_vec),
+            token_endpoint_auth_method: fapi.token_endpoint_auth_method,
+            keys: fapi.keys.cloned(),
+            fapi_profile: fapi.fapi_profile,
+            dpop_bound_access_tokens: fapi.dpop_bound_access_tokens,
+            post_logout_redirect_uris: self.post_logout_redirect_uris.map(<[String]>::to_vec),
+        })
+    }
+}
+
+/// Why an owner's update was not applied to the stored client.
+#[derive(Debug)]
+pub(crate) enum UpdateRefusal {
+    /// The client does not exist, or the caller does not own it.
+    NotFound,
+    /// The update is invalid for the client as stored.
+    Invalid(AppValidationError),
 }
 
 fn trim_nonempty(value: Option<&str>) -> Option<&str> {
@@ -1573,6 +1640,8 @@ mod tests {
 
     fn update_input(fapi_profile: Option<&str>) -> ValidatedUpdateApp<'_> {
         validate_update_format(UpdateAppInput {
+            name: None,
+            description: None,
             redirect_uris: None,
             resource_uris: None,
             post_logout_redirect_uris: None,
@@ -1655,6 +1724,8 @@ mod tests {
 
         let jwks = fapi_jwks_json();
         let validated = validate_update_format(UpdateAppInput {
+            name: None,
+            description: None,
             redirect_uris: None,
             resource_uris: None,
             post_logout_redirect_uris: None,
@@ -1688,6 +1759,8 @@ mod tests {
         let jwks = fapi_jwks_json();
 
         let update = validate_update_format(UpdateAppInput {
+            name: None,
+            description: None,
             redirect_uris: None,
             resource_uris: None,
             post_logout_redirect_uris: None,
@@ -1744,6 +1817,8 @@ mod tests {
 
         let jwks = rs256_only_jwks_json();
         let validated = validate_update_format(UpdateAppInput {
+            name: None,
+            description: None,
             redirect_uris: None,
             resource_uris: None,
             post_logout_redirect_uris: None,
@@ -1771,6 +1846,8 @@ mod tests {
 
         let jwks = fapi_jwks_json();
         let validated = validate_update_format(UpdateAppInput {
+            name: None,
+            description: None,
             redirect_uris: None,
             resource_uris: None,
             post_logout_redirect_uris: None,
@@ -1797,6 +1874,8 @@ mod tests {
 
         let jwks = unpinned_rsa_jwks_json();
         let validated = validate_update_format(UpdateAppInput {
+            name: None,
+            description: None,
             redirect_uris: None,
             resource_uris: None,
             post_logout_redirect_uris: None,
@@ -1823,6 +1902,8 @@ mod tests {
 
         let jwks = eddsa_jwks_json();
         let validated = validate_update_format(UpdateAppInput {
+            name: None,
+            description: None,
             redirect_uris: None,
             resource_uris: None,
             post_logout_redirect_uris: None,
@@ -1848,6 +1929,8 @@ mod tests {
 
         let jwks = rs256_only_jwks_json();
         let validated = validate_update_format(UpdateAppInput {
+            name: None,
+            description: None,
             redirect_uris: None,
             resource_uris: None,
             post_logout_redirect_uris: None,
@@ -1874,6 +1957,8 @@ mod tests {
 
         let jwks = rs256_only_jwks_json();
         let validated = validate_update_format(UpdateAppInput {
+            name: None,
+            description: None,
             redirect_uris: None,
             resource_uris: None,
             post_logout_redirect_uris: None,
@@ -1897,6 +1982,8 @@ mod tests {
 
         let jwks = eddsa_jwks_json();
         let validated = validate_update_format(UpdateAppInput {
+            name: None,
+            description: None,
             redirect_uris: None,
             resource_uris: None,
             post_logout_redirect_uris: None,
@@ -1925,6 +2012,8 @@ mod tests {
             "https://example.com/callback2".to_string(),
         ];
         let validated = validate_update_format(UpdateAppInput {
+            name: None,
+            description: None,
             redirect_uris: Some(&redirect_uris),
             resource_uris: None,
             post_logout_redirect_uris: None,
@@ -1969,6 +2058,8 @@ mod tests {
 
         let redirect_uris = vec!["https://example.com/callback".to_string()];
         let validated = validate_update_format(UpdateAppInput {
+            name: None,
+            description: None,
             redirect_uris: Some(&redirect_uris),
             resource_uris: None,
             post_logout_redirect_uris: None,
@@ -2089,6 +2180,8 @@ mod tests {
 
         let jwks = rs256_only_jwks_json();
         let validated = validate_update_format(UpdateAppInput {
+            name: None,
+            description: None,
             redirect_uris: None,
             resource_uris: None,
             post_logout_redirect_uris: None,
@@ -2388,11 +2481,11 @@ mod tests {
         );
     }
 
-    // Explicitly setting `fapi_profile: "none"` clears JWKS, which for a
-    // `private_key_jwt` client leaves it with no way to authenticate and no way
-    // back through this endpoint. The merge must refuse rather than persist it.
+    // Restating `fapi_profile: "none"` on a standard client is a no-op: it
+    // changes neither the profile nor the auth method, so a `private_key_jwt`
+    // client keeps the keys it authenticates with.
     #[tokio::test]
-    async fn explicit_none_is_refused_when_it_would_strip_a_pkjwt_client_of_keys() {
+    async fn restating_none_keeps_a_pkjwt_client_s_keys() {
         let state = test_app_state().await;
         let client = non_fapi_pkjwt_client(&state, "pkjwt-clear@example.com").await;
         assert!(
@@ -2403,21 +2496,17 @@ mod tests {
         let validated = update_input(Some("none"));
         validate_update_fapi(&validated, &client).expect("non-FAPI -> non-FAPI is allowed");
 
-        let err = compute_fapi_update_fields(&validated, &client)
-            .expect_err("must refuse to leave a private_key_jwt client without keys");
-        assert!(matches!(err, AppValidationError::AuthMethodMissingJwks));
+        let fields = compute_fapi_update_fields(&validated, &client).expect("a no-op merges");
+        assert_eq!(fields.keys, client.keys.as_ref(), "the stored keys stay");
+        assert_eq!(fields.fapi_profile, FapiProfile::None);
     }
 
-    // Same as above for `self_signed_tls_client_auth`: its certificate is
-    // carried in the JWKS's x5c member (RFC 8705 §2.2.2), so clearing it
-    // leaves the client just as unable to authenticate. A client registered
+    // Same as above for `self_signed_tls_client_auth`, whose certificate is
+    // carried in the JWKS's x5c member (RFC 8705 §2.2.2). A client registered
     // dynamically (RFC 7591) with this auth method and no FAPI profile can
-    // reach the admin update path, where nothing but this guard stops a bare
-    // `fapi_profile: "none"` re-declaration from silently dropping its only
-    // key material — `validate_update_fapi` returns early for non-FAPI
-    // clients before any JWKS-presence check runs.
+    // reach the admin update path.
     #[tokio::test]
-    async fn explicit_none_is_refused_when_it_would_strip_a_self_signed_client_of_keys() {
+    async fn restating_none_keeps_a_self_signed_client_s_keys() {
         let state = test_app_state().await;
         let client = non_fapi_self_signed_client(&state, "self-signed-clear@example.com").await;
         assert!(
@@ -2428,9 +2517,8 @@ mod tests {
         let validated = update_input(Some("none"));
         validate_update_fapi(&validated, &client).expect("non-FAPI -> non-FAPI is allowed");
 
-        let err = compute_fapi_update_fields(&validated, &client)
-            .expect_err("must refuse to leave a self_signed_tls_client_auth client without keys");
-        assert!(matches!(err, AppValidationError::AuthMethodMissingJwks));
+        let fields = compute_fapi_update_fields(&validated, &client).expect("a no-op merges");
+        assert_eq!(fields.keys, client.keys.as_ref(), "the stored keys stay");
     }
 
     // A JWKS-only update can swap in a JWKS that still satisfies the bare
@@ -2445,6 +2533,8 @@ mod tests {
         let jwks = serde_json::json!({"keys": [{"kty": "RSA", "n": TEST_JWK_RSA_N, "e": "AQAB"}]})
             .to_string();
         let validated = validate_update_format(UpdateAppInput {
+            name: None,
+            description: None,
             redirect_uris: None,
             resource_uris: None,
             post_logout_redirect_uris: None,
@@ -2493,6 +2583,8 @@ mod tests {
         let jwks =
             serde_json::json!({"keys": [{"kty": "EC", "x": TEST_JWK_EC_X, "y": TEST_JWK_EC_Y, "crv": "P-256", "use": "enc"}]}).to_string();
         let validated = validate_update_format(UpdateAppInput {
+            name: None,
+            description: None,
             redirect_uris: None,
             resource_uris: None,
             post_logout_redirect_uris: None,
@@ -2523,6 +2615,8 @@ mod tests {
 
         let jwks = serde_json::json!({"keys": [{"kty": "oct"}]}).to_string();
         let validated = validate_update_format(UpdateAppInput {
+            name: None,
+            description: None,
             redirect_uris: None,
             resource_uris: None,
             post_logout_redirect_uris: None,
@@ -2552,6 +2646,8 @@ mod tests {
             serde_json::json!({"keys": [{"kty": "RSA", "alg": "ES256", "n": TEST_JWK_RSA_N, "e": "AQAB"}]})
                 .to_string();
         let validated = validate_update_format(UpdateAppInput {
+            name: None,
+            description: None,
             redirect_uris: None,
             resource_uris: None,
             post_logout_redirect_uris: None,
@@ -2580,6 +2676,8 @@ mod tests {
 
         let jwks = rs256_only_jwks_json();
         let validated = validate_update_format(UpdateAppInput {
+            name: None,
+            description: None,
             redirect_uris: None,
             resource_uris: None,
             post_logout_redirect_uris: None,
@@ -2605,6 +2703,8 @@ mod tests {
 
         let jwks = eddsa_jwks_json();
         let validated = validate_update_format(UpdateAppInput {
+            name: None,
+            description: None,
             redirect_uris: None,
             resource_uris: None,
             post_logout_redirect_uris: None,
@@ -2629,6 +2729,8 @@ mod tests {
 
         let jwks = unpinned_rsa_jwks_json();
         let validated = validate_update_format(UpdateAppInput {
+            name: None,
+            description: None,
             redirect_uris: None,
             resource_uris: None,
             post_logout_redirect_uris: None,
@@ -2660,6 +2762,8 @@ mod tests {
 
         let redirect_uris = vec!["https://example.com/callback".to_string()];
         let validated = validate_update_format(UpdateAppInput {
+            name: None,
+            description: None,
             redirect_uris: Some(&redirect_uris),
             resource_uris: None,
             post_logout_redirect_uris: None,
@@ -2857,6 +2961,8 @@ mod tests {
         fapi_profile: Option<&'a str>,
     ) -> UpdateAppInput<'a> {
         UpdateAppInput {
+            name: None,
+            description: None,
             redirect_uris: None,
             resource_uris: None,
             post_logout_redirect_uris: None,
@@ -2894,6 +3000,8 @@ mod tests {
     fn update_rejects_jwks_with_type_invalid_key_member() {
         let jwks = serde_json::json!({"keys": [{"kty": "EC", "x": TEST_JWK_EC_X, "y": TEST_JWK_EC_Y, "use": 123}]}).to_string();
         let err = validate_update_format(UpdateAppInput {
+            name: None,
+            description: None,
             redirect_uris: None,
             resource_uris: None,
             post_logout_redirect_uris: None,

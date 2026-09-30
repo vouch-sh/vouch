@@ -7,12 +7,12 @@ use super::documents::audit::OAuthUsageData;
 use super::documents::jwt_assertion_jti::JwtAssertionJtiDoc;
 use super::documents::oauth::{
     AccessScope, FapiProfile, OAuthClientDoc, OAuthClientSecretDoc, OAuthClientType,
-    RegistrationSource, TokenEndpointAuthMethod,
+    RegistrationSource, SecretStatus, TokenEndpointAuthMethod,
 };
+use super::pool::CasError;
 use super::store::{DocumentStore, Transition};
 use crate::crypto::alg::JwsAlgorithm;
 use crate::db::documents::audit::GeoFields;
-use crate::db::documents::oauth;
 use crate::error::ServiceError;
 use anyhow::Result;
 use axum::http::StatusCode;
@@ -1057,18 +1057,24 @@ pub async fn get_oauth_clients_for_user(
     Ok(docs.into_iter().map(OAuthClient::from).collect())
 }
 
-/// Parameters for updating an OAuth client.
-pub struct UpdateOAuthClientParams<'a> {
-    pub id: &'a str,
-    pub name: &'a str,
-    pub description: Option<&'a str>,
-    pub redirect_uris: &'a [String],
-    pub access_scope: Option<AccessScope>,
-    pub org_id: Option<&'a str>,
-    pub resource_uris: &'a [String],
+/// An owner's edit to an OAuth client: the value each field will hold.
+///
+/// Built by [`update_oauth_client`]'s `decide` from the client as it is
+/// stored at the moment of the write, never from an earlier read, so a field
+/// the request did not change keeps whatever a concurrent writer (an RFC 7592
+/// update, say) put there.
+#[derive(Debug)]
+pub struct OAuthClientUpdate {
+    pub name: String,
+    pub description: Option<String>,
+    pub redirect_uris: Vec<String>,
+    /// `Some` changes the access scope, with the owning organization for an
+    /// organization-scoped client; `None` keeps both.
+    pub access_scope: Option<(AccessScope, Option<String>)>,
+    pub resource_uris: Vec<String>,
     pub token_endpoint_auth_method: TokenEndpointAuthMethod,
-    /// RFC 7591 §2 key material, in whichever of the two forms was supplied.
-    pub keys: Option<&'a ClientKeys>,
+    /// RFC 7591 §2 key material, in whichever of the two forms it takes.
+    pub keys: Option<ClientKeys>,
     pub fapi_profile: FapiProfile,
     pub dpop_bound_access_tokens: bool,
     /// RP-Initiated Logout 1.0: Registered post-logout redirect URIs.
@@ -1076,57 +1082,71 @@ pub struct UpdateOAuthClientParams<'a> {
     pub post_logout_redirect_uris: Option<Vec<String>>,
 }
 
-/// Update an OAuth client.
-///
-/// Uses [`DocumentStore::modify`] for read-modify-write with automatic
-/// version-conflict retry.
-pub async fn update_oauth_client(
-    store: &DocumentStore,
-    params: &UpdateOAuthClientParams<'_>,
-) -> Result<()> {
-    // Same delete-before-modify ordering as `update_oauth_client_registration`
-    // (RFC 7592), and the same reasoning: check whether jwks_uri is changing
-    // before modifying the parent doc so the stale cache is gone before a
-    // reader could see the new URI paired with old-host keys. Bounded race: a
-    // concurrent JWKS refresh completing between this delete and the modify's
-    // internal re-fetch can repopulate the cache with old-URI keys; worst-case
-    // window is one TTL (~1h), self-corrected by the next cache miss.
-    let jwks_uri_changing = store
-        .get::<OAuthClientDoc>(params.id)
-        .await?
-        .is_some_and(|doc| doc.data.jwks_uri.as_deref() != params.keys.and_then(ClientKeys::uri));
-
-    if jwks_uri_changing {
-        super::jwks_cache::delete_jwks_cache(store, params.id).await?;
+impl OAuthClientUpdate {
+    fn apply(self, data: &mut OAuthClientDoc) {
+        data.name = self.name;
+        data.description = self.description;
+        data.redirect_uris = self.redirect_uris;
+        data.resource_uris = self.resource_uris;
+        data.token_endpoint_auth_method = self.token_endpoint_auth_method;
+        let (jwks, jwks_uri) = client_keys_to_stored(self.keys.as_ref());
+        data.jwks = jwks;
+        data.jwks_uri = jwks_uri;
+        data.set_fapi_profile(self.fapi_profile);
+        data.dpop_bound_access_tokens = self.dpop_bound_access_tokens;
+        if let Some(uris) = self.post_logout_redirect_uris {
+            data.post_logout_redirect_uris = if uris.is_empty() { None } else { Some(uris) };
+        }
+        if let Some((scope, org_id)) = self.access_scope {
+            data.access_scope = scope;
+            data.org_id = org_id;
+        }
     }
+}
 
-    store
-        .modify::<OAuthClientDoc, _>(params.id, |data| {
-            data.name = params.name.to_string();
-            data.description = params.description.map(String::from);
-            data.redirect_uris = params.redirect_uris.to_vec();
-            data.resource_uris = params.resource_uris.to_vec();
-            data.token_endpoint_auth_method = params.token_endpoint_auth_method;
-            let (jwks, jwks_uri) = client_keys_to_stored(params.keys);
-            data.jwks = jwks;
-            data.jwks_uri = jwks_uri;
-            data.set_fapi_profile(params.fapi_profile);
-            data.dpop_bound_access_tokens = params.dpop_bound_access_tokens;
-            if let Some(ref uris) = params.post_logout_redirect_uris {
-                data.post_logout_redirect_uris = if uris.is_empty() {
-                    None
-                } else {
-                    Some(uris.clone())
-                };
+/// Apply an owner's edit to an OAuth client.
+///
+/// `decide` receives the client as currently stored and returns the edit, or
+/// rejects it. It runs again on every version conflict, against the newer
+/// row, so the edit is always decided and validated against what it
+/// overwrites: nothing from a read taken before this call is written back.
+///
+/// # Errors
+///
+/// Returns an error if a read or write fails, or if the version conflict
+/// persists after retries.
+pub async fn update_oauth_client<R>(
+    store: &DocumentStore,
+    id: &str,
+    decide: impl Fn(&OAuthClient) -> std::result::Result<OAuthClientUpdate, R>,
+) -> Result<Transition<(), R>> {
+    let outcome: std::result::Result<Transition<(), R>, CasError> =
+        crate::with_dsql_retry!(async {
+            let Some(doc) = store.get::<OAuthClientDoc>(id).await? else {
+                return Ok(Transition::NotFound);
+            };
+            let version = doc.version;
+            let mut data = doc.data.clone();
+            let update = match decide(&OAuthClient::from(doc)) {
+                Ok(update) => update,
+                Err(rejected) => return Ok(Transition::Rejected(rejected)),
+            };
+            // Same delete-before-write ordering as `update_oauth_client_registration`
+            // (RFC 7592), and the same reasoning: the stale cache is gone before a
+            // reader could see the new URI paired with old-host keys. Bounded
+            // race: a concurrent JWKS refresh completing between this delete and
+            // the write can repopulate the cache with old-URI keys; worst-case
+            // window is one TTL (~1h), self-corrected by the next cache miss.
+            if data.jwks_uri.as_deref() != update.keys.as_ref().and_then(ClientKeys::uri) {
+                super::jwks_cache::delete_jwks_cache(store, id).await?;
             }
-
-            if let Some(scope) = params.access_scope {
-                data.access_scope = scope;
-                data.org_id = params.org_id.map(String::from);
+            update.apply(&mut data);
+            if !store.compare_and_update(id, version, &data).await? {
+                return Err(CasError::OccConflict);
             }
-        })
-        .await?;
-    Ok(())
+            Ok(Transition::Applied(()))
+        });
+    Ok(outcome?)
 }
 
 /// Delete an OAuth client permanently.
@@ -1276,10 +1296,16 @@ impl From<Document<OAuthClientSecretDoc>> for OAuthClientSecret {
 }
 
 impl OAuthClientSecret {
+    /// Where this secret stands at `now`.
+    #[must_use]
+    pub fn status(&self, now: &Timestamp) -> SecretStatus {
+        SecretStatus::at(self.revoked_at, self.expires_at, now)
+    }
+
     /// Check if this secret is valid (not revoked/expired).
     #[must_use]
     pub fn is_valid(&self, now: &Timestamp) -> bool {
-        oauth::is_secret_active(self.revoked_at, self.expires_at, now)
+        self.status(now) == SecretStatus::Active
     }
 }
 

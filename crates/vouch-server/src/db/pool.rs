@@ -442,6 +442,33 @@ impl RetryableError for anyhow::Error {
     }
 }
 
+/// The error inside a `with_dsql_retry!` block whose serialization point is
+/// one document's `compare_and_update`.
+///
+/// `OccConflict` means the compare-and-update found a newer version, so the
+/// block re-reads and decides again. A business rejection travels as
+/// `Other(anyhow!(...))`: it carries no retryable DB error code, so the macro
+/// returns it at once.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum CasError {
+    /// The document changed between the read and the compare-and-update.
+    #[error("document was modified concurrently; please retry")]
+    OccConflict,
+    /// A business rejection or an infrastructure failure. Retried only when
+    /// the wrapped error carries a retryable DB error code.
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+impl RetryableError for CasError {
+    fn is_retryable(&self) -> bool {
+        match self {
+            Self::OccConflict => true,
+            Self::Other(e) => is_retryable_db_error(e),
+        }
+    }
+}
+
 /// Retry an async block on transient DSQL errors or OCC version conflicts.
 ///
 /// Re-evaluates the body on each attempt (creating a fresh future),
