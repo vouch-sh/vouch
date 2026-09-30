@@ -846,16 +846,14 @@ fn validate_id_token_signed_response_alg(
 ///   signing, on a server that always has an RSA key available. Ignoring the
 ///   omission is the conformant reading that does not weaken the client.
 ///
-/// FAPI 2.0 §5.4 pins FAPI clients to ES256 either way.
+/// FAPI 2.0 §5.4.1 keeps FAPI clients off RS256 either way
+/// ([`FapiProfile::signing_alg`]).
 fn resolve_id_token_alg(
     explicit: Option<JwsAlgorithm>,
     fapi_profile: FapiProfile,
     fallback: JwsAlgorithm,
 ) -> JwsAlgorithm {
-    if fapi_profile != FapiProfile::None {
-        return JwsAlgorithm::Es256;
-    }
-    explicit.unwrap_or(fallback)
+    fapi_profile.signing_alg(explicit.unwrap_or(fallback))
 }
 
 /// The ID token signing algorithm a new registration gets when it names none.
