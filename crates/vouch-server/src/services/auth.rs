@@ -45,14 +45,14 @@ use vouch_common::protocol;
 
 /// A session that still authorizes requests, and the security key it was
 /// established with.
-pub(crate) struct LiveSession {
+pub(crate) struct ValidatedSession {
     pub(crate) session: std::sync::Arc<db::Session>,
     /// `None` for a session established without a security key (enrollment
     /// bootstrap, `client_credentials`).
     pub(crate) authenticator: Option<Authenticator>,
 }
 
-impl LiveSession {
+impl ValidatedSession {
     /// The live session behind `token_hash`, if any.
     ///
     /// Live means the row exists and is unexpired at `arrival` (the session

@@ -11,7 +11,7 @@ use crate::db::{self, SessionPurpose};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use crate::infra::metrics;
 use crate::redact_email;
-use crate::services::auth::LiveSession;
+use crate::services::auth::ValidatedSession;
 use crate::services::auth::{
     ActorClaim, CreateOAuthTokenParams, MAX_DELEGATION_DEPTH, TokenBinding, TokenIssuanceProof,
     create_oauth_access_token, decode_token,
@@ -357,7 +357,7 @@ pub(crate) async fn exchange_token(
 
     // The subject token's session must be live (its security key not deleted)
     let subject_token_hash = hash_token(subject_token);
-    let subject_session = LiveSession::lookup(state, &subject_token_hash, arrival)
+    let subject_session = ValidatedSession::lookup(state, &subject_token_hash, arrival)
         .await?
         .map(|live| live.session)
         .ok_or_else(|| {
@@ -444,7 +444,7 @@ pub(crate) async fn exchange_token(
 
         // The actor token's session must be live (its security key not deleted)
         let actor_token_hash = hash_token(actor_token);
-        let _actor_session = LiveSession::lookup(state, &actor_token_hash, arrival)
+        let _actor_session = ValidatedSession::lookup(state, &actor_token_hash, arrival)
             .await?
             .ok_or_else(|| {
                 ServiceError::oauth(

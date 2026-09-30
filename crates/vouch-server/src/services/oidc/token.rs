@@ -17,7 +17,7 @@ use crate::db::{self, Authenticator, OAuthClient, User};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use crate::infra::jwks::JwksOrigin;
 use crate::redact_email;
-use crate::services::auth::LiveSession;
+use crate::services::auth::ValidatedSession;
 use crate::services::auth::{
     ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenBinding,
     TokenIssuanceProof, create_oauth_access_token, decode_token,
@@ -1376,10 +1376,10 @@ pub async fn validate_session_token(
     // The session must be live: its row exists, and the security key it was
     // established with has not been deleted (key revocation).
     let token_hash = hash_token(token);
-    let Some(LiveSession {
+    let Some(ValidatedSession {
         session,
         authenticator,
-    }) = LiveSession::lookup(state, &token_hash, arrival).await?
+    }) = ValidatedSession::lookup(state, &token_hash, arrival).await?
     else {
         return Ok(None);
     };

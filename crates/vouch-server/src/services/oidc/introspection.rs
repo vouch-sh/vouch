@@ -13,7 +13,7 @@ use crate::db::{self, ClientInfo};
 use crate::error::ServiceError;
 use crate::error::ServiceResult;
 use crate::redact_email;
-use crate::services::auth::LiveSession;
+use crate::services::auth::ValidatedSession;
 use crate::services::auth::{DecodedToken, decode_token};
 use crate::services::oidc::CnfClaim;
 use crate::services::oidc::ScopeSet;
@@ -178,7 +178,7 @@ pub async fn introspect_token(
     // The session must be live (its security key not deleted); it also
     // supplies authorization_details.
     let token_hash = hash_token(token);
-    let session = match LiveSession::lookup(state, &token_hash, arrival).await? {
+    let session = match ValidatedSession::lookup(state, &token_hash, arrival).await? {
         Some(live) => live.session,
         None => return Ok(IntrospectionResult::inactive()),
     };
