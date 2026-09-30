@@ -253,25 +253,17 @@ impl SessionSlot {
         }
     }
 
-    /// The session, if it has not expired.
-    fn live_session(&self) -> Option<&Session> {
-        Some(&self.session).filter(|s| !s.is_expired())
-    }
-
     /// The slot, if its session has not expired. Every read or write of a
-    /// slot's server or credentials goes through this or [`Self::live_mut`],
-    /// so nothing is stored or served under an expired session.
+    /// slot's session, server or credentials goes through this or
+    /// [`Self::live_mut`], so nothing is stored or served under an expired
+    /// session.
     fn live(&self) -> Option<&Self> {
-        self.live_session().map(|_| self)
+        (!self.session.is_expired()).then_some(self)
     }
 
     /// [`Self::live`] for a write.
     fn live_mut(&mut self) -> Option<&mut Self> {
-        if self.live_session().is_some() {
-            Some(self)
-        } else {
-            None
-        }
+        (!self.session.is_expired()).then_some(self)
     }
 }
 
@@ -325,7 +317,7 @@ impl AgentState {
     /// Get the current session (if valid).
     pub async fn get_session(&self) -> Option<Session> {
         let guard = self.inner.read().await;
-        guard.as_ref()?.live_session().cloned()
+        guard.as_ref()?.live().map(|slot| slot.session.clone())
     }
 
     /// The live session and the server it was issued by, read under one lock
@@ -364,7 +356,7 @@ impl AgentState {
         server_url: Option<String>,
     ) -> bool {
         let mut guard = self.inner.write().await;
-        if guard.as_ref().and_then(SessionSlot::live_session).is_some() {
+        if guard.as_ref().and_then(SessionSlot::live).is_some() {
             return false;
         }
         *guard = Some(SessionSlot::new(session, server_url));
@@ -533,7 +525,10 @@ impl AgentState {
     /// Get the raw token (if session is valid).
     pub async fn get_token(&self) -> Option<SecretString> {
         let guard = self.inner.read().await;
-        guard.as_ref()?.live_session().map(|s| s.token.clone())
+        guard
+            .as_ref()?
+            .live()
+            .map(|slot| slot.session.token.clone())
     }
 
     /// Get the current session's email, if a session is stored.
