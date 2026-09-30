@@ -257,6 +257,22 @@ impl SessionSlot {
     fn live_session(&self) -> Option<&Session> {
         Some(&self.session).filter(|s| !s.is_expired())
     }
+
+    /// The slot, if its session has not expired. Every read or write of a
+    /// slot's server or credentials goes through this or [`Self::live_mut`],
+    /// so nothing is stored or served under an expired session.
+    fn live(&self) -> Option<&Self> {
+        self.live_session().map(|_| self)
+    }
+
+    /// [`Self::live`] for a write.
+    fn live_mut(&mut self) -> Option<&mut Self> {
+        if self.live_session().is_some() {
+            Some(self)
+        } else {
+            None
+        }
+    }
 }
 
 /// Hand-written so SSH credentials are reported as present or absent only.
@@ -310,6 +326,16 @@ impl AgentState {
     pub async fn get_session(&self) -> Option<Session> {
         let guard = self.inner.read().await;
         guard.as_ref()?.live_session().cloned()
+    }
+
+    /// The live session and the server it was issued by, read under one lock
+    /// so the two cannot come from different logins.
+    pub async fn session_info(&self) -> Option<SessionInfo> {
+        let guard = self.inner.read().await;
+        let slot = guard.as_ref()?.live()?;
+        let mut info = SessionInfo::from(&slot.session);
+        info.server_url.clone_from(&slot.server_url);
+        Some(info)
     }
 
     /// Store a new session with the server URL it was issued by.
@@ -369,17 +395,13 @@ impl AgentState {
         creds: SshCredentials,
     ) -> Result<(), SshStoreRefusal> {
         let mut guard = self.inner.write().await;
-        let Some(slot) = guard.as_mut() else {
-            debug!("No live session; refusing to store SSH credentials");
-            return Err(SshStoreRefusal::NoSession);
-        };
-        let Some(session) = slot.live_session() else {
+        let Some(slot) = guard.as_mut().and_then(SessionSlot::live_mut) else {
             debug!("No live session; refusing to store SSH credentials");
             return Err(SshStoreRefusal::NoSession);
         };
         if !vouch_common::ssh_cert_issued_to(
             &creds.metadata.key_id,
-            session.user_email(),
+            slot.session.user_email(),
             slot.server_url.as_deref(),
         ) {
             warn!("Refusing SSH certificate not issued to the current session");
@@ -403,16 +425,13 @@ impl AgentState {
     /// a certificate cannot be served after the session backing it is gone.
     pub async fn get_valid_ssh_credentials(&self) -> Option<SshCredentials> {
         let guard = self.inner.read().await;
-        let slot = guard.as_ref()?;
+        let Some(slot) = guard.as_ref()?.live() else {
+            debug!("No live session; refusing to serve SSH credentials");
+            return None;
+        };
         let creds = slot.ssh_credentials.as_ref()?;
-
         if creds.is_expired() {
             debug!("SSH certificate has expired");
-            return None;
-        }
-
-        if slot.live_session().is_none() {
-            debug!("No live session; refusing to serve SSH credentials");
             return None;
         }
         Some(creds.clone())
@@ -424,10 +443,10 @@ impl AgentState {
         guard.as_ref().is_some_and(|s| s.ssh_credentials.is_some())
     }
 
-    /// Get the server URL the current session was issued by.
+    /// Get the server URL the current live session was issued by.
     pub async fn get_server_url(&self) -> Option<String> {
         let guard = self.inner.read().await;
-        guard.as_ref()?.server_url.clone()
+        guard.as_ref()?.live()?.server_url.clone()
     }
 
     /// Store a credential in the current session's cache.
@@ -435,10 +454,11 @@ impl AgentState {
     /// Rejects keys longer than 256 bytes and caps the cache at 128 entries,
     /// evicting the oldest expired entry (or the oldest entry) when full.
     ///
-    /// Refused when no session is stored: an entry with no session to belong
-    /// to would otherwise be served to whichever identity logs in next. When
-    /// refused, nothing is cached, so the caller must not log or audit a
-    /// cache hit.
+    /// Refused when no live session is stored: an entry with no session to
+    /// belong to would otherwise be served to whichever identity logs in
+    /// next, and one stored under an expired session would outlive the
+    /// session that authorized it. When refused, nothing is cached, so the
+    /// caller must not log or audit a cache hit.
     pub async fn cache_credential(
         &self,
         credential_type: String,
@@ -453,8 +473,8 @@ impl AgentState {
         }
 
         let mut guard = self.inner.write().await;
-        let Some(slot) = guard.as_mut() else {
-            debug!("No session; refusing to cache credential");
+        let Some(slot) = guard.as_mut().and_then(SessionSlot::live_mut) else {
+            debug!("No live session; refusing to cache credential");
             return Err(CacheRefusal::NoSession);
         };
         let cache = &mut slot.credential_cache;
@@ -483,11 +503,13 @@ impl AgentState {
         Ok(())
     }
 
-    /// Get a cached credential if it is still valid.
+    /// Get a cached credential if it and the session that authorized it are
+    /// both still valid.
     pub async fn get_cached_credential(&self, credential_type: &str) -> Option<CachedCredential> {
         let guard = self.inner.read().await;
         guard
             .as_ref()?
+            .live()?
             .credential_cache
             .get(credential_type)
             .filter(|c| c.is_valid())
@@ -1216,6 +1238,68 @@ mod tests {
         assert!(
             state.get_cached_credential(&over_limit).await.is_none(),
             "rejected key must not be cached"
+        );
+    }
+
+    /// The `SessionSlot` doc: "a credential cannot outlive the session that
+    /// authorized it". A session that expires in place stays in its slot until
+    /// the next store or clear; its cached credentials and server must not be
+    /// stored or served meanwhile, as the SSH credentials already are not.
+    #[tokio::test]
+    async fn an_expired_session_neither_stores_nor_serves_its_slot() {
+        let state = AgentState::new();
+        let token = SecretString::from("token".to_string());
+        state
+            .store_session(
+                Session::new(
+                    token,
+                    "user@example.com".to_string(),
+                    future_timestamp(3600),
+                ),
+                Some("https://vouch.example.com".to_string()),
+            )
+            .await;
+        let cred = CachedCredential::new(serde_json::json!({"k": "v"}), future_timestamp(3600));
+        assert!(
+            state
+                .cache_credential("aws:role".to_string(), cred.clone())
+                .await
+                .is_ok()
+        );
+        assert!(state.get_cached_credential("aws:role").await.is_some());
+        assert!(state.get_server_url().await.is_some());
+        let info = state.session_info().await.unwrap();
+        assert_eq!(
+            info.server_url.as_deref(),
+            Some("https://vouch.example.com")
+        );
+
+        state
+            .inner
+            .write()
+            .await
+            .as_mut()
+            .unwrap()
+            .session
+            .expires_at = past_timestamp(1);
+
+        assert!(
+            state.get_cached_credential("aws:role").await.is_none(),
+            "a credential is not served after its session expires"
+        );
+        assert!(
+            matches!(
+                state.cache_credential("gh:repo".to_string(), cred).await,
+                Err(CacheRefusal::NoSession)
+            ),
+            "nothing is cached under an expired session"
+        );
+        assert!(state.get_server_url().await.is_none());
+        assert!(state.session_info().await.is_none());
+        assert_eq!(
+            state.current_user_email().await.as_deref(),
+            Some("user@example.com"),
+            "the expiry monitor still attributes the expiry"
         );
     }
 }
