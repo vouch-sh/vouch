@@ -7,7 +7,7 @@
 //! 1. Fetch a clean OIDC ID token from the Vouch server (the *assertion*)
 //!    via the standard RFC 8693 token exchange at `POST /oauth/token`
 //!    (`requested_token_type=id_token`). The subject token is the existing
-//!    session token, so this is non-interactive — `resolve_token()` only
+//!    session token, so this is non-interactive — `token_for()` only
 //!    reads the current session and never triggers FIDO2. Client
 //!    authentication uses the FAPI `private_key_jwt` assertion and the
 //!    request carries a DPoP proof (the CLI client is DPoP-bound).
@@ -32,7 +32,7 @@ use vouch_cli::{tr, tr_args};
 
 use crate::config::Config;
 use crate::server_url::ServerUrl;
-use crate::session::resolve_token;
+use crate::session::token_for;
 use vouch_cli::fapi::key_store::load_client_key;
 use vouch_cli::fapi::{ClientAssertionBuilder, ClientKey, DpopProofBuilder};
 use vouch_common::http;
@@ -96,7 +96,7 @@ pub(crate) async fn fetch_assertion(
         .context(tr!("err-no-oauth-client-registered-run-vouch-login-first"))?;
     let key =
         load_client_key().context(tr!("err-no-fapi-client-key-found-run-vouch-login-first"))?;
-    let subject_token = resolve_token().await?;
+    let subject_token = token_for(server).await?;
 
     let endpoint = format!("{server}/oauth/token");
     let http = http::credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
@@ -276,7 +276,7 @@ impl std::fmt::Debug for ProviderTokenResponse {
 /// OpenAI: `token-exchange` grant). `label` names the provider in error
 /// messages.
 pub(crate) async fn exchange(
-    endpoint: &str,
+    endpoint: &ServerUrl,
     body: &serde_json::Value,
     label: &str,
 ) -> Result<(SecretString, String)> {
@@ -287,7 +287,7 @@ pub(crate) async fn exchange(
         serde_json::to_vec(body).context(tr!("err-failed-serialize-token-exchange-request"))?;
 
     let response = client
-        .post(endpoint)
+        .post(endpoint.as_str())
         .header("content-type", "application/json")
         .body(payload)
         .send()
@@ -296,7 +296,7 @@ pub(crate) async fn exchange(
             tr_args!(
                 "err-failed-reach-token-endpoint",
                 label = label,
-                endpoint = endpoint
+                endpoint = endpoint.as_str()
             )
         })?;
 

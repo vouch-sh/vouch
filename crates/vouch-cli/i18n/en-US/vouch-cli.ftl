@@ -1881,6 +1881,7 @@ err-failed-parse-cached-expiration = failed to parse cached Expiration: { $expir
 err-failed-parse-public-key = failed to parse public key: { $e }
 err-failed-parse-sts-expiration = failed to parse STS Expiration: { $expiration_str }
 err-failed-reach-token-endpoint = failed to reach { $label } token endpoint at { $endpoint }
+err-session-for-other-server = your session is for { $session }, not { $server }; run 'vouch login' with --server { $server } to sign in there
 err-failed-reach-vouch-token-endpoint = failed to reach Vouch token endpoint at { $endpoint }
 err-failed-read-token-response-body = failed to read { $label } token response body
 err-failed-serialize-posture = failed to serialize posture: { $e }

@@ -104,7 +104,66 @@ pub(crate) async fn resolve_session(opt_in: InsecureOptIn) -> Result<ResolvedSes
     Ok(session)
 }
 
-/// Resolve the current authentication token.
+/// The session token, for requests to `server`.
+///
+/// A session belongs to the server it was established with. `--server` and
+/// `VOUCH_SERVER` can name another one, and sending this token there hands
+/// the user's access to that server, which can replay a Bearer token against
+/// the one it came from. So the token is returned only when the stored
+/// session, from the agent or else the config file, is `server`'s. `server`
+/// itself was judged by [`ServerUrl::parse`] when it was resolved.
+///
+/// # Errors
+///
+/// Returns an error if no session is available, or if it belongs to another
+/// server.
+pub(crate) async fn token_for(server: &ServerUrl) -> Result<SecretString> {
+    #[cfg(unix)]
+    if let Some((stored, token)) = try_agent_session().await {
+        belongs_to(server, &stored)?;
+        return Ok(token);
+    }
+
+    let config = Config::load().context(tr!("err-failed-load-config"))?;
+    let token = config
+        .token()
+        .ok_or(CliError::NotAuthenticated {
+            reason: "no session token — run 'vouch login' to authenticate".to_string(),
+        })?
+        .clone();
+    // A token stored without its server cannot show where it belongs.
+    belongs_to(server, config.server_url().unwrap_or_default())?;
+    #[cfg(unix)]
+    restore_agent_session(&ResolvedSession {
+        server_url: server.clone(),
+        token: token.clone(),
+    })
+    .await;
+    Ok(token)
+}
+
+/// Refuse a session stored for another server than `server`.
+fn belongs_to(server: &ServerUrl, stored: &str) -> Result<()> {
+    if server.names(stored) {
+        return Ok(());
+    }
+    Err(CliError::NotAuthenticated {
+        reason: vouch_cli::tr_args!(
+            "err-session-for-other-server",
+            session = stored,
+            server = server.as_str()
+        ),
+    }
+    .into())
+}
+
+/// Resolve the current authentication token, whichever server it belongs
+/// to.
+///
+/// Only for handing the token to something outside the CLI's own requests:
+/// printing it (`vouch credential token`), or a cargo registry that asked
+/// for it. A request the CLI sends to a server takes its token from
+/// [`token_for`], which checks the session belongs to that server.
 ///
 /// Tries multiple sources in order:
 /// 1. Agent (Unix only) - most reliable, always up-to-date
@@ -327,28 +386,29 @@ pub(crate) async fn store_and_finalize(
     clippy::unwrap_used,
     reason = "test code: panic on assertion failure is acceptable"
 )]
-mod tests {
-    use super::*;
+pub(crate) mod test_support {
+    //! A stored session for tests that read the config file.
+
     use crate::commands::credential::aws::test_support::ENV_LOCK;
-    use crate::server_url::ServerUrlError;
+    use crate::config::Config;
 
     const ENV_VARS: [&str; 3] = ["XDG_CONFIG_HOME", "XDG_RUNTIME_DIR", "VOUCH_ALLOW_INSECURE"];
 
-    /// Resolve a session stored for `server` in a fresh config directory,
-    /// with no agent reachable, once per opt-in, under `ENV_LOCK`.
+    /// Run `body` against a session stored for `server` in a fresh config
+    /// directory, with no agent reachable, under `ENV_LOCK`.
     ///
     /// `env_opt_in` is the `VOUCH_ALLOW_INSECURE` value seen by
     /// `InsecureOptIn::Env`. The prior environment is restored before the
-    /// results are returned, so a failing assertion cannot leak it.
+    /// result is returned, so a failing assertion cannot leak it.
     #[expect(
         unsafe_code,
         reason = "env mutation under ENV_LOCK; the prior values are restored before returning"
     )]
-    async fn resolve_stored(
+    pub(crate) async fn with_stored_session<T>(
         server: Option<&str>,
         env_opt_in: Option<&str>,
-        opt_ins: &[InsecureOptIn],
-    ) -> Vec<Result<String>> {
+        body: impl AsyncFnOnce() -> T,
+    ) -> T {
         let _guard = ENV_LOCK.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let prior: Vec<_> = ENV_VARS.iter().map(|k| (*k, std::env::var_os(k))).collect();
@@ -370,14 +430,7 @@ mod tests {
             config.save().unwrap();
         }
 
-        let mut results = Vec::new();
-        for opt_in in opt_ins {
-            results.push(
-                resolve_session(*opt_in)
-                    .await
-                    .map(|s| s.server_url.as_str().to_string()),
-            );
-        }
+        let result = body().await;
 
         // SAFETY: as above; restores the prior values.
         unsafe {
@@ -388,7 +441,68 @@ mod tests {
                 }
             }
         }
-        results
+        result
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
+mod tests {
+    use super::test_support::with_stored_session;
+    use super::*;
+    #[cfg(all(unix, feature = "test-utils"))]
+    use crate::commands::credential::aws::test_support::ENV_LOCK;
+    use crate::server_url::ServerUrlError;
+
+    /// Resolve a session stored for `server`, once per opt-in; see
+    /// [`with_stored_session`](super::test_support::with_stored_session).
+    async fn resolve_stored(
+        server: Option<&str>,
+        env_opt_in: Option<&str>,
+        opt_ins: &[InsecureOptIn],
+    ) -> Vec<Result<String>> {
+        with_stored_session(server, env_opt_in, async || {
+            let mut results = Vec::new();
+            for opt_in in opt_ins {
+                results.push(
+                    resolve_session(*opt_in)
+                        .await
+                        .map(|s| s.server_url.as_str().to_string()),
+                );
+            }
+            results
+        })
+        .await
+    }
+
+    /// A session belongs to the server it was established with. A
+    /// `--server` or `VOUCH_SERVER` naming another one gets no token, so the
+    /// session's token is never sent there; the session's own server, with or
+    /// without a trailing slash, gets it.
+    #[tokio::test]
+    async fn token_goes_only_to_the_sessions_own_server() {
+        use secrecy::ExposeSecret;
+
+        let (own, other) = with_stored_session(Some("https://a.example.com/"), None, async || {
+            let own = token_for(&ServerUrl::parse("https://a.example.com", false).unwrap())
+                .await
+                .map(|token| token.expose_secret().to_string());
+            let other = token_for(&ServerUrl::parse("https://b.example.com", false).unwrap())
+                .await
+                .map(|token| token.expose_secret().to_string());
+            (own, other)
+        })
+        .await;
+
+        assert_eq!(own.unwrap(), "stored-token");
+        let refusal = other.unwrap_err().to_string();
+        assert!(
+            refusal.contains("https://b.example.com"),
+            "the refusal names the other server: {refusal}"
+        );
     }
 
     fn is_url_refusal(result: &Result<String>) -> bool {

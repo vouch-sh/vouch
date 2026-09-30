@@ -65,6 +65,12 @@ impl ServerUrl {
         &self.url
     }
 
+    /// Whether the stored URL `raw` names this server: the same URL once
+    /// trailing slashes are trimmed, as [`Self::parse`] normalizes.
+    pub fn names(&self, raw: &str) -> bool {
+        raw.trim_end_matches('/') == self.url
+    }
+
     /// Whether `url` is on this server: the same scheme, host, and port, and
     /// a path at or below this URL's path. Used before sending a credential
     /// to a URL the server returned earlier (RFC 7592 `registration_client_uri`).
