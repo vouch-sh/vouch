@@ -17,11 +17,11 @@ use crate::db::{self, Authenticator, OAuthClient, User};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use crate::infra::jwks::JwksOrigin;
 use crate::redact_email;
+use crate::services::auth::LiveSession;
 use crate::services::auth::{
     ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenBinding,
     TokenIssuanceProof, create_oauth_access_token, decode_token,
 };
-use crate::services::auth::{LiveSession, live_session};
 use aws_lc_rs::digest::{self, SHA256};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -1379,7 +1379,7 @@ pub async fn validate_session_token(
     let Some(LiveSession {
         session,
         authenticator,
-    }) = live_session(state, &token_hash, arrival).await?
+    }) = LiveSession::lookup(state, &token_hash, arrival).await?
     else {
         return Ok(None);
     };

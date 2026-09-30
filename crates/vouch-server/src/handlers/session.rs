@@ -115,7 +115,7 @@ async fn extract_resource_token(
     // 3. The session must be live: its row exists, and the security key it
     //    was established with has not been deleted.
     let token_hash = hash_token(&token);
-    let session = auth::live_session(state, &token_hash, arrival)
+    let session = auth::LiveSession::lookup(state, &token_hash, arrival)
         .await?
         .ok_or_else(|| {
             ServiceError::api(
