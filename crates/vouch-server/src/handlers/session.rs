@@ -298,18 +298,24 @@ fn enforce_audience_coverage(
 // ============================================================================
 //
 // `extract_resource_token` is private to this module. The only ways a handler
-// can obtain a validated token are the two extractors below, so the strength of
-// authentication a route accepts is stated in its signature rather than left to
-// a check the handler remembers to write. `HardwareVerifiedToken` is the reason
-// the split exists: credential issuance must not run on a session that never
-// exercised the security key.
+// can obtain a validated token are the extractors below and
+// `extract_session_from_cookie`, so the strength of authentication a route
+// accepts is stated in its signature rather than left to a check the handler
+// remembers to write. `HardwareVerifiedToken` is the reason the split exists:
+// credential issuance must not run on a session that never exercised the
+// security key. Each of them also loads the token's account through
+// `load_active_user`, so no handler sees a token whose account is missing or
+// deactivated.
 
-/// An access token that passed validation.
+/// An access token that passed validation, and its active account.
 ///
 /// Says nothing about *how* the user authenticated — an enrollment bootstrap
 /// session satisfies this. Handlers that mint credentials want
 /// [`HardwareVerifiedToken`] instead.
-pub(crate) struct AuthenticatedToken(pub(crate) ValidatedResourceToken);
+pub(crate) struct AuthenticatedToken {
+    pub(crate) token: ValidatedResourceToken,
+    pub(crate) user: db::User,
+}
 
 /// An access token whose session proved possession of the user's security key.
 ///
@@ -320,7 +326,10 @@ pub(crate) struct AuthenticatedToken(pub(crate) ValidatedResourceToken);
 /// The gate is on `hardware_verified` rather than `authenticator_id`: the latter
 /// only means the user has a key on record, which an enrollment session carries
 /// while `hardware_verified` is false.
-pub(crate) struct HardwareVerifiedToken(pub(crate) ValidatedResourceToken);
+pub(crate) struct HardwareVerifiedToken {
+    pub(crate) token: ValidatedResourceToken,
+    pub(crate) user: db::User,
+}
 
 /// An access token whose session exercised the security key *recently*.
 ///
@@ -334,7 +343,10 @@ pub(crate) struct HardwareVerifiedToken(pub(crate) ValidatedResourceToken);
 /// the 403 `HardwareVerifiedToken` uses: the caller's correct response is to
 /// re-authenticate and retry, and the key-management page drives an inline
 /// FIDO2 step-up off exactly that challenge.
-pub(crate) struct SteppedUpToken(pub(crate) ValidatedResourceToken);
+pub(crate) struct SteppedUpToken {
+    pub(crate) token: ValidatedResourceToken,
+    pub(crate) user: db::User,
+}
 
 /// Run the shared validation for both extractors.
 ///
@@ -387,7 +399,9 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for AuthenticatedToken {
         parts: &mut http::request::Parts,
         state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
-        Ok(Self(extract_token_from_parts(parts, state).await?))
+        let token = extract_token_from_parts(parts, state).await?;
+        let user = load_active_user(state, &token.sub).await?;
+        Ok(Self { token, user })
     }
 }
 
@@ -401,7 +415,10 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for AuthenticatedToken {
 ///
 /// Only the `Authorization` header is consulted: a browser session cookie must
 /// not authenticate a client registration.
-pub(crate) struct OptionalAuthenticatedToken(pub(crate) Option<ValidatedResourceToken>);
+///
+/// A deactivated account's still-live token is refused as `invalid_token`: the
+/// token is invalid "for other reasons" (RFC 6750 §3.1).
+pub(crate) struct OptionalAuthenticatedToken(pub(crate) Option<AuthenticatedToken>);
 
 impl axum::extract::FromRequestParts<Arc<AppState>> for OptionalAuthenticatedToken {
     type Rejection = ServiceError;
@@ -434,7 +451,22 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for OptionalAuthenticatedTok
             arrival,
         )
         .await?;
-        Ok(Self(Some(token)))
+        let user = match load_active_user(state, &token.sub).await {
+            Ok(user) => user,
+            Err(ServiceError::Api {
+                status: StatusCode::UNAUTHORIZED,
+                message,
+                ..
+            }) => {
+                return Err(ServiceError::api(
+                    StatusCode::UNAUTHORIZED,
+                    "invalid_token",
+                    message,
+                ));
+            }
+            Err(e) => return Err(e),
+        };
+        Ok(Self(Some(AuthenticatedToken { token, user })))
     }
 }
 
@@ -458,7 +490,8 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for HardwareVerifiedToken {
                 "This credential requires a hardware-verified session - run 'vouch login' to authenticate with your security key",
             ));
         }
-        Ok(Self(token))
+        let user = load_active_user(state, &token.sub).await?;
+        Ok(Self { token, user })
     }
 }
 
@@ -472,28 +505,13 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for SteppedUpToken {
         let token = extract_token_from_parts(parts, state).await?;
         let arrival = arrival_from_parts(parts, state).await?;
         key_svc::require_recent_hardware_verification(&token, arrival)?;
-        Ok(Self(token))
+        let user = load_active_user(state, &token.sub).await?;
+        Ok(Self { token, user })
     }
 }
 
-/// Email for a validated token: the `email` claim when present, else the user
-/// record.
-pub(super) async fn resolve_token_email(
-    state: &AppState,
-    token: &ValidatedResourceToken,
-) -> Result<String, ServiceError> {
-    if let Some(ref email) = token.email {
-        return Ok(email.clone());
-    }
-    let user = db::get_user_by_id(&state.store, &token.sub)
-        .await?
-        .ok_or_else(|| {
-            ServiceError::api(StatusCode::NOT_FOUND, "user_not_found", "User not found")
-        })?;
-    Ok(user.email)
-}
-
-/// Extract and validate an OAuth access token from the session cookie only.
+/// Extract and validate an OAuth access token from the session cookie only,
+/// with its active account.
 ///
 /// Used by browser UI handlers (enrollment, GitHub, applications) where the
 /// Authorization header is not available. The cookie contains an OAuth access token
@@ -501,18 +519,21 @@ pub(super) async fn resolve_token_email(
 ///
 /// # Errors
 ///
-/// Returns an error response if no valid session cookie is present.
+/// Returns an error response if no valid session cookie is present, or its
+/// account is missing or deactivated.
 pub(crate) async fn extract_session_from_cookie(
     state: &AppState,
     jar: &CookieJar,
     arrival: ArrivalTime,
-) -> Result<ValidatedResourceToken, ServiceError> {
+) -> Result<AuthenticatedToken, ServiceError> {
     // Use an empty header map — cookie path only.
     // DPoP validation is skipped for the Cookie auth scheme, so method and uri
     // are not used and can be empty strings. `arrival` still applies: the
     // session's `expires_at` is judged against it.
     let empty_headers = axum::http::HeaderMap::new();
-    extract_resource_token(state, &empty_headers, jar, "", "", None, arrival).await
+    let token = extract_resource_token(state, &empty_headers, jar, "", "", None, arrival).await?;
+    let user = load_active_user(state, &token.sub).await?;
+    Ok(AuthenticatedToken { token, user })
 }
 
 /// Authorization scheme detected from the request.
@@ -566,11 +587,11 @@ fn extract_token_from_request(
 /// deactivated accounts.
 ///
 /// This is the single enforcement point for the account-active invariant on
-/// the session path: every extractor that turns a validated token or cookie
-/// into a user must obtain that user through here, so a deactivated account
-/// cannot authenticate anywhere — including during the window between
-/// `update_user_active_status` and `delete_sessions_for_user`, which commit
-/// in separate transactions.
+/// the session path: the token extractors, `extract_session_from_cookie`, and
+/// `extract_user_with_org` obtain the user through here before a handler sees
+/// the token, so a deactivated account cannot authenticate anywhere —
+/// including during the window between `update_user_active_status` and
+/// `delete_sessions_for_user`, which commit in separate transactions.
 pub(crate) async fn load_active_user(
     state: &AppState,
     user_id: &str,
@@ -714,31 +735,21 @@ pub(crate) async fn get_resource_auth_context(
     jar: &CookieJar,
     arrival: ArrivalTime,
 ) -> AuthContext {
-    let token = match extract_session_from_cookie(state, jar, arrival).await {
-        Ok(t) => t,
+    let AuthenticatedToken { token, user } = match extract_session_from_cookie(state, jar, arrival)
+        .await
+    {
+        Ok(session) => session,
         Err(e) => {
-            // Expected auth rejections (missing/invalid/revoked token, or a
-            // sender-constrained token presented via cookie) are silent
-            // unauthenticated outcomes. A store failure is an outage, not a
-            // logout — log it so it is distinguishable from a revoked session.
+            // Expected auth rejections (missing/invalid/revoked token, a
+            // sender-constrained token presented via cookie, or a missing
+            // or deactivated account) are silent unauthenticated outcomes.
+            // A store failure is an outage, not a logout — log it so it is
+            // distinguishable from a revoked session.
             if !matches!(
                 e,
                 ServiceError::Api { .. } | ServiceError::ApiWithHeaders { .. }
             ) {
                 tracing::error!(error = %e, "Session validation failed; treating UI request as unauthenticated");
-            }
-            return AuthContext::unauthenticated();
-        }
-    };
-
-    // Look up user to check active status, org membership, and admin status.
-    // A deactivated or deleted user is an ordinary unauthenticated outcome;
-    // only a store failure (`Internal`) is worth an error line.
-    let user = match load_active_user(state, &token.sub).await {
-        Ok(user) => user,
-        Err(e) => {
-            if matches!(e, ServiceError::Internal(_)) {
-                tracing::error!(error = %e, "User lookup failed; treating UI request as unauthenticated");
             }
             return AuthContext::unauthenticated();
         }

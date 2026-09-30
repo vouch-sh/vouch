@@ -41,7 +41,7 @@ use vouch_common::aws::Arn;
 pub(crate) async fn issue_ssh_certificate(
     State(state): State<Arc<AppState>>,
     client_info: ClientInfo,
-    HardwareVerifiedToken(token): HardwareVerifiedToken,
+    HardwareVerifiedToken { token, user }: HardwareVerifiedToken,
     Json(request): Json<SshCertificateRequest>,
 ) -> Result<Json<SshCertificateResponse>, ServiceError> {
     // Check config before auth — zero-cost in-memory check avoids DB queries
@@ -53,10 +53,7 @@ pub(crate) async fn issue_ssh_certificate(
         ));
     }
 
-    let user_email = super::session::resolve_token_email(&state, &token).await?;
-
-    // Reject deactivated users (defense-in-depth for SCIM deactivation)
-    let user = super::session::load_active_user(&state, &token.sub).await?;
+    let user_email = token.email.clone().unwrap_or_else(|| user.email.clone());
 
     // Certificate validity matches session duration
     let valid_seconds = state.config().session_hours.saturating_mul(3600);
@@ -336,8 +333,8 @@ pub(crate) struct SshRevocationCheckResponse {
 // AWS Token Endpoint
 // ============================================================================
 
-/// Shared preamble for the AWS credential endpoints: confirm the user is active
-/// and resolve the user's email and issuer.
+/// Shared preamble for the AWS credential endpoints: resolve the user's email
+/// and issuer. The account is active: `HardwareVerifiedToken` loaded it.
 ///
 /// AWS federation mints an OIDC token whose claims hardcode
 /// `hardware_verified: true`, so the *current session* must itself be
@@ -347,11 +344,10 @@ pub(crate) struct SshRevocationCheckResponse {
 async fn authorize_aws_token_request(
     state: &Arc<AppState>,
     token: ValidatedResourceToken,
+    user: db::User,
 ) -> Result<AwsIssuanceContext, ServiceError> {
-    // Confirm the user is still active. Email and federation claims come from
-    // the session snapshot, not from current state.
-    let user = super::session::load_active_user(state, &token.sub).await?;
-
+    // Email and federation claims come from the session snapshot, not from
+    // current state.
     let user_email = token.email.clone().unwrap_or_else(|| user.email.clone());
 
     // Resolve the issuer for this user's AWS tokens: the org's claimed
@@ -486,7 +482,7 @@ pub(crate) async fn get_aws_token(
     State(state): State<Arc<AppState>>,
     Query(params): Query<AwsTokenParams>,
     client_info: ClientInfo,
-    HardwareVerifiedToken(token): HardwareVerifiedToken,
+    HardwareVerifiedToken { token, user }: HardwareVerifiedToken,
     arrival: ArrivalTime,
 ) -> Result<Json<AwsTokenResponse>, ServiceError> {
     let pinned_role = params.role_arn.as_deref();
@@ -494,7 +490,7 @@ pub(crate) async fn get_aws_token(
         validate_pinned_role(role_arn)?;
     }
 
-    let ctx = authorize_aws_token_request(&state, token).await?;
+    let ctx = authorize_aws_token_request(&state, token, user).await?;
 
     // Issue AWS token using the session-time snapshot of aaguid and org domain.
     // Sign with the org's own RS256 key when it has a claimed subdomain, so the
@@ -585,11 +581,8 @@ pub(crate) async fn get_aws_token(
 /// Returns whether GitHub is configured and connected for the user's organization.
 pub(crate) async fn get_github_status(
     State(state): State<Arc<AppState>>,
-    AuthenticatedToken(token): AuthenticatedToken,
+    AuthenticatedToken { user, .. }: AuthenticatedToken,
 ) -> Result<Json<GitHubStatusResponse>, ServiceError> {
-    // Get user
-    let user = super::session::load_active_user(&state, &token.sub).await?;
-
     // Check if GitHub App is configured
     let configured = state.github_app.is_some();
 
@@ -638,7 +631,7 @@ pub(crate) async fn get_github_token(
     arrival: ArrivalTime,
     client_info: ClientInfo,
     State(state): State<Arc<AppState>>,
-    HardwareVerifiedToken(token): HardwareVerifiedToken,
+    HardwareVerifiedToken { token, user }: HardwareVerifiedToken,
     Json(request): Json<GitHubTokenRequest>,
 ) -> Result<Json<GitHubTokenResponse>, ServiceError> {
     // Check config before auth — zero-cost in-memory check avoids DB queries
@@ -649,9 +642,6 @@ pub(crate) async fn get_github_token(
             "GitHub App is not configured",
         )
     })?;
-
-    // Get user
-    let user = super::session::load_active_user(&state, &token.sub).await?;
 
     // Verify user has an organization
     let org_id = user.org_id.as_ref().ok_or_else(|| {

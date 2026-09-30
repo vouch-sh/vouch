@@ -24,14 +24,14 @@ use crate::handlers::applications::validate::{
     validate_update_format,
 };
 use crate::handlers::hash_token;
-use crate::handlers::session::{self, AuthenticatedToken};
+use crate::handlers::session::AuthenticatedToken;
 use crate::handlers::{ValidPath, ValidUuid};
 
 /// List user's applications (API).
 /// GET /api/v1/applications
 pub(crate) async fn list_applications_api(
     State(state): State<Arc<AppState>>,
-    AuthenticatedToken(token): AuthenticatedToken,
+    AuthenticatedToken { token, .. }: AuthenticatedToken,
 ) -> Result<Json<ListApplicationsResponse>, ServiceError> {
     let applications = db::get_oauth_clients_for_user(&state.store, &token.sub)
         .await
@@ -50,32 +50,12 @@ pub(crate) async fn list_applications_api(
     Ok(Json(ListApplicationsResponse { applications }))
 }
 
-/// Load the requesting user and enforce account-status and access-scope rules.
-///
-/// The account must be active, and organization scope requires organization
-/// membership. Used by the create handler, which has no ownership check and
-/// therefore gates in a single step.
-async fn load_active_user_for_scope(
-    state: &AppState,
-    user_id: &str,
-    wants_org_scope: bool,
-) -> Result<db::User, ServiceError> {
-    let user = session::load_active_user(state, user_id).await?;
-    validate_org_scope_membership(&user, wants_org_scope)?;
-    Ok(user)
-}
-
 /// Reject an organization-scope request when the user is not an organization
 /// member.
 ///
-/// Extracted from [`load_active_user_for_scope`] as the half the update
-/// handler must keep *after* its ownership check: the active-user gate (the
-/// rejection inside [`load_active_user`]) moves before ownership in
-/// `update_application_api` to match `load_active_owned_client`, but this
-/// validation stays after it so an active non-org user PATCHing a non-owned
-/// app still hits the ownership `404` rather than the org-scope `400`.
-///
-/// [`load_active_user`]: crate::handlers::session::load_active_user
+/// The update handler runs this *after* its ownership check, so an active
+/// non-org user PATCHing a non-owned app hits the ownership `404` rather than
+/// the org-scope `400`.
 fn validate_org_scope_membership(
     user: &db::User,
     wants_org_scope: bool,
@@ -90,24 +70,14 @@ fn validate_org_scope_membership(
     Ok(())
 }
 
-/// Load the requesting user and the application, enforcing the account-active
-/// invariant and ownership before any state-changing operation.
-///
-/// `AuthenticatedToken` establishes token validity only — it does not load
-/// the user record — so a deactivated user holding a live session would
-/// otherwise reach the destructive operations below. This is the shared gate
-/// for the delete/secret/revoke handlers, mirroring
-/// [`load_active_user_for_scope`] on the create/update path; see
-/// `session::load_active_user`.
-async fn load_active_owned_client(
+/// Load the application, enforcing ownership before any state-changing
+/// operation. The caller's account is already active: `AuthenticatedToken`
+/// refuses a deactivated one before the handler runs.
+async fn load_owned_client(
     state: &AppState,
     user_id: &str,
     app_id: &str,
 ) -> Result<db::OAuthClient, ServiceError> {
-    // Active-user gate first: a deactivated account is rejected before we
-    // disclose whether the application exists.
-    session::load_active_user(state, user_id).await?;
-
     let client = db::get_oauth_client_by_id(&state.store, app_id)
         .await
         .map_err(|e| {
@@ -163,16 +133,11 @@ pub(crate) async fn create_application_api(
     // Deferred so a malformed body still answers 400 rather than 401; an
     // unauthenticated request costs no DB lookup either way, because token
     // extraction fails before touching the store when no credential is sent.
-    let AuthenticatedToken(token) = token?;
+    let AuthenticatedToken { token, user } = token?;
 
     let access_scope = validated.access_scope;
 
-    let user = load_active_user_for_scope(
-        &state,
-        &token.sub,
-        access_scope == AccessScope::Organization,
-    )
-    .await?;
+    validate_org_scope_membership(&user, access_scope == AccessScope::Organization)?;
 
     // Set org_id only for organization-scoped apps
     let org_id = if access_scope == AccessScope::Organization {
@@ -266,7 +231,7 @@ pub(crate) async fn create_application_api(
 /// GET /api/v1/applications/:id
 pub(crate) async fn get_application_api(
     State(state): State<Arc<AppState>>,
-    AuthenticatedToken(token): AuthenticatedToken,
+    AuthenticatedToken { token, .. }: AuthenticatedToken,
     ValidPath(app_id): ValidPath<ValidUuid>,
 ) -> Result<Json<ApplicationResponse>, ServiceError> {
     let client = db::get_oauth_client_by_id(&state.store, &app_id)
@@ -319,20 +284,10 @@ pub(crate) async fn update_application_api(
     // Deferred so a malformed body still answers 400 rather than 401; an
     // unauthenticated request costs no DB lookup either way, because token
     // extraction fails before touching the store when no credential is sent.
-    let AuthenticatedToken(token) = token?;
+    let AuthenticatedToken { token, user } = token?;
 
-    // Active-user gate first — match `load_active_owned_client` and every
-    // other state-changing application handler: a deactivated account holding
-    // a live session is rejected (401) before we disclose whether the
-    // application exists or is owned by the caller (404). The org-scope half
-    // of the previous `load_active_user_for_scope` call stays *after* the
-    // ownership check below, so an active non-org user PATCHing a non-owned
-    // app still hits the ownership 404 rather than the org-scope 400 — only
-    // deactivated-user behavior changes (404 → 401 on non-owned/non-existent
-    // apps).
     let access_scope = validated.access_scope;
     let wants_org_scope = access_scope == Some(AccessScope::Organization);
-    let user = session::load_active_user(&state, &token.sub).await?;
 
     // Get existing application
     let client = db::get_oauth_client_by_id(&state.store, &app_id)
@@ -450,12 +405,12 @@ pub(crate) async fn update_application_api(
 pub(crate) async fn delete_application_api(
     State(state): State<Arc<AppState>>,
     client_info: db::ClientInfo,
-    AuthenticatedToken(token): AuthenticatedToken,
+    AuthenticatedToken { token, .. }: AuthenticatedToken,
     ValidPath(app_id): ValidPath<ValidUuid>,
 ) -> Result<StatusCode, ServiceError> {
     // Active-user gate + ownership check (deactivated users must not delete
     // applications).
-    let client = load_active_owned_client(&state, &token.sub, &app_id).await?;
+    let client = load_owned_client(&state, &token.sub, &app_id).await?;
 
     // Delete the client and revoke every session it minted (M2M and
     // user-issued). Deleting an application is a stronger revocation intent
@@ -535,13 +490,13 @@ pub(crate) async fn delete_application_api(
 pub(crate) async fn add_secret_api(
     State(state): State<Arc<AppState>>,
     client_info: db::ClientInfo,
-    AuthenticatedToken(token): AuthenticatedToken,
+    AuthenticatedToken { token, .. }: AuthenticatedToken,
     ValidPath(app_id): ValidPath<ValidUuid>,
     Json(req): Json<AddSecretRequest>,
 ) -> Result<(StatusCode, Json<AddSecretResponse>), ServiceError> {
     // Active-user gate + ownership check (deactivated users must not mint
     // client secrets).
-    let client = load_active_owned_client(&state, &token.sub, &app_id).await?;
+    let client = load_owned_client(&state, &token.sub, &app_id).await?;
 
     // Mint only a secret that authenticates the client: its registered method
     // is `client_secret_*` and it is not FAPI, whose clients authenticate via
@@ -614,7 +569,7 @@ pub(crate) async fn add_secret_api(
 pub(crate) async fn list_secrets_api(
     arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
-    AuthenticatedToken(token): AuthenticatedToken,
+    AuthenticatedToken { token, .. }: AuthenticatedToken,
     ValidPath(app_id): ValidPath<ValidUuid>,
 ) -> Result<Json<ListSecretsResponse>, ServiceError> {
     let client = db::get_oauth_client_by_id(&state.store, &app_id)
@@ -673,12 +628,12 @@ pub(crate) async fn delete_secret_api(
     arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
     client_info: db::ClientInfo,
-    AuthenticatedToken(token): AuthenticatedToken,
+    AuthenticatedToken { token, .. }: AuthenticatedToken,
     ValidPath((app_id, secret_id)): ValidPath<(ValidUuid, ValidUuid)>,
 ) -> Result<StatusCode, ServiceError> {
     // Active-user gate + ownership check (deactivated users must not revoke
     // secrets).
-    let client = load_active_owned_client(&state, &token.sub, &app_id).await?;
+    let client = load_owned_client(&state, &token.sub, &app_id).await?;
 
     let secret = db::get_oauth_client_secret_by_id(&state.store, &secret_id)
         .await
@@ -777,12 +732,12 @@ pub(crate) async fn delete_secret_api(
 pub(crate) async fn revoke_tokens_api(
     State(state): State<Arc<AppState>>,
     client_info: db::ClientInfo,
-    AuthenticatedToken(token): AuthenticatedToken,
+    AuthenticatedToken { token, .. }: AuthenticatedToken,
     ValidPath(app_id): ValidPath<ValidUuid>,
 ) -> Result<StatusCode, ServiceError> {
     // Active-user gate + ownership check (deactivated users must not revoke
     // an application's tokens).
-    let client = load_active_owned_client(&state, &token.sub, &app_id).await?;
+    let client = load_owned_client(&state, &token.sub, &app_id).await?;
 
     // Revoke all secrets. This blocks new issuance only —
     // `db::revoke_all_oauth_client_secrets` sets `revoked_at` on

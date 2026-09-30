@@ -2235,15 +2235,17 @@ async fn test_browser_register_start_refuses_deactivated_user() {
         StatusCode::UNAUTHORIZED,
         "deactivated user must not start key registration: {body}"
     );
+    // The cookie extraction refuses the account, which this endpoint answers
+    // as an invalid session.
     let error: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
-    assert_eq!(error["message"], "User account is deactivated");
+    assert_eq!(error["code"], "invalid_session");
 }
 
 #[tokio::test]
 async fn test_browser_register_start_refuses_vanished_user() {
     // A user hard-deleted while their enrollment cookie survives must not
-    // begin key registration: the start guard rejects `Ok(None)` the same way
-    // it rejects `active=false`, matching the completion handler.
+    // begin key registration: the cookie extraction rejects `Ok(None)` the
+    // same way it rejects `active=false`.
     let target: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let (calls, hook) = install_user_vanish_hook(target.clone());
     let (app, state) = test_app_with_modify_hook(|store| {
@@ -2269,10 +2271,10 @@ async fn test_browser_register_start_refuses_vanished_user() {
         "deleted user must not start key registration: {body}"
     );
     let error: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
-    assert_eq!(error["message"], "User not found");
+    assert_eq!(error["code"], "invalid_session");
     assert!(
         calls.load(Ordering::SeqCst) >= 1,
-        "the forced Ok(None) must have reached the handler's user read"
+        "the forced Ok(None) must have reached the extraction's user read"
     );
 }
 
@@ -2358,17 +2360,12 @@ async fn test_browser_register_complete_refuses_deactivated_user() {
 // A user hard-deleted in the window between `browser_register_start` (which
 // issued the state, valid for five minutes) and this completion must be
 // rejected — not proceed to the single-use consume and WebAuthn
-// verification. The `extract_session_from_cookie` extractor validates the
-// session via `session_cache.get_session_by_token_hash` and does NOT call
-// `get_user_by_id`; the handler's `load_active_user` read is the ONLY
-// `get_user_by_id` on this path (mirrors the org-scoped OAuth app race in
-// `handlers/applications/web.rs`, fixed via the same
-// `get_user_by_id_test_hook` seam, and the CLI sibling regression test
-// `test_register_complete_refuses_vanished_user`). Before the
-// `load_active_user` fix the inline `if let Some(ref account) = account`
-// guard admitted `Ok(None)` and the request reached WebAuthn, returning
-// 400 invalid_attestation — the smoking gun that a deleted user was being
-// treated like an active user.
+// verification. The cookie extraction's `load_active_user` read is the ONLY
+// `get_user_by_id` on this path (the org-scoped OAuth app race in
+// `handlers/applications/web.rs` and the CLI sibling
+// `test_register_complete_refuses_vanished_user` use the same
+// `get_user_by_id_test_hook` seam). A 400 invalid_attestation would mean a
+// deleted user reached WebAuthn as if active.
 
 /// Install a `get_user_by_id_test_hook` that forces `Ok(None)` (the "user
 /// vanished mid-request" outcome) for `target` once it has been set. While
@@ -2389,10 +2386,9 @@ fn install_user_vanish_hook(
             return false;
         }
         calls_for_hook.fetch_add(1, Ordering::SeqCst);
-        // Every handler-path read for the target user is forced to `Ok(None)`.
-        // The browser completion path's `load_active_user` makes exactly one
-        // `get_user_by_id` read, so this forces it on the first (and only)
-        // call.
+        // Every read for the target user is forced to `Ok(None)`. The cookie
+        // extraction's `load_active_user` makes exactly one `get_user_by_id`
+        // read on this path, so this forces it on the first (and only) call.
         true
     });
     (calls, hook)
@@ -2491,14 +2487,13 @@ async fn test_browser_register_complete_refuses_vanished_user() {
     assert_eq!(json["code"], "unauthorized");
     assert_eq!(json["message"], "User not found");
 
-    // The handler's `load_active_user` read is the ONLY `get_user_by_id` on
-    // this path, so the forced `Ok(None)` must have landed exactly there —
-    // proving the rejection came from the handler's guard, not a too-early
-    // fire that some other layer caught.
+    // The cookie extraction's `load_active_user` read is the ONLY
+    // `get_user_by_id` on this path, so the forced `Ok(None)` must have
+    // landed exactly there.
     assert_eq!(
         calls.load(Ordering::SeqCst),
         1,
-        "expected exactly one get_user_by_id call (the handler's load_active_user read)"
+        "expected exactly one get_user_by_id call (the extraction's load_active_user read)"
     );
 }
 
