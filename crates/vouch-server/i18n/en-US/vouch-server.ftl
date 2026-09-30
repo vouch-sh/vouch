@@ -1085,6 +1085,8 @@ logout-confirm-cancel = Cancel
 logout-done-title = { -product } - Signed Out
 logout-done-heading = You have been signed out.
 logout-done-body = Your session has ended. Close this tab or return to the application.
+logout-error-title = { -product } - Sign Out Failed
+logout-error-message = { -product } could not end your session, so you are still signed in. Try signing out again in a moment.
 
 ## Redirect interstitials (form_post_response.html, saml_post_form.html)
 redirect-title = Redirecting...

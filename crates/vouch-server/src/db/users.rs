@@ -639,6 +639,7 @@ pub async fn demote_or_deactivate_member(
 /// the same serialization [`demote_or_deactivate_member`] relies on.
 pub async fn delete_user(
     store: &DocumentStore,
+    session_cache: &super::SessionCache,
     user_id: &str,
     floor: LastAdminGuard,
 ) -> Result<bool, DeleteUserError> {
@@ -679,8 +680,10 @@ pub async fn delete_user(
         //    step 1 already removed all the user's sessions, but the duplicate
         //    no-op delete is cheap and keeps the cascade logic in one place.
         let authenticators = tx.find_all::<AuthenticatorDoc>("user_id", user_id).await?;
+        let mut deleted_sessions = Vec::with_capacity(authenticators.len());
         for auth in &authenticators {
-            super::authenticators::delete_authenticator(&mut tx, &auth.id).await?;
+            deleted_sessions
+                .push(super::authenticators::delete_authenticator(&mut tx, &auth.id).await?);
         }
 
         // 4. Delete SSH issued certificate records
@@ -795,6 +798,11 @@ pub async fn delete_user(
         let removed = tx.delete(user_id).await?;
 
         tx.commit().await?;
+        // The user's sessions were deleted above; evict them after the commit.
+        session_cache.invalidate_for_user(user_id);
+        for deleted in deleted_sessions {
+            session_cache.evict(deleted);
+        }
         Ok(removed)
     })
 }

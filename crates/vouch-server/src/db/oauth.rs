@@ -1231,10 +1231,10 @@ pub async fn delete_oauth_client_and_revoke_sessions(
     #[cfg(test)]
     store.run_post_secret_revoke_test_hook(client_id).await;
 
-    super::sessions::delete_sessions_for_user(store, client_id).await?;
-    session_cache.invalidate_for_user(client_id);
-    super::sessions::delete_sessions_for_oauth_client(store, client_id).await?;
-    session_cache.invalidate_for_client(client_id);
+    session_cache.delete_for_user(store, client_id).await?;
+    session_cache
+        .delete_for_oauth_client(store, client_id)
+        .await?;
     delete_oauth_client(store, id).await
 }
 

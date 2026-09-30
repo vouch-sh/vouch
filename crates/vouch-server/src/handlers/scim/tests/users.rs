@@ -1428,7 +1428,7 @@ async fn test_scim_delete_user_refuses_to_remove_the_last_active_admin_without_r
     );
 
     // Sessions must be intact — `revoke_user_access` would have called
-    // `delete_sessions_for_user`, but the pre-check short-circuited
+    // `SessionCache::delete_for_user`, but the pre-check short-circuited
     // before that ran.
     let session_count_after = state
         .store

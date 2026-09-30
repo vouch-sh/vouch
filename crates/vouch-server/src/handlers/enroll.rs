@@ -115,6 +115,18 @@ pub(crate) struct ErrorTemplate {
     pub back_url: Option<String>,
 }
 
+impl ErrorTemplate {
+    /// The page for a sign-out whose session delete failed. Serve it with
+    /// 503 and no `Set-Cookie`, so the browser keeps the cookie and can retry.
+    pub(crate) fn logout_failed() -> Self {
+        Self {
+            title: Tr::new("logout-error-title").to_string(),
+            message: Tr::new("logout-error-message").to_string(),
+            back_url: Some("/".to_string()),
+        }
+    }
+}
+
 /// SAML POST binding auto-submit form template.
 ///
 /// Rendered when the upstream IdP uses SAML POST binding. The page

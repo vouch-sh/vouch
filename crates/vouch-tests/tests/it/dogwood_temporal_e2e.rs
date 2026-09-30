@@ -914,7 +914,12 @@ async fn test_failed_login_burst_ignores_storage_faults() {
     );
 
     // Repair the record; the next grant must not be denied.
-    test_utils::remove_test_authenticator(&harness.state.store, &auth_id).await;
+    test_utils::remove_test_authenticator(
+        &harness.state.store,
+        &harness.state.session_cache,
+        &auth_id,
+    )
+    .await;
     register_mock_device_in_db(&harness, &user.id, &device).await;
     let (status, json) = fido2_grant(&harness, &device, &user.id, &client, &pkcs8).await;
     assert_eq!(

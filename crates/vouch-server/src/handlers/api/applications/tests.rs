@@ -1776,7 +1776,7 @@ async fn test_delete_application_partial_failure_revokes_m2m_token_from_cache() 
         // `user_id`-scoped delete, step A), then fault the client-scoped
         // delete (step B). The setup helpers never call `delete_by_index`, so
         // the budget is consumed only by the chokepoint's two
-        // `delete_sessions_for_*` calls during the DELETE below.
+        // `SessionCache::delete_for_*` calls during the DELETE below.
         store.set_delete_by_index_remaining_successes(1);
     })
     .await;

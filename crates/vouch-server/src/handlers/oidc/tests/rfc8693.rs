@@ -2561,8 +2561,9 @@ async fn test_rfc8693_actor_session_not_found_returns_invalid_request() {
         issue_oauth_access_token(&app, &state, &grantee, &grantee_auth, &client).await;
 
     let grantee_hash = crypto::hash_token(&grantee_token);
-    state.session_cache.invalidate(&grantee_hash);
-    db::delete_session_by_token_hash(&state.store, &grantee_hash)
+    state
+        .session_cache
+        .delete_by_token_hash(&state.store, &grantee_hash)
         .await
         .expect("delete actor session");
 

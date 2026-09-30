@@ -8,7 +8,7 @@
 use crate::AppState;
 use crate::arrival::ArrivalTime;
 use crate::db::ClientInfo;
-use crate::error::ServiceError;
+use crate::error::{OAuthErrorCode, OAuthErrorResponse, ServiceError};
 use crate::handlers::extractors::{OAuthForm, OptionalClientCert};
 use crate::services::oidc::introspection::{
     introspect_token as svc_introspect, revoke_token as svc_revoke, sign_introspection_jwt,
@@ -16,7 +16,7 @@ use crate::services::oidc::introspection::{
 use axum::{
     Json,
     extract::State,
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
 use secrecy::{ExposeSecret, SecretString};
@@ -181,17 +181,37 @@ pub(crate) async fn revoke(
         Err(response) => return response,
     };
 
-    let _result = svc_revoke(
+    match svc_revoke(
         &state,
         params.token.expose_secret(),
         params.token_type_hint.as_deref(),
         client_info,
         &caller_client_id,
     )
-    .await;
-
-    // Always return 200 per RFC 7009 Section 2 (for valid clients)
-    StatusCode::OK.into_response()
+    .await
+    {
+        // RFC 7009 §2.2: 200 whether or not the token was known.
+        Ok(_) => StatusCode::OK.into_response(),
+        // RFC 7009 §2.2.1: "If the server responds with HTTP status code 503,
+        // the client must assume the token still exists and may retry after
+        // a reasonable delay." A failed delete leaves the session live, so
+        // the client must not be told it was revoked.
+        Err(e) => {
+            tracing::error!("Token revocation failed: {e}");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(header::RETRY_AFTER, "5")],
+                Json(OAuthErrorResponse {
+                    error: OAuthErrorCode::ServerError.as_str().to_string(),
+                    error_description: Some(
+                        "Token revocation is temporarily unavailable".to_string(),
+                    ),
+                    error_uri: None,
+                }),
+            )
+                .into_response()
+        }
+    }
 }
 
 /// POST /oauth/introspect

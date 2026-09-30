@@ -292,7 +292,7 @@ async fn test_token_exchange_rejects_revoked_authenticator() {
     .await;
 
     // Revoke the authenticator between code issuance and code exchange.
-    test_utils::remove_test_authenticator(&state.store, &auth_id).await;
+    test_utils::remove_test_authenticator(&state.store, &state.session_cache, &auth_id).await;
 
     let auth_header = client.basic_auth_header();
     let (status, body) = http_post_form(

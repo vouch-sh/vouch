@@ -1216,13 +1216,14 @@ pub(crate) async fn revoke_user_access(
     reason: &str,
     revoked_by: &str,
 ) -> Result<(), ServiceError> {
-    db::delete_sessions_for_user(&state.store, user_id)
+    state
+        .session_cache
+        .delete_for_user(&state.store, user_id)
         .await
         .map_err(|e| {
             tracing::error!("Failed to delete sessions for {user_id}: {e}");
             ServiceError::Internal("failed to delete sessions".to_string())
         })?;
-    state.session_cache.invalidate_for_user(user_id);
 
     db::revoke_user_credentials(&state.store, user_id, Some(reason), Some(revoked_by))
         .await

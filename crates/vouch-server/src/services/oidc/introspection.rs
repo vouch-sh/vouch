@@ -197,7 +197,7 @@ pub async fn introspect_token(
     // RFC 7662 Section 4: A token's active status depends on the resource
     // owner's current authorization state, not just session existence.
     // Deactivation paths (admin/SCIM) are not atomic — `update_user_active_status`
-    // and `delete_sessions_for_user` commit in separate transactions, so a
+    // and `SessionCache::delete_for_user` commit in separate transactions, so a
     // deactivated user may still have live sessions. Mirror the `user.active`
     // check performed by the direct API path (`extract_user_with_org`) and the
     // token exchange path, so introspection cannot bypass deactivation.
@@ -257,18 +257,19 @@ pub async fn introspect_token(
 /// * `_token_type_hint` - Optional hint about token type (ignored but included for compatibility)
 ///
 /// # Returns
-/// Revocation result (always succeeds per RFC 7009).
-#[expect(
-    clippy::too_many_lines,
-    reason = "RFC 7009 revocation: decode, delete by hash, then one audit row per token kind"
-)]
+/// The revocation result, whether or not the token was known (RFC 7009
+/// §2.2).
+///
+/// # Errors
+/// [`ServiceError::Internal`] if the store failed: the token may still be
+/// live, so the caller answers 503 (RFC 7009 §2.2.1), not success.
 pub async fn revoke_token(
     state: &Arc<AppState>,
     token: &str,
     _token_type_hint: Option<&str>,
     client_info: ClientInfo,
     caller_client_id: &str,
-) -> RevocationResult {
+) -> ServiceResult<RevocationResult> {
     // Try to decode to get email for audit logging
     let config = state.config();
     let decoded = decode_token(token, &state.oidc_key, &config.base_url);
@@ -278,10 +279,10 @@ pub async fn revoke_token(
     if let Some(DecodedToken::AccessToken(ref claims)) = decoded
         && caller_client_id != claims.client_id
     {
-        return RevocationResult {
+        return Ok(RevocationResult {
             revoked: false,
             user_email: None,
-        };
+        });
     }
 
     let sub = decoded.as_ref().map(|d| d.sub().to_string());
@@ -291,7 +292,7 @@ pub async fn revoke_token(
     // carry the OAuth `client_id` as the JWT `sub` claim, and their sessions
     // are persisted with `user_id == client_id` (one session per token — see
     // `client_credentials.rs`). Revoking one such token via the per-user
-    // `delete_sessions_for_user(user_id)` path would delete EVERY concurrent
+    // `SessionCache::delete_for_user(user_id)` path would delete EVERY concurrent
     // M2M session for that client, violating RFC 7009 §2.1 which targets "the
     // particular token" being revoked. Detect M2M tokens via JWT-intrinsic
     // claims (`sub == client_id` and no `email` grant, which is the only
@@ -309,25 +310,23 @@ pub async fn revoke_token(
     let (revoked, deleted_row) = if let Some(ref user_id) = sub
         && !is_m2m
     {
-        match db::delete_sessions_for_user(&state.store, user_id).await {
-            Ok(count) => {
-                if count > 0 {
-                    state.session_cache.invalidate_for_user(user_id);
-                    if let Some(ref email) = email {
-                        tracing::info!(
-                            "Revoked {} session(s) for user: {}",
-                            count,
-                            redact_email(email),
-                        );
-                    }
-                }
-                (count > 0, None)
-            }
-            Err(e) => {
-                tracing::warn!("Failed to delete sessions during revocation: {}", e,);
-                (false, None)
-            }
+        let count = state
+            .session_cache
+            .delete_for_user(&state.store, user_id)
+            .await
+            .map_err(|e| {
+                ServiceError::Internal(format!("failed to delete sessions during revocation: {e}"))
+            })?;
+        if count > 0
+            && let Some(ref email) = email
+        {
+            tracing::info!(
+                "Revoked {} session(s) for user: {}",
+                count,
+                redact_email(email)
+            );
         }
+        (count > 0, None)
     } else {
         // M2M token, or token that couldn't be decoded — revoke ONLY the
         // named token per RFC 7009 §2.1.
@@ -345,32 +344,29 @@ pub async fn revoke_token(
                         .as_deref()
                         .is_some_and(|issued_to| issued_to != caller_client_id) =>
                 {
-                    return RevocationResult {
+                    return Ok(RevocationResult {
                         revoked: false,
                         user_email: None,
-                    };
+                    });
                 }
                 Ok(_) => {}
                 Err(e) => {
-                    tracing::warn!("Failed to look up session during revocation: {}", e);
-                    return RevocationResult {
-                        revoked: false,
-                        user_email: None,
-                    };
+                    return Err(ServiceError::Internal(format!(
+                        "failed to look up session during revocation: {e}"
+                    )));
                 }
             }
         }
 
-        match db::delete_session_by_token_hash(&state.store, &token_hash).await {
-            Ok(Some(row)) => {
-                state.session_cache.invalidate(&token_hash);
-                (true, Some(row))
-            }
-            Ok(None) => (false, None),
-            Err(e) => {
-                tracing::warn!("Failed to delete session during revocation: {}", e,);
-                (false, None)
-            }
+        match state
+            .session_cache
+            .delete_by_token_hash(&state.store, &token_hash)
+            .await
+            .map_err(|e| {
+                ServiceError::Internal(format!("failed to delete session during revocation: {e}"))
+            })? {
+            Some(row) => (true, Some(row)),
+            None => (false, None),
         }
     };
 
@@ -426,10 +422,10 @@ pub async fn revoke_token(
                 org_domain: db::RecordedOrgDomain::Known(audit_org_domain.as_deref()),
             };
             db::record_oauth_event(&state.audit, &state.store, &params).await;
-            return RevocationResult {
+            return Ok(RevocationResult {
                 revoked: true,
                 user_email: None,
-            };
+            });
         }
 
         // Human revocation: the decoded token names the user. A token that
@@ -441,10 +437,10 @@ pub async fn revoke_token(
             (None, None) => None,
         };
         let Some((user_id, email)) = principal else {
-            return RevocationResult {
+            return Ok(RevocationResult {
                 revoked: true,
                 user_email: None,
-            };
+            });
         };
         // A token minted without the `email` scope carries no email claim.
         // The user record supplies it so the event stays in the org-scoped
@@ -473,17 +469,17 @@ pub async fn revoke_token(
         };
         db::record_auth_event(&state.audit, params, email.clone()).await;
 
-        return RevocationResult {
+        return Ok(RevocationResult {
             revoked: true,
             user_email: email,
-        };
+        });
     }
 
     // Per RFC 7009, always return success even if nothing was revoked
-    RevocationResult {
+    Ok(RevocationResult {
         revoked: false,
         user_email: email,
-    }
+    })
 }
 
 #[cfg(test)]

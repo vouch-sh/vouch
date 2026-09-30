@@ -167,7 +167,13 @@ pub(crate) async fn complete_login(
     // Delete any previous sessions for the cert user first to prevent
     // session leakage between conformance test modules (which share a
     // browser context). Each module should start with a clean session.
-    if let Err(e) = db::delete_sessions_for_user(&state.store, &user.id).await {
+    // `delete_for_user` also evicts the session cache, so a prior module's
+    // cookie cannot keep validating from a cached `Hit`.
+    if let Err(e) = state
+        .session_cache
+        .delete_for_user(&state.store, &user.id)
+        .await
+    {
         tracing::error!("Failed to delete previous cert sessions: {e}");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -175,16 +181,6 @@ pub(crate) async fn complete_login(
         )
             .into_response();
     }
-    // Companion cache eviction: a DB delete alone does not evict the
-    // in-process `SessionCache`. Without this, a DB-deleted session cookie
-    // keeps validating as a `Hit` until the cache TTL elapses, so the next
-    // conformance module could still be authenticated by a prior module's
-    // stale cookie — exactly the per-module "clean session" the delete above
-    // is meant to guarantee. Mirrors the contract every other production
-    // `delete_sessions_for_user` caller follows (`revoke_user_access`,
-    // `revoke_token`, `revoke_tokens_api`, `delete_oauth_client_and_revoke_sessions`,
-    // `revoke_sessions_for_domain_users`).
-    state.session_cache.invalidate_for_user(&user.id);
 
     let session_client_id = state.config().base_url.clone();
     let session_result = match create_oauth_access_token(
@@ -737,7 +733,7 @@ mod tests {
     /// authorization code under the deleted session's `auth_time` for a
     /// `pending_auth` the session was never minted for.
     ///
-    /// Mirrors the contract every other production `delete_sessions_for_user`
+    /// Mirrors the contract every other production `SessionCache::delete_for_user`
     /// caller follows (`revoke_user_access`, `revoke_token`, `revoke_tokens_api`,
     /// `delete_oauth_client_and_revoke_sessions`, `revoke_sessions_for_domain_users`).
     ///

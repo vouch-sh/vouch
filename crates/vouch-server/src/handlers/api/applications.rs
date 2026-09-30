@@ -776,7 +776,9 @@ pub(crate) async fn revoke_tokens_api(
         // secrets is not enough on its own: the session cache may still serve
         // unexpired tokens until their TTL elapses. Deleting those sessions and
         // invalidating the cache is what closes the M2M half of revocation.
-        db::delete_sessions_for_user(&state.store, &client.client_id)
+        state
+            .session_cache
+            .delete_for_user(&state.store, &client.client_id)
             .await
             .map_err(|e| {
                 tracing::error!(
@@ -789,7 +791,6 @@ pub(crate) async fn revoke_tokens_api(
                     "Internal database error",
                 )
             })?;
-        state.session_cache.invalidate_for_user(&client.client_id);
 
         // Terminate user-issued access-token sessions minted for this client.
         //
@@ -807,7 +808,9 @@ pub(crate) async fn revoke_tokens_api(
         // deserialize `client_id` to `None` and so are not matched; they remain
         // valid until their `exp` (bounded by `session_hours`). New tokens minted
         // after this change are revocable on demand.
-        db::delete_sessions_for_oauth_client(&state.store, &client.client_id)
+        state
+            .session_cache
+            .delete_for_oauth_client(&state.store, &client.client_id)
             .await
             .map_err(|e| {
                 tracing::error!(
@@ -820,7 +823,6 @@ pub(crate) async fn revoke_tokens_api(
                     "Internal database error",
                 )
             })?;
-        state.session_cache.invalidate_for_client(&client.client_id);
         Ok(())
     }
     .await;

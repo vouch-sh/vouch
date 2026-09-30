@@ -74,10 +74,8 @@ pub use users::{upsert_user, upsert_user_with_org};
 
 // Re-export session types and functions
 pub use sessions::{
-    CreateSessionParams, Session, SessionCache, SessionPurpose, create_session,
-    delete_expired_sessions, delete_session_by_token_hash, delete_sessions_for_code_replay,
-    delete_sessions_for_oauth_client, delete_sessions_for_user, find_session_by_token_hash,
-    get_session_by_token_hash,
+    CreateSessionParams, DeletedSessions, Session, SessionCache, SessionPurpose, create_session,
+    delete_expired_sessions, find_session_by_token_hash, get_session_by_token_hash,
 };
 
 // Re-export authenticator types and functions

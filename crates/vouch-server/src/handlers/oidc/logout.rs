@@ -26,6 +26,8 @@
 use crate::AppState;
 use crate::db;
 use crate::db::ClientInfo;
+use crate::error::{ServiceError, ServiceResult};
+use crate::handlers::enroll::ErrorTemplate;
 use crate::handlers::{clear_session_cookie, hash_token};
 use crate::impl_template_response;
 use crate::infra::i18n::{negotiate_ui_locales, sync_scope_locale};
@@ -342,8 +344,18 @@ pub(crate) async fn logout_post(
 
     // Clear the browser session first (DB deletion + cache invalidation + audit
     // event). The user asked to log out, so a later redirect-validation database
-    // error must not prevent logout.
-    clear_user_session(&state, &jar, &client_info, verified_client_id.as_deref()).await;
+    // error must not prevent logout. OIDC RP-Initiated Logout §2: the OP "MUST"
+    // log the user out, so a failed delete is reported, not shown as done.
+    if let Err(e) =
+        clear_user_session(&state, &jar, &client_info, verified_client_id.as_deref()).await
+    {
+        tracing::error!("Failed to delete session during RP-Initiated Logout: {e}");
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            ErrorTemplate::logout_failed(),
+        )
+            .into_response();
+    }
 
     let clear_cookie = clear_session_cookie().to_string();
 
@@ -450,7 +462,7 @@ async fn resolve_post_logout_redirect_uri(
 /// The audit context lookup uses the expiry-agnostic
 /// [`db::find_session_by_token_hash`] rather than the expiry-filtering
 /// [`db::get_session_by_token_hash`]: a `POST /oauth/logout` deletes the row
-/// by `token_hash` regardless of expiry (see [`db::delete_session_by_token_hash`]),
+/// by `token_hash` regardless of expiry (see [`db::SessionCache::delete_by_token_hash`]),
 /// so the `Logout` audit event must fire whenever the row actually existed.
 /// The expiry-filtering lookup returns `None` for an expired-but-present row,
 /// silently dropping the audit event in the window between DB expiry and the
@@ -460,43 +472,42 @@ async fn clear_user_session(
     jar: &CookieJar,
     client_info: &ClientInfo,
     rp_client_id: Option<&str>,
-) {
+) -> ServiceResult<()> {
     let Some(token) = jar
         .get(vouch_common::SESSION_COOKIE_NAME)
         .map(|c| c.value().to_string())
     else {
-        return;
+        return Ok(());
     };
 
     let token_hash = hash_token(&token);
 
     // The deleted row, expired or not, carries the user for the `Logout`
-    // audit event (see `db::delete_session_by_token_hash`).
-    match db::delete_session_by_token_hash(&state.store, &token_hash).await {
-        Ok(Some(session)) => {
-            state.session_cache.invalidate(&token_hash);
-            tracing::info!(
-                rp_client_id = rp_client_id,
-                "Session cleared during RP-Initiated Logout"
-            );
+    // audit event.
+    if let Some(session) = state
+        .session_cache
+        .delete_by_token_hash(&state.store, &token_hash)
+        .await
+        .map_err(|e| ServiceError::Internal(format!("failed to delete session: {e}")))?
+    {
+        tracing::info!(
+            rp_client_id = rp_client_id,
+            "Session cleared during RP-Initiated Logout"
+        );
 
-            let params = db::AuthEventParams {
-                user_id: db::Principal::Verified(session.user_id.clone()),
-                event_type: db::AuthEventType::Logout,
-                success: true,
-                client_id: rp_client_id.map(str::to_string),
-                client: client_info.clone(),
-                authenticator_id: None,
-                failure_reason: None,
-                idp_issuer: None,
-            };
-            db::record_auth_event(&state.audit, params, Some(session.user_email.clone())).await;
-        }
-        Ok(None) => {}
-        Err(e) => {
-            tracing::warn!("Failed to delete session during RP-Initiated Logout: {e}");
-        }
+        let params = db::AuthEventParams {
+            user_id: db::Principal::Verified(session.user_id.clone()),
+            event_type: db::AuthEventType::Logout,
+            success: true,
+            client_id: rp_client_id.map(str::to_string),
+            client: client_info.clone(),
+            authenticator_id: None,
+            failure_reason: None,
+            idp_issuer: None,
+        };
+        db::record_auth_event(&state.audit, params, Some(session.user_email.clone())).await;
     }
+    Ok(())
 }
 
 // ============================================================================
@@ -518,7 +529,7 @@ mod tests {
     use crate::test_utils::{
         TestClientSpec, TestSessionSpec, create_test_authenticator, create_test_client,
         create_test_expired_session_row, create_test_session_with, create_test_user, http_get,
-        http_post_form, test_app, test_app_state, test_app_state_with_rsa_key,
+        http_post_form, http_post_form_full, test_app, test_app_state, test_app_state_with_rsa_key,
     };
 
     /// Build a minimal `IdTokenClaims` for signing in tests.
@@ -1020,6 +1031,49 @@ mod tests {
             events.len(),
             1,
             "RP-initiated logout must record a Logout audit event for a live row"
+        );
+    }
+
+    /// OIDC RP-Initiated Logout 1.0 §2: "If the End-User says "yes", then the
+    /// OP MUST log out the End-User." When the session delete fails the OP has
+    /// not done so, so the confirmation POST answers 503 and keeps the cookie
+    /// instead of rendering the done page or redirecting.
+    #[tokio::test]
+    async fn test_rp_logout_reports_failed_session_delete() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "rp-logout-fault@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let token_hash = crypto::hash_token(&token);
+        state.session_cache.inject_fault(token_hash.clone());
+
+        let cookie = format!("{}={token}", vouch_common::SESSION_COOKIE_NAME);
+        let response =
+            http_post_form_full(&app, "/oauth/logout", "", &[("Cookie", cookie.as_str())]).await;
+
+        assert_eq!(response.status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            !response.headers.get_all("set-cookie").iter().any(|v| v
+                .to_str()
+                .is_ok_and(|v| v.starts_with(vouch_common::SESSION_COOKIE_NAME))),
+            "a failed logout must not clear the session cookie"
+        );
+        let row = db::find_session_by_token_hash(&state.store, &token_hash)
+            .await
+            .unwrap();
+        assert!(row.is_some(), "the session row survives the failed delete");
+        assert!(
+            logout_audit_events(&state, &user.id).await.is_empty(),
+            "no Logout audit event when nothing was deleted"
         );
     }
 
