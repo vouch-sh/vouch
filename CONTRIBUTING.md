@@ -64,10 +64,10 @@ vouch/
 │   │   ├── templates/      # Askama HTML templates
 │   │   └── i18n/           # Fluent translation catalogs (en-US/vouch-server.ftl)
 │   └── vouch-tests/        # Integration + property-based tests
-│       └── tests/
+│       └── tests/it/
 │           ├── integration.rs
 │           ├── golden_files.rs
-│           └── proptest.rs
+│           └── properties.rs
 ├── docs/                   # Operator guide (mdBook): install, configure, operate
 └── packaging/              # AMI and post-install scripts
 ```
