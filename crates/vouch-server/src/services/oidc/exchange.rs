@@ -471,6 +471,18 @@ pub(crate) async fn exchange_token(
                 "User account is deactivated",
             ));
         }
+        // Delegation stays inside one tenant (#1617): an actor from another
+        // org would otherwise be recorded as a foreign principal in `act`.
+        // RFC 8693 is silent on tenancy; the boundary is ours. A user with no
+        // org pairs only with another user with no org.
+        // RFC 8693 §2.2.2: an actor_token "unacceptable based on policy" is
+        // reported as `invalid_request`.
+        if actor_user.org_id != subject_user.org_id {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidRequest,
+                "Actor and subject must belong to the same organization",
+            ));
+        }
         // Temporal policy gate for the actor principal: evaluate only
         // `logout_invalidates_exchange`, not the full `evaluate_exchange_policies`
         // set. The other ExchangeToken policies reason about the *request*

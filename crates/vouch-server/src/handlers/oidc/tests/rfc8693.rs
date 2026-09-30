@@ -1132,6 +1132,111 @@ async fn test_rfc8693_self_delegation_rejected() {
     );
 }
 
+/// Delegate a subject in `a.example` to an actor in `actor_domain` and return
+/// the token-endpoint response.
+async fn delegation_across_orgs(actor_domain: &str) -> (StatusCode, String) {
+    let (app, state) = test_app().await;
+    let org_a = test_utils::create_test_org(&state.store, "a.example").await;
+    let org_b = if actor_domain == "a.example" {
+        org_a.clone()
+    } else {
+        test_utils::create_test_org(&state.store, actor_domain).await
+    };
+    let subject =
+        test_utils::create_test_user_in_org(&state.store, "subject@a.example", &org_a.id, false)
+            .await;
+    let actor_email = format!("actor@{actor_domain}");
+    let actor =
+        test_utils::create_test_user_in_org(&state.store, &actor_email, &org_b.id, false).await;
+    let subject_auth = create_test_authenticator(&state.store, &subject.id).await;
+    let actor_auth = create_test_authenticator(&state.store, &actor.id).await;
+    let client = create_test_oauth_client(&state.store, &subject.id).await;
+    let (subject_token, _) =
+        issue_oauth_access_token(&app, &state, &subject, &subject_auth, &client).await;
+    let (actor_token, _) =
+        issue_oauth_access_token(&app, &state, &actor, &actor_auth, &client).await;
+    http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={subject_token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &actor_token={actor_token}\
+             &actor_token_type=urn:ietf:params:oauth:token-type:access_token"
+        ),
+        &[("Authorization", &client.basic_auth_header())],
+    )
+    .await
+}
+
+#[tokio::test]
+async fn test_rfc8693_same_org_delegation_succeeds() {
+    // Positive control for the cross-org check below.
+    let (status, body) = delegation_across_orgs("a.example").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let claims = decode_jwt_payload(v["access_token"].as_str().expect("access_token"));
+    assert_eq!(claims["act"]["sub"], "actor@a.example");
+}
+
+// RFC 8693 §2.2.2: "If ... the "subject_token" or "actor_token" are invalid
+// for any reason, or are unacceptable based on policy, the authorization
+// server MUST construct an error response ... The value of the "error"
+// parameter MUST be the "invalid_request" error code." Vouch's policy keeps
+// delegation inside one organization (#1617).
+#[tokio::test]
+async fn test_rfc8693_cross_org_delegation_rejected() {
+    let (status, body) = delegation_across_orgs("b.example").await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "cross-org actor accepted: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["error"], "invalid_request");
+    assert!(
+        error["error_description"]
+            .as_str()
+            .is_some_and(|d| d.contains("same organization")),
+        "Error should name the organization boundary, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc8693_org_actor_for_orgless_subject_rejected() {
+    // A user with no org pairs only with another user with no org (#1617).
+    let (app, state) = test_app().await;
+    let org = test_utils::create_test_org(&state.store, "a.example").await;
+    let subject = create_test_user(&state.store, "orgless@example.com").await;
+    assert!(subject.org_id.is_none(), "fixture must have no org");
+    let actor =
+        test_utils::create_test_user_in_org(&state.store, "actor@a.example", &org.id, false).await;
+    let subject_auth = create_test_authenticator(&state.store, &subject.id).await;
+    let actor_auth = create_test_authenticator(&state.store, &actor.id).await;
+    let client = create_test_oauth_client(&state.store, &subject.id).await;
+    let (subject_token, _) =
+        issue_oauth_access_token(&app, &state, &subject, &subject_auth, &client).await;
+    let (actor_token, _) =
+        issue_oauth_access_token(&app, &state, &actor, &actor_auth, &client).await;
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={subject_token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &actor_token={actor_token}\
+             &actor_token_type=urn:ietf:params:oauth:token-type:access_token"
+        ),
+        &[("Authorization", &client.basic_auth_header())],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["error"], "invalid_request");
+}
+
 #[tokio::test]
 async fn test_rfc8693_invalid_actor_token_type() {
     // RFC 8693: Invalid actor_token_type should be rejected.
@@ -3299,18 +3404,10 @@ async fn test_rfc8693_logged_out_subject_rejected_under_logout_invalidates_excha
 async fn test_rfc8693_org_less_actor_exempt_from_logout_invalidates_exchange() {
     let (app, state) = test_app().await;
 
-    // Subject: in an org with the policy enabled, but logged IN (no
-    // Logout), so the subject path allows.
-    let org = create_test_org(&state.store, "subject-org.example").await;
-    db::set_preconfigured_active(
-        &state.store,
-        &org.id,
-        vec!["logout_invalidates_exchange".to_string()],
-    )
-    .await
-    .expect("enable logout_invalidates_exchange");
-    let subject =
-        create_test_user_in_org(&state.store, "subject-with-org@example.com", &org.id, false).await;
+    // Subject: also org-less, since delegation never crosses an org
+    // boundary and an org-less actor pairs only with an org-less subject
+    // (#1617).
+    let subject = create_test_user(&state.store, "org-less-subject@example.com").await;
     let subject_auth = create_test_authenticator(&state.store, &subject.id).await;
     let client = create_test_oauth_client(&state.store, &subject.id).await;
     let (subject_token, _) =
