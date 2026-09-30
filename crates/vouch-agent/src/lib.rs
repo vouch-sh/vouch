@@ -57,3 +57,6 @@ pub use state::SessionInfo;
 
 #[cfg(any(test, feature = "test-utils"))]
 pub use transport::{TestTransport, TestTransportPair};
+
+#[cfg(test)]
+mod ipc_tests;

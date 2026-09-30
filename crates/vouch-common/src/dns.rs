@@ -722,3 +722,6 @@ mod tests {
         assert!(nc.dns_over_https.is_none());
     }
 }
+
+#[cfg(test)]
+mod wiring_tests;

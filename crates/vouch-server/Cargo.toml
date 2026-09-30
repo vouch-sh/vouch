@@ -113,5 +113,6 @@ aws-lc-rs = { workspace = true, features = ["fips"] }
 rustls = { workspace = true, features = ["fips"] }
 
 [dev-dependencies]
+proptest = { workspace = true, features = ["std"] }
 tokio = { workspace = true, features = ["test-util"] }
 wiremock = { workspace = true }

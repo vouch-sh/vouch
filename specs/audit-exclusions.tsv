@@ -14,7 +14,7 @@
 # makes the section inapplicable, with the evidence -- the next person to read
 # it needs to be able to check the claim, not just take it.
 #
-# crates/vouch-tests/tests/spec_coverage.rs enforces two rules that keep this
+# crates/vouch-tests/tests/it/spec_coverage.rs enforces two rules that keep this
 # file honest:
 #
 #   1. An exclusion matching no statement fails the build. Sections get

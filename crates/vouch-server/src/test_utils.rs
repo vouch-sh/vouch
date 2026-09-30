@@ -58,6 +58,9 @@ use vouch_httpsig::SignatureBuilder;
 use vouch_httpsig::algorithm::ecdsa_p256::EcdsaP256Signer;
 use vouch_httpsig::digest;
 
+mod harness;
+pub use harness::TestHarness;
+
 /// Create an in-memory SQLite database with migrations for testing.
 pub async fn test_db() -> Pool {
     let pool = Pool::connect("sqlite::memory:", &PoolConfig::default())
@@ -1046,6 +1049,17 @@ pub struct HttpResponse {
     pub body: String,
     /// Response headers.
     pub headers: axum::http::HeaderMap,
+}
+
+impl HttpResponse {
+    /// The body parsed as JSON.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the body is not JSON of type `T`.
+    pub fn json<T: serde::de::DeserializeOwned>(&self) -> serde_json::Result<T> {
+        serde_json::from_str(&self.body)
+    }
 }
 
 /// Helper for making test HTTP requests that returns full response including headers.

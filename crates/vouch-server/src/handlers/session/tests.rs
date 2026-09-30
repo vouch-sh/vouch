@@ -583,3 +583,7 @@ fn test_session_cookie_max_age_tracks_minted_lifetime() {
         "saturates, never wraps"
     );
 }
+
+mod deactivated_account;
+
+mod negative_auth;

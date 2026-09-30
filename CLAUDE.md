@@ -17,7 +17,7 @@ vouch/
 │   ├── vouch-common/     # Shared types, FIDO2 helpers, API client (Apache-2.0/MIT)
 │   ├── vouch-httpsig/    # RFC 9421 HTTP Message Signatures + RFC 9530 Content-Digest
 │   ├── vouch-i18n/       # Locale-agnostic Fluent i18n core shared by server, CLI, agent
-│   └── vouch-tests/      # Integration + property-based tests
+│   └── vouch-tests/      # Cross-crate tests (CLI/agent driving the server, proptest), one binary: tests/it
 ├── fuzz/                 # libfuzzer targets: BER, attestation objects, COSE keys, HTTP sigs
 ├── docs/                 # Internal sysadmin/operations mdBook — how to run the Vouch server; NOT public/end-user docs (build with `make docs-build`)
 ├── specs/                # Cached text of every spec we implement — grep this before WebFetch (see specs/README.md)
@@ -269,6 +269,14 @@ covered without hardware through the `CoseVerifier` seam
 
 **Test placement convention** (no lint enforces this — convention + review):
 
+- A test that exercises one crate lives in that crate, next to the code it
+  tests — including router-level tests, which use `test_utils::TestHarness` or
+  `test_app`. `crates/vouch-tests/tests/it/` is only for tests that need more
+  than one crate (the CLI's HTTP client or FIDO2 device against the server,
+  agent + httpsig) or scan the repository. Add a module there, never a new
+  file under `tests/`: each file there is a separate binary that links the
+  whole workspace.
+
 - An inline `#[cfg(test)] mod tests` is fine until it passes ~500 lines; then move it
   to a sibling file: keep `foo.rs`, declare `#[cfg(test)] mod tests;` in it, and put the
   body in `foo/tests.rs` (still a child module — private access is unchanged).
@@ -314,7 +322,7 @@ fn test_tr_returns_error() { ... }
 ```
 
 `specs/requirements.tsv` holds every MUST / MUST NOT / SHOULD / SHOULD NOT in
-the cached corpus, and `crates/vouch-tests/tests/spec_coverage.rs` links the
+the cached corpus, and `crates/vouch-tests/tests/it/spec_coverage.rs` links the
 two. It is a ratchet: the existing backlog in `specs/coverage-baseline.tsv` is
 tolerated, but a statement that loses its citing test fails the build, and one
 that gains a citation fails until the baseline is pruned. See
@@ -360,7 +368,8 @@ that gains a citation fails until the baseline is pruned. See
 | CSS source | `crates/vouch-server/styles/input.css` |
 | Static assets | `crates/vouch-server/static/` (embedded via rust-embed) |
 | FAPI client (CLI) | `crates/vouch-cli/src/fapi/` (key.rs, dpop.rs, client_assertion.rs, registration.rs) |
-| Integration tests | `crates/vouch-tests/tests/` |
+| Cross-crate tests | `crates/vouch-tests/tests/it/` (one module per file) |
+| Server test harness | `crates/vouch-server/src/test_utils/harness.rs` (`TestHarness`) |
 | DB migrations | `crates/vouch-server/migrations/{sqlite,postgres}/` |
 | Cached spec text | `specs/` (roster: `specs/manifest.tsv`, errata: `specs/rfc/errata/`) |
 

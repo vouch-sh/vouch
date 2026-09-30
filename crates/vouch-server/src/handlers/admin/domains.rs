@@ -671,3 +671,6 @@ mod tests {
         assert_eq!(victim_after.data.org_id, Some(org.id.clone()));
     }
 }
+
+#[cfg(test)]
+mod router_tests;

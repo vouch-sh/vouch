@@ -10,7 +10,7 @@ Reads three committed files and writes ``specs/coverage-report.md``:
 * ``specs/coverage-baseline.tsv`` -- the statements with no citing test.
 
 This script does **not** scan the test suite. The scan lives in
-``crates/vouch-tests/tests/spec_coverage.rs``, which owns both the gate and
+``crates/vouch-tests/tests/it/spec_coverage.rs``, which owns both the gate and
 the baseline it checks; a second implementation here drifted from it by 627
 statements before this was split apart. Regenerate the baseline first:
 
@@ -139,7 +139,7 @@ def main() -> int:
         "and section. Linkage is section-level and deliberately optimistic: it",
         "establishes that a statement is untested, not that a cited one is tested",
         "well. The scan and the gate live in",
-        "`crates/vouch-tests/tests/spec_coverage.rs`.",
+        "`crates/vouch-tests/tests/it/spec_coverage.rs`.",
         "",
         "| Spec | Scope | Statements | Cited | MUST/MUST NOT | MUST gaps |",
         "|---|---|---:|---:|---:|---:|",

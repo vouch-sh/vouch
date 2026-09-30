@@ -1,6 +1,6 @@
 # Normative statements with no citing test: the accepted backlog.
 # Regenerate: UPDATE_SPEC_COVERAGE_BASELINE=1 cargo test -p vouch-tests --test spec_coverage
-# This list may only shrink -- see crates/vouch-tests/tests/spec_coverage.rs.
+# This list may only shrink -- see crates/vouch-tests/tests/it/spec_coverage.rs.
 req_id	strength	text
 ctap-2.0-ps-20190130#5#01c2c887	MUST	Note that because this specification defines normative behaviors for them, all authenticators MUST understand the "rk", "up", and "uv" options.
 ctap-2.0-ps-20190130#5#0f409d00	MUST	The "alg" parameter MUST contain a COSEAlgorithmIdentifier value. pinToken (0x02) Byte Array Optional Encrypted pinToken using sharedSecret to be used in subseq

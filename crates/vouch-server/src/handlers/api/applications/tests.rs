@@ -4532,3 +4532,7 @@ async fn mtls_port_audit_row_records_peer_cert_addr() {
     // null and this would fail.
     assert_audit_rows_record_transport(&state, "oauth_secret_added", ua).await;
 }
+
+mod fapi_signing_alg;
+
+mod fapi_jwks_repair;

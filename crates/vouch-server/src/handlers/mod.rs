@@ -183,3 +183,6 @@ macro_rules! impl_template_response {
         $crate::impl_template_helpers!($($template),*);
     };
 }
+
+#[cfg(test)]
+mod static_pages_tests;

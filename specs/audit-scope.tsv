@@ -10,7 +10,7 @@
 # roles: the actor(s) Vouch plays, used to filter requirements addressed to
 # other actors. "-" means the role filter does not apply.
 #
-# Generated rows are checked by crates/vouch-tests/tests/spec_coverage.rs; every
+# Generated rows are checked by crates/vouch-tests/tests/it/spec_coverage.rs; every
 # spec in specs/manifest.tsv must appear here exactly once.
 #
 spec_id	scope	roles	reason
