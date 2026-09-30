@@ -282,8 +282,10 @@ takes the request's `SenderConstraints` and returns the binding the `cnf` names,
 `exchange_token` returns that error as `invalid_request`. Without the check, a stolen
 DPoP-bound token could be exchanged for a bearer token, or rebound to the thief's key.
 
-- **Subject token bound:** the issued token inherits the subject's binding, whatever the
-  client and the requested token type.
+- **Subject token bound:** the issued access token inherits the subject's binding,
+  whatever the client. An issued ID token (`requested_token_type=id_token`) is never
+  bound: it is an assertion for a third party that cannot check a confirmation, and is
+  protected by its TTL, its audience and TLS.
 - **Actor token bound:** the actor must prove its key, and the issued token is bound to
   it. RFC 8693 §2.1 describes the actor as *"the party that is authorized to use the
   requested security token"* (`specs/rfc/rfc8693.txt`).
@@ -297,9 +299,12 @@ DPoP-bound token could be exchanged for a bearer token, or rebound to the thief'
 registered for DPoP-bound tokens. It does not carry the certificate binding over.
 
 The authorization endpoint closes the same hole from the browser side. A session cookie
-carries no DPoP proof and the browser connection no client certificate, so
-`check_session_for_authorization` treats a cookie holding a bound token as signed out.
-Browser sign-in, enrollment and the certification bypass all set unbound session tokens.
+carries no DPoP proof and the browser connection no client certificate, so the cookie
+holds only a browser session: a token issued to this deployment itself, covering all of
+it, and unbound (`AccessTokenClaims::is_browser_session`). `check_session_for_authorization`
+and the UI's cookie extractor treat any other token in the cookie, a bound one or one
+issued to another client or narrowed to a resource, as signed out. Browser sign-in,
+enrollment and the certification bypass all set browser session tokens.
 
 ## FIDO2 login
 
@@ -393,7 +398,7 @@ flowchart TB
   pstore --> checks
   jar --> checks
   plain --> checks
-  checks["require_pkce_for_client<br/>redirect_uri, scope, response_type"] --> sess{"session cookie<br/>hardware-verified<br/>and unbound?"}
+  checks["require_pkce_for_client<br/>redirect_uri, scope, response_type"] --> sess{"session cookie holds a<br/>hardware-verified<br/>browser session?"}
   sess -- "no" --> login["/login, browser WebAuthn"] --> sess
   sess -- "yes" --> code["issue_authorization_code<br/>binds code_challenge"]
   code --> mode{"response_mode"}

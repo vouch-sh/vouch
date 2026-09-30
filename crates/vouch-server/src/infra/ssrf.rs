@@ -12,10 +12,13 @@
 //! and `https://169.254.169.254` are valid HTTPS URLs.
 //!
 //! [`assert_public_destination`] vets a URL immediately before it is fetched.
-//! It parses the host and — resolving hostnames through the same system
-//! resolver the server's `reqwest` client uses — rejects any destination that
-//! maps to a non-global address. Combined with the existing HTTPS requirement
-//! and `redirect(Policy::none())`, this closes the private-network reach.
+//! It parses the host, resolves a hostname through the process-wide resolver
+//! in `infra/dns.rs`, and rejects any destination that maps to a non-global
+//! address. `reqwest` resolves again with its own resolver and cache, so a
+//! record that changes between the check and the fetch can send the request
+//! elsewhere: the check is a pre-flight, not a pin. Combined with the HTTPS
+//! requirement, TLS validation of the dialled host, and
+//! `redirect(Policy::none())`, it closes the private-network reach.
 //!
 //! This guard is intentionally scoped to **client-controlled** fetches. The
 //! operator-configured upstream-IdP discovery fetch
@@ -149,11 +152,11 @@ impl Ipv6Special for Ipv6Addr {
 /// Reject a URL whose host is — or resolves to — a non-global address.
 ///
 /// Call this immediately before fetching a client-controlled URL. The host is
-/// resolved through the process-wide system resolver (the same path the
-/// server's `reqwest` client uses, since no DoH override is installed
-/// server-side), so the addresses vetted here are the ones the HTTP client
-/// will dial. If a hostname has multiple A/AAAA records, **all** are checked
-/// and any non-global address rejects the URL.
+/// resolved through the process-wide resolver in `infra/dns.rs`, which is not
+/// the one `reqwest` dials with (see [`crate::infra::dns`]), so the addresses
+/// vetted here are the ones the name maps to now, not necessarily the ones the
+/// HTTP client dials. If a hostname has multiple A/AAAA records, **all** are
+/// checked and any non-global address rejects the URL.
 ///
 /// `allow_loopback` permits loopback destinations (`127.0.0.0/8`, `::1`,
 /// `localhost`) for local development and testing — wired from

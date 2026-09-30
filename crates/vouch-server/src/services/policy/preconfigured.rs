@@ -12,6 +12,8 @@
 //! permits: Cedar denies by default and a forbid overrides any permit, so
 //! every active policy must be satisfied for a decision to allow.
 
+use crate::infra::i18n::Tr;
+
 /// Active custom policies an org may run alongside the built-ins.
 ///
 /// A guardrail against an admin enabling more rules than they can reason
@@ -19,7 +21,6 @@
 /// overhead, so the policy count barely moves it (13 policies measured
 /// within a rounding error of 2). Orgs may author up to
 /// `MAX_CUSTOM_POLICIES`; this bounds how many run at once.
-use crate::infra::i18n::Tr;
 pub(crate) const MAX_ACTIVE_CUSTOM_POLICIES: usize = 10;
 
 /// Maximum number of active policies (preconfigured + custom combined).
