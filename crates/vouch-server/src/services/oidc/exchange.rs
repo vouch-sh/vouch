@@ -11,6 +11,7 @@ use crate::db::{self, SessionPurpose};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use crate::infra::metrics;
 use crate::redact_email;
+use crate::services::auth::ValidatedSession;
 use crate::services::auth::{
     ActorClaim, CreateOAuthTokenParams, MAX_DELEGATION_DEPTH, TokenBinding, TokenIssuanceProof,
     create_oauth_access_token, decode_token,
@@ -354,13 +355,11 @@ pub(crate) async fn exchange_token(
         None => None,
     };
 
-    // Verify the subject token's session exists
+    // The subject token's session must be live (its security key not deleted)
     let subject_token_hash = hash_token(subject_token);
-    let subject_session = state
-        .session_cache
-        .get_session_by_token_hash(&state.store, &subject_token_hash, arrival)
-        .await
-        .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
+    let subject_session = ValidatedSession::lookup(state, &subject_token_hash, arrival)
+        .await?
+        .map(|live| live.session)
         .ok_or_else(|| {
             ServiceError::oauth(
                 OAuthErrorCode::InvalidRequest,
@@ -443,13 +442,10 @@ pub(crate) async fn exchange_token(
             ));
         }
 
-        // Verify the actor token's session exists in the database
+        // The actor token's session must be live (its security key not deleted)
         let actor_token_hash = hash_token(actor_token);
-        let _actor_session = state
-            .session_cache
-            .get_session_by_token_hash(&state.store, &actor_token_hash, arrival)
-            .await
-            .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
+        let _actor_session = ValidatedSession::lookup(state, &actor_token_hash, arrival)
+            .await?
             .ok_or_else(|| {
                 ServiceError::oauth(
                     OAuthErrorCode::InvalidRequest,

@@ -17,6 +17,7 @@ use crate::db::{self, Authenticator, OAuthClient, User};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use crate::infra::jwks::JwksOrigin;
 use crate::redact_email;
+use crate::services::auth::ValidatedSession;
 use crate::services::auth::{
     ClientAuthProof, CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenBinding,
     TokenIssuanceProof, create_oauth_access_token, decode_token,
@@ -1372,16 +1373,15 @@ pub async fn validate_session_token(
         None => return Ok(None),
     };
 
-    // Verify session exists in database
+    // The session must be live: its row exists, and the security key it was
+    // established with has not been deleted (key revocation).
     let token_hash = hash_token(token);
-    let session = match state
-        .session_cache
-        .get_session_by_token_hash(&state.store, &token_hash, arrival)
-        .await
-        .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
-    {
-        Some(s) => s,
-        None => return Ok(None),
+    let Some(ValidatedSession {
+        session,
+        authenticator,
+    }) = ValidatedSession::lookup(state, &token_hash, arrival).await?
+    else {
+        return Ok(None);
     };
 
     // M2M tokens (client_credentials grant) are not valid at user-facing endpoints.
@@ -1407,25 +1407,8 @@ pub async fn validate_session_token(
         return Ok(None);
     }
 
-    // Get authenticator from the server-side session record.
-    // The authenticator_id is stored server-side and is NOT included in the JWT
-    // to prevent information leakage.
-    let authenticator_id = session.authenticator_id.as_deref();
-
-    // If the session references an authenticator that no longer exists (deleted/revoked),
-    // the session is invalid — this implements key revocation.
-    let authenticator = match authenticator_id {
-        Some(id) => {
-            match db::get_authenticator_by_id(&state.store, id)
-                .await
-                .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
-            {
-                Some(a) => Some(a),
-                None => return Ok(None), // authenticator revoked → session invalid
-            }
-        }
-        None => None,
-    };
+    // `authenticator` comes from the server-side session record, not the
+    // JWT, which omits it to avoid leaking it.
 
     let (client_id, hardware_verified) = match &decoded {
         DecodedToken::AccessToken(c) => (Some(c.client_id.clone()), c.hardware_verified),

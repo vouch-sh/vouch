@@ -112,11 +112,10 @@ async fn extract_resource_token(
     // 2b. Audience coverage for resource-narrowed tokens.
     enforce_audience_coverage(&access_claims, &config.base_url, uri)?;
 
-    // 3. Verify session exists in DB via token_hash
+    // 3. The session must be live: its row exists, and the security key it
+    //    was established with has not been deleted.
     let token_hash = hash_token(&token);
-    let session = state
-        .session_cache
-        .get_session_by_token_hash(&state.store, &token_hash, arrival)
+    let session = auth::ValidatedSession::lookup(state, &token_hash, arrival)
         .await?
         .ok_or_else(|| {
             ServiceError::api(
@@ -124,7 +123,8 @@ async fn extract_resource_token(
                 "invalid_token",
                 "Session not found or revoked",
             )
-        })?;
+        })?
+        .session;
 
     // 4. DPoP validation for sender-constrained tokens
     if let Some(ref cnf) = access_claims.cnf
