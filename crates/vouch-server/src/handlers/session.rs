@@ -6,6 +6,7 @@ use crate::arrival::ArrivalTime;
 use crate::crypto::hash_token;
 use crate::db;
 use crate::error::{OAuthErrorCode, ServiceError};
+use crate::handlers::extractors::OptionalClientCert;
 use crate::http::strip_auth_scheme;
 use crate::services::auth::{self, AccessTokenClaims, DecodedToken, ValidatedResourceToken};
 use crate::services::keys as key_svc;
@@ -631,11 +632,19 @@ pub(crate) async fn extract_org_admin(
     jar: &CookieJar,
     method: &str,
     uri: &str,
-    client_cert: Option<&ClientCertificate>,
+    client_cert: &OptionalClientCert,
     arrival: ArrivalTime,
 ) -> Result<(db::User, String), ServiceError> {
-    let (user, org_id) =
-        extract_user_with_org(state, headers, jar, method, uri, client_cert, arrival).await?;
+    let (user, org_id) = extract_user_with_org(
+        state,
+        headers,
+        jar,
+        method,
+        uri,
+        client_cert.0.as_ref(),
+        arrival,
+    )
+    .await?;
 
     if !user.is_org_admin {
         return Err(ServiceError::api(

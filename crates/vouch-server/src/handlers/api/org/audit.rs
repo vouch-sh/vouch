@@ -26,6 +26,7 @@ use super::ocsf::{self, RawOrValue};
 use crate::db::audit::{AuditEvent, AuditEventFilter, AuditEventKind};
 use crate::db::{self, ScimScope, ScimScopeSet};
 use crate::error::ServiceError;
+use crate::handlers::extractors::OptionalClientCert;
 use crate::handlers::session::extract_org_admin;
 use crate::{AppState, http};
 
@@ -140,8 +141,9 @@ async fn authenticate(
     state: &AppState,
     headers: &HeaderMap,
     jar: &CookieJar,
-    method: &str,
-    uri: &str,
+    method: &Method,
+    uri: &OriginalUri,
+    client_cert: &OptionalClientCert,
     arrival: ArrivalTime,
 ) -> Result<AuditApiAuth, ServiceError> {
     let Some(auth_header) = headers
@@ -215,7 +217,16 @@ async fn authenticate(
         ));
     }
 
-    let (user, org_id) = extract_org_admin(state, headers, jar, method, uri, None, arrival).await?;
+    let (user, org_id) = extract_org_admin(
+        state,
+        headers,
+        jar,
+        method.as_str(),
+        uri.path(),
+        client_cert,
+        arrival,
+    )
+    .await?;
     Ok(AuditApiAuth::OrgAdmin {
         org_id,
         user_id: user.id,
@@ -342,6 +353,10 @@ fn build_ndjson_body(
 }
 
 /// GET /api/v1/org/audit-events
+#[expect(
+    clippy::too_many_arguments,
+    reason = "axum extractors, one per request input; they cannot be bundled"
+)]
 pub(crate) async fn audit_events(
     arrival: ArrivalTime,
     method: Method,
@@ -349,9 +364,10 @@ pub(crate) async fn audit_events(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     jar: CookieJar,
+    client_cert: OptionalClientCert,
     Query(query): Query<AuditEventsQuery>,
 ) -> Result<Response, ServiceError> {
-    let auth = authenticate(&state, &headers, &jar, method.as_str(), uri.path(), arrival).await?;
+    let auth = authenticate(&state, &headers, &jar, &method, &uri, &client_cert, arrival).await?;
 
     let event_types = query
         .event_type
