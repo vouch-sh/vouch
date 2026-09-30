@@ -389,6 +389,20 @@ impl FapiProfile {
         }
         union
     }
+
+    /// The algorithm a client of this profile gets where `alg` was asked for
+    /// a JWT it or the server signs.
+    ///
+    /// FAPI 2.0 Security Profile §5.4.1: authorization servers and clients
+    /// creating or processing JWTs "shall ... use PS256, ES256, or EdDSA
+    /// (using the Ed25519 variant) algorithms". ES256 stands in for RS256.
+    #[must_use]
+    pub fn signing_alg(self, alg: JwsAlgorithm) -> JwsAlgorithm {
+        match (self, alg) {
+            (Self::Fapi2Security, JwsAlgorithm::Rs256) => JwsAlgorithm::Es256,
+            (Self::None | Self::Fapi2Security, alg) => alg,
+        }
+    }
 }
 
 /// How the client was registered.
@@ -503,6 +517,24 @@ pub struct OAuthClientDoc {
     /// to `None` — no migration needed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_logout_redirect_uris: Option<Vec<String>>,
+}
+
+impl OAuthClientDoc {
+    /// Set the FAPI profile and bring every stored JWT signing algorithm
+    /// within it ([`FapiProfile::signing_alg`]), in the same write.
+    pub fn set_fapi_profile(&mut self, profile: FapiProfile) {
+        self.fapi_profile = profile;
+        self.id_token_signed_response_alg = profile.signing_alg(self.id_token_signed_response_alg);
+        self.authorization_signed_response_alg = self
+            .authorization_signed_response_alg
+            .map(|alg| profile.signing_alg(alg));
+        self.userinfo_signed_response_alg = self
+            .userinfo_signed_response_alg
+            .map(|alg| profile.signing_alg(alg));
+        self.request_object_signing_alg = self
+            .request_object_signing_alg
+            .map(|alg| profile.signing_alg(alg));
+    }
 }
 
 impl DocumentType for OAuthClientDoc {
@@ -637,7 +669,9 @@ impl DocumentType for TokenExchangeDoc {
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
-    use super::{AccessScope, OAuthClientType, OAuthDocumentParseError, TokenEndpointAuthMethod};
+    use super::{
+        AccessScope, FapiProfile, OAuthClientType, OAuthDocumentParseError, TokenEndpointAuthMethod,
+    };
     use crate::crypto::alg::JwsAlgorithm;
     use std::str::FromStr;
 
@@ -675,6 +709,63 @@ mod tests {
             OAuthDocumentParseError::TokenEndpointAuthMethod("mtls".to_string())
         );
         assert_eq!(err.to_string(), "Unknown token endpoint auth method: mtls");
+    }
+
+    // FAPI 2.0 Security Profile §5.4.1: JWTs "shall ... use PS256, ES256, or
+    // EdDSA (using the Ed25519 variant) algorithms".
+    #[test]
+    fn fapi_profile_moves_rs256_to_es256_only_under_fapi() {
+        assert_eq!(
+            FapiProfile::Fapi2Security.signing_alg(JwsAlgorithm::Rs256),
+            JwsAlgorithm::Es256
+        );
+        assert_eq!(
+            FapiProfile::Fapi2Security.signing_alg(JwsAlgorithm::Es256),
+            JwsAlgorithm::Es256
+        );
+        assert_eq!(
+            FapiProfile::None.signing_alg(JwsAlgorithm::Rs256),
+            JwsAlgorithm::Rs256
+        );
+    }
+
+    // FAPI 2.0 Security Profile §5.4.1, applied to every stored signing
+    // algorithm when a client becomes FAPI, and to none when it leaves.
+    #[test]
+    fn set_fapi_profile_constrains_every_stored_signing_alg() {
+        let json = r#"{
+            "user_id": null, "client_id": "c", "name": "n", "description": null,
+            "application_type": "web", "redirect_uris": [], "active": true,
+            "access_scope": "public", "org_id": null, "resource_uris": [],
+            "jwks": null, "jwks_uri": null, "token_endpoint_auth_method": "none",
+            "request_object_signing_alg": "RS256", "require_signed_request_object": null,
+            "fapi_profile": "none", "dpop_bound_access_tokens": false,
+            "grant_types": null, "response_types": null, "software_id": null,
+            "software_version": null, "registration_source": null,
+            "registration_access_token_hash": null, "registration_metadata": null,
+            "id_token_signed_response_alg": "RS256",
+            "authorization_signed_response_alg": "RS256",
+            "userinfo_signed_response_alg": "RS256",
+            "introspection_signed_response_alg": "ES256"
+        }"#;
+        let mut doc: super::OAuthClientDoc = serde_json::from_str(json).expect("client doc");
+
+        doc.set_fapi_profile(FapiProfile::None);
+        assert_eq!(doc.id_token_signed_response_alg, JwsAlgorithm::Rs256);
+
+        doc.set_fapi_profile(FapiProfile::Fapi2Security);
+        assert_eq!(doc.fapi_profile, FapiProfile::Fapi2Security);
+        assert_eq!(doc.id_token_signed_response_alg, JwsAlgorithm::Es256);
+        assert_eq!(
+            doc.authorization_signed_response_alg,
+            Some(JwsAlgorithm::Es256)
+        );
+        assert_eq!(doc.userinfo_signed_response_alg, Some(JwsAlgorithm::Es256));
+        assert_eq!(doc.request_object_signing_alg, Some(JwsAlgorithm::Es256));
+        assert_eq!(
+            doc.introspection_signed_response_alg,
+            Some(JwsAlgorithm::Es256)
+        );
     }
 
     #[test]

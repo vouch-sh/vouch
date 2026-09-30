@@ -952,7 +952,7 @@ pub async fn create_oauth_client(
     let client_id = uuid::Uuid::now_v7().to_string();
     let (stored_jwks, stored_jwks_uri) = client_keys_to_stored(params.keys);
 
-    let doc = OAuthClientDoc {
+    let mut doc = OAuthClientDoc {
         user_id: params.user_id.map(String::from),
         client_id: client_id.clone(),
         name: params.name.to_string(),
@@ -968,7 +968,7 @@ pub async fn create_oauth_client(
         token_endpoint_auth_method: params.token_endpoint_auth_method,
         request_object_signing_alg: params.request_object_signing_alg,
         require_signed_request_object: params.require_signed_request_object,
-        fapi_profile: params.fapi_profile.unwrap_or_default(),
+        fapi_profile: FapiProfile::None,
         dpop_bound_access_tokens: params.dpop_bound_access_tokens.unwrap_or(false),
         grant_types: params.grant_types.map(<[String]>::to_vec),
         response_types: params.response_types.map(<[String]>::to_vec),
@@ -992,6 +992,7 @@ pub async fn create_oauth_client(
         request_uris: params.request_uris.clone(),
         post_logout_redirect_uris: params.post_logout_redirect_uris.clone(),
     };
+    doc.set_fapi_profile(params.fapi_profile.unwrap_or_default());
 
     let result = store.insert(&doc).await?;
     let oauth_client = OAuthClient::from(result);
@@ -1081,7 +1082,7 @@ pub async fn update_oauth_client(
             let (jwks, jwks_uri) = client_keys_to_stored(params.keys);
             data.jwks = jwks;
             data.jwks_uri = jwks_uri;
-            data.fapi_profile = params.fapi_profile;
+            data.set_fapi_profile(params.fapi_profile);
             data.dpop_bound_access_tokens = params.dpop_bound_access_tokens;
             if let Some(ref uris) = params.post_logout_redirect_uris {
                 data.post_logout_redirect_uris = if uris.is_empty() {

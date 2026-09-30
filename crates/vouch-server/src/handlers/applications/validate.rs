@@ -815,6 +815,8 @@ pub(crate) fn build_create_params<'a>(
         registration_source: RegistrationSource::Manual,
         registration_access_token_hash: None,
         registration_metadata: None,
+        // OIDC Dynamic Client Registration §2 default. `create_oauth_client`
+        // replaces it with ES256 for a FAPI 2.0 client (FAPI 2.0 §5.4.1).
         id_token_signed_response_alg: JwsAlgorithm::Rs256,
         tls_client_auth_subject_dn: None,
         tls_client_auth_san_dns: None,
