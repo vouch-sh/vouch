@@ -453,6 +453,7 @@ pub(crate) mod test_support {
 mod tests {
     use super::test_support::with_stored_session;
     use super::*;
+    #[cfg(all(unix, feature = "test-utils"))]
     use crate::commands::credential::aws::test_support::ENV_LOCK;
     use crate::server_url::ServerUrlError;
 
