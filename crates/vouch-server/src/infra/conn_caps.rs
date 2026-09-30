@@ -29,13 +29,14 @@
 //! multiply its allowance by spreading over the ports.
 
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use ipnet::IpNet;
 use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore};
 
 use crate::config::ServerConfig;
+use crate::infra::rate_limit::ClientBucket;
 
 /// Operator-configurable connection caps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -130,7 +131,7 @@ impl Peer {
 pub(crate) struct ConnCaps {
     total: Arc<Semaphore>,
     redirect_total: Arc<Semaphore>,
-    per_ip: Mutex<HashMap<IpAddr, u32>>,
+    per_ip: Mutex<HashMap<ClientBucket, u32>>,
     max_per_ip: u32,
     exempt: Vec<IpNet>,
 }
@@ -181,7 +182,7 @@ impl ConnCaps {
         if exemptible && self.exempt.iter().any(|net| net.contains(&peer)) {
             return Some(ClientSlot(None));
         }
-        let key = client_key(peer);
+        let key = ClientBucket::from(peer);
         let mut counts = self.per_ip.lock().unwrap_or_else(PoisonError::into_inner);
         let count = counts.entry(key).or_insert(0);
         if *count >= self.max_per_ip {
@@ -196,7 +197,7 @@ impl ConnCaps {
         Some(ClientSlot(Some((Arc::clone(self), key))))
     }
 
-    fn release(&self, key: IpAddr) {
+    fn release(&self, key: ClientBucket) {
         let mut counts = self.per_ip.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(count) = counts.get_mut(&key) {
             *count = count.saturating_sub(1);
@@ -251,15 +252,6 @@ impl ListenerCaps {
     }
 }
 
-/// The address a connection is counted under: IPv4 as is, IPv6 by its /64.
-fn client_key(peer: IpAddr) -> IpAddr {
-    const PREFIX_64: u128 = 0xFFFF_FFFF_FFFF_FFFF_0000_0000_0000_0000;
-    match peer {
-        IpAddr::V4(v4) => IpAddr::V4(v4),
-        IpAddr::V6(v6) => IpAddr::V6(Ipv6Addr::from_bits(v6.to_bits() & PREFIX_64)),
-    }
-}
-
 /// One place under the total cap, held for the life of a connection.
 #[derive(Debug)]
 pub(crate) struct TotalSlot(
@@ -275,7 +267,7 @@ impl Drop for TotalSlot {
 /// One place under a client's cap, held for the life of a connection.
 /// `None` for an exempt peer.
 #[derive(Debug)]
-pub(crate) struct ClientSlot(Option<(Arc<ConnCaps>, IpAddr)>);
+pub(crate) struct ClientSlot(Option<(Arc<ConnCaps>, ClientBucket)>);
 
 impl Drop for ClientSlot {
     fn drop(&mut self) {

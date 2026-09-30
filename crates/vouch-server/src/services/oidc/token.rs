@@ -1196,7 +1196,7 @@ pub(crate) async fn authenticate_client_mtls(
                         // so cannot drive a freshness-based rate limit. No
                         // cross-request throttle is applied beyond that bound —
                         // repeated attempts across requests still cost one fetch
-                        // each, bounded upstream by the per-IP auth rate limiter.
+                        // each, bounded upstream by the per-client auth rate limiter.
                         let Some(uri) = client.keys.as_ref().and_then(ClientKeys::uri) else {
                             return Err(ClientAuthError::MtlsVerificationFailed(e.to_string()));
                         };

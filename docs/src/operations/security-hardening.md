@@ -73,8 +73,9 @@ is no setting for any of this.
 
 ## Rate limiting
 
-Three tiers, applied per resolved client IP using a GCRA limiter. **The limits are compile-time
-constants; there is no environment variable to tune them.**
+Three tiers, applied per resolved client using a GCRA limiter. A client is an IPv4 address, or an
+IPv6 /64, since one host can use a whole /64 (the per-client connection cap counts the same way).
+**The limits are compile-time constants; there is no environment variable to tune them.**
 
 | Tier | Burst | Sustained | Applies to |
 |------|-------|-----------|------------|
@@ -87,7 +88,9 @@ authentication endpoints, and `kubectl` spawns parallel credential processes at 
 larger credential burst.
 
 Every response carries `x-ratelimit-limit` and `x-ratelimit-remaining`. A rejected request gets
-**429** with `retry-after` and `x-ratelimit-after`.
+**429** with `retry-after` and `x-ratelimit-after`. Each limiter forgets a client about a minute
+after its burst has fully replenished, so its memory tracks recent clients, not every client since
+startup.
 
 Not rate-limited at all: `/health`, `/health/ready`, `/metrics`, `/`, `/static/*`, `/oauth/jwks`,
 `/oauth/userinfo`, `/oauth/callback`, `/saml/acs`, and the `.well-known` endpoints.

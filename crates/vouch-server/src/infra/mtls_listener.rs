@@ -655,7 +655,7 @@ mod tests {
         let app = build_app(state, &config).expect("build app");
         let (addr, server) = serve_over_mtls(app, ConnLimits::DEFAULT).await;
 
-        // `build_auth_rate_limiter` allows a burst of 8; four more requests
+        // `RateLimitTier::AUTH` allows a burst of 8; four more requests
         // leave margin for the 2/s refill during the run.
         let mut statuses = Vec::new();
         for i in 0..12 {
@@ -926,7 +926,7 @@ mod tests {
         let (app, _state) = test_utils::test_app().await;
         let (addr, server) = serve_over_https_proxied(app).await;
 
-        // `build_auth_rate_limiter` allows a burst of 8 on `/oauth/token`; a
+        // `RateLimitTier::AUTH` allows a burst of 8 on `/oauth/token`; a
         // GET is refused by the handler after the limiter has counted it.
         let mut distinct = Vec::new();
         for i in 0..12 {
