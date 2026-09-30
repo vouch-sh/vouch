@@ -30,9 +30,10 @@ use url::Host;
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use crate::infra::dns;
 
-/// Returns `true` for IP addresses that must never be the target of a
-/// server-side fetch of a client-controlled URL: every block the IANA
-/// special-purpose address registries
+/// Whether an address may be the target of a server-side fetch of a
+/// client-controlled URL.
+///
+/// Non-global means every block the IANA special-purpose address registries
 /// (<https://www.iana.org/assignments/iana-ipv4-special-registry>,
 /// <https://www.iana.org/assignments/iana-ipv6-special-registry>) do not mark
 /// globally reachable, plus multicast and deprecated ranges.
@@ -44,80 +45,104 @@ use crate::infra::dns;
 /// addresses"), 6to4 `2002::/16` (RFC 3056 §2), and Teredo `2001::/32`
 /// (RFC 4380 §4), whose server address and obfuscated client address are both
 /// checked.
-pub(crate) fn is_non_global(ip: &IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => is_non_global_v4(*v4),
-        IpAddr::V6(v6) => {
-            if let Some(embedded) = embedded_ipv4(*v6) {
-                return embedded.into_iter().flatten().any(is_non_global_v4);
-            }
-            let [s0, s1, s2, s3, ..] = v6.segments();
-            v6.is_loopback()
-                || v6.is_unspecified()
-                || v6.is_multicast()
-                || (s0 & 0xfe00 == 0xfc00) // unique-local fc00::/7
-                || (s0 & 0xffc0 == 0xfe80) // link-local fe80::/10
-                || (s0 == 0x0100 && s1 == 0 && s2 == 0 && s3 <= 1) // discard-only 100::/64, dummy 100:0:0:1::/64
-                || (s0 == 0x0064 && s1 == 0xff9b && s2 == 1) // local-use NAT64 64:ff9b:1::/48
-                || (s0 == 0x2001 && s1 == 0x0db8) // documentation 2001:db8::/32
-                || (s0 == 0x3fff && s1 & 0xf000 == 0) // documentation 3fff::/20
-                || s0 == 0x5f00 // SRv6 SIDs 5f00::/16
-                || (s0 == 0x2001 && s1 < 0x0200 && !ietf_block_is_global(*v6)) // IETF protocol assignments 2001::/23
+pub(crate) trait GlobalReachability {
+    /// `true` if the address must never be the target of such a fetch.
+    fn is_non_global(&self) -> bool;
+}
+
+impl GlobalReachability for IpAddr {
+    fn is_non_global(&self) -> bool {
+        match self {
+            IpAddr::V4(v4) => v4.is_non_global(),
+            IpAddr::V6(v6) => v6.is_non_global(),
         }
     }
 }
 
-fn is_non_global_v4(v4: Ipv4Addr) -> bool {
-    let [a, b, c, _d] = v4.octets();
-    a == 0 // "this network" 0.0.0.0/8
-        || v4.is_loopback()
-        || v4.is_private()
-        || v4.is_link_local()
-        || v4.is_broadcast()
-        || v4.is_documentation()
-        || v4.is_multicast()
-        || (a == 100 && (b & 0xC0 == 64)) // CGNAT 100.64.0.0/10
-        || (a == 192 && b == 0 && c == 0) // IETF protocol 192.0.0.0/24
-        || (a == 192 && b == 88 && c == 99) // 6to4 relay anycast 192.88.99.0/24
-        || (a == 198 && (b & 0xFE == 18)) // benchmarking 198.18.0.0/15
-        || (a & 0xF0 == 240) // reserved 240.0.0.0/4
-}
-
-/// The IPv4 addresses an IPv6 address embeds, or `None` if it is not one of
-/// the embedding formats. Teredo carries two: the server, and the client
-/// address stored with every bit inverted (RFC 4380 §4).
-fn embedded_ipv4(v6: Ipv6Addr) -> Option<[Option<Ipv4Addr>; 2]> {
-    let v4 = |hi: u16, lo: u16| {
-        let [a, b] = hi.to_be_bytes();
-        let [c, d] = lo.to_be_bytes();
-        Ipv4Addr::new(a, b, c, d)
-    };
-    match v6.segments() {
-        // IPv4-mapped ::ffff:0:0/96 and IPv4-compatible ::/96 (RFC 4291
-        // §2.5.5); the latter also holds :: and ::1, which classify as
-        // 0.0.0.0/8.
-        [0, 0, 0, 0, 0, 0xffff | 0, hi, lo] => Some([Some(v4(hi, lo)), None]),
-        // NAT64 well-known prefix 64:ff9b::/96 (RFC 6052 §2.1)
-        [0x0064, 0xff9b, 0, 0, 0, 0, hi, lo] => Some([Some(v4(hi, lo)), None]),
-        // 6to4 2002:V4ADDR::/48 (RFC 3056 §2)
-        [0x2002, hi, lo, ..] => Some([Some(v4(hi, lo)), None]),
-        // Teredo 2001:0000:SERVER:FLAGS:PORT:~CLIENT (RFC 4380 §4)
-        [0x2001, 0, server_hi, server_lo, _, _, client_hi, client_lo] => Some([
-            Some(v4(server_hi, server_lo)),
-            Some(v4(!client_hi, !client_lo)),
-        ]),
-        _ => None,
+impl GlobalReachability for Ipv4Addr {
+    fn is_non_global(&self) -> bool {
+        let [a, b, c, _d] = self.octets();
+        a == 0 // "this network" 0.0.0.0/8
+            || self.is_loopback()
+            || self.is_private()
+            || self.is_link_local()
+            || self.is_broadcast()
+            || self.is_documentation()
+            || self.is_multicast()
+            || (a == 100 && (b & 0xC0 == 64)) // CGNAT 100.64.0.0/10
+            || (a == 192 && b == 0 && c == 0) // IETF protocol 192.0.0.0/24
+            || (a == 192 && b == 88 && c == 99) // 6to4 relay anycast 192.88.99.0/24
+            || (a == 198 && (b & 0xFE == 18)) // benchmarking 198.18.0.0/15
+            || (a & 0xF0 == 240) // reserved 240.0.0.0/4
     }
 }
 
-/// Whether an address in the IETF protocol assignments block `2001::/23`
-/// falls in one of the sub-blocks the IANA registry marks globally reachable.
-fn ietf_block_is_global(v6: Ipv6Addr) -> bool {
-    match v6.segments() {
-        [_, 0x0001, 0, 0, 0, 0, 0, 1..=3] // anycast 2001:1::1, ::2, ::3
-        | [_, 0x0003, ..] // AMT 2001:3::/32
-        | [_, 0x0004, 0x0112, ..] => true, // AS112-v6 2001:4:112::/48
-        [_, s1, ..] => s1 & 0xfff0 == 0x0020 || s1 & 0xfff0 == 0x0030, // ORCHIDv2, Drone Remote ID
+impl GlobalReachability for Ipv6Addr {
+    fn is_non_global(&self) -> bool {
+        if let Some(embedded) = self.embedded_ipv4() {
+            return embedded.into_iter().flatten().any(|v4| v4.is_non_global());
+        }
+        let [s0, s1, s2, s3, ..] = self.segments();
+        self.is_loopback()
+            || self.is_unspecified()
+            || self.is_multicast()
+            || (s0 & 0xfe00 == 0xfc00) // unique-local fc00::/7
+            || (s0 & 0xffc0 == 0xfe80) // link-local fe80::/10
+            || (s0 == 0x0100 && s1 == 0 && s2 == 0 && s3 <= 1) // discard-only 100::/64, dummy 100:0:0:1::/64
+            || (s0 == 0x0064 && s1 == 0xff9b && s2 == 1) // local-use NAT64 64:ff9b:1::/48
+            || (s0 == 0x2001 && s1 == 0x0db8) // documentation 2001:db8::/32
+            || (s0 == 0x3fff && s1 & 0xf000 == 0) // documentation 3fff::/20
+            || s0 == 0x5f00 // SRv6 SIDs 5f00::/16
+            || (s0 == 0x2001 && s1 < 0x0200 && !self.is_global_ietf_assignment()) // IETF protocol assignments 2001::/23
+    }
+}
+
+/// How an IPv6 address relates to IPv4 and to the IETF protocol assignments,
+/// for [`GlobalReachability`].
+trait Ipv6Special {
+    /// The IPv4 addresses the address embeds, or `None` if it is not one of
+    /// the embedding formats. Teredo carries two: the server, and the client
+    /// address stored with every bit inverted (RFC 4380 §4).
+    fn embedded_ipv4(&self) -> Option<[Option<Ipv4Addr>; 2]>;
+    /// Whether an address in `2001::/23` falls in one of the sub-blocks the
+    /// IANA registry marks globally reachable.
+    fn is_global_ietf_assignment(&self) -> bool;
+}
+
+impl Ipv6Special for Ipv6Addr {
+    fn embedded_ipv4(&self) -> Option<[Option<Ipv4Addr>; 2]> {
+        // IPv4-mapped ::ffff:0:0/96 and IPv4-compatible ::/96 (RFC 4291
+        // §2.5.5); the latter also holds :: and ::1, which classify as
+        // 0.0.0.0/8.
+        if let Some(v4) = self.to_ipv4() {
+            return Some([Some(v4), None]);
+        }
+        let v4 = |hi: u16, lo: u16| {
+            let [a, b] = hi.to_be_bytes();
+            let [c, d] = lo.to_be_bytes();
+            Ipv4Addr::new(a, b, c, d)
+        };
+        match self.segments() {
+            // NAT64 well-known prefix 64:ff9b::/96 (RFC 6052 §2.1)
+            [0x0064, 0xff9b, 0, 0, 0, 0, hi, lo] => Some([Some(v4(hi, lo)), None]),
+            // 6to4 2002:V4ADDR::/48 (RFC 3056 §2)
+            [0x2002, hi, lo, ..] => Some([Some(v4(hi, lo)), None]),
+            // Teredo 2001:0000:SERVER:FLAGS:PORT:~CLIENT (RFC 4380 §4)
+            [0x2001, 0, server_hi, server_lo, _, _, client_hi, client_lo] => Some([
+                Some(v4(server_hi, server_lo)),
+                Some(v4(!client_hi, !client_lo)),
+            ]),
+            _ => None,
+        }
+    }
+
+    fn is_global_ietf_assignment(&self) -> bool {
+        match self.segments() {
+            [_, 0x0001, 0, 0, 0, 0, 0, 1..=3] // anycast 2001:1::1, ::2, ::3
+            | [_, 0x0003, ..] // AMT 2001:3::/32
+            | [_, 0x0004, 0x0112, ..] => true, // AS112-v6 2001:4:112::/48
+            [_, s1, ..] => s1 & 0xfff0 == 0x0020 || s1 & 0xfff0 == 0x0030, // ORCHIDv2, Drone Remote ID
+        }
     }
 }
 
@@ -183,7 +208,7 @@ fn reject_if_blocked(ip: IpAddr, allow_loopback: bool, code: OAuthErrorCode) -> 
     if allow_loopback && canonical.is_loopback() {
         return Ok(());
     }
-    if is_non_global(&canonical) {
+    if canonical.is_non_global() {
         tracing::warn!(
             target: "security",
             %ip,
@@ -225,7 +250,7 @@ mod tests {
             [255, 255, 255, 255], // broadcast
         ] {
             let ip = IpAddr::V4(Ipv4Addr::new(a, b, c, d));
-            assert!(is_non_global(&ip), "expected non-global: {ip}");
+            assert!(ip.is_non_global(), "expected non-global: {ip}");
         }
     }
 
@@ -233,18 +258,18 @@ mod tests {
     fn classifies_v4_global() {
         for [a, b, c, d] in [[1, 1, 1, 1], [8, 8, 8, 8], [93, 184, 216, 34]] {
             let ip = IpAddr::V4(Ipv4Addr::new(a, b, c, d));
-            assert!(!is_non_global(&ip), "expected global: {ip}");
+            assert!(!ip.is_non_global(), "expected global: {ip}");
         }
     }
 
     #[test]
     fn classifies_v6() {
-        assert!(is_non_global(&IpAddr::V6(Ipv6Addr::LOCALHOST)));
-        assert!(is_non_global(&IpAddr::V6(Ipv6Addr::UNSPECIFIED)));
-        assert!(is_non_global(&v6("fe80::1"))); // link-local
-        assert!(is_non_global(&v6("fc00::1"))); // ULA
-        assert!(is_non_global(&v6("2001:db8::1"))); // documentation
-        assert!(!is_non_global(&v6("2606:4700:4700::1111"))); // Cloudflare DNS
+        assert!(IpAddr::V6(Ipv6Addr::LOCALHOST).is_non_global());
+        assert!(IpAddr::V6(Ipv6Addr::UNSPECIFIED).is_non_global());
+        assert!(v6("fe80::1").is_non_global()); // link-local
+        assert!(v6("fc00::1").is_non_global()); // ULA
+        assert!(v6("2001:db8::1").is_non_global()); // documentation
+        assert!(!v6("2606:4700:4700::1111").is_non_global()); // Cloudflare DNS
     }
 
     /// One address per block of the IANA special-purpose registries
@@ -283,7 +308,7 @@ mod tests {
         ];
         for (addr, non_global) in cases {
             let ip: IpAddr = addr.parse().unwrap();
-            assert_eq!(is_non_global(&ip), *non_global, "{addr}");
+            assert_eq!(ip.is_non_global(), *non_global, "{addr}");
         }
     }
 
@@ -307,7 +332,7 @@ mod tests {
         ];
         for (addr, non_global) in cases {
             let ip: IpAddr = addr.parse().unwrap();
-            assert_eq!(is_non_global(&ip), *non_global, "{addr}");
+            assert_eq!(ip.is_non_global(), *non_global, "{addr}");
         }
     }
 
@@ -328,7 +353,7 @@ mod tests {
     fn canonicalizes_mapped_v4_loopback() {
         // ::ffff:127.0.0.1 must classify as loopback once canonicalised.
         let mapped = v6("::ffff:127.0.0.1");
-        assert!(is_non_global(&mapped.to_canonical()));
+        assert!(mapped.to_canonical().is_non_global());
     }
 
     #[tokio::test]
