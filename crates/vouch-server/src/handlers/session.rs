@@ -133,69 +133,65 @@ async fn extract_resource_token(
         match auth_scheme {
             AuthScheme::DPoP => {
                 // Validate DPoP proof header against cnf.jkt
-                let dpop_header = headers
-                    .get(protocol::HEADER_DPOP)
-                    .and_then(|v| v.to_str().ok());
-                if let Some(proof) = dpop_header {
-                    let full_uri = format!("{}{}", config.base_url, uri);
-                    match dpop::validate_dpop_at_resource(
-                        &token,
-                        proof,
-                        method,
-                        &full_uri,
-                        &state.store,
-                        config.dpop_max_age_seconds,
-                        arrival,
-                    )
-                    .await
-                    {
-                        Ok(validated) => {
-                            if !cnf.confirms_dpop(&validated) {
-                                return Err(ServiceError::api(
-                                    StatusCode::UNAUTHORIZED,
-                                    "invalid_token",
-                                    PossessionError::DpopKeyMismatch.as_str(),
-                                ));
-                            }
-                            dpop_source = validated.source;
-                        }
-                        Err(e @ DpopError::Database(_)) => {
-                            tracing::error!("DPoP backend failure: {e}");
-                            return Err(ServiceError::api(
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                "server_error",
-                                "DPoP validation backend error",
-                            ));
-                        }
-                        Err(DpopError::UseNonce(nonce)) => {
-                            // RFC 9449 §7.2: When the server requires (or
-                            // reissues) a nonce, the error response MUST carry
-                            // a fresh `DPoP-Nonce` header so the client can
-                            // retry the proof. At resource endpoints this fires
-                            // when a client replays an already-consumed nonce;
-                            // the fresh nonce lets the caller retry once.
-                            return Err(ServiceError::api_with_header(
-                                StatusCode::UNAUTHORIZED,
-                                OAuthErrorCode::UseDpopNonce.as_str(),
-                                "Authorization server requires nonce in DPoP proof",
-                                (protocol::HEADER_DPOP_NONCE, nonce.as_str()),
-                            ));
-                        }
-                        Err(e) => {
-                            tracing::debug!("DPoP validation failed: {e}");
+                let full_uri = format!("{}{}", config.base_url, uri);
+                match dpop::validate_dpop_at_resource(
+                    &token,
+                    headers,
+                    method,
+                    &full_uri,
+                    &state.store,
+                    config.dpop_max_age_seconds,
+                    arrival,
+                )
+                .await
+                {
+                    Ok(validated) => {
+                        if !cnf.confirms_dpop(&validated) {
                             return Err(ServiceError::api(
                                 StatusCode::UNAUTHORIZED,
                                 "invalid_token",
-                                "Invalid DPoP proof",
+                                PossessionError::DpopKeyMismatch.as_str(),
                             ));
                         }
+                        dpop_source = validated.source;
                     }
-                } else {
-                    return Err(ServiceError::api(
-                        StatusCode::UNAUTHORIZED,
-                        "invalid_token",
-                        PossessionError::MissingDpopProof.as_str(),
-                    ));
+                    Err(e @ DpopError::Database(_)) => {
+                        tracing::error!("DPoP backend failure: {e}");
+                        return Err(ServiceError::api(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "server_error",
+                            "DPoP validation backend error",
+                        ));
+                    }
+                    Err(DpopError::UseNonce(nonce)) => {
+                        // RFC 9449 §7.2: When the server requires (or
+                        // reissues) a nonce, the error response MUST carry
+                        // a fresh `DPoP-Nonce` header so the client can
+                        // retry the proof. At resource endpoints this fires
+                        // when a client replays an already-consumed nonce;
+                        // the fresh nonce lets the caller retry once.
+                        return Err(ServiceError::api_with_header(
+                            StatusCode::UNAUTHORIZED,
+                            OAuthErrorCode::UseDpopNonce.as_str(),
+                            "Authorization server requires nonce in DPoP proof",
+                            (protocol::HEADER_DPOP_NONCE, nonce.as_str()),
+                        ));
+                    }
+                    Err(DpopError::MissingProof) => {
+                        return Err(ServiceError::api(
+                            StatusCode::UNAUTHORIZED,
+                            "invalid_token",
+                            PossessionError::MissingDpopProof.as_str(),
+                        ));
+                    }
+                    Err(e) => {
+                        tracing::debug!("DPoP validation failed: {e}");
+                        return Err(ServiceError::api(
+                            StatusCode::UNAUTHORIZED,
+                            "invalid_token",
+                            "Invalid DPoP proof",
+                        ));
+                    }
                 }
             }
             AuthScheme::Bearer => {

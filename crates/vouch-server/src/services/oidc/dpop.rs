@@ -15,6 +15,9 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 
+use axum::http::HeaderMap;
+use vouch_common::protocol;
+
 use crate::arrival::ArrivalTime;
 use crate::crypto::alg::JwsAlgorithm;
 use crate::crypto::jwk::Jwk;
@@ -112,6 +115,8 @@ pub use super::claims::CnfClaim;
 pub enum DpopError {
     /// Missing DPoP header.
     MissingProof,
+    /// More than one DPoP header field.
+    MultipleProofs,
     /// Invalid proof format.
     InvalidFormat(String),
     /// Invalid signature.
@@ -146,6 +151,7 @@ impl std::fmt::Display for DpopError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::MissingProof => write!(f, "missing DPoP proof"),
+            Self::MultipleProofs => write!(f, "request must contain exactly one DPoP header"),
             Self::InvalidFormat(msg) => write!(f, "invalid DPoP format: {msg}"),
             Self::InvalidSignature => write!(f, "invalid DPoP signature"),
             Self::UnsupportedAlgorithm(alg) => write!(f, "unsupported DPoP algorithm: {alg}"),
@@ -652,6 +658,25 @@ async fn validate_dpop_common(
     })
 }
 
+/// The request's `DPoP` header field value, or `None` when there is none.
+///
+/// RFC 9449 §4.3 check 1: "There is not more than one DPoP HTTP request
+/// header field." A value that is not visible ASCII is not a proof JWT and
+/// fails as a malformed proof, not as an absent one.
+pub fn single_dpop_header(headers: &HeaderMap) -> Result<Option<&str>, DpopError> {
+    let mut values = headers.get_all(protocol::HEADER_DPOP).iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(DpopError::MultipleProofs);
+    }
+    value
+        .to_str()
+        .map(Some)
+        .map_err(|_| DpopError::InvalidFormat("DPoP header is not visible ASCII".to_string()))
+}
+
 /// Fully validate a DPoP proof, including signature verification.
 ///
 /// This is the main entry point for DPoP validation at the token endpoint.
@@ -685,22 +710,26 @@ pub async fn validate_dpop_proof(
 /// Section 7.1. Resource endpoints MUST verify that the DPoP proof binds
 /// to the specific access token being used.
 ///
+/// Fails with [`DpopError::MissingProof`] when the request has no `DPoP`
+/// header and [`DpopError::MultipleProofs`] when it has more than one.
+///
 /// # Arguments
-/// * `proof` - The DPoP proof JWT from the `DPoP` header
 /// * `access_token` - The access token from the `Authorization: DPoP` header
+/// * `headers` - The request headers carrying the `DPoP` proof
 /// * `method` - HTTP method of the request
 /// * `uri` - Full request URI
 /// * `pool` - Database pool for nonce and JTI persistence
 /// * `config_max_age` - Maximum allowed proof age in seconds
 pub async fn validate_dpop_at_resource(
     access_token: &str,
-    proof: &str,
+    headers: &HeaderMap,
     method: &str,
     uri: &str,
     store: &DocumentStore,
     config_max_age: i64,
     arrival: ArrivalTime,
 ) -> Result<ValidatedDpopProof, DpopError> {
+    let proof = single_dpop_header(headers)?.ok_or(DpopError::MissingProof)?;
     let expected_ath = compute_access_token_hash(access_token);
     let accepted_uris = vec![uri.to_string()];
     validate_dpop_common(
@@ -738,6 +767,50 @@ mod tests {
     use crate::db::store::DocumentStore;
     use crate::test_utils::test_arrival;
     use jiff::Timestamp;
+
+    fn dpop_headers(values: &[&[u8]]) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        for value in values {
+            headers.append(
+                protocol::HEADER_DPOP,
+                axum::http::HeaderValue::from_bytes(value).expect("valid header bytes"),
+            );
+        }
+        headers
+    }
+
+    #[test]
+    fn single_dpop_header_absent_is_none() {
+        assert!(matches!(single_dpop_header(&dpop_headers(&[])), Ok(None)));
+    }
+
+    #[test]
+    fn single_dpop_header_returns_the_one_value() {
+        let headers = dpop_headers(&[b"a.b.c"]);
+        assert!(matches!(single_dpop_header(&headers), Ok(Some("a.b.c"))));
+    }
+
+    // RFC 9449 §4.3: "the receiving server MUST ensure the following: 1. There
+    // is not more than one DPoP HTTP request header field."
+    #[test]
+    fn single_dpop_header_rejects_two_fields() {
+        let headers = dpop_headers(&[b"a.b.c", b"not-a-jwt"]);
+        assert!(matches!(
+            single_dpop_header(&headers),
+            Err(DpopError::MultipleProofs)
+        ));
+    }
+
+    // A non-ASCII value must fail as a malformed proof, not read as absent:
+    // absent falls back to Bearer at the token endpoint.
+    #[test]
+    fn single_dpop_header_rejects_non_ascii_value() {
+        let headers = dpop_headers(&[b"a.b.\xff"]);
+        assert!(matches!(
+            single_dpop_header(&headers),
+            Err(DpopError::InvalidFormat(_))
+        ));
+    }
 
     #[test]
     fn test_ec_jwk_thumbprint() {
@@ -1782,9 +1855,14 @@ mod tests {
         let proof = resource_test_dpop_proof(&key, &jwk, method, uri, access_token);
 
         let now_before = jiff::Timestamp::now().as_second();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            protocol::HEADER_DPOP,
+            proof.parse().expect("proof is a valid header value"),
+        );
         let validated = validate_dpop_at_resource(
             access_token,
-            &proof,
+            &headers,
             method,
             uri,
             &store,
@@ -1840,7 +1918,7 @@ mod tests {
         // Replay of the same proof must be rejected while the row is present.
         let replay = validate_dpop_at_resource(
             access_token,
-            &proof,
+            &headers,
             method,
             uri,
             &store,

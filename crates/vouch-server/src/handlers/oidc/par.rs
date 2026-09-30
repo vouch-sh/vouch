@@ -223,44 +223,38 @@ pub(crate) async fn par(
     // nonce value supplied upon receiving a use_dpop_nonce error". The proof
     // is checked before client authentication, which spends a
     // `private_key_jwt` assertion's `jti`, so that retry can reuse it.
-    let dpop_header = headers
-        .get(protocol::HEADER_DPOP)
-        .and_then(|v| v.to_str().ok());
-    let dpop_proof =
-        match validate_dpop_if_present(&state, dpop_header, "POST", "/oauth/par", arrival).await {
-            Ok(proof) => proof,
-            Err(DpopError::UseNonce(nonce)) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    [(
-                        axum::http::header::HeaderName::from_static(protocol::HEADER_DPOP_NONCE),
-                        nonce.to_string(),
-                    )],
-                    Json(OAuthErrorResponse {
-                        error: OAuthErrorCode::UseDpopNonce.as_str().to_string(),
-                        error_description: Some(
-                            "Authorization server requires nonce in DPoP proof".to_string(),
-                        ),
-                        error_uri: None,
-                    }),
-                )
-                    .into_response();
-            }
-            Err(e @ DpopError::Database(_)) => {
-                return par_error_response(
-                    OAuthErrorCode::ServerError,
-                    presentation,
-                    &e.to_string(),
-                );
-            }
-            Err(e) => {
-                return par_error_response(
-                    OAuthErrorCode::InvalidDpopProof,
-                    presentation,
-                    &e.to_string(),
-                );
-            }
-        };
+    let dpop_proof = match validate_dpop_if_present(&state, &headers, "POST", "/oauth/par", arrival)
+        .await
+    {
+        Ok(proof) => proof,
+        Err(DpopError::UseNonce(nonce)) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                [(
+                    axum::http::header::HeaderName::from_static(protocol::HEADER_DPOP_NONCE),
+                    nonce.to_string(),
+                )],
+                Json(OAuthErrorResponse {
+                    error: OAuthErrorCode::UseDpopNonce.as_str().to_string(),
+                    error_description: Some(
+                        "Authorization server requires nonce in DPoP proof".to_string(),
+                    ),
+                    error_uri: None,
+                }),
+            )
+                .into_response();
+        }
+        Err(e @ DpopError::Database(_)) => {
+            return par_error_response(OAuthErrorCode::ServerError, presentation, &e.to_string());
+        }
+        Err(e) => {
+            return par_error_response(
+                OAuthErrorCode::InvalidDpopProof,
+                presentation,
+                &e.to_string(),
+            );
+        }
+    };
 
     // Extract and authenticate the client (required for PAR)
     let client_auth = match extract_client_auth(&headers, &params) {

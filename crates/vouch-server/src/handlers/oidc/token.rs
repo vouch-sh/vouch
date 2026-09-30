@@ -667,33 +667,23 @@ async fn handle_authorization_code_grant(
     // nonce value supplied upon receiving a use_dpop_nonce error". The proof
     // is checked before client authentication, which spends a
     // `private_key_jwt` assertion's `jti`, so that retry can reuse it.
-    let dpop_header = headers
-        .get(protocol::HEADER_DPOP)
-        .and_then(|v| v.to_str().ok());
-    let dpop_proof = match validate_dpop_if_present(
-        &state,
-        dpop_header,
-        "POST",
-        "/oauth/token",
-        arrival,
-    )
-    .await
-    {
-        Ok(proof) => proof,
-        Err(DpopError::UseNonce(nonce)) => {
-            return dpop_use_nonce_response(&nonce);
-        }
-        Err(e @ DpopError::Database(_)) => {
-            return ServiceError::oauth(OAuthErrorCode::ServerError, e.to_string())
-                .into_oauth_response()
-                .into_response();
-        }
-        Err(e) => {
-            return ServiceError::oauth(OAuthErrorCode::InvalidDpopProof, e.to_string())
-                .into_oauth_response()
-                .into_response();
-        }
-    };
+    let dpop_proof =
+        match validate_dpop_if_present(&state, &headers, "POST", "/oauth/token", arrival).await {
+            Ok(proof) => proof,
+            Err(DpopError::UseNonce(nonce)) => {
+                return dpop_use_nonce_response(&nonce);
+            }
+            Err(e @ DpopError::Database(_)) => {
+                return ServiceError::oauth(OAuthErrorCode::ServerError, e.to_string())
+                    .into_oauth_response()
+                    .into_response();
+            }
+            Err(e) => {
+                return ServiceError::oauth(OAuthErrorCode::InvalidDpopProof, e.to_string())
+                    .into_oauth_response()
+                    .into_response();
+            }
+        };
 
     // Extract client credentials from headers or body (including JWT assertion)
     let has_jwt_assertion = auth.client_assertion.is_some();
@@ -860,33 +850,23 @@ async fn handle_client_credentials_grant(
     // nonce value supplied upon receiving a use_dpop_nonce error". The proof
     // is checked before client authentication, which spends a
     // `private_key_jwt` assertion's `jti`, so that retry can reuse it.
-    let dpop_header = headers
-        .get(protocol::HEADER_DPOP)
-        .and_then(|v| v.to_str().ok());
-    let dpop_proof = match validate_dpop_if_present(
-        &state,
-        dpop_header,
-        "POST",
-        "/oauth/token",
-        arrival,
-    )
-    .await
-    {
-        Ok(proof) => proof,
-        Err(DpopError::UseNonce(nonce)) => {
-            return dpop_use_nonce_response(&nonce);
-        }
-        Err(e @ DpopError::Database(_)) => {
-            return ServiceError::oauth(OAuthErrorCode::ServerError, e.to_string())
-                .into_oauth_response()
-                .into_response();
-        }
-        Err(e) => {
-            return ServiceError::oauth(OAuthErrorCode::InvalidDpopProof, e.to_string())
-                .into_oauth_response()
-                .into_response();
-        }
-    };
+    let dpop_proof =
+        match validate_dpop_if_present(&state, &headers, "POST", "/oauth/token", arrival).await {
+            Ok(proof) => proof,
+            Err(DpopError::UseNonce(nonce)) => {
+                return dpop_use_nonce_response(&nonce);
+            }
+            Err(e @ DpopError::Database(_)) => {
+                return ServiceError::oauth(OAuthErrorCode::ServerError, e.to_string())
+                    .into_oauth_response()
+                    .into_response();
+            }
+            Err(e) => {
+                return ServiceError::oauth(OAuthErrorCode::InvalidDpopProof, e.to_string())
+                    .into_oauth_response()
+                    .into_response();
+            }
+        };
 
     // RFC 6749 Section 4.4.2: Client authentication is REQUIRED
     let client_auth = match extract_client_auth(&headers, &auth) {
@@ -1025,33 +1005,23 @@ async fn handle_device_code_grant(
     // nonce value supplied upon receiving a use_dpop_nonce error". The proof
     // is checked before client authentication, which spends a
     // `private_key_jwt` assertion's `jti`, so that retry can reuse it.
-    let dpop_header = headers
-        .get(protocol::HEADER_DPOP)
-        .and_then(|v| v.to_str().ok());
-    let dpop_proof = match validate_dpop_if_present(
-        &state,
-        dpop_header,
-        "POST",
-        "/oauth/token",
-        arrival,
-    )
-    .await
-    {
-        Ok(proof) => proof,
-        Err(DpopError::UseNonce(nonce)) => {
-            return dpop_use_nonce_response(&nonce);
-        }
-        Err(e @ DpopError::Database(_)) => {
-            return ServiceError::oauth(OAuthErrorCode::ServerError, e.to_string())
-                .into_oauth_response()
-                .into_response();
-        }
-        Err(e) => {
-            return ServiceError::oauth(OAuthErrorCode::InvalidDpopProof, e.to_string())
-                .into_oauth_response()
-                .into_response();
-        }
-    };
+    let dpop_proof =
+        match validate_dpop_if_present(&state, &headers, "POST", "/oauth/token", arrival).await {
+            Ok(proof) => proof,
+            Err(DpopError::UseNonce(nonce)) => {
+                return dpop_use_nonce_response(&nonce);
+            }
+            Err(e @ DpopError::Database(_)) => {
+                return ServiceError::oauth(OAuthErrorCode::ServerError, e.to_string())
+                    .into_oauth_response()
+                    .into_response();
+            }
+            Err(e) => {
+                return ServiceError::oauth(OAuthErrorCode::InvalidDpopProof, e.to_string())
+                    .into_oauth_response()
+                    .into_response();
+            }
+        };
 
     // RFC 8628 §3.4: "If the client was issued client credentials (or
     // assigned other authentication requirements), the client MUST
@@ -1189,33 +1159,23 @@ async fn handle_token_exchange_grant(
     // nonce value supplied upon receiving a use_dpop_nonce error". The proof
     // is checked before client authentication, which spends a
     // `private_key_jwt` assertion's `jti`, so that retry can reuse it.
-    let dpop_header = headers
-        .get(protocol::HEADER_DPOP)
-        .and_then(|v| v.to_str().ok());
-    let dpop_proof = match validate_dpop_if_present(
-        &state,
-        dpop_header,
-        "POST",
-        "/oauth/token",
-        arrival,
-    )
-    .await
-    {
-        Ok(proof) => proof,
-        Err(DpopError::UseNonce(nonce)) => {
-            return dpop_use_nonce_response(&nonce);
-        }
-        Err(e @ DpopError::Database(_)) => {
-            return ServiceError::oauth(OAuthErrorCode::ServerError, e.to_string())
-                .into_oauth_response()
-                .into_response();
-        }
-        Err(e) => {
-            return ServiceError::oauth(OAuthErrorCode::InvalidDpopProof, e.to_string())
-                .into_oauth_response()
-                .into_response();
-        }
-    };
+    let dpop_proof =
+        match validate_dpop_if_present(&state, &headers, "POST", "/oauth/token", arrival).await {
+            Ok(proof) => proof,
+            Err(DpopError::UseNonce(nonce)) => {
+                return dpop_use_nonce_response(&nonce);
+            }
+            Err(e @ DpopError::Database(_)) => {
+                return ServiceError::oauth(OAuthErrorCode::ServerError, e.to_string())
+                    .into_oauth_response()
+                    .into_response();
+            }
+            Err(e) => {
+                return ServiceError::oauth(OAuthErrorCode::InvalidDpopProof, e.to_string())
+                    .into_oauth_response()
+                    .into_response();
+            }
+        };
 
     let client_auth = match extract_client_auth(&headers, &auth) {
         Ok(auth) => auth,
@@ -1400,33 +1360,23 @@ async fn handle_fido2_assertion_grant(
     // nonce value supplied upon receiving a use_dpop_nonce error". The proof
     // is checked before client authentication, which spends a
     // `private_key_jwt` assertion's `jti`, so that retry can reuse it.
-    let dpop_header = headers
-        .get(protocol::HEADER_DPOP)
-        .and_then(|v| v.to_str().ok());
-    let dpop_proof = match validate_dpop_if_present(
-        &state,
-        dpop_header,
-        "POST",
-        "/oauth/token",
-        arrival,
-    )
-    .await
-    {
-        Ok(proof) => proof,
-        Err(DpopError::UseNonce(nonce)) => {
-            return dpop_use_nonce_response(&nonce);
-        }
-        Err(e @ DpopError::Database(_)) => {
-            return ServiceError::oauth(OAuthErrorCode::ServerError, e.to_string())
-                .into_oauth_response()
-                .into_response();
-        }
-        Err(e) => {
-            return ServiceError::oauth(OAuthErrorCode::InvalidDpopProof, e.to_string())
-                .into_oauth_response()
-                .into_response();
-        }
-    };
+    let dpop_proof =
+        match validate_dpop_if_present(&state, &headers, "POST", "/oauth/token", arrival).await {
+            Ok(proof) => proof,
+            Err(DpopError::UseNonce(nonce)) => {
+                return dpop_use_nonce_response(&nonce);
+            }
+            Err(e @ DpopError::Database(_)) => {
+                return ServiceError::oauth(OAuthErrorCode::ServerError, e.to_string())
+                    .into_oauth_response()
+                    .into_response();
+            }
+            Err(e) => {
+                return ServiceError::oauth(OAuthErrorCode::InvalidDpopProof, e.to_string())
+                    .into_oauth_response()
+                    .into_response();
+            }
+        };
 
     // Extract and authenticate client via private_key_jwt
     let client_auth = match extract_client_auth(&headers, &auth) {

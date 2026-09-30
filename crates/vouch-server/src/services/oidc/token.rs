@@ -1252,23 +1252,24 @@ pub(crate) async fn authenticate_client_mtls(
 ///
 /// # Arguments
 /// * `state` - Application state
-/// * `dpop_header` - The DPoP header value (if present)
+/// * `headers` - The request headers, read for the `DPoP` proof
 /// * `method` - HTTP method
 /// * `uri` - Request URI
 ///
 /// # Returns
 /// - `Ok(Some(proof))` if DPoP header was present and valid
 /// - `Ok(None)` if DPoP header was not present (use Bearer token)
+/// - `Err(DpopError::MultipleProofs)` if more than one DPoP header was sent
 /// - `Err(DpopError::UseNonce(nonce))` if the server requires a nonce
 /// - `Err(...)` if DPoP header was present but invalid
 pub async fn validate_dpop_if_present(
     state: &AppState,
-    dpop_header: Option<&str>,
+    headers: &axum::http::HeaderMap,
     method: &str,
     uri: &str,
     arrival: ArrivalTime,
 ) -> Result<Option<ValidatedDpopProof>, DpopError> {
-    let dpop_proof = match dpop_header {
+    let dpop_proof = match dpop::single_dpop_header(headers)? {
         Some(proof) => proof,
         None => return Ok(None), // No DPoP header, use Bearer token
     };

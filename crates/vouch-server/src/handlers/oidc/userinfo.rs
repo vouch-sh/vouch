@@ -125,32 +125,10 @@ pub(crate) async fn userinfo(
 
     // RFC 9449 Section 7.1: If DPoP scheme is used, validate the DPoP proof at resource endpoint
     if is_dpop_scheme {
-        // RFC 9449 Section 7.1: There MUST NOT be more than one DPoP header.
-        if headers.get_all(protocol::HEADER_DPOP).iter().count() > 1 {
-            return oauth_error(
-                StatusCode::BAD_REQUEST,
-                OAuthErrorCode::InvalidDpopProof,
-                "Request must contain exactly one DPoP header",
-            );
-        }
-        let dpop_header = match headers
-            .get(protocol::HEADER_DPOP)
-            .and_then(|v| v.to_str().ok())
-        {
-            Some(h) => h,
-            None => {
-                return oauth_error(
-                    StatusCode::BAD_REQUEST,
-                    OAuthErrorCode::InvalidDpopProof,
-                    "DPoP scheme requires DPoP proof header",
-                );
-            }
-        };
-
         let full_uri = format!("{}/oauth/userinfo", state.config().base_url);
         match dpop::validate_dpop_at_resource(
             &token,
-            dpop_header,
+            &headers,
             method.as_str(),
             &full_uri,
             &state.store,
@@ -218,6 +196,20 @@ pub(crate) async fn userinfo(
                     }),
                 )
                     .into_response();
+            }
+            Err(DpopError::MissingProof) => {
+                return oauth_error(
+                    StatusCode::BAD_REQUEST,
+                    OAuthErrorCode::InvalidDpopProof,
+                    "DPoP scheme requires DPoP proof header",
+                );
+            }
+            Err(e @ DpopError::MultipleProofs) => {
+                return oauth_error(
+                    StatusCode::BAD_REQUEST,
+                    OAuthErrorCode::InvalidDpopProof,
+                    &e.to_string(),
+                );
             }
             Err(e @ DpopError::Database(_)) => {
                 return oauth_error(
