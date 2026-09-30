@@ -118,7 +118,7 @@ pub(crate) async fn create_scim_token(
         &jar,
         method.as_str(),
         uri.path(),
-        client_cert.0.as_ref(),
+        &client_cert,
         arrival,
     )
     .await?;

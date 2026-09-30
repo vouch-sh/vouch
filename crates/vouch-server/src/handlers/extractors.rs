@@ -454,7 +454,7 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for OrgAdmin {
             &jar,
             parts.method.as_str(),
             uri.path(),
-            client_cert.0.as_ref(),
+            &client_cert,
             arrival,
         )
         .await?;

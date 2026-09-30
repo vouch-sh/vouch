@@ -20,7 +20,7 @@ use std::sync::Arc;
 use vouch_common::ResourceLabel;
 
 use crate::handlers::ValidPath;
-use crate::handlers::extractors::{AdminPage, OrgAdmin};
+use crate::handlers::extractors::{AdminPage, OptionalClientCert, OrgAdmin};
 use crate::handlers::session::{AuthContext, extract_org_admin};
 
 const REDIRECT_BASE: &str = "/admin/policies";
@@ -167,12 +167,17 @@ pub(crate) async fn admin_policies_page(
 }
 
 /// POST /admin/policies/preconfigured/{slug}/toggle
+#[expect(
+    clippy::too_many_arguments,
+    reason = "axum extractors, one per request input; they cannot be bundled"
+)]
 pub(crate) async fn toggle_preconfigured_policy(
     method: Method,
     uri: OriginalUri,
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     jar: CookieJar,
+    client_cert: OptionalClientCert,
     ValidPath(slug): ValidPath<String>,
     arrival: ArrivalTime,
 ) -> Result<Response, ServiceError> {
@@ -190,7 +195,7 @@ pub(crate) async fn toggle_preconfigured_policy(
         &jar,
         method.as_str(),
         uri.path(),
-        None,
+        &client_cert,
         arrival,
     )
     .await?;
@@ -352,6 +357,10 @@ fn verified_builder_spec(form: &CustomPolicyForm) -> Option<&str> {
 }
 
 /// POST /admin/policies/custom — Create a new custom policy.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "axum extractors, one per request input; they cannot be bundled"
+)]
 pub(crate) async fn create_custom_policy(
     arrival: ArrivalTime,
     method: Method,
@@ -359,6 +368,7 @@ pub(crate) async fn create_custom_policy(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     jar: CookieJar,
+    client_cert: OptionalClientCert,
     axum::Form(form): axum::Form<CustomPolicyForm>,
 ) -> Result<Response, ServiceError> {
     // Validate inputs before auth
@@ -398,7 +408,7 @@ pub(crate) async fn create_custom_policy(
         &jar,
         method.as_str(),
         uri.path(),
-        None,
+        &client_cert,
         arrival,
     )
     .await?;
@@ -470,6 +480,7 @@ pub(crate) async fn update_custom_policy(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     jar: CookieJar,
+    client_cert: OptionalClientCert,
     ValidPath(id): ValidPath<String>,
     axum::Form(form): axum::Form<CustomPolicyForm>,
 ) -> Result<Response, ServiceError> {
@@ -507,7 +518,7 @@ pub(crate) async fn update_custom_policy(
         &jar,
         method.as_str(),
         uri.path(),
-        None,
+        &client_cert,
         arrival,
     )
     .await?;

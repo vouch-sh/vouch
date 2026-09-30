@@ -24,7 +24,7 @@ use super::{
     requested_scope,
 };
 use crate::filters;
-use crate::handlers::extractors::{AdminPage, OrgAdmin};
+use crate::handlers::extractors::{AdminPage, OptionalClientCert, OrgAdmin};
 use crate::handlers::session::{AuthContext, extract_org_admin, get_resource_auth_context};
 use crate::handlers::{ValidPath, ValidUuid};
 
@@ -154,6 +154,10 @@ pub(crate) async fn admin_scim_tokens_page(
 }
 
 /// POST /admin/scim-tokens — Create a new SCIM token (UI form).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "axum extractors, one per request input; they cannot be bundled"
+)]
 pub(crate) async fn admin_create_scim_token(
     arrival: ArrivalTime,
     method: Method,
@@ -161,6 +165,7 @@ pub(crate) async fn admin_create_scim_token(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     jar: CookieJar,
+    client_cert: OptionalClientCert,
     axum::Form(form): axum::Form<CreateScimTokenForm>,
 ) -> Result<Response, ServiceError> {
     // Validate inputs before auth to fail fast on obviously bad requests
@@ -186,7 +191,7 @@ pub(crate) async fn admin_create_scim_token(
         &jar,
         method.as_str(),
         uri.path(),
-        None,
+        &client_cert,
         arrival,
     )
     .await?;
