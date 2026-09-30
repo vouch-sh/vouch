@@ -1755,10 +1755,11 @@ async fn test_rfc9470_max_age_zero_resume_rejects_code_grant_row_from_same_secon
         &format!("__Host-vouch_session={access_token}"),
     )
     .await;
+    // A code-grant token was issued to the client, not to this deployment,
+    // so it is not a browser session and the cookie counts as signed out.
     assert!(
-        location.contains("error=login_required"),
-        "a ceremony earlier in the pending's own second must not satisfy max_age=0 through \
-         a later code-grant row: {location}"
+        location.starts_with("/login?pending_auth="),
+        "a code-grant token in the session cookie must send the user to sign in: {location}"
     );
     assert!(!location.contains("code="), "no code: {location}");
 }
@@ -1811,10 +1812,20 @@ async fn test_rfc9470_max_age_zero_resume_accepts_ceremony_after_pending_in_same
 
         let location =
             resume_pending(&app, &pending_id, &format!("__Host-vouch_session={token}")).await;
-        assert!(
-            location.contains("code=") && !location.contains("error="),
-            "{label}: a ceremony after the pending must satisfy max_age=0: {location}"
-        );
+        if label == "direct" {
+            assert!(
+                location.contains("code=") && !location.contains("error="),
+                "a ceremony after the pending must satisfy max_age=0: {location}"
+            );
+        } else {
+            // The code-grant row carries the fresh instant, but its token was
+            // issued to the client, so the cookie is not a browser session.
+            assert!(
+                location.starts_with("/login?pending_auth=") && !location.contains("code="),
+                "a code-grant token in the session cookie must send the user to sign in: \
+                 {location}"
+            );
+        }
     }
 }
 
@@ -1979,9 +1990,8 @@ async fn test_rfc9470_max_age_zero_resume_rejects_code_grant_row_with_old_auth_t
     )
     .await;
     assert!(
-        location.contains("error=login_required"),
-        "an hour-old authentication must not satisfy max_age=0 through a code-grant row: \
-         {location}"
+        location.starts_with("/login?pending_auth=") && !location.contains("code="),
+        "a code-grant token in the session cookie must send the user to sign in: {location}"
     );
 }
 

@@ -40,6 +40,7 @@ use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use crate::services::oidc::OAuthScope;
 use crate::services::oidc::fapi::{self, SenderConstraints};
 use crate::services::oidc::jwt_bearer::client_auth::JwtAuthSucceeded;
+use crate::services::oidc::resource;
 use crate::services::oidc::token::{ClientSecretVerification, MtlsCertVerification};
 use vouch_common::protocol;
 
@@ -754,6 +755,74 @@ pub(crate) struct AccessTokenClaims {
     /// RFC 9068 Section 2.2: Authentication context class reference.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acr: Option<String>,
+}
+
+impl AccessTokenClaims {
+    /// Whether the token was narrowed to a resource (RFC 8707 `resource`, or
+    /// an RFC 8693 `audience`) instead of carrying its client's default
+    /// audience, `aud == client_id`, which every Vouch resource accepts.
+    pub(crate) fn is_narrowed(&self) -> bool {
+        self.aud != self.client_id
+    }
+
+    /// Whether this deployment's resource at `path` may accept the token
+    /// (RFC 8725 §3.9): a default-audience token everywhere, a narrowed one
+    /// only where its audience covers the path.
+    pub(crate) fn audience_covers(&self, base_url: &str, path: &str) -> bool {
+        !self.is_narrowed() || resource::audience_covers_resource(&self.aud, base_url, path)
+    }
+
+    /// Whether the token is a Vouch browser session: issued to this
+    /// deployment itself (`client_id == base_url`, as browser sign-in,
+    /// enrollment, and certification mint it), with an audience covering the
+    /// whole deployment, and unbound, since a cookie carries no proof of
+    /// possession. Only such a token may stand in the session cookie; an
+    /// access token issued to another client, or narrowed to a single
+    /// resource, is not a sign-in to Vouch.
+    pub(crate) fn is_browser_session(&self, base_url: &str) -> bool {
+        self.client_id == base_url && self.audience_covers(base_url, "") && self.cnf.is_none()
+    }
+
+    /// The audience of a token exchanged from this subject token (RFC 8693)
+    /// for `client_id`, given the `requested` one.
+    ///
+    /// A default-audience subject may be re-scoped to any audience, falling
+    /// back to the client's default. A narrowed subject keeps its narrowing,
+    /// as a bound subject keeps its binding: without a request the issued
+    /// token carries the subject's audience, and a requested audience that
+    /// Vouch itself would accept, the client's default or a resource on
+    /// this deployment, is refused unless it is the subject's own. Otherwise
+    /// exchange would turn a token that "can only be spent at the external
+    /// service it names" back into one Vouch's endpoints accept.
+    ///
+    /// # Errors
+    ///
+    /// `invalid_request` (RFC 8693 §2.2.2: a subject token "unacceptable
+    /// based on policy") when the requested audience would widen a narrowed
+    /// subject.
+    pub(crate) fn exchanged_audience<'a>(
+        &'a self,
+        requested: Option<&'a str>,
+        client_id: &str,
+        base_url: &str,
+    ) -> ServiceResult<Option<&'a str>> {
+        if !self.is_narrowed() {
+            return Ok(requested);
+        }
+        let Some(requested) = requested else {
+            return Ok(Some(self.aud.as_str()));
+        };
+        if requested != self.aud
+            && (requested == client_id || resource::audience_names_deployment(requested, base_url))
+        {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidRequest,
+                "The subject token is narrowed to another resource; \
+                 the exchanged token cannot name this server or its client",
+            ));
+        }
+        Ok(Some(requested))
+    }
 }
 
 /// Parameters for creating an OAuth access token (RFC 9068).

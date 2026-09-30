@@ -61,8 +61,8 @@ async fn test_cookie_session_dpop_bound_token_rejected() {
 
     assert_eq!(status, StatusCode::UNAUTHORIZED, "body: {body}");
     assert!(
-        body.contains("Sender-constrained"),
-        "Error should mention sender-constrained tokens, got: {body}"
+        body.contains("does not hold a browser session"),
+        "a bound token is not a browser session, got: {body}"
     );
 }
 

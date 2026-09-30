@@ -14,6 +14,7 @@ use crate::error::OAuthErrorCode;
 use crate::error::OAuthErrorResponse;
 use crate::handlers::extractors::OptionalClientCert;
 use crate::services::auth::decode_token;
+use crate::services::oidc::claims::PossessionError;
 use crate::services::oidc::dpop;
 use crate::services::oidc::token::validate_session_token;
 use crate::services::oidc::{DpopError, OAuthScope};
@@ -145,9 +146,9 @@ pub(crate) async fn userinfo(
                 // This ensures the DPoP proof was made with the same key that was
                 // bound to the token at issuance time.
                 //
-                // RFC 9449 Section 7.1: If DPoP authorization scheme is used,
-                // the token MUST be DPoP-bound (have a cnf.jkt claim). Reject
-                // non-DPoP-bound tokens presented with the DPoP scheme.
+                // RFC 9449 §7.1 covers only DPoP-bound tokens and is silent on
+                // an unbound token under the DPoP scheme; it is refused here as
+                // on `/v1/*`, so the scheme always means a checked proof.
                 // Decode the access token to extract DPoP binding (cnf claim).
                 // Note: audience is NOT validated here because the userinfo endpoint
                 // receives tokens from any client (aud = client_id per RFC 9068).
@@ -178,7 +179,7 @@ pub(crate) async fn userinfo(
                         return oauth_error(
                             StatusCode::UNAUTHORIZED,
                             OAuthErrorCode::InvalidDpopProof,
-                            "DPoP scheme used but token is not DPoP-bound",
+                            PossessionError::NotDpopBound.as_str(),
                         );
                     }
                 }

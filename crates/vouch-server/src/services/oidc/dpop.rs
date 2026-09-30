@@ -23,7 +23,10 @@ use crate::crypto::alg::JwsAlgorithm;
 use crate::crypto::jwk::Jwk;
 use crate::crypto::jwt::{HeaderAlg, Jws, JwsError};
 use crate::db::{self, store::DocumentStore};
+use crate::error::{OAuthErrorCode, ServiceError};
 use crate::services::RecencyWindow;
+use crate::services::oidc::claims::PossessionError;
+use axum::http::StatusCode;
 
 /// Nonce validity in seconds (5 minutes), before the JTI-retention cap below.
 const NONCE_VALIDITY_SECONDS: i64 = 300;
@@ -145,6 +148,45 @@ pub enum DpopError {
     /// as `InvalidFormat`, which surfaced as HTTP 400 `invalid_dpop_proof`
     /// and prevented clients from retrying transient DB failures.
     Database(String),
+}
+
+impl DpopError {
+    /// The response a resource server gives for a proof that failed
+    /// validation: `401 invalid_token`, except a backend failure (`500
+    /// server_error`) and a nonce demand, which a resource server answers
+    /// with a 401 `use_dpop_nonce` and a fresh `DPoP-Nonce` header (RFC 9449
+    /// §9) so the client can retry once.
+    pub(crate) fn at_resource(self) -> ServiceError {
+        match self {
+            Self::Database(ref e) => {
+                tracing::error!("DPoP backend failure: {e}");
+                ServiceError::api(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "server_error",
+                    "DPoP validation backend error",
+                )
+            }
+            Self::UseNonce(nonce) => ServiceError::api_with_header(
+                StatusCode::UNAUTHORIZED,
+                OAuthErrorCode::UseDpopNonce.as_str(),
+                "Authorization server requires nonce in DPoP proof",
+                (protocol::HEADER_DPOP_NONCE, nonce.as_str()),
+            ),
+            Self::MissingProof => ServiceError::api(
+                StatusCode::UNAUTHORIZED,
+                "invalid_token",
+                PossessionError::MissingDpopProof.as_str(),
+            ),
+            e => {
+                tracing::debug!("DPoP validation failed: {e}");
+                ServiceError::api(
+                    StatusCode::UNAUTHORIZED,
+                    "invalid_token",
+                    "Invalid DPoP proof",
+                )
+            }
+        }
+    }
 }
 
 impl std::fmt::Display for DpopError {
@@ -537,7 +579,7 @@ impl NoncePolicy {
     reason = "RFC 9449 proof validation inputs: proof, method, URIs, store, policy, clock"
 )]
 async fn validate_dpop_common(
-    proof: &str,
+    proof: DpopProofHeader<'_>,
     expected_method: &str,
     accepted_uris: &[String],
     store: &DocumentStore,
@@ -547,7 +589,7 @@ async fn validate_dpop_common(
     arrival: ArrivalTime,
 ) -> Result<ValidatedDpopProof, DpopError> {
     // Parse header, verify signature, and extract claims in a single pass
-    let (header, claims) = parse_and_verify_dpop_proof(proof)?;
+    let (header, claims) = parse_and_verify_dpop_proof(proof.0)?;
 
     // The JTI retention window and the proof-freshness window are two halves
     // of one single-use guarantee, so they must be measured from one instant.
@@ -660,21 +702,37 @@ async fn validate_dpop_common(
 
 /// The request's `DPoP` header field value, or `None` when there is none.
 ///
+/// The value of a request's single `DPoP` header field: the proof JWT,
+/// not yet validated.
+///
 /// RFC 9449 §4.3 check 1: "There is not more than one DPoP HTTP request
-/// header field." A value that is not visible ASCII is not a proof JWT and
-/// fails as a malformed proof, not as an absent one.
-pub fn single_dpop_header(headers: &HeaderMap) -> Result<Option<&str>, DpopError> {
-    let mut values = headers.get_all(protocol::HEADER_DPOP).iter();
-    let Some(value) = values.next() else {
-        return Ok(None);
-    };
-    if values.next().is_some() {
-        return Err(DpopError::MultipleProofs);
+/// header field." [`Self::from_headers`] is the only constructor, so every
+/// proof that reaches validation came from exactly one field. A value that
+/// is not visible ASCII is not a proof JWT and fails as a malformed proof,
+/// not as an absent one.
+#[derive(Debug, Clone, Copy)]
+pub struct DpopProofHeader<'a>(&'a str);
+
+impl<'a> DpopProofHeader<'a> {
+    /// The request's DPoP proof, or `None` when it sent no `DPoP` header.
+    ///
+    /// # Errors
+    ///
+    /// [`DpopError::MultipleProofs`] for more than one field, and
+    /// [`DpopError::InvalidFormat`] for a value that is not visible ASCII.
+    pub fn from_headers(headers: &'a HeaderMap) -> Result<Option<Self>, DpopError> {
+        let mut values = headers.get_all(protocol::HEADER_DPOP).iter();
+        let Some(value) = values.next() else {
+            return Ok(None);
+        };
+        if values.next().is_some() {
+            return Err(DpopError::MultipleProofs);
+        }
+        value
+            .to_str()
+            .map(|proof| Some(Self(proof)))
+            .map_err(|_| DpopError::InvalidFormat("DPoP header is not visible ASCII".to_string()))
     }
-    value
-        .to_str()
-        .map(Some)
-        .map_err(|_| DpopError::InvalidFormat("DPoP header is not visible ASCII".to_string()))
 }
 
 /// Fully validate a DPoP proof, including signature verification.
@@ -684,7 +742,7 @@ pub fn single_dpop_header(headers: &HeaderMap) -> Result<Option<&str>, DpopError
 ///
 /// Returns the validated proof information including the JWK thumbprint.
 pub async fn validate_dpop_proof(
-    proof: &str,
+    proof: DpopProofHeader<'_>,
     expected_method: &str,
     accepted_uris: &[String],
     store: &DocumentStore,
@@ -729,7 +787,7 @@ pub async fn validate_dpop_at_resource(
     config_max_age: i64,
     arrival: ArrivalTime,
 ) -> Result<ValidatedDpopProof, DpopError> {
-    let proof = single_dpop_header(headers)?.ok_or(DpopError::MissingProof)?;
+    let proof = DpopProofHeader::from_headers(headers)?.ok_or(DpopError::MissingProof)?;
     let expected_ath = compute_access_token_hash(access_token);
     let accepted_uris = vec![uri.to_string()];
     validate_dpop_common(
@@ -780,23 +838,29 @@ mod tests {
     }
 
     #[test]
-    fn single_dpop_header_absent_is_none() {
-        assert!(matches!(single_dpop_header(&dpop_headers(&[])), Ok(None)));
+    fn dpop_proof_header_absent_is_none() {
+        assert!(matches!(
+            DpopProofHeader::from_headers(&dpop_headers(&[])),
+            Ok(None)
+        ));
     }
 
     #[test]
-    fn single_dpop_header_returns_the_one_value() {
+    fn dpop_proof_header_returns_the_one_value() {
         let headers = dpop_headers(&[b"a.b.c"]);
-        assert!(matches!(single_dpop_header(&headers), Ok(Some("a.b.c"))));
+        assert!(matches!(
+            DpopProofHeader::from_headers(&headers),
+            Ok(Some(DpopProofHeader("a.b.c")))
+        ));
     }
 
     // RFC 9449 §4.3: "the receiving server MUST ensure the following: 1. There
     // is not more than one DPoP HTTP request header field."
     #[test]
-    fn single_dpop_header_rejects_two_fields() {
+    fn dpop_proof_header_rejects_two_fields() {
         let headers = dpop_headers(&[b"a.b.c", b"not-a-jwt"]);
         assert!(matches!(
-            single_dpop_header(&headers),
+            DpopProofHeader::from_headers(&headers),
             Err(DpopError::MultipleProofs)
         ));
     }
@@ -804,10 +868,10 @@ mod tests {
     // A non-ASCII value must fail as a malformed proof, not read as absent:
     // absent falls back to Bearer at the token endpoint.
     #[test]
-    fn single_dpop_header_rejects_non_ascii_value() {
+    fn dpop_proof_header_rejects_non_ascii_value() {
         let headers = dpop_headers(&[b"a.b.\xff"]);
         assert!(matches!(
-            single_dpop_header(&headers),
+            DpopProofHeader::from_headers(&headers),
             Err(DpopError::InvalidFormat(_))
         ));
     }

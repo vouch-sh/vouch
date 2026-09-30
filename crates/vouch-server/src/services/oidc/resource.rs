@@ -80,6 +80,17 @@ fn trim_trailing_slash(path: &str) -> &str {
     path.strip_suffix('/').unwrap_or(path)
 }
 
+/// True when `aud` is an absolute URI on the deployment's origin (scheme,
+/// host, and port of `base_url`): an audience that Vouch's own resource
+/// endpoints may accept, as opposed to one naming an external resource
+/// server or a logical audience such as `kubernetes`.
+pub(crate) fn audience_names_deployment(aud: &str, base_url: &str) -> bool {
+    match (url::Url::parse(aud), url::Url::parse(base_url)) {
+        (Ok(aud_url), Ok(base)) => aud_url.origin() == base.origin(),
+        _ => false,
+    }
+}
+
 /// True when a resource-narrowed `aud` authorizes a request to `request_path`
 /// on the deployment identified by `base_url` (RFC 8707 / RFC 8725 §3.9).
 ///
@@ -118,7 +129,7 @@ pub(crate) fn audience_covers_resource(aud: &str, base_url: &str, request_path: 
     // Scheme + host + port must match the deployment. `Url::origin` handles
     // host case-insensitivity and default-port elision; opaque origins
     // (non-special schemes such as `urn:`) never compare equal.
-    if aud_url.origin() != base.origin() {
+    if !audience_names_deployment(aud, base_url) {
         return false;
     }
 

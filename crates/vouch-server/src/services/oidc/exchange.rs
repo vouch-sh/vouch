@@ -13,8 +13,8 @@ use crate::infra::metrics;
 use crate::redact_email;
 use crate::services::auth::ValidatedSession;
 use crate::services::auth::{
-    ActorClaim, CreateOAuthTokenParams, MAX_DELEGATION_DEPTH, TokenBinding, TokenIssuanceProof,
-    create_oauth_access_token, decode_token,
+    ActorClaim, CreateOAuthTokenParams, DecodedToken, MAX_DELEGATION_DEPTH, TokenBinding,
+    TokenIssuanceProof, create_oauth_access_token, decode_token,
 };
 use crate::services::oidc::ScopeSet;
 use crate::services::oidc::authorization_details::AuthorizationDetails;
@@ -594,7 +594,9 @@ pub(crate) async fn exchange_token(
     );
 
     // RFC 9068: Audience is the explicit audience param (target resource server),
-    // falling back to client_id if no audience specified.
+    // falling back to client_id if no audience specified. The ID-token fork
+    // below federates with external relying parties and takes the requested
+    // audience as is; the access-token fork keeps a narrowed subject narrowed.
     let audience = params.audience;
 
     // Get authenticator_id from the session record (server-side, not from JWT)
@@ -644,6 +646,12 @@ pub(crate) async fn exchange_token(
         )
         .await;
     }
+
+    // A narrowed subject token keeps its narrowing, as a bound one keeps its
+    // binding, so exchange cannot widen it back to a token Vouch accepts.
+    let DecodedToken::AccessToken(ref subject_claims) = subject_decoded;
+    let audience =
+        subject_claims.exchanged_audience(audience, &params.client.client_id, &config.base_url)?;
 
     // RFC 9396: Inherit authorization_details from subject token session.
     let inherited_ad_value = subject_session.authorization_details.as_ref();
@@ -765,7 +773,7 @@ pub(crate) async fn exchange_token(
             ),
             &db::TokenExchangeDetails {
                 client_id: params.client.client_id.clone(),
-                audience: params.audience.map(String::from),
+                audience: audience.map(String::from),
                 scope: scope_string.clone(),
                 issued_token_type: TokenType::AccessToken.as_urn().to_string(),
                 token_expires_at: Some(expires_at.to_string()),
@@ -776,7 +784,7 @@ pub(crate) async fn exchange_token(
     tracing::info!(
         "Token exchanged for user {} (audience: {:?})",
         redact_email(subject_email),
-        params.audience
+        audience
     );
 
     Ok(TokenExchangeResult {

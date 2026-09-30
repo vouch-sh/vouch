@@ -121,6 +121,9 @@ pub(crate) enum PossessionError {
     /// The token is certificate-bound and the requesting client registered
     /// for DPoP-bound tokens only.
     DpopRequired,
+    /// The request used the `DPoP` authorization scheme for a token that is
+    /// not DPoP-bound.
+    NotDpopBound,
 }
 
 impl PossessionError {
@@ -137,6 +140,7 @@ impl PossessionError {
             Self::DpopRequired => {
                 "client requires DPoP-bound access tokens, but the token is certificate-bound"
             }
+            Self::NotDpopBound => "DPoP scheme used but token is not DPoP-bound",
         }
     }
 
