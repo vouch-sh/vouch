@@ -13,6 +13,8 @@ use anyhow::{Context, Result};
 use secrecy::ExposeSecret;
 use secrecy::SecretString;
 #[cfg(unix)]
+use vouch_agent::protocol::StoreMode;
+#[cfg(unix)]
 use vouch_agent::{AgentClient, AgentError};
 use vouch_cli::fapi::ClientKey;
 use vouch_cli::tr;
@@ -145,8 +147,10 @@ pub(crate) async fn resolve_token() -> Result<SecretString> {
 /// The agent keeps no session across a restart and never reads the token
 /// itself. When it is running without one, check the stored token with
 /// `/v1/auth/status`, signed with this CLI's DPoP key (RFC 9449 §7.1), and
-/// store the session in the agent if the server still accepts it.
-/// Best-effort: a failure leaves the agent empty, and the caller uses the
+/// store the session in the agent if the server still accepts it and the
+/// agent still holds no live session: a `vouch login` that finishes during
+/// the check stores a newer session, which this one must not overwrite.
+/// Best-effort: a failure leaves the agent as it was, and the caller uses the
 /// config session regardless.
 #[cfg(unix)]
 async fn restore_agent_session(session: &ResolvedSession) {
@@ -188,28 +192,36 @@ async fn restore_agent_session(session: &ResolvedSession) {
         &email,
         &expires_at.to_string(),
         session.server_url.as_str(),
+        StoreMode::IfNoLiveSession,
     )
     .await;
 }
 
 /// Store session in the agent (if running).
 ///
-/// Returns `true` if the session was successfully stored, `false` otherwise.
-/// This is a best-effort operation — agent not running is not an error.
+/// Returns `true` if the agent stored the session, `false` otherwise: with
+/// [`StoreMode::IfNoLiveSession`] the agent keeps a live session it already
+/// holds. This is a best-effort operation — agent not running is not an error.
 #[cfg(unix)]
 pub(crate) async fn store_session_in_agent(
     token: &str,
     email: &str,
     expires_at: &str,
     server: &str,
+    mode: StoreMode,
 ) -> bool {
     match AgentClient::connect().await {
         Ok(mut agent) => {
             match agent
-                .store_session(token, email, expires_at, Some(server))
+                .store_session(token, email, expires_at, Some(server), mode)
                 .await
             {
-                Ok(()) => true,
+                Ok(stored) => {
+                    if !stored {
+                        tracing::debug!("The agent kept its live session");
+                    }
+                    stored
+                }
                 // The agent answered and refused, e.g. an insecure server URL
                 // it was not configured to allow. Surface it: the session is
                 // then served from the config file, not the agent.
@@ -280,7 +292,14 @@ pub(crate) async fn store_and_finalize(
     let agent_future = async {
         #[cfg(unix)]
         {
-            store_session_in_agent(token, email, expires_at_str, server.as_str()).await
+            store_session_in_agent(
+                token,
+                email,
+                expires_at_str,
+                server.as_str(),
+                StoreMode::Replace,
+            )
+            .await
         }
         #[cfg(not(unix))]
         {
@@ -455,6 +474,10 @@ mod tests {
         assert!(is_url_refusal(&result));
     }
 
+    /// The account of a login that completes during a restore check.
+    #[cfg(all(unix, feature = "test-utils"))]
+    const LOGIN_EMAIL: &str = "login@example.com";
+
     /// What a fake server saw on each `/v1/auth/status` request: the
     /// `Authorization` value and whether a `DPoP` header was present.
     #[cfg(all(unix, feature = "test-utils"))]
@@ -462,8 +485,11 @@ mod tests {
 
     /// Resolve a session stored only in `config.json`, against a fake server
     /// that answers `/v1/auth/status` with `status`, with or without an empty
-    /// agent running. Returns the agent's session afterwards (`None` when it
-    /// holds none or is not running) and the requests the server received.
+    /// agent running. With `login_during_check`, the server stores
+    /// [`LOGIN_EMAIL`]'s session in the agent before it answers, as a
+    /// `vouch login` finishing during the check would. Returns the agent's
+    /// session afterwards (`None` when it holds none or is not running) and
+    /// the requests the server received.
     #[cfg(all(unix, feature = "test-utils"))]
     #[expect(
         unsafe_code,
@@ -472,6 +498,7 @@ mod tests {
     async fn restore_from_config(
         status: serde_json::Value,
         agent_running: bool,
+        login_during_check: bool,
     ) -> (Option<vouch_agent::SessionInfo>, Vec<(String, bool)>) {
         use std::sync::Arc;
         use tokio::net::{TcpListener, UnixListener};
@@ -497,13 +524,17 @@ mod tests {
             std::env::remove_var("VOUCH_ALLOW_INSECURE");
         }
 
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server = format!("http://{}", listener.local_addr().unwrap());
         let seen = SeenRequests::default();
         let seen_by_route = Arc::clone(&seen);
+        let server_for_route = server.clone();
         let router = axum::Router::new().route(
             "/v1/auth/status",
             axum::routing::get(move |headers: axum::http::HeaderMap| {
                 let seen = Arc::clone(&seen_by_route);
                 let status = status.clone();
+                let server = server_for_route.clone();
                 async move {
                     let auth = headers
                         .get("authorization")
@@ -513,12 +544,29 @@ mod tests {
                     seen.lock()
                         .unwrap()
                         .push((auth, headers.contains_key("dpop")));
+                    if login_during_check {
+                        let expires_at = jiff::Timestamp::now()
+                            .checked_add(jiff::SignedDuration::from_secs(3600))
+                            .unwrap()
+                            .to_string();
+                        let stored = AgentClient::connect()
+                            .await
+                            .unwrap()
+                            .store_session(
+                                "login-token",
+                                LOGIN_EMAIL,
+                                &expires_at,
+                                Some(&server),
+                                StoreMode::Replace,
+                            )
+                            .await
+                            .unwrap();
+                        assert!(stored, "the login's session is stored");
+                    }
                     axum::Json(status)
                 }
             }),
         );
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let server = format!("http://{}", listener.local_addr().unwrap());
         let http_task = tokio::spawn(async move { axum::serve(listener, router).await });
 
         std::fs::create_dir_all(dir.path().join("config").join("vouch")).unwrap();
@@ -595,6 +643,7 @@ mod tests {
                 "device_name": null,
             }),
             true,
+            false,
         )
         .await;
 
@@ -610,6 +659,28 @@ mod tests {
         assert!(session.expires_in_seconds > 0);
     }
 
+    /// A `vouch login` that stores its session while the stored token is
+    /// being checked keeps it: the older config-file session is not stored
+    /// over it.
+    #[cfg(all(unix, feature = "test-utils"))]
+    #[tokio::test]
+    async fn restore_keeps_a_session_stored_during_the_check() {
+        let (agent_session, seen) = restore_from_config(
+            serde_json::json!({
+                "authenticated": true,
+                "email": "restored@example.com",
+                "expires_in_seconds": 3600,
+                "device_name": null,
+            }),
+            true,
+            true,
+        )
+        .await;
+
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(agent_session.unwrap().user_email, LOGIN_EMAIL);
+    }
+
     /// A token the server no longer accepts is not handed to the agent.
     #[cfg(all(unix, feature = "test-utils"))]
     #[tokio::test]
@@ -622,6 +693,7 @@ mod tests {
                 "device_name": null,
             }),
             true,
+            false,
         )
         .await;
 
@@ -641,6 +713,7 @@ mod tests {
                 "expires_in_seconds": 3600,
                 "device_name": null,
             }),
+            false,
             false,
         )
         .await;

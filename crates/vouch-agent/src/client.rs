@@ -4,7 +4,7 @@
 use crate::error::{AgentError, Result};
 use crate::protocol::{
     CACHE_MISS, CacheCredentialParams, GetCachedCredentialParams, JSONRPC_VERSION, Method,
-    NOT_AUTHENTICATED, Request, Response, RpcError, SESSION_EXPIRED, StoreSessionParams,
+    NOT_AUTHENTICATED, Request, Response, RpcError, SESSION_EXPIRED, StoreMode, StoreSessionParams,
     StoreSshCredentialsParams,
 };
 use crate::socket::socket_path;
@@ -119,7 +119,9 @@ impl AgentClient {
         serde_json::from_value(result).map_err(AgentError::from)
     }
 
-    /// Store a session.
+    /// Store a session, and report whether the agent stored it: with
+    /// [`StoreMode::IfNoLiveSession`] it keeps a live session it already
+    /// holds.
     ///
     /// # Errors
     ///
@@ -130,12 +132,14 @@ impl AgentClient {
         user_email: &str,
         expires_at: &str,
         server_url: Option<&str>,
-    ) -> Result<()> {
+        mode: StoreMode,
+    ) -> Result<bool> {
         let params = StoreSessionParams {
             token: secrecy::SecretString::from(token),
             user_email: user_email.to_string(),
             expires_at: expires_at.to_string(),
             server_url: server_url.map(String::from),
+            mode,
         };
 
         let response = self
@@ -146,7 +150,11 @@ impl AgentClient {
             return Err(AgentError::Protocol(error.message));
         }
 
-        Ok(())
+        let result = response
+            .result
+            .ok_or_else(|| AgentError::Protocol("missing result".to_string()))?;
+
+        serde_json::from_value(result).map_err(AgentError::from)
     }
 
     /// Clear the current session.

@@ -11,7 +11,7 @@
 )]
 
 use vouch_agent::protocol::{
-    NOT_AUTHENTICATED, Response, StoreSessionParams, StoreSshCredentialsParams,
+    NOT_AUTHENTICATED, Response, StoreMode, StoreSessionParams, StoreSshCredentialsParams,
 };
 use vouch_agent::state::{AgentState, Session, SessionInfo};
 
@@ -190,6 +190,7 @@ mod protocol_types {
             user_email: "user@example.com".to_string(),
             expires_at: "2099-12-31T23:59:59Z".to_string(),
             server_url: Some("https://vouch.example.com".to_string()),
+            mode: StoreMode::IfNoLiveSession,
         };
 
         let json = serde_json::to_string(&params).unwrap();
@@ -202,6 +203,18 @@ mod protocol_types {
             deserialized.server_url.as_deref(),
             Some("https://vouch.example.com")
         );
+        assert_eq!(deserialized.mode, StoreMode::IfNoLiveSession);
+    }
+
+    /// A client that predates `mode` sends none; the agent replaces the
+    /// session, as it did before the field existed.
+    #[test]
+    fn test_store_session_params_without_mode_replace() {
+        let deserialized: StoreSessionParams = serde_json::from_str(
+            r#"{"token":"jwt_token","user_email":"user@example.com","expires_at":"2099-12-31T23:59:59Z"}"#,
+        )
+        .unwrap();
+        assert_eq!(deserialized.mode, StoreMode::Replace);
     }
 
     /// StoreSessionParams without server_url.
@@ -212,6 +225,7 @@ mod protocol_types {
             user_email: "user@example.com".to_string(),
             expires_at: "2099-12-31T23:59:59Z".to_string(),
             server_url: None,
+            mode: StoreMode::Replace,
         };
 
         let json = serde_json::to_string(&params).unwrap();
