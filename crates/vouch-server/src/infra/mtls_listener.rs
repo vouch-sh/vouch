@@ -276,7 +276,7 @@ mod tests {
     use crate::AppState;
     use crate::client_info::ClientInfo;
     use crate::infra::accept::{self, ConnLimits, ProxyProtocol};
-    use crate::infra::conn_caps::ConnCaps;
+    use crate::infra::conn_caps::{ConnCaps, ListenerRole};
     use crate::infra::router::build_app;
     use crate::infra::tls;
     use crate::test_utils;
@@ -560,7 +560,7 @@ mod tests {
             MtlsHandshake::new(swap),
             app,
             limits,
-            ConnCaps::for_test(),
+            ConnCaps::for_test().listener(ListenerRole::Mtls),
             CancellationToken::new(),
         ));
         (addr, server)
@@ -692,7 +692,7 @@ mod tests {
             accept::TlsHandshake(tls),
             app,
             ConnLimits::DEFAULT,
-            ConnCaps::for_test(),
+            ConnCaps::for_test().listener(ListenerRole::Mtls),
             CancellationToken::new(),
         ));
 
@@ -741,7 +741,7 @@ mod tests {
             accept::TlsHandshake(tls),
             app,
             ConnLimits::DEFAULT,
-            ConnCaps::for_test(),
+            ConnCaps::for_test().listener(ListenerRole::Mtls),
             CancellationToken::new(),
         ));
         (addr, server)

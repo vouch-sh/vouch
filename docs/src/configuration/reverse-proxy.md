@@ -158,7 +158,12 @@ and client IP preservation, or with the PROXY protocol, the cap sees each real c
 configuration. An address taken from a PROXY header is never exempt, even one inside
 `VOUCH_TRUSTED_PROXIES`: the header's source is the client, not the proxy. The proxy's own address
 stays exempt wherever it is the connection's peer: on port 80, which never takes the PROXY
-protocol, and on a `LOCAL` health-check header.
+protocol, and on a `LOCAL` health-check header. On the mTLS port a peer that sends no PROXY header is
+never exempt: Vouch terminates TLS there, so the peer is the client, whatever its address.
+
+Port 80 serves only the HTTPS redirect and readiness probes, and draws from a pool of its own: at
+most **256** open connections, apart from `VOUCH_MAX_CONNECTIONS`. Connections on port 80 cannot take
+the places the HTTPS and mTLS listeners need.
 
 ## Example configurations
 
@@ -381,6 +386,10 @@ spec:
     ports: [{ port: 443 }, { port: 8443 }]
   - ports: [{ port: 80 }]           # readiness probes and the HTTP redirect
 ```
+
+Port 80 stays open to every pod, and a pod inside `VOUCH_TRUSTED_PROXIES` is exempt from the
+per-address cap there. Port 80 draws from its own pool of 256 connections, so such a pod can hold up
+redirects and probes on port 80 but cannot take places the HTTPS and mTLS listeners need.
 
 **6. Probes.** Point the readiness probe at port 80, which never takes the PROXY protocol. The
 kubelet sends no header, so a probe on 443 would be refused:

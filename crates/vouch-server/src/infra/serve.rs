@@ -17,7 +17,7 @@ use crate::config::ServerConfig;
 use crate::infra::s3_config;
 
 use super::accept::{self, ConnLimits, PlainHandshake, ProxyProtocol, TlsHandshake};
-use super::conn_caps::ConnCaps;
+use super::conn_caps::{ConnCaps, ListenerRole};
 use super::mtls_listener::MtlsHandshake;
 use super::startup::ServerComponents;
 use crate::infra::tls;
@@ -181,7 +181,7 @@ async fn serve_tls_on(
         MtlsHandshake::new(mtls_config_swap.clone()),
         app.clone(),
         ConnLimits::DEFAULT,
-        Arc::clone(&caps),
+        caps.listener(ListenerRole::Mtls),
         shutdown_token.clone(),
     ));
     tracing::info!("mTLS listener started on port {}", addrs.mtls.port());
@@ -207,7 +207,7 @@ async fn serve_tls_on(
     // Spawn HTTP redirect server (port 80) - best effort, not fatal if fails
     let http_addr = addrs.http_redirect;
     let token_for_http = shutdown_token.clone();
-    let caps_for_http = Arc::clone(&caps);
+    let caps_for_http = caps.listener(ListenerRole::Redirect);
     let http_handle = tokio::spawn(async move {
         match tokio::net::TcpListener::bind(http_addr).await {
             Ok(listener) => {
@@ -241,7 +241,7 @@ async fn serve_tls_on(
         TlsHandshake(tls_config),
         app,
         ConnLimits::DEFAULT,
-        caps,
+        caps.listener(ListenerRole::App),
         shutdown_token,
     )
     .await;
@@ -294,7 +294,7 @@ async fn serve_plain(
         PlainHandshake,
         app,
         ConnLimits::DEFAULT,
-        ConnCaps::for_config(config),
+        ConnCaps::for_config(config).listener(ListenerRole::App),
         shutdown_token,
     )
     .await;

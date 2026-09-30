@@ -52,7 +52,7 @@ use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
 use crate::config::ServerConfig;
-use crate::infra::conn_caps::{ConnCaps, Peer, TotalSlot};
+use crate::infra::conn_caps::{ListenerCaps, Peer, TotalSlot};
 use crate::infra::router::REQUEST_TIMEOUT;
 
 /// Time limits applied to every connection.
@@ -193,7 +193,7 @@ async fn read_proxy_header(
 ) -> io::Result<(ClientStream, Peer)> {
     let stream = ProxiedStream::create_from_tokio(tcp, PROXY_PARSE).await?;
     let client = match stream.proxy_header().proxied_address() {
-        None => Peer::Tcp(tcp_peer),
+        None => Peer::Proxy(tcp_peer),
         Some(addr) if addr.protocol == Protocol::Stream => Peer::Header(addr.source),
         Some(_) => {
             return Err(io::Error::new(
@@ -268,7 +268,7 @@ pub(crate) async fn serve<H: Handshake>(
     handshake: H,
     app: Router,
     limits: ConnLimits,
-    caps: Arc<ConnCaps>,
+    caps: ListenerCaps,
     shutdown: CancellationToken,
 ) {
     let handshake = Arc::new(handshake);
@@ -313,7 +313,7 @@ pub(crate) async fn serve<H: Handshake>(
             Arc::clone(&handshake),
             app.clone(),
             limits,
-            Arc::clone(&caps),
+            caps.clone(),
             shutdown.clone(),
         ));
     }
@@ -362,7 +362,7 @@ async fn serve_connection<H: Handshake>(
     handshake: Arc<H>,
     app: Router,
     limits: ConnLimits,
-    caps: Arc<ConnCaps>,
+    caps: ListenerCaps,
     shutdown: CancellationToken,
 ) {
     // With the PROXY protocol on, `peer` becomes the header's source address,
@@ -547,7 +547,7 @@ impl HttpBody for TrackedBody {
 )]
 mod tests {
     use super::*;
-    use crate::infra::conn_caps::ConnCapConfig;
+    use crate::infra::conn_caps::{ConnCapConfig, ConnCaps, ListenerRole};
     use crate::test_utils::test_config;
 
     use axum::routing::get;
@@ -588,7 +588,12 @@ mod tests {
         limits: ConnLimits,
         caps: Arc<ConnCaps>,
     ) -> (SocketAddr, CancellationToken, tokio::task::JoinHandle<()>) {
-        start_full(limits, caps, ProxyProtocol::off()).await
+        start_full(
+            limits,
+            caps.listener(ListenerRole::App),
+            ProxyProtocol::off(),
+        )
+        .await
     }
 
     /// A listener requiring a PROXY header from `sources`.
@@ -601,12 +606,17 @@ mod tests {
             .iter()
             .map(|net| net.parse().expect("CIDR"))
             .collect();
-        start_full(limits, caps, ProxyProtocol::from_sources(&sources)).await
+        start_full(
+            limits,
+            caps.listener(ListenerRole::App),
+            ProxyProtocol::from_sources(&sources),
+        )
+        .await
     }
 
     async fn start_full(
         limits: ConnLimits,
-        caps: Arc<ConnCaps>,
+        caps: ListenerCaps,
         proxy: ProxyProtocol,
     ) -> (SocketAddr, CancellationToken, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
@@ -1093,8 +1103,12 @@ mod tests {
     /// on its peer is still the proxy, which stays exempt.
     #[tokio::test]
     async fn proxy_mode_keeps_trusted_proxy_exempt_without_proxy_protocol() {
-        let (addr, _shutdown, _server) =
-            start_with_caps(ConnLimits::DEFAULT, caps_trusting_loopback(true)).await;
+        let (addr, _shutdown, _server) = start_full(
+            ConnLimits::DEFAULT,
+            caps_trusting_loopback(true).listener(ListenerRole::Redirect),
+            ProxyProtocol::off(),
+        )
+        .await;
 
         let mut first = TcpStream::connect(addr).await.expect("connect");
         let response = request_keep_alive(&mut first).await;
@@ -1105,6 +1119,82 @@ mod tests {
         assert!(
             response.starts_with("HTTP/1.1 200"),
             "a trusted proxy as the TCP peer is exempt; second: {response}"
+        );
+    }
+
+    /// Vouch terminates TLS on the mTLS port, so its TCP peer is the client
+    /// and is capped even inside `VOUCH_TRUSTED_PROXIES`.
+    /// docs/src/configuration/reverse-proxy.md: on the mTLS port "the client
+    /// IP is the TCP peer, or the PROXY header's source when
+    /// `VOUCH_PROXY_PROTOCOL` is on."
+    #[tokio::test]
+    async fn mtls_listener_caps_tcp_peer_inside_trusted_proxies() {
+        let (addr, _shutdown, _server) = start_full(
+            ConnLimits::DEFAULT,
+            caps_trusting_loopback(false).listener(ListenerRole::Mtls),
+            ProxyProtocol::off(),
+        )
+        .await;
+
+        let mut first = TcpStream::connect(addr).await.expect("connect");
+        let response = request_keep_alive(&mut first).await;
+        assert!(response.starts_with("HTTP/1.1 200"), "first: {response}");
+
+        let second = request_after(addr, b"").await;
+        assert!(
+            second.is_empty(),
+            "a second connection from the same client is over its cap; second: {second}"
+        );
+    }
+
+    /// Port 80 draws from its own pool, so exempt trusted-proxy connections
+    /// there cannot take the places a proxied client on the application
+    /// listener needs.
+    #[tokio::test]
+    async fn redirect_listener_cannot_starve_the_app_listener() {
+        let mut config = test_config();
+        config.proxy_protocol = true;
+        config.trusted_proxies = vec!["127.0.0.1/32".parse().expect("CIDR")];
+        config.connection_caps = ConnCapConfig {
+            max_total: 1,
+            max_per_ip: 1,
+        };
+        // Held keep-alive connections are never closed as idle during the test.
+        let hold = ConnLimits {
+            header_read: Duration::from_secs(3600),
+            ..ConnLimits::DEFAULT
+        };
+        let caps = ConnCaps::for_config(&config);
+        let (port80, _s80, _server80) = start_full(
+            hold,
+            caps.listener(ListenerRole::Redirect),
+            ProxyProtocol::off(),
+        )
+        .await;
+        let (port443, _s443, _server443) = start_full(
+            hold,
+            caps.listener(ListenerRole::App),
+            ProxyProtocol::from_sources(&config.trusted_proxies),
+        )
+        .await;
+
+        let mut held = Vec::new();
+        for _ in 0..3 {
+            let mut stream = TcpStream::connect(port80).await.expect("connect");
+            let response = request_keep_alive(&mut stream).await;
+            assert!(response.starts_with("HTTP/1.1 200"), "port 80: {response}");
+            held.push(stream);
+        }
+
+        let proxied = tokio::time::timeout(
+            Duration::from_secs(5),
+            request_after(port443, &proxy_v2("203.0.113.7:40000")),
+        )
+        .await
+        .expect("a proxied client is not starved by port 80");
+        assert!(
+            proxied.starts_with("HTTP/1.1 200"),
+            "a proxied client is served while port 80 holds connections: {proxied}"
         );
     }
 
