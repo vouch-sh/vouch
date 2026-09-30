@@ -10,6 +10,7 @@
 //! - GET /github/success - Success page after connection
 
 use crate::arrival::ArrivalTime;
+use crate::client_info::ClientInfo;
 use crate::config::ServerConfig;
 use crate::crypto::jwt::{JwtType, StateTokenError, StateTokenSigner};
 use crate::error::ServiceError;
@@ -452,6 +453,7 @@ pub(crate) async fn github_connect_page(
 pub(crate) async fn github_callback(
     arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
+    client_info: ClientInfo,
     jar: CookieJar,
     Query(params): Query<GitHubCallbackParams>,
 ) -> Response {
@@ -461,7 +463,7 @@ pub(crate) async fn github_callback(
     }
 
     // Otherwise, handle as installation callback
-    handle_installation_callback(&state, &jar, &params, arrival).await
+    handle_installation_callback(&state, &jar, &params, client_info, arrival).await
 }
 
 /// Validate the callback session against the state token.
@@ -582,6 +584,7 @@ async fn handle_installation_callback(
     state: &Arc<AppState>,
     jar: &CookieJar,
     params: &GitHubCallbackParams,
+    client_info: ClientInfo,
     arrival: ArrivalTime,
 ) -> Response {
     // Verify required parameters
@@ -646,6 +649,7 @@ async fn handle_installation_callback(
             org_id: &token.org_id,
             user: &user,
             flow: InstallationLinkFlow::Install,
+            client: client_info,
         })
         .await
     {
@@ -729,6 +733,7 @@ pub(crate) async fn github_link_start(
 pub(crate) async fn github_reconnect(
     arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
+    client_info: ClientInfo,
     jar: CookieJar,
     Form(form): Form<GitHubReconnectForm>,
 ) -> Response {
@@ -761,6 +766,7 @@ pub(crate) async fn github_reconnect(
             org_id: &org_id,
             user: &user,
             flow: InstallationLinkFlow::Reconnect,
+            client: client_info,
         })
         .await
     {

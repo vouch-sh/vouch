@@ -16,6 +16,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::client_info::ClientInfo;
 use crate::db::audit::AuditEventKind;
 use crate::db::config::AuthEventParams;
 use crate::geo;
@@ -312,7 +313,13 @@ pub const TOKEN_ISSUED: &str = "token_issued";
 ///
 /// Serialized flattened alongside a [`CredentialAuditDetails`] payload, so
 /// stored events keep one flat JSON object per event.
-#[derive(Debug, Default, Serialize, Deserialize)]
+///
+/// Every credential event is written for a request, so production code
+/// builds one only through [`Self::succeeded`], which takes the request's
+/// [`ClientInfo`]: an event cannot leave its IP and User-Agent unrecorded.
+/// `Default` exists for test fixtures alone.
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(test, derive(Default))]
 pub struct CredentialAuditEnvelope {
     /// Event subtype within the kind (e.g. "token_issued",
     /// "certificate_issued", "installation_connected").
@@ -331,15 +338,30 @@ pub struct CredentialAuditEnvelope {
 }
 
 impl CredentialAuditEnvelope {
-    /// Record the caller's transport metadata: IP, user agent, and the
-    /// geo fields derived from the IP. Events written without this carry
-    /// null transport fields.
+    /// A successful `event_type` event, with the transport metadata of the
+    /// request that caused it: the client IP, its User-Agent, and the geo
+    /// fields derived from the IP. Set the optional fields with struct
+    /// update syntax (`CredentialAuditEnvelope { org_id, ..succeeded(..) }`).
     #[must_use]
-    pub fn with_client(mut self, ip: Option<std::net::IpAddr>, user_agent: Option<String>) -> Self {
-        self.client_ip = ip.map(|a| a.to_string());
-        self.user_agent = user_agent;
-        self.geo = GeoFields::from_ip(ip);
-        self
+    pub fn succeeded(event_type: &str, client: &ClientInfo) -> Self {
+        let ip = client.client_ip();
+        Self {
+            event_type: event_type.to_string(),
+            org_id: None,
+            authenticator_id: None,
+            agent: None,
+            success: true,
+            client_ip: ip.map(|a| a.to_string()),
+            user_agent: client.user_agent().map(String::from),
+            geo: GeoFields::from_ip(ip),
+        }
+    }
+
+    /// Whether this event records a successful issuance: a certificate or a
+    /// token was handed out.
+    #[must_use]
+    pub fn records_issuance(&self) -> bool {
+        self.success && matches!(self.event_type.as_str(), CERTIFICATE_ISSUED | TOKEN_ISSUED)
     }
 }
 

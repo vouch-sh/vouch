@@ -143,17 +143,11 @@ pub(crate) async fn issue_ssh_certificate(
             &token.sub,
             &user_email,
             CredentialAuditEnvelope {
-                event_type: db::CERTIFICATE_ISSUED.to_string(),
                 org_id: user.org_id.clone(),
                 authenticator_id: token.authenticator_id.clone(),
                 agent: token.dpop_source.clone(),
-                success: true,
-                ..Default::default()
-            }
-            .with_client(
-                client_info.client_ip(),
-                client_info.user_agent().map(String::from),
-            ),
+                ..CredentialAuditEnvelope::succeeded(db::CERTIFICATE_ISSUED, &client_info)
+            },
             &SshCredentialDetails {
                 serial: signed.serial,
                 principals: signed.principals.clone(),
@@ -544,17 +538,11 @@ pub(crate) async fn get_aws_token(
             &ctx.token.sub,
             &ctx.user_email,
             CredentialAuditEnvelope {
-                event_type: db::TOKEN_ISSUED.to_string(),
                 org_id: ctx.org.as_ref().map(|o| o.id.clone()),
                 authenticator_id: ctx.token.authenticator_id.clone(),
                 agent: ctx.token.dpop_source.clone(),
-                success: true,
-                ..Default::default()
-            }
-            .with_client(
-                client_info.client_ip(),
-                client_info.user_agent().map(String::from),
-            ),
+                ..CredentialAuditEnvelope::succeeded(db::TOKEN_ISSUED, &client_info)
+            },
             &AwsCredentialDetails {
                 role_arn: pinned_role.map(str::to_string),
                 token_expires_at,
@@ -788,17 +776,11 @@ pub(crate) async fn get_github_token(
             &user.id,
             &user.email,
             CredentialAuditEnvelope {
-                event_type: db::TOKEN_ISSUED.to_string(),
                 org_id: Some(org_id.to_string()),
                 authenticator_id: token.authenticator_id.clone(),
                 agent: token.dpop_source.clone(),
-                success: true,
-                ..Default::default()
-            }
-            .with_client(
-                client_info.client_ip(),
-                client_info.user_agent().map(String::from),
-            ),
+                ..CredentialAuditEnvelope::succeeded(db::TOKEN_ISSUED, &client_info)
+            },
             &GitHubCredentialDetails {
                 installation_id: Some(installation.installation_id),
                 repositories: request.repositories.clone(),

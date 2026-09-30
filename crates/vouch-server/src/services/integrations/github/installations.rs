@@ -50,6 +50,8 @@ pub(crate) struct LinkInstallationParams<'a> {
     pub user: &'a User,
     /// Which flow the request came from.
     pub flow: InstallationLinkFlow,
+    /// The request's transport metadata, recorded on the audit row.
+    pub client: db::ClientInfo,
 }
 
 /// Result of a successful installation connection.
@@ -239,14 +241,8 @@ impl GitHubService<'_> {
             params.user.id
         );
 
-        self.log_installation_event(
-            params.flow.event_type(),
-            params.user,
-            params.org_id,
-            params.installation_id,
-            Some(&details.permissions),
-        )
-        .await;
+        self.log_installation_event(&params, &details.permissions)
+            .await;
 
         Ok(InstallationConnectResult {
             account_login: details.account.login,
@@ -342,28 +338,26 @@ impl GitHubService<'_> {
         ))
     }
 
-    /// Log an installation audit event.
+    /// Log the audit event for a completed link.
     async fn log_installation_event(
         &self,
-        event_type: &str,
-        user: &User,
-        org_id: &str,
-        installation_id: u64,
-        permissions: Option<&HashMap<String, String>>,
+        params: &LinkInstallationParams<'_>,
+        permissions: &HashMap<String, String>,
     ) {
         self.audit
             .log_credential_event(
-                &user.id,
-                &user.email,
+                &params.user.id,
+                &params.user.email,
                 db::CredentialAuditEnvelope {
-                    event_type: event_type.to_string(),
-                    org_id: Some(org_id.to_string()),
-                    success: true,
-                    ..Default::default()
+                    org_id: Some(params.org_id.to_string()),
+                    ..db::CredentialAuditEnvelope::succeeded(
+                        params.flow.event_type(),
+                        &params.client,
+                    )
                 },
                 &db::GitHubCredentialDetails {
-                    installation_id: Some(installation_id.cast_signed()),
-                    permissions: permissions.cloned(),
+                    installation_id: Some(params.installation_id.cast_signed()),
+                    permissions: Some(permissions.clone()),
                     ..Default::default()
                 },
             )
@@ -646,6 +640,7 @@ mod tests {
             org_id,
             user,
             flow: InstallationLinkFlow::Install,
+            client: db::ClientInfo::default(),
         }
     }
 
@@ -781,11 +776,17 @@ mod tests {
                 state.github_app.as_ref(),
             );
 
+            let mut headers = axum::http::HeaderMap::new();
+            headers.insert(
+                axum::http::header::USER_AGENT,
+                axum::http::HeaderValue::from_static("install-browser/1.0"),
+            );
             svc.link_installation(LinkInstallationParams {
                 installation_id: 5,
                 org_id: &org_id,
                 user: &admin,
                 flow,
+                client: db::ClientInfo::for_test(Some([198, 51, 100, 7].into()), &headers),
             })
             .await
             .expect("link succeeds");
@@ -798,12 +799,20 @@ mod tests {
                 })
                 .await
                 .expect("audit events");
-            let subtypes: Vec<String> = events
+            let rows: Vec<serde_json::Value> = events
                 .iter()
                 .filter_map(|e| serde_json::from_str::<serde_json::Value>(&e.data).ok())
-                .filter_map(|d| d.get("event_type")?.as_str().map(str::to_string))
                 .collect();
-            assert_eq!(subtypes, vec![event_type.to_string()], "{flow:?}");
+            let subtypes: Vec<&str> = rows
+                .iter()
+                .filter_map(|d| d.get("event_type")?.as_str())
+                .collect();
+            assert_eq!(subtypes, vec![event_type], "{flow:?}");
+            // The row records the request's transport metadata, as every
+            // request-scoped audit row does.
+            let row = rows.first().expect("one audit row");
+            assert_eq!(row["client_ip"], "198.51.100.7", "{flow:?}");
+            assert_eq!(row["user_agent"], "install-browser/1.0", "{flow:?}");
         }
     }
 

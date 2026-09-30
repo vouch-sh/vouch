@@ -15,6 +15,7 @@ use crate::arrival::ArrivalTime;
 use crate::db;
 use crate::db::audit::{AuditEvent as AuditRow, AuditEventFilter, AuditEventKind, AuditStore};
 use dogwood_language::{Event, Value};
+use serde::Deserialize;
 
 /// Audit kinds that feed the temporal history. Every kind here must have a
 /// mapping arm in [`history_event`]; the parity test enforces both
@@ -83,17 +84,6 @@ pub(crate) async fn fetch_user_history(
     Ok(rows)
 }
 
-/// Whether a credential audit payload records a successful issuance: its
-/// envelope `event_type` is [`db::CERTIFICATE_ISSUED`] or
-/// [`db::TOKEN_ISSUED`], and `success` is true.
-fn records_issuance(data: &serde_json::Value) -> bool {
-    let issued = matches!(
-        data.get("event_type").and_then(serde_json::Value::as_str),
-        Some(db::CERTIFICATE_ISSUED | db::TOKEN_ISSUED)
-    );
-    issued && data.get("success").and_then(serde_json::Value::as_bool) == Some(true)
-}
-
 /// Map one audit row to a Dogwood history event. Returns `None` for rows
 /// that carry no principal, an unmapped kind, or a credential kind that
 /// records no issuance.
@@ -130,7 +120,8 @@ pub(crate) fn history_event(row: &AuditRow, org_id: &str, min_ts: i64) -> Option
             | AuditEventKind::AwsCredential
             | AuditEventKind::GitHubCredential
             | AuditEventKind::TokenExchange
-    ) && !records_issuance(&data)
+    ) && !db::CredentialAuditEnvelope::deserialize(&data)
+        .is_ok_and(|envelope| envelope.records_issuance())
     {
         return None;
     }
