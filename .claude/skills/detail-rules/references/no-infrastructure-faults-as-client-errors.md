@@ -171,13 +171,14 @@ fn into_registration_response(err: ServiceError) -> Response { ... /* error="inv
 
 **GitHub rotation propagates DB errors instead of swallowing them:**
 ```rust
-let user = db::get_user_by_id(self.store, user_id)
-    .await
-    .map_err(GitHubError::Database)?          // propagate
-    .ok_or(GitHubError::UserNotFound)?;
-db::update_user_github_identity(self.store, user_id, github_id, github_login, Some(new_refresh_token.expose_secret()))
-    .await
-    .map_err(GitHubError::Database)?;         // propagate
+db::update_user_github_refresh_token(
+    self.store,
+    user_id,
+    new_refresh_token.expose_secret(),
+    &linked,
+)
+.await
+.map_err(GitHubError::Database)?;         // propagate
 ```
 
 **JWKS cache skipped for inline-JWKS clients:**
