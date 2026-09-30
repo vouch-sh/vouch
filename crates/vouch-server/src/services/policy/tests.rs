@@ -837,13 +837,25 @@ fn test_base_allow_alone_allows() {
 // ============================================================
 
 fn history_row(kind: &str, user_id: &str, secs_ago: i64, seq: u32) -> AuditEvent {
+    // A credential-kind row counts only when its envelope records an issued
+    // credential, as the writers serialize it.
+    let data = match kind {
+        "ssh_credential" => format!(
+            r#"{{"event_type":"{}","success":true}}"#,
+            db::CERTIFICATE_ISSUED
+        ),
+        "aws_credential" | "github_credential" | "token_exchange" => {
+            format!(r#"{{"event_type":"{}","success":true}}"#, db::TOKEN_ISSUED)
+        }
+        _ => "{}".to_string(),
+    };
     AuditEvent {
         id: format!("row-{seq:04}"),
         event_type: kind.to_string(),
         user_id: Some(user_id.to_string()),
         email_domain: None,
         email_hmac: None,
-        data: "{}".to_string(),
+        data,
         created_at: jiff::Timestamp::now()
             .checked_sub(jiff::Span::new().seconds(secs_ago))
             .unwrap(),
@@ -1358,14 +1370,23 @@ when temporal {
 /// test cannot, since it only checks that a field is written at all.
 #[test]
 fn test_ingestion_reads_the_keys_writers_serialize() {
-    use crate::db::documents::audit::{OAuthUsageData, TokenExchangeDetails};
+    use crate::db::documents::audit::{
+        CredentialAuditEnvelope, CredentialAuditPayload, OAuthUsageData, TokenExchangeDetails,
+    };
 
-    let exchange = serde_json::to_string(&TokenExchangeDetails {
-        client_id: "client-abc".to_string(),
-        audience: Some("https://aud.example".to_string()),
-        scope: None,
-        issued_token_type: "urn:ietf:params:oauth:token-type:access_token".to_string(),
-        token_expires_at: None,
+    let exchange = serde_json::to_string(&CredentialAuditPayload {
+        envelope: &CredentialAuditEnvelope {
+            event_type: db::TOKEN_ISSUED.to_string(),
+            success: true,
+            ..Default::default()
+        },
+        details: &TokenExchangeDetails {
+            client_id: "client-abc".to_string(),
+            audience: Some("https://aud.example".to_string()),
+            scope: None,
+            issued_token_type: "urn:ietf:params:oauth:token-type:access_token".to_string(),
+            token_expires_at: None,
+        },
     })
     .unwrap();
     let row = AuditEvent {
@@ -2062,5 +2083,54 @@ async fn test_authorize_decision_multi_rule_custom_policy_name_in_audit() {
         Some("Multi-Rule Policy"),
         "audit record must carry the custom policy name even when the \
          second rule of a multi-rule policy fires"
+    );
+}
+
+/// `docs/src/admin/policies.md` documents `IssueCredential` with
+/// `input.kind` `"github"` as GitHub credential issuance. The GitHub App link
+/// flow writes `installation_connected` / `installation_reconnected` rows of
+/// the same `github_credential` kind; only a successful `token_issued` row is
+/// an issuance.
+#[test]
+fn test_history_counts_only_credential_rows_that_record_an_issuance() {
+    use crate::db::documents::audit::{
+        CredentialAuditEnvelope, CredentialAuditPayload, GitHubCredentialDetails,
+    };
+    let row = |event_type: &str, success: bool| AuditEvent {
+        id: format!("row-{event_type}-{success}"),
+        event_type: "github_credential".to_string(),
+        user_id: Some("admin".to_string()),
+        email_domain: None,
+        email_hmac: None,
+        data: serde_json::to_string(&CredentialAuditPayload {
+            envelope: &CredentialAuditEnvelope {
+                event_type: event_type.to_string(),
+                success,
+                ..Default::default()
+            },
+            details: &GitHubCredentialDetails {
+                installation_id: Some(42),
+                ..Default::default()
+            },
+        })
+        .unwrap(),
+        created_at: jiff::Timestamp::now(),
+    };
+
+    let issued = events::history_event(&row(db::TOKEN_ISSUED, true), "org-1", 0)
+        .expect("a GitHub token issuance is history");
+    assert_eq!(
+        issued.field("input", "kind"),
+        Some(&dogwood_language::Value::String("github".to_string()))
+    );
+    for event_type in ["installation_connected", "installation_reconnected"] {
+        assert!(
+            events::history_event(&row(event_type, true), "org-1", 0).is_none(),
+            "linking an installation issues no credential: {event_type}"
+        );
+    }
+    assert!(
+        events::history_event(&row(db::TOKEN_ISSUED, false), "org-1", 0).is_none(),
+        "a failed issuance is not an issuance"
     );
 }

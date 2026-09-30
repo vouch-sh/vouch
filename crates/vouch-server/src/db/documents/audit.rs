@@ -303,6 +303,11 @@ pub struct ScimAuditData<'a> {
     pub refusal: Option<Refusal>,
 }
 
+/// Envelope `event_type` of a row that records an issued SSH certificate.
+pub const CERTIFICATE_ISSUED: &str = "certificate_issued";
+/// Envelope `event_type` of a row that records an issued token.
+pub const TOKEN_ISSUED: &str = "token_issued";
+
 /// Fields shared by every credential-issuance audit payload.
 ///
 /// Serialized flattened alongside a [`CredentialAuditDetails`] payload, so

@@ -143,7 +143,7 @@ pub(crate) async fn issue_ssh_certificate(
             &token.sub,
             &user_email,
             CredentialAuditEnvelope {
-                event_type: "certificate_issued".to_string(),
+                event_type: db::CERTIFICATE_ISSUED.to_string(),
                 org_id: user.org_id.clone(),
                 authenticator_id: token.authenticator_id.clone(),
                 agent: token.dpop_source.clone(),
@@ -544,7 +544,7 @@ pub(crate) async fn get_aws_token(
             &ctx.token.sub,
             &ctx.user_email,
             CredentialAuditEnvelope {
-                event_type: "token_issued".to_string(),
+                event_type: db::TOKEN_ISSUED.to_string(),
                 org_id: ctx.org.as_ref().map(|o| o.id.clone()),
                 authenticator_id: ctx.token.authenticator_id.clone(),
                 agent: ctx.token.dpop_source.clone(),
@@ -788,7 +788,7 @@ pub(crate) async fn get_github_token(
             &user.id,
             &user.email,
             CredentialAuditEnvelope {
-                event_type: "token_issued".to_string(),
+                event_type: db::TOKEN_ISSUED.to_string(),
                 org_id: Some(org_id.to_string()),
                 authenticator_id: token.authenticator_id.clone(),
                 agent: token.dpop_source.clone(),
