@@ -354,25 +354,39 @@ pub(crate) async fn exchange_fido2_assertion(
     let authenticator = lookup_result.authenticator;
     let user = lookup_result.user;
 
-    // Verify WebAuthn assertion
+    // Validate authorization_details if provided (RFC 9396). Pure request
+    // validation, so it runs before verification commits the signature
+    // counter: a malformed parameter is rejected with nothing durable
+    // changed and nothing that needs an audit row.
+    let validated_ad = params
+        .authorization_details
+        .map(AuthorizationDetails::parse)
+        .transpose()?;
+    let ad_value = validated_ad.as_ref().map(serde_json::Value::from);
+
+    // Verify the WebAuthn assertion and commit its signature counter.
     let stored_counter = authenticator.counter.cast_unsigned();
     // Cloned for the failure audit event below, since the success path moves
     // `params.client_info` when it records the LoginSuccess event.
     let failure_client_info = params.client_info.clone();
-    let assertion_result = match verify_login_assertion(LoginAssertionParams {
-        authenticator_data: payload.authenticator_data.into_bytes(),
-        client_data_json: payload.client_data_json.into_bytes(),
-        signature: payload.signature.into_bytes(),
-        public_key: authenticator.public_key.clone(),
-        rp_id: challenge_state.rp_id.clone(),
-        // CLI flow: clientDataJSON.origin is `https://{rp_id}` since the
-        // CLI is not a browser and does not have a page origin.
-        expected_origin: format!("https://{}", challenge_state.rp_id),
-        challenge: challenge_state.challenge.as_bytes().to_vec(),
-        stored_counter,
-        // Tolerate loopback origin variations only in development (no TLS).
-        origin_policy: state.config().as_ref().into(),
-    })
+    let assertion_result = match verify_login_assertion(
+        &state.store,
+        &authenticator.id,
+        LoginAssertionParams {
+            authenticator_data: payload.authenticator_data.into_bytes(),
+            client_data_json: payload.client_data_json.into_bytes(),
+            signature: payload.signature.into_bytes(),
+            public_key: authenticator.public_key.clone(),
+            rp_id: challenge_state.rp_id.clone(),
+            // CLI flow: clientDataJSON.origin is `https://{rp_id}` since the
+            // CLI is not a browser and does not have a page origin.
+            expected_origin: format!("https://{}", challenge_state.rp_id),
+            challenge: challenge_state.challenge.as_bytes().to_vec(),
+            stored_counter,
+            // Tolerate loopback origin variations only in development (no TLS).
+            origin_policy: state.config().as_ref().into(),
+        },
+    )
     .await
     {
         Ok(result) => result,
@@ -421,31 +435,10 @@ pub(crate) async fn exchange_fido2_assertion(
         assertion_result.user_verified,
     );
 
-    // Validate authorization_details if provided (RFC 9396). Pure request
-    // validation, so it runs before the counter commit below: a malformed
-    // parameter is rejected with nothing durable changed and nothing that
-    // needs an audit row.
-    let validated_ad = params
-        .authorization_details
-        .map(AuthorizationDetails::parse)
-        .transpose()?;
-
-    let ad_value = validated_ad.as_ref().map(serde_json::Value::from);
-
-    // Update counter in database
-    // WebAuthn counter is u32; stored bit-identical as i32. Real authenticators never
-    // approach 2^31 uses, and bitwise reinterpret preserves DB monotonicity comparisons.
-    //
     // From here on every exit records an audit event (`LoginFailed` from
-    // the posture gate, `LoginSuccess` otherwise): the counter update is
-    // committed, and a verified ceremony must never vanish from AuthEvents.
-    db::update_authenticator_counter(
-        &state.store,
-        &authenticator.id,
-        assertion_result.new_counter.cast_signed(),
-    )
-    .await
-    .map_err(|e| ServiceError::Internal(format!("Failed to update counter: {e}")))?;
+    // the posture gate, `LoginSuccess` otherwise): verification committed
+    // the counter, and a verified ceremony must never vanish from
+    // AuthEvents.
 
     // Capture client metadata for the audit events below.
     let client_ip = params.client_info.client_ip();

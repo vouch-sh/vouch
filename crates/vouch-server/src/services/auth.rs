@@ -21,6 +21,7 @@ use crate::assurance::{AuthMethod, HardwareVerification};
 use crate::crypto::hash_token;
 use crate::crypto::keys::OidcSigningKey;
 use crate::crypto::webauthn_verify::{self, AuthTime, OriginPolicy};
+use crate::db::store::DocumentStore;
 use crate::db::{self, Authenticator, SessionPurpose, User};
 use crate::services::oidc::mtls::CertThumbprint;
 use crate::services::oidc::{CnfClaim, ScopeSet, ValidatedDpopProof};
@@ -288,6 +289,13 @@ pub(crate) enum AssertionFailure {
     /// cancelled). Nothing was decided about the assertion.
     #[error("WebAuthn verification task failed")]
     TaskFailed,
+    /// The authenticator was deleted after it was looked up, so the
+    /// assertion no longer names a registered key.
+    #[error("the security key was deleted during sign-in")]
+    KeyDeleted,
+    /// Committing the signature counter failed. Nothing was committed.
+    #[error("failed to commit the signature counter: {0}")]
+    Storage(anyhow::Error),
 }
 
 impl AssertionFailure {
@@ -302,22 +310,25 @@ impl AssertionFailure {
     /// rejection happened before or at the signature, so the credential ID
     /// and `user_handle` are still only request-supplied.
     ///
-    /// A verification task that did not complete is a server fault that
-    /// decided nothing about the assertion. It is handled like a storage
-    /// fault during the credential lookup ([`LookupError::Service`]): no
-    /// `login_failed` row, and the caller answers with a server error.
-    /// `Principal::ServerFault` would not fit — it records a user the server
-    /// *verified*, and here nothing was verified.
+    /// A verification task that did not complete, and a failed counter
+    /// commit, are server faults that decided nothing about the assertion.
+    /// They are handled like a storage fault during the credential lookup
+    /// ([`LookupError::Service`]): no `login_failed` row, and the caller
+    /// answers with a server error. `Principal::ServerFault` would not fit —
+    /// it records a user the server *verified*, and here nothing was.
+    ///
+    /// A key deleted during the ceremony is not the owner's failed login, so
+    /// its row stays unattributed and cannot feed `failed_login_burst`.
     #[must_use]
     pub(crate) fn principal(&self, owner_user_id: &str) -> Option<db::Principal> {
         match self {
             Self::Rejected(webauthn_verify::VerifyError::CounterNotIncreasing) => {
                 Some(db::Principal::Verified(owner_user_id.to_string()))
             }
-            Self::Rejected(_) => Some(db::Principal::Unverified {
+            Self::Rejected(_) | Self::KeyDeleted => Some(db::Principal::Unverified {
                 asserted: Some(owner_user_id.to_string()),
             }),
-            Self::TaskFailed => None,
+            Self::TaskFailed | Self::Storage(_) => None,
         }
     }
 }
@@ -331,15 +342,23 @@ impl AssertionFailure {
 /// deadlock without `spawn_blocking`), this is purely about runtime
 /// fairness — local crypto doesn't block on async I/O.
 ///
+/// A verified assertion's signature counter is then committed to the
+/// authenticator `authenticator_id` ([`db::commit_authenticator_counter`]),
+/// so an `Ok` means the counter is stored: callers do not write it.
+///
 /// # Errors
 ///
-/// Returns [`AssertionFailure::Rejected`] if verification fails, and
+/// Returns [`AssertionFailure::Rejected`] if verification fails or the
+/// committed counter no longer admits the assertion's,
+/// [`AssertionFailure::KeyDeleted`] if the authenticator is gone,
 /// [`AssertionFailure::TaskFailed`] if the verification task did not run to
-/// completion.
+/// completion, and [`AssertionFailure::Storage`] if the commit failed.
 pub(crate) async fn verify_login_assertion(
+    store: &DocumentStore,
+    authenticator_id: &str,
     params: LoginAssertionParams,
 ) -> Result<LoginAssertionResult, AssertionFailure> {
-    tokio::task::spawn_blocking(move || {
+    let result = tokio::task::spawn_blocking(move || {
         let expected_challenge = URL_SAFE_NO_PAD.encode(&params.challenge);
 
         let result = webauthn_verify::verify_assertion(&webauthn_verify::AssertionParams {
@@ -355,7 +374,7 @@ pub(crate) async fn verify_login_assertion(
             origin_policy: params.origin_policy,
         })?;
 
-        Ok(LoginAssertionResult {
+        Ok::<_, AssertionFailure>(LoginAssertionResult {
             new_counter: result.counter,
             user_verified: result.user_verified,
             verified_at: result.verified_at,
@@ -365,7 +384,22 @@ pub(crate) async fn verify_login_assertion(
     .map_err(|e| {
         tracing::error!("WebAuthn verification task failed: {e}");
         AssertionFailure::TaskFailed
-    })?
+    })??;
+
+    // The verifier judged the counter against the value read at lookup;
+    // committing it re-judges against the row it writes, so of two
+    // assertions with one counter only one stands, and a key deleted
+    // meanwhile yields nothing.
+    match db::commit_authenticator_counter(store, authenticator_id, result.new_counter)
+        .await
+        .map_err(AssertionFailure::Storage)?
+    {
+        db::CounterCommit::Committed => Ok(result),
+        db::CounterCommit::NotIncreasing => Err(AssertionFailure::Rejected(
+            webauthn_verify::VerifyError::CounterNotIncreasing,
+        )),
+        db::CounterCommit::KeyDeleted => Err(AssertionFailure::KeyDeleted),
+    }
 }
 
 /// Actor claim for delegation chains (RFC 8693 Section 4.1).
@@ -1394,7 +1428,8 @@ mod tests {
         }
     }
     use crate::test_utils::{
-        TEST_ISSUER, create_test_user, make_test_access_token, make_test_oidc_key, test_app,
+        TEST_ISSUER, create_test_user, make_test_access_token, make_test_oidc_key,
+        remove_test_authenticator, test_app, test_app_state,
     };
 
     #[tokio::test]
@@ -1673,7 +1708,8 @@ mod tests {
             origin_policy: OriginPolicy::Strict,
         };
 
-        let err = verify_login_assertion(params)
+        let state = test_app_state().await;
+        let err = verify_login_assertion(&state.store, "no-such-key", params)
             .await
             .err()
             .expect("expected error — signature is bogus");
@@ -1685,5 +1721,143 @@ mod tests {
             !description.contains("Invalid origin"),
             "origin must not be rejected for valid subdomain config; got: {description}"
         );
+    }
+
+    // ========================================================================
+    // verify_login_assertion commits the signature counter
+    // ========================================================================
+
+    const COUNTER_RP_ID: &str = "counter.example.com";
+    const COUNTER_ORIGIN: &str = "https://counter.example.com";
+
+    /// A registered Ed25519 security key: its signing half, and the id of
+    /// its stored authenticator, whose counter starts at `stored`.
+    async fn registered_key(
+        state: &crate::AppState,
+        email: &str,
+        stored: u32,
+    ) -> (aws_lc_rs::signature::Ed25519KeyPair, String) {
+        use aws_lc_rs::signature::KeyPair;
+
+        let key = aws_lc_rs::signature::Ed25519KeyPair::generate().unwrap();
+        let cose = ciborium::Value::Map(vec![
+            (1.into(), 1.into()),    // kty: OKP
+            (3.into(), (-8).into()), // alg: EdDSA
+            ((-1).into(), 6.into()), // crv: Ed25519
+            (
+                (-2).into(),
+                ciborium::Value::Bytes(key.public_key().as_ref().to_vec()),
+            ),
+        ]);
+        let mut public_key = Vec::new();
+        ciborium::into_writer(&cose, &mut public_key).unwrap();
+
+        let user = create_test_user(&state.store, email).await;
+        let authenticator = db::create_authenticator(
+            &state.store,
+            &db::CreateAuthenticatorParams {
+                user_id: &user.id,
+                name: "Counter Key",
+                credential_id: email.as_bytes(),
+                public_key: &public_key,
+                aaguid: None,
+                user_handle: None,
+                attestation_verified: false,
+                counter: stored,
+            },
+        )
+        .await
+        .unwrap();
+        (key, authenticator)
+    }
+
+    /// An assertion signed by `key` reporting `counter`, checked against a
+    /// stored counter of `stored` as read at lookup.
+    fn signed_assertion(
+        key: &aws_lc_rs::signature::Ed25519KeyPair,
+        counter: u32,
+        stored: u32,
+    ) -> LoginAssertionParams {
+        use aws_lc_rs::digest::{SHA256, digest};
+
+        let challenge = b"counter-commit-challenge".to_vec();
+        let mut authenticator_data = digest(&SHA256, COUNTER_RP_ID.as_bytes()).as_ref().to_vec();
+        authenticator_data.push(0x05); // UP + UV
+        authenticator_data.extend_from_slice(&counter.to_be_bytes());
+        let client_data_json = serde_json::to_vec(&serde_json::json!({
+            "type": "webauthn.get",
+            "challenge": URL_SAFE_NO_PAD.encode(&challenge),
+            "origin": COUNTER_ORIGIN,
+        }))
+        .unwrap();
+        let mut signed = authenticator_data.clone();
+        signed.extend_from_slice(digest(&SHA256, &client_data_json).as_ref());
+        LoginAssertionParams {
+            authenticator_data,
+            client_data_json,
+            signature: key.sign(&signed).as_ref().to_vec(),
+            public_key: Vec::new(),
+            rp_id: COUNTER_RP_ID.to_string(),
+            expected_origin: COUNTER_ORIGIN.to_string(),
+            challenge,
+            stored_counter: stored,
+            origin_policy: OriginPolicy::Strict,
+        }
+    }
+
+    // Two copies of one credential report the same signCount, and both
+    // assertions are verified against the counter read before either
+    // committed. Only the first commits; the second is refused as a counter
+    // that does not increase, which is what clone detection exists to catch.
+    #[tokio::test]
+    async fn two_assertions_with_one_counter_commit_only_once() {
+        let state = test_app_state().await;
+        let (key, authenticator_id) = registered_key(&state, "clone@example.com", 4).await;
+        let public_key = db::get_authenticator_by_id(&state.store, &authenticator_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .public_key;
+
+        let mut first = signed_assertion(&key, 5, 4);
+        first.public_key.clone_from(&public_key);
+        let mut second = signed_assertion(&key, 5, 4);
+        second.public_key = public_key;
+
+        let result = verify_login_assertion(&state.store, &authenticator_id, first)
+            .await
+            .expect("the first assertion verifies and commits");
+        assert_eq!(result.new_counter, 5);
+
+        let err = verify_login_assertion(&state.store, &authenticator_id, second)
+            .await
+            .err()
+            .expect("the second assertion with the same counter is refused");
+        assert!(matches!(
+            err,
+            AssertionFailure::Rejected(webauthn_verify::VerifyError::CounterNotIncreasing)
+        ));
+    }
+
+    // A key deleted after the grant looked it up yields no login: the
+    // counter commit finds no authenticator, and nothing is issued for it.
+    #[tokio::test]
+    async fn an_assertion_for_a_key_deleted_during_sign_in_is_refused() {
+        let state = test_app_state().await;
+        let (key, authenticator_id) = registered_key(&state, "deleted@example.com", 4).await;
+        let mut params = signed_assertion(&key, 5, 4);
+        params.public_key = db::get_authenticator_by_id(&state.store, &authenticator_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .public_key;
+
+        remove_test_authenticator(&state.store, &state.session_cache, &authenticator_id).await;
+
+        let err = verify_login_assertion(&state.store, &authenticator_id, params)
+            .await
+            .err()
+            .expect("a deleted key yields no login");
+        assert!(matches!(err, AssertionFailure::KeyDeleted));
     }
 }

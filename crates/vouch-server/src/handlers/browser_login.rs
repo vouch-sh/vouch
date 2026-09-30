@@ -652,20 +652,24 @@ pub(crate) async fn browser_login_complete(
     let stored_counter = authenticator.counter.cast_unsigned();
 
     use crate::services::auth::{LoginAssertionParams, verify_login_assertion};
-    let verification_result = match verify_login_assertion(LoginAssertionParams {
-        authenticator_data: req.authenticator_data.into_bytes(),
-        client_data_json: req.client_data_json.into_bytes(),
-        signature: req.signature.into_bytes(),
-        public_key: authenticator.public_key.clone(),
-        rp_id: auth_state.rp_id.clone(),
-        // Browser sets clientDataJSON.origin to the calling page's origin
-        // (the server's base_url), which may be a subdomain of rp_id.
-        expected_origin: state.config().base_url.to_string(),
-        challenge: auth_state.challenge.clone(),
-        stored_counter,
-        // Tolerate loopback origin variations only in development (no TLS).
-        origin_policy: state.config().as_ref().into(),
-    })
+    let verification_result = match verify_login_assertion(
+        &state.store,
+        &authenticator.id,
+        LoginAssertionParams {
+            authenticator_data: req.authenticator_data.into_bytes(),
+            client_data_json: req.client_data_json.into_bytes(),
+            signature: req.signature.into_bytes(),
+            public_key: authenticator.public_key.clone(),
+            rp_id: auth_state.rp_id.clone(),
+            // Browser sets clientDataJSON.origin to the calling page's origin
+            // (the server's base_url), which may be a subdomain of rp_id.
+            expected_origin: state.config().base_url.to_string(),
+            challenge: auth_state.challenge.clone(),
+            stored_counter,
+            // Tolerate loopback origin variations only in development (no TLS).
+            origin_policy: state.config().as_ref().into(),
+        },
+    )
     .await
     {
         Ok(result) => result,
@@ -707,8 +711,8 @@ pub(crate) async fn browser_login_complete(
         verification_result.user_verified
     );
 
-    // The assertion has verified; every remaining step (counter commit,
-    // device-auth release, session creation) is fallible. If any of them
+    // The assertion has verified and its counter is committed; every
+    // remaining step (device-auth release, session creation) is fallible. If any of them
     // errors, record a `LoginFailed` audit row so the verified hardware
     // ceremony never vanishes from AuthEvents — the same audit-ordering
     // guarantee `browser_register_complete` provides for `Enrollment`.
@@ -718,7 +722,6 @@ pub(crate) async fn browser_login_complete(
             jar: &jar,
             user: &user,
             authenticator: &authenticator,
-            new_counter: verification_result.new_counter,
             auth_now: verification_result.verified_at,
             challenge_claim,
             pending_auth: auth_state.pending_auth,
@@ -734,8 +737,6 @@ struct LoginSessionParams<'a> {
     jar: &'a CookieJar,
     user: &'a db::User,
     authenticator: &'a db::Authenticator,
-    /// Verifier-reported WebAuthn counter (u32); stored bit-identical as i32.
-    new_counter: u32,
     /// The instant the assertion verified, stamped by the verifier itself.
     /// It backs both the browser session and the device approval, so the
     /// token the device-code grant later mints reports the ceremony instant
@@ -746,13 +747,13 @@ struct LoginSessionParams<'a> {
     client_info: ClientInfo,
 }
 
-/// Run every fallible step that follows a verified login assertion: commit
-/// the authenticator counter, release a waiting CLI device authorization,
-/// create the OAuth session, and record the `LoginSuccess` audit event.
+/// Run every fallible step that follows a verified login assertion, whose
+/// signature counter verification already committed: release a waiting CLI
+/// device authorization, create the OAuth session, and record the
+/// `LoginSuccess` audit event.
 ///
 /// The caller records a `LoginFailed` audit row when this returns `Err`, so
-/// a verified hardware ceremony (and any state it already committed, such as
-/// the counter update) always leaves an AuthEvents trace even when a
+/// a verified hardware ceremony (and the counter it committed) always leaves an AuthEvents trace even when a
 /// post-verification step fails — the same audit-ordering guarantee
 /// `browser_register_complete` provides for `Enrollment`.
 async fn finalize_login_session(
@@ -768,8 +769,8 @@ async fn finalize_login_session(
     let result = finalize_login_session_inner(state, params, arrival).await;
 
     if let Err(ref e) = result {
-        // The assertion verified and the counter update may already have
-        // committed, but a later step failed: leave a `LoginFailed` trace
+        // The assertion verified and its counter committed, but a later step
+        // failed: leave a `LoginFailed` trace
         // so the ceremony never vanishes from AuthEvents. The failure is the
         // server's, not the user's, so the row is not attributed to them and
         // cannot feed `failed_login_burst`.
@@ -797,17 +798,11 @@ async fn finalize_login_session_inner(
         jar,
         user,
         authenticator,
-        new_counter,
         auth_now,
         challenge_claim,
         pending_auth,
         client_info,
     } = params;
-
-    // WebAuthn counter is u32; stored bit-identical as i32. Real authenticators never
-    // approach 2^31 uses, and bitwise reinterpret preserves DB monotonicity comparisons.
-    let new_counter = new_counter.cast_signed();
-    db::update_authenticator_counter(&state.store, &authenticator.id, new_counter).await?;
 
     // Release a CLI waiting on `vouch enroll`: the assertion just verified is
     // the possession proof the upstream IdP sign-in cannot provide, so the
@@ -2027,7 +2022,7 @@ mod tests {
     // fallible. `finalize_login_session` guarantees an AuthEvents row either
     // way: `LoginSuccess` when the session is created, `LoginFailed` with a
     // `post_verification` reason when a later step errors — so a verified
-    // hardware ceremony (whose counter update may already have committed)
+    // hardware ceremony (whose counter verification committed)
     // never vanishes from the audit log. The failure row is a server fault,
     // so it is not attributed to the user. The full handler path needs a real
     // signed assertion, so these tests exercise the extracted tail directly.
@@ -2060,7 +2055,6 @@ mod tests {
                 jar: &CookieJar::new(),
                 user: &user,
                 authenticator: &authenticator,
-                new_counter: 7,
                 auth_now: AuthTime::for_test(Timestamp::now().as_second()),
                 challenge_claim: claim,
                 pending_auth: None,
@@ -2145,7 +2139,6 @@ mod tests {
                 jar: &jar,
                 user: &user,
                 authenticator: &authenticator,
-                new_counter: 9,
                 auth_now: AuthTime::for_test(Timestamp::now().as_second()),
                 challenge_claim: claim,
                 pending_auth: None,

@@ -317,6 +317,30 @@ pub struct AssertionParams<'a> {
     pub origin_policy: OriginPolicy,
 }
 
+/// A credential's stored signature counter (WebAuthn Level 2 §6.1
+/// `signCount`, a `u32`), and the rule an assertion's counter must meet
+/// against it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SignCounter(pub u32);
+
+impl SignCounter {
+    /// Whether an assertion reporting `presented` may follow this stored
+    /// value: the stored counter is zero, or `presented` exceeds it.
+    ///
+    /// WebAuthn Level 2 §6.1.1 flags a possible clone when "either is
+    /// non-zero, and the new signCount value is less than or equal to the
+    /// stored value". This reads "the stored value is non-zero": the only
+    /// case the two treat differently is a nonzero presented counter against
+    /// a zero stored one, which cannot also be less than or equal to it.
+    /// Credentials that have only ever reported zero (counter-less
+    /// authenticators, e.g. some CTAP1 devices) keep a zero stored counter
+    /// and stay accepted.
+    #[must_use]
+    pub fn admits(self, presented: u32) -> bool {
+        self.0 == 0 || presented > self.0
+    }
+}
+
 /// Verify a WebAuthn assertion using the default COSE verifier.
 ///
 /// This is a convenience function that uses [`RealCoseVerifier`] for production use.
@@ -506,15 +530,10 @@ fn verify_assertion_inner<V: CoseVerifier>(
     // counter regression should stop the ceremony rather than feed a risk
     // score.
     //
-    // The condition below reads `stored_counter != 0` where the specification
-    // says "either is non-zero". The two agree: the only case they treat
-    // differently is a nonzero presented counter against a zero stored
-    // counter, which cannot also satisfy `counter <= stored_counter`.
-    //
-    // Credentials that have only ever reported zero (counter-less
-    // authenticators, e.g. some CTAP1 devices) keep `stored_counter == 0` and
-    // remain accepted, preserving compatibility.
-    if stored_counter != 0 && counter <= stored_counter {
+    // The rule is `SignCounter::admits`; the stored counter's commit applies
+    // it again against the row it writes, so two assertions verified at once
+    // cannot both pass against the same stored value.
+    if !SignCounter(stored_counter).admits(counter) {
         return Err(VerifyError::CounterNotIncreasing);
     }
 
