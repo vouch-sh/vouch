@@ -704,7 +704,7 @@ async fn test_rfc7662_valid_token_is_active_unknown_token_is_inactive() {
 // Deactivated user — introspection MUST return active=false
 //
 // Deactivation paths (admin `members.rs`, SCIM `users.rs`) are not atomic:
-// `update_user_active_status` and `delete_sessions_for_user` commit in
+// `update_user_active_status` and `SessionCache::delete_for_user` commit in
 // separate transactions. If session deletion fails after the user is
 // deactivated, live sessions remain. Introspection must not grant access
 // to a deactivated user's token in that state — it mirrors the `user.active`

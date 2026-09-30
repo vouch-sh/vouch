@@ -5,6 +5,7 @@ use super::document_type::Document;
 use super::documents::authenticator::AuthenticatorDoc;
 use super::documents::device_auth::{DeviceAuthRequestDoc, DeviceAuthStatus};
 use super::documents::session::SessionDoc;
+use super::sessions::DeletedSessions;
 use super::store::{DocumentStore, StoreTransaction};
 use super::users::User;
 use anyhow::{Context, Result};
@@ -268,7 +269,7 @@ fn detach_authenticator_from_device_auth(d: &mut DeviceAuthRequestDoc) {
 pub async fn delete_authenticator(
     tx: &mut StoreTransaction<'_>,
     authenticator_id: &str,
-) -> Result<()> {
+) -> Result<DeletedSessions> {
     tx.update_by_index::<DeviceAuthRequestDoc, _>(
         "authenticator_id",
         authenticator_id,
@@ -278,7 +279,7 @@ pub async fn delete_authenticator(
     tx.delete_by_index::<SessionDoc>("authenticator_id", authenticator_id)
         .await?;
     tx.delete(authenticator_id).await?;
-    Ok(())
+    Ok(DeletedSessions::of_authenticator(authenticator_id))
 }
 
 /// Update an authenticator's name.

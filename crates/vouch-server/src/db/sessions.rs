@@ -177,7 +177,7 @@ pub async fn find_session_by_token_hash(
 /// one of them records the `Logout` audit event. A loser that read the row but
 /// deleted nothing returns `None`, matching `delete_scim_token`,
 /// `delete_custom_policy`, `delete_scim_group`, and `delete_user`.
-pub async fn delete_session_by_token_hash(
+pub(super) async fn delete_session_by_token_hash(
     store: &DocumentStore,
     token_hash: &str,
 ) -> Result<Option<Session>> {
@@ -231,7 +231,7 @@ pub async fn delete_expired_sessions(store: &DocumentStore, _now: &str) -> Resul
 ///
 /// Returns the token hashes of the sessions actually deleted, in insertion
 /// order, so the caller can invalidate each cache entry by key.
-pub async fn delete_sessions_for_code_replay(
+pub(super) async fn delete_sessions_for_code_replay(
     store: &DocumentStore,
     code_hash: &str,
 ) -> Result<Vec<String>> {
@@ -260,7 +260,7 @@ pub async fn delete_sessions_for_code_replay(
 }
 
 /// Delete all sessions for a user (for immediate session invalidation).
-pub async fn delete_sessions_for_user(store: &DocumentStore, user_id: &str) -> Result<u64> {
+pub(super) async fn delete_sessions_for_user(store: &DocumentStore, user_id: &str) -> Result<u64> {
     store
         .delete_by_index::<SessionDoc>("user_id", user_id)
         .await
@@ -281,16 +281,37 @@ pub async fn delete_sessions_for_user(store: &DocumentStore, user_id: &str) -> R
 ///
 /// Pre-migration sessions issued before the `client_id` index existed
 /// deserialize `client_id` to `None` and so are not matched; they remain
-/// valid until their `exp`. The caller MUST also call
-/// [`SessionCache::invalidate_for_client`] to drop any cached entries for
-/// the same client, since a DB delete alone does not evict the cache.
-pub async fn delete_sessions_for_oauth_client(
+/// valid until their `exp`. Reached through
+/// [`SessionCache::delete_for_oauth_client`], which also evicts the cache.
+pub(super) async fn delete_sessions_for_oauth_client(
     store: &DocumentStore,
     client_id: &str,
 ) -> Result<u64> {
     store
         .delete_by_index::<SessionDoc>("client_id", client_id)
         .await
+}
+
+/// Sessions a transaction deleted, to be evicted from the [`SessionCache`]
+/// once it commits.
+///
+/// Returned by a cascade that deletes sessions inside the caller's
+/// transaction, where eviction has to wait for the commit: evicting earlier
+/// would let a concurrent lookup re-cache the still-committed row.
+/// [`SessionCache::evict`] is the only way to consume it, and `#[must_use]`
+/// under `-D warnings` makes dropping it a build error.
+#[must_use = "evict the deleted sessions with SessionCache::evict after the transaction commits"]
+#[derive(Debug)]
+pub struct DeletedSessions {
+    authenticator_id: String,
+}
+
+impl DeletedSessions {
+    pub(in crate::db) fn of_authenticator(authenticator_id: &str) -> Self {
+        Self {
+            authenticator_id: authenticator_id.to_string(),
+        }
+    }
 }
 
 /// In-memory cache for session lookups by token hash.
@@ -394,8 +415,97 @@ impl SessionCache {
         Ok(result)
     }
 
+    /// Delete the session behind `token_hash` and evict it, returning the
+    /// deleted row (expired or not) so the caller can audit who was signed
+    /// out; `None` if no row matched.
+    ///
+    /// Session rows are deleted only through `SessionCache` methods, or by a
+    /// cascade that takes the cache and evicts after it commits, so a deleted
+    /// session cannot keep validating from a cached `Hit`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the store error; the session may then still be live, so the
+    /// caller must not report it ended.
+    pub async fn delete_by_token_hash(
+        &self,
+        store: &DocumentStore,
+        token_hash: &str,
+    ) -> Result<Option<Session>> {
+        #[cfg(test)]
+        if self.is_faulted(token_hash) {
+            return Err(anyhow::anyhow!(
+                "injected store fault for token hash {token_hash}"
+            ));
+        }
+        let row = delete_session_by_token_hash(store, token_hash).await?;
+        self.invalidate(token_hash);
+        Ok(row)
+    }
+
+    /// Delete every session of `user_id` and evict them, returning how many
+    /// rows were deleted.
+    ///
+    /// # Errors
+    ///
+    /// Returns the store error; nothing was deleted.
+    pub async fn delete_for_user(&self, store: &DocumentStore, user_id: &str) -> Result<u64> {
+        let deleted = delete_sessions_for_user(store, user_id).await?;
+        self.invalidate_for_user(user_id);
+        Ok(deleted)
+    }
+
+    /// Delete the OAuth access-token sessions issued from a replayed
+    /// single-use code and evict them, returning how many were deleted. See
+    /// [`delete_sessions_for_code_replay`] for the revocation bound.
+    ///
+    /// # Errors
+    ///
+    /// Returns the store error of the initial lookup; nothing was deleted.
+    pub async fn delete_for_code_replay(
+        &self,
+        store: &DocumentStore,
+        code_hash: &str,
+    ) -> Result<usize> {
+        let token_hashes = delete_sessions_for_code_replay(store, code_hash).await?;
+        for token_hash in &token_hashes {
+            self.invalidate(token_hash);
+        }
+        Ok(token_hashes.len())
+    }
+
+    /// Delete every session issued for `client_id` and evict them, returning
+    /// how many rows were deleted. See [`delete_sessions_for_oauth_client`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the store error; nothing was deleted.
+    pub async fn delete_for_oauth_client(
+        &self,
+        store: &DocumentStore,
+        client_id: &str,
+    ) -> Result<u64> {
+        let deleted = delete_sessions_for_oauth_client(store, client_id).await?;
+        self.invalidate_for_client(client_id);
+        Ok(deleted)
+    }
+
+    /// Evict the sessions a committed transaction deleted.
+    pub fn evict(&self, deleted: DeletedSessions) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        let Ok(mut map) = self.entries.lock() else {
+            return;
+        };
+        map.retain(|_, entry| {
+            let Some(session) = entry.value.as_ref() else {
+                return true;
+            };
+            session.authenticator_id.as_deref() != Some(deleted.authenticator_id.as_str())
+        });
+    }
+
     /// Invalidate a cached session by token hash.
-    pub fn invalidate(&self, token_hash: &str) {
+    pub(in crate::db) fn invalidate(&self, token_hash: &str) {
         self.generation.fetch_add(1, Ordering::SeqCst);
         let Ok(mut map) = self.entries.lock() else {
             return;
@@ -404,7 +514,7 @@ impl SessionCache {
     }
 
     /// Invalidate cached sessions for a specific user.
-    pub fn invalidate_for_user(&self, user_id: &str) {
+    pub(in crate::db) fn invalidate_for_user(&self, user_id: &str) {
         self.generation.fetch_add(1, Ordering::SeqCst);
         let Ok(mut map) = self.entries.lock() else {
             return;
@@ -425,7 +535,7 @@ impl SessionCache {
     /// `client_id` is `None` (pre-migration rows) are retained — they are not
     /// reachable by client-scoped revocation and would otherwise be dropped
     /// indiscriminately.
-    pub fn invalidate_for_client(&self, client_id: &str) {
+    pub(in crate::db) fn invalidate_for_client(&self, client_id: &str) {
         self.generation.fetch_add(1, Ordering::SeqCst);
         let Ok(mut map) = self.entries.lock() else {
             return;

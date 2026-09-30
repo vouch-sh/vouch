@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Authentication handlers for session management.
 
+use super::enroll::ErrorTemplate;
 use crate::AppState;
 use crate::arrival::ArrivalTime;
 use crate::db;
@@ -113,10 +114,14 @@ pub(crate) async fn logout(
         let token_hash = hash_token(token);
 
         // The deleted row, expired or not, carries the user for the `Logout`
-        // audit event (see `db::delete_session_by_token_hash`).
-        match db::delete_session_by_token_hash(&state.store, &token_hash).await {
+        // audit event. A failed delete leaves the session live: the user is
+        // told sign-out failed and keeps the cookie to retry.
+        match state
+            .session_cache
+            .delete_by_token_hash(&state.store, &token_hash)
+            .await
+        {
             Ok(Some(session)) => {
-                state.session_cache.invalidate(&token_hash);
                 tracing::info!("Session deleted during logout");
 
                 // Best-effort logout audit event
@@ -134,7 +139,12 @@ pub(crate) async fn logout(
             }
             Ok(None) => {}
             Err(e) => {
-                tracing::warn!("Failed to delete session during logout: {}", e);
+                tracing::error!("Failed to delete session during logout: {e}");
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    ErrorTemplate::logout_failed(),
+                )
+                    .into_response();
             }
         }
     }
@@ -429,7 +439,7 @@ mod tests {
     /// fetched the audit context via the expiry-filtering
     /// `get_session_by_token_hash`, which returned `None` for the expired
     /// row, so the audit was silently dropped — even though
-    /// `delete_session_by_token_hash` successfully deleted the row.
+    /// `SessionCache::delete_by_token_hash` successfully deleted the row.
     #[tokio::test]
     async fn test_logout_records_audit_event_for_expired_session_row() {
         let (app, state) = test_app().await;
@@ -561,6 +571,57 @@ mod tests {
         assert!(
             events.is_empty(),
             "no Logout audit event when there is no session to delete"
+        );
+    }
+
+    /// A `POST /logout` whose session delete fails must say so: 503 with no
+    /// `Set-Cookie` clearing the session, so the browser keeps a cookie that
+    /// still works and can retry. A redirect home would show the user as
+    /// signed out while the session stays live.
+    #[tokio::test]
+    async fn test_logout_reports_failed_session_delete() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "logout-fault@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let token_hash = crypto::hash_token(&token);
+        state.session_cache.inject_fault(token_hash.clone());
+
+        let cookie = format!("{}={token}", vouch_common::SESSION_COOKIE_NAME);
+        let response = http_post_form_full(
+            &app,
+            "/logout",
+            "",
+            &[
+                ("Cookie", cookie.as_str()),
+                ("Origin", "https://test.example.com"),
+            ],
+        )
+        .await;
+
+        assert_eq!(response.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            !response.headers.get_all("set-cookie").iter().any(|v| v
+                .to_str()
+                .is_ok_and(|v| v.starts_with(vouch_common::SESSION_COOKIE_NAME))),
+            "a failed logout must not clear the session cookie"
+        );
+        let row = db::find_session_by_token_hash(&state.store, &token_hash)
+            .await
+            .expect("post-logout lookup");
+        assert!(row.is_some(), "the session row survives the failed delete");
+        assert!(
+            logout_audit_events(&state, &user.id).await.is_empty(),
+            "no Logout audit event when nothing was deleted"
         );
     }
 

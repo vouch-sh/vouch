@@ -54,9 +54,14 @@ async fn test_store_delete_cleans_up_indexes() {
     assert!(found.is_some());
 
     // Delete the document
-    delete_user(&store, &user_id, LastAdminGuard::Enforce)
-        .await
-        .expect("delete failed");
+    delete_user(
+        &store,
+        &SessionCache::new(16, 30),
+        &user_id,
+        LastAdminGuard::Enforce,
+    )
+    .await
+    .expect("delete failed");
 
     // Document is gone
     assert!(

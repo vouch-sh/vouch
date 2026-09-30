@@ -613,15 +613,16 @@ async fn enforce_single_use_code(
             // issuance, so this targets exactly the compromised code's tokens
             // and leaves the user's other sessions (other codes, FIDO2,
             // browser login, …) intact.
-            match db::delete_sessions_for_code_replay(&state.store, code_hash).await {
-                Ok(token_hashes) if !token_hashes.is_empty() => {
-                    for token_hash in &token_hashes {
-                        state.session_cache.invalidate(token_hash);
-                    }
+            match state
+                .session_cache
+                .delete_for_code_replay(&state.store, code_hash)
+                .await
+            {
+                Ok(revoked_count) if revoked_count > 0 => {
                     tracing::warn!(
                         target: "security",
                         user_id = %auth_code.user_id,
-                        revoked_count = token_hashes.len(),
+                        revoked_count,
                         "Revoked OAuth tokens issued from the replayed authorization code"
                     );
                 }

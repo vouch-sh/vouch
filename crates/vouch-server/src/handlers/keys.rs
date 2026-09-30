@@ -491,10 +491,7 @@ pub(crate) async fn delete_key(
     let current_session_revoked = token.authenticator_id.as_deref() == Some(key_id.as_str());
 
     let (key_name, sessions_revoked) =
-        key_svc::delete_key(&state.store, &token.sub, &key_id).await?;
-
-    // Invalidate session cache for this user — authenticator deletion cascades to their sessions
-    state.session_cache.invalidate_for_user(&token.sub);
+        key_svc::delete_key(&state.store, &state.session_cache, &token.sub, &key_id).await?;
 
     let event = db::AuthEventParams {
         user_id: db::Principal::Verified(token.sub.clone()),

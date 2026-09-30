@@ -16,7 +16,7 @@ use crate::db::documents::organization::{
     UNVERIFY_FAILURE_THRESHOLD,
 };
 use crate::db::pool::{self, RetryableError};
-use crate::db::sessions::{self, SessionCache};
+use crate::db::sessions::SessionCache;
 use crate::db::store::DocumentStore;
 use anyhow::Result;
 use jiff::Timestamp;
@@ -577,12 +577,8 @@ async fn revoke_sessions_for_domain_users(
         if !matches {
             continue;
         }
-        match sessions::delete_sessions_for_user(store, &user.id).await {
+        match session_cache.delete_for_user(store, &user.id).await {
             Ok(_) => {
-                // Companion cache eviction: invalidate only after the DB
-                // delete committed, so a cache refill can't reintroduce the
-                // revoked session. Matches the other revocation paths.
-                session_cache.invalidate_for_user(&user.id);
                 tracing::info!(
                     user_id = %user.id,
                     org_id = %org_id,

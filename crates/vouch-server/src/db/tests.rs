@@ -41,6 +41,10 @@
 
 use std::sync::Arc;
 
+use super::sessions::{
+    delete_session_by_token_hash, delete_sessions_for_code_replay,
+    delete_sessions_for_oauth_client, delete_sessions_for_user,
+};
 use super::*;
 use crate::crypto::document_crypto::{DocumentCrypto, PlaintextDocumentCrypto};
 use crate::db::audit::AuditStore;

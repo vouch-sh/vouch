@@ -76,9 +76,14 @@ async fn test_user_cascade_delete() {
     );
 
     // Delete user
-    delete_user(&store, &user_id, LastAdminGuard::Enforce)
-        .await
-        .expect("Failed to delete user");
+    delete_user(
+        &store,
+        &SessionCache::new(16, 30),
+        &user_id,
+        LastAdminGuard::Enforce,
+    )
+    .await
+    .expect("Failed to delete user");
 
     // Verify cascade (authenticators and sessions should be deleted)
     assert!(
@@ -96,6 +101,136 @@ async fn test_user_cascade_delete() {
     assert!(get_user_by_id(&store, &user_id).await.unwrap().is_none());
 }
 
+/// A session a user's deletion removed must not keep answering from the
+/// cache: `delete_user` evicts the sessions it deleted, both the user's own
+/// and the ones its authenticator cascade removed.
+#[tokio::test]
+async fn test_delete_user_evicts_cached_sessions() {
+    let (store, _audit) = test_db().await;
+    let (user_id, _) = upsert_user(&store, "evict-user@example.com", None)
+        .await
+        .expect("create user");
+    let auth_id = create_test_key(&store, &user_id, 91).await;
+    create_bound_session(&store, &user_id, "evict_user_token", &auth_id).await;
+
+    let cache = SessionCache::new(16, 30);
+    assert!(
+        cache
+            .get_session_by_token_hash(&store, "evict_user_token", test_arrival())
+            .await
+            .unwrap()
+            .is_some(),
+        "the lookup warms the cache"
+    );
+
+    delete_user(&store, &cache, &user_id, LastAdminGuard::Enforce)
+        .await
+        .expect("delete user");
+
+    assert!(
+        cache
+            .get_session_by_token_hash(&store, "evict_user_token", test_arrival())
+            .await
+            .unwrap()
+            .is_none(),
+        "a deleted user's session must not answer from the cache"
+    );
+}
+
+/// Deleting an authenticator deletes the sessions it authenticated. The
+/// `DeletedSessions` it returns evicts exactly those sessions: a session
+/// the user authenticated with another key stays cached.
+#[tokio::test]
+async fn test_delete_authenticator_evicts_only_its_sessions() {
+    let (store, _audit) = test_db().await;
+    let (user_id, _) = upsert_user(&store, "evict-key@example.com", None)
+        .await
+        .expect("create user");
+    let removed_key = create_test_key(&store, &user_id, 92).await;
+    let kept_key = create_test_key(&store, &user_id, 93).await;
+    create_bound_session(&store, &user_id, "evict_removed_token", &removed_key).await;
+    create_bound_session(&store, &user_id, "evict_kept_token", &kept_key).await;
+
+    let cache = SessionCache::new(16, 30);
+    for hash in ["evict_removed_token", "evict_kept_token"] {
+        assert!(
+            cache
+                .get_session_by_token_hash(&store, hash, test_arrival())
+                .await
+                .unwrap()
+                .is_some(),
+            "the lookup warms the cache for {hash}"
+        );
+    }
+
+    let mut tx = store.begin().await.unwrap();
+    let deleted = delete_authenticator(&mut tx, &removed_key).await.unwrap();
+    tx.commit().await.unwrap();
+    cache.evict(deleted);
+
+    assert!(
+        cache
+            .get_session_by_token_hash(&store, "evict_removed_token", test_arrival())
+            .await
+            .unwrap()
+            .is_none(),
+        "a session of the deleted authenticator must not answer from the cache"
+    );
+    assert!(
+        cache
+            .get_session_by_token_hash(&store, "evict_kept_token", test_arrival())
+            .await
+            .unwrap()
+            .is_some(),
+        "a session of another authenticator stays valid"
+    );
+}
+
+async fn create_test_key(store: &DocumentStore, user_id: &str, seed: u8) -> String {
+    create_authenticator(
+        store,
+        &CreateAuthenticatorParams {
+            user_id,
+            name: "Evict Key",
+            credential_id: &[seed; 10],
+            public_key: &[0u8; 32],
+            aaguid: None,
+            user_handle: None,
+            attestation_verified: false,
+            counter: 0,
+        },
+    )
+    .await
+    .expect("create authenticator")
+}
+
+async fn create_bound_session(
+    store: &DocumentStore,
+    user_id: &str,
+    token_hash: &str,
+    authenticator_id: &str,
+) {
+    create_session(
+        store,
+        &CreateSessionParams {
+            user_id,
+            user_email: "evict@example.com",
+            token_hash,
+            authenticator_id: Some(authenticator_id),
+            expires_at: "2099-12-31T23:59:59Z".parse().unwrap(),
+            session_type: SessionPurpose::OAuthAccessToken,
+            authorization_details: None,
+            hardware_aaguid: None,
+            org_domain: None,
+            client_id: None,
+            source_code_hash: None,
+            authenticated_at: None,
+        },
+    )
+    .await
+    .expect("create session");
+}
+
 /// `delete_user` returns `Result<bool>`: it must return `false` when the
 /// user document does not exist (so handlers can surface 404 and skip the
 /// audit event) and `true` when the user is deleted. Mirrors the contract
@@ -110,9 +245,14 @@ async fn test_delete_user_returns_false_when_missing() {
 
     // A valid UUID that was never inserted.
     let missing_id = "00000000-0000-7000-0000-000000000001";
-    let deleted = delete_user(&store, missing_id, LastAdminGuard::Enforce)
-        .await
-        .expect("delete_user must not error on a missing user");
+    let deleted = delete_user(
+        &store,
+        &SessionCache::new(16, 30),
+        missing_id,
+        LastAdminGuard::Enforce,
+    )
+    .await
+    .expect("delete_user must not error on a missing user");
     assert!(
         !deleted,
         "delete_user must return false when the user does not exist"
@@ -122,9 +262,14 @@ async fn test_delete_user_returns_false_when_missing() {
     let (user_id, _) = upsert_user(&store, "delete-bool@example.com", None)
         .await
         .expect("create user");
-    let deleted = delete_user(&store, &user_id, LastAdminGuard::Enforce)
-        .await
-        .expect("delete_user should succeed");
+    let deleted = delete_user(
+        &store,
+        &SessionCache::new(16, 30),
+        &user_id,
+        LastAdminGuard::Enforce,
+    )
+    .await
+    .expect("delete_user should succeed");
     assert!(deleted, "delete_user must return true for an existing user");
     assert!(
         get_user_by_id(&store, &user_id)
@@ -135,9 +280,14 @@ async fn test_delete_user_returns_false_when_missing() {
     );
 
     // Deleting the same user again returns false (idempotent miss).
-    let deleted_again = delete_user(&store, &user_id, LastAdminGuard::Enforce)
-        .await
-        .expect("delete_user must not error on a missing user");
+    let deleted_again = delete_user(
+        &store,
+        &SessionCache::new(16, 30),
+        &user_id,
+        LastAdminGuard::Enforce,
+    )
+    .await
+    .expect("delete_user must not error on a missing user");
     assert!(
         !deleted_again,
         "delete_user must return false on the second delete of the same user"
@@ -177,9 +327,14 @@ async fn test_user_delete_preserves_ssh_revocations() {
     .await
     .expect("Failed to revoke SSH certificates");
 
-    delete_user(&store, &user_id, LastAdminGuard::Enforce)
-        .await
-        .expect("delete failed");
+    delete_user(
+        &store,
+        &SessionCache::new(16, 30),
+        &user_id,
+        LastAdminGuard::Enforce,
+    )
+    .await
+    .expect("delete failed");
 
     // User should be gone
     assert!(
@@ -344,7 +499,13 @@ async fn test_delete_user_refuses_to_remove_the_last_active_admin() {
 
     assert!(
         matches!(
-            delete_user(&store, &sole_admin, LastAdminGuard::Enforce).await,
+            delete_user(
+                &store,
+                &SessionCache::new(16, 30),
+                &sole_admin,
+                LastAdminGuard::Enforce
+            )
+            .await,
             Err(DeleteUserError::LastAdmin)
         ),
         "the organization's only active admin must not be deletable"
@@ -359,9 +520,14 @@ async fn test_delete_user_refuses_to_remove_the_last_active_admin() {
 
     // A plain member is not part of the count, so the floor does not apply.
     assert!(
-        delete_user(&store, &member, LastAdminGuard::Enforce)
-            .await
-            .expect("member delete"),
+        delete_user(
+            &store,
+            &SessionCache::new(16, 30),
+            &member,
+            LastAdminGuard::Enforce
+        )
+        .await
+        .expect("member delete"),
         "deleting a non-admin must not be blocked by the admin floor"
     );
 
@@ -376,14 +542,25 @@ async fn test_delete_user_refuses_to_remove_the_last_active_admin() {
     .await
     .expect("create second admin");
     assert!(
-        delete_user(&store, &sole_admin, LastAdminGuard::Enforce)
-            .await
-            .expect("admin delete"),
+        delete_user(
+            &store,
+            &SessionCache::new(16, 30),
+            &sole_admin,
+            LastAdminGuard::Enforce
+        )
+        .await
+        .expect("admin delete"),
         "an admin with a surviving peer must be deletable"
     );
     assert!(
         matches!(
-            delete_user(&store, &second_admin, LastAdminGuard::Enforce).await,
+            delete_user(
+                &store,
+                &SessionCache::new(16, 30),
+                &second_admin,
+                LastAdminGuard::Enforce
+            )
+            .await,
             Err(DeleteUserError::LastAdmin)
         ),
         "the survivor is now the last admin and must be protected in turn"
@@ -421,7 +598,13 @@ async fn test_delete_user_ignores_deactivated_admins_in_the_floor() {
 
     assert!(
         matches!(
-            delete_user(&store, &active_admin, LastAdminGuard::Enforce).await,
+            delete_user(
+                &store,
+                &SessionCache::new(16, 30),
+                &active_admin,
+                LastAdminGuard::Enforce
+            )
+            .await,
             Err(DeleteUserError::LastAdmin)
         ),
         "a deactivated admin must not satisfy the floor"
@@ -446,9 +629,14 @@ async fn test_delete_user_bypass_skips_the_admin_floor() {
     .expect("create sole admin");
 
     assert!(
-        delete_user(&store, &sole_admin, LastAdminGuard::Bypass)
-            .await
-            .expect("bypass delete"),
+        delete_user(
+            &store,
+            &SessionCache::new(16, 30),
+            &sole_admin,
+            LastAdminGuard::Bypass
+        )
+        .await
+        .expect("bypass delete"),
         "Bypass must delete the last admin without consulting the floor"
     );
 }
@@ -493,12 +681,16 @@ async fn test_concurrent_mutual_admin_removal_leaves_one_admin() {
         {
             let s = std::sync::Arc::clone(&store);
             let id = admin_a.clone();
-            async move { delete_user(&s, &id, LastAdminGuard::Enforce).await }
+            async move {
+                delete_user(&s, &SessionCache::new(16, 30), &id, LastAdminGuard::Enforce).await
+            }
         },
         {
             let s = std::sync::Arc::clone(&store);
             let id = admin_b.clone();
-            async move { delete_user(&s, &id, LastAdminGuard::Enforce).await }
+            async move {
+                delete_user(&s, &SessionCache::new(16, 30), &id, LastAdminGuard::Enforce).await
+            }
         },
     );
 
@@ -558,9 +750,14 @@ async fn test_delete_user_transfers_org_scoped_apps_to_org_admin() {
     .await;
 
     assert!(
-        delete_user(&store, &creator_id, LastAdminGuard::Enforce)
-            .await
-            .expect("delete_user"),
+        delete_user(
+            &store,
+            &SessionCache::new(16, 30),
+            &creator_id,
+            LastAdminGuard::Enforce
+        )
+        .await
+        .expect("delete_user"),
         "creator must be deleted"
     );
 
@@ -611,9 +808,14 @@ async fn test_delete_user_unlinks_org_app_when_no_admin_remains() {
     .await;
 
     assert!(
-        delete_user(&store, &creator_id, LastAdminGuard::Bypass)
-            .await
-            .expect("delete_user"),
+        delete_user(
+            &store,
+            &SessionCache::new(16, 30),
+            &creator_id,
+            LastAdminGuard::Bypass
+        )
+        .await
+        .expect("delete_user"),
         "creator must be deleted"
     );
 
@@ -780,9 +982,14 @@ async fn test_delete_user_skips_deactivated_org_admin_as_successor() {
     .await;
 
     assert!(
-        delete_user(&store, &creator_id, LastAdminGuard::Enforce)
-            .await
-            .expect("delete_user"),
+        delete_user(
+            &store,
+            &SessionCache::new(16, 30),
+            &creator_id,
+            LastAdminGuard::Enforce
+        )
+        .await
+        .expect("delete_user"),
         "creator must be deleted"
     );
 
@@ -858,12 +1065,12 @@ async fn test_concurrent_admin_deletes_never_strand_org_apps() {
         {
             let s = std::sync::Arc::clone(&store);
             let id = admin_a.clone();
-            async move { delete_user(&s, &id, LastAdminGuard::Bypass).await }
+            async move { delete_user(&s, &SessionCache::new(16, 30), &id, LastAdminGuard::Bypass).await }
         },
         {
             let s = std::sync::Arc::clone(&store);
             let id = admin_b.clone();
-            async move { delete_user(&s, &id, LastAdminGuard::Bypass).await }
+            async move { delete_user(&s, &SessionCache::new(16, 30), &id, LastAdminGuard::Bypass).await }
         },
     );
     assert!(r1.expect("delete a"), "admin a must be deleted");
@@ -964,9 +1171,14 @@ async fn test_delete_user_client_reassignment_writes_against_latest_version() {
     }
 
     assert!(
-        delete_user(&store, &creator_id, LastAdminGuard::Enforce)
-            .await
-            .expect("delete_user"),
+        delete_user(
+            &store,
+            &SessionCache::new(16, 30),
+            &creator_id,
+            LastAdminGuard::Enforce
+        )
+        .await
+        .expect("delete_user"),
         "creator must be deleted"
     );
 
@@ -1318,9 +1530,14 @@ impl Offboard {
 
     async fn run(self, store: &DocumentStore, user_id: &str) {
         let done = match self {
-            Self::Delete => delete_user(store, user_id, LastAdminGuard::Enforce)
-                .await
-                .expect("delete_user"),
+            Self::Delete => delete_user(
+                store,
+                &SessionCache::new(16, 30),
+                user_id,
+                LastAdminGuard::Enforce,
+            )
+            .await
+            .expect("delete_user"),
             Self::AdminDeactivate => {
                 demote_or_deactivate_member(store, user_id, MemberDowngrade::Deactivate)
                     .await

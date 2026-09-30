@@ -2019,9 +2019,14 @@ async fn test_rfc7592_deleted_owner_token_is_invalid() {
     let auth = format!("Bearer {token}");
 
     assert!(
-        db::delete_user(&state.store, &user.id, db::LastAdminGuard::Bypass)
-            .await
-            .expect("delete owner"),
+        db::delete_user(
+            &state.store,
+            &state.session_cache,
+            &user.id,
+            db::LastAdminGuard::Bypass
+        )
+        .await
+        .expect("delete owner"),
         "owner must be deleted"
     );
 
@@ -2122,9 +2127,14 @@ async fn test_rfc7592_deleted_owner_transferred_client_revokes_token() {
     .await;
 
     assert!(
-        db::delete_user(&state.store, &creator.id, db::LastAdminGuard::Enforce)
-            .await
-            .expect("delete creator"),
+        db::delete_user(
+            &state.store,
+            &state.session_cache,
+            &creator.id,
+            db::LastAdminGuard::Enforce
+        )
+        .await
+        .expect("delete creator"),
         "creator must be deleted"
     );
 
@@ -4923,9 +4933,14 @@ async fn test_rfc7592_failed_delete_does_not_restore_token_revoked_by_owner_dele
             Box::pin(async move {
                 if let (Some(store), Some(owner)) = (store, owner) {
                     assert!(
-                        db::delete_user(&store, &owner, db::LastAdminGuard::Enforce)
-                            .await
-                            .expect("delete owner mid-delete")
+                        db::delete_user(
+                            &store,
+                            &db::SessionCache::new(16, 30),
+                            &owner,
+                            db::LastAdminGuard::Enforce
+                        )
+                        .await
+                        .expect("delete owner mid-delete")
                     );
                 }
             })

@@ -270,6 +270,7 @@ pub(crate) async fn rename_key(
 /// - `ServiceError::Internal` on database errors.
 pub(crate) async fn delete_key(
     store: &DocumentStore,
+    session_cache: &db::SessionCache,
     user_id: &str,
     key_id: &str,
 ) -> Result<(String, u64), ServiceError> {
@@ -337,7 +338,7 @@ pub(crate) async fn delete_key(
             .map_err(|e| ServiceError::from_db_contention(e, "Failed to count sessions"))?;
 
         // Cascade-delete the authenticator (device_auth refs, sessions, doc).
-        db::delete_authenticator(&mut tx, key_id)
+        let deleted_sessions = db::delete_authenticator(&mut tx, key_id)
             .await
             .map_err(|e| ServiceError::from_db_contention(e, "Failed to delete key"))?;
 
@@ -371,6 +372,7 @@ pub(crate) async fn delete_key(
         tx.commit()
             .await
             .map_err(|e| ServiceError::from_db_contention(e, "Failed to commit key deletion"))?;
+        session_cache.evict(deleted_sessions);
 
         let sessions = u64::try_from(sessions_revoked).unwrap_or_default();
         tracing::info!("Deleted key {key_id} for user {user_id}, revoked {sessions} sessions");
@@ -526,10 +528,10 @@ mod tests {
         let owned_key = test_utils::create_test_authenticator(&state.store, &owner.id).await;
         let absent_key = uuid::Uuid::now_v7().to_string();
 
-        let foreign = delete_key(&state.store, &caller.id, &owned_key)
+        let foreign = delete_key(&state.store, &state.session_cache, &caller.id, &owned_key)
             .await
             .unwrap_err();
-        let missing = delete_key(&state.store, &caller.id, &absent_key)
+        let missing = delete_key(&state.store, &state.session_cache, &caller.id, &absent_key)
             .await
             .unwrap_err();
 

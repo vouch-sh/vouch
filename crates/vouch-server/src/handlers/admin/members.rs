@@ -409,14 +409,22 @@ pub(crate) async fn revoke_member_credentials(
                     .map_err(|e| {
                         ServiceError::from_db_contention(e, "Failed to load authenticators")
                     })?;
+                let mut deleted_sessions = Vec::with_capacity(authenticators.len());
                 for auth in &authenticators {
-                    db::delete_authenticator(&mut tx, &auth.id)
-                        .await
-                        .map_err(|e| ServiceError::from_db_contention(e, "Failed to revoke key"))?;
+                    deleted_sessions.push(
+                        db::delete_authenticator(&mut tx, &auth.id)
+                            .await
+                            .map_err(|e| {
+                                ServiceError::from_db_contention(e, "Failed to revoke key")
+                            })?,
+                    );
                 }
                 tx.commit().await.map_err(|e| {
                     ServiceError::from_db_contention(e, "Failed to commit key revocation")
                 })?;
+                for deleted in deleted_sessions {
+                    state.session_cache.evict(deleted);
+                }
                 Ok::<usize, ServiceError>(authenticators.len())
             })
         },
@@ -478,7 +486,13 @@ pub(crate) async fn remove_member(
     // would make those certificates permanently unrevocable.
     auth::revoke_user_access(&state, &target_id, "User removed by admin", &admin.id).await?;
 
-    let deleted = match db::delete_user(&state.store, &target_id, db::LastAdminGuard::Enforce).await
+    let deleted = match db::delete_user(
+        &state.store,
+        &state.session_cache,
+        &target_id,
+        db::LastAdminGuard::Enforce,
+    )
+    .await
     {
         Ok(deleted) => deleted,
         Err(db::DeleteUserError::LastAdmin) => {

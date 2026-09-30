@@ -460,7 +460,9 @@ impl TestHarness {
             },
         )
         .await;
-        db::delete_session_by_token_hash(&self.state.store, &hash_token(&token))
+        self.state
+            .session_cache
+            .delete_by_token_hash(&self.state.store, &hash_token(&token))
             .await
             .expect("delete session to simulate revocation");
         token

@@ -1630,7 +1630,7 @@ async fn test_delete_authenticator_clears_device_auth_reference() {
     );
 
     // Delete the authenticator — this triggers the cascade.
-    test_utils::remove_test_authenticator(&store, &auth_id).await;
+    test_utils::remove_test_authenticator(&store, &SessionCache::new(16, 30), &auth_id).await;
 
     // The approval's evidence is gone, so the request must read as denied
     // rather than stay redeemable (RFC 8628 §3.5 access_denied).
@@ -2235,7 +2235,7 @@ async fn test_delete_authenticator_preserves_consumed_device_auth_for_replay_rev
     );
 
     // Delete the authenticator — the cascade must NOT regress the row.
-    test_utils::remove_test_authenticator(&store, &auth_id).await;
+    test_utils::remove_test_authenticator(&store, &SessionCache::new(16, 30), &auth_id).await;
 
     let after = get_device_auth_by_id(&store, &request_id)
         .await
@@ -2546,6 +2546,7 @@ async fn test_delete_user_loses_to_concurrent_delete() {
 
     let removed = delete_user(
         &store_with_concurrent_delete(&store, &user_id),
+        &SessionCache::new(16, 30),
         &user_id,
         LastAdminGuard::Enforce,
     )

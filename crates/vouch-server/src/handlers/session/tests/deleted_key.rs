@@ -101,7 +101,7 @@ async fn every_validator_refuses_a_session_of_a_deleted_key() {
         "control: a session of an existing key is accepted everywhere"
     );
 
-    keys::delete_key(&f.state.store, &f.user_id, &deleted)
+    keys::delete_key(&f.state.store, &f.state.session_cache, &f.user_id, &deleted)
         .await
         .expect("delete key");
     // The row a login racing the deletion leaves behind: written after the

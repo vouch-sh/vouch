@@ -591,7 +591,7 @@ fn extract_token_from_request(
 /// `extract_user_with_org` obtain the user through here before a handler sees
 /// the token, so a deactivated account cannot authenticate anywhere —
 /// including during the window between `update_user_active_status` and
-/// `delete_sessions_for_user`, which commit in separate transactions.
+/// `SessionCache::delete_for_user`, which commit in separate transactions.
 pub(crate) async fn load_active_user(
     state: &AppState,
     user_id: &str,

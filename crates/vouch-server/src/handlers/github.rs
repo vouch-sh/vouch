@@ -1314,7 +1314,9 @@ mod tests {
 
         // Simulate a deactivation that ran on a DIFFERENT instance: apply the
         // production DB effects without invalidating this process's cache.
-        db::delete_sessions_for_user(&state.store, &user_id)
+        // A peer's cache is evicted, not this process's.
+        db::SessionCache::new(16, 30)
+            .delete_for_user(&state.store, &user_id)
             .await
             .expect("delete sessions");
         db::revoke_user_credentials(&state.store, &user_id, Some("deactivation"), None)
@@ -1370,7 +1372,9 @@ mod tests {
             .expect("seed lookup succeeds");
         assert!(seeded.is_some(), "session row must exist before seeding");
 
-        db::delete_sessions_for_user(&state.store, &user_id)
+        // A peer's cache is evicted, not this process's.
+        db::SessionCache::new(16, 30)
+            .delete_for_user(&state.store, &user_id)
             .await
             .expect("delete sessions");
         db::revoke_user_credentials(&state.store, &user_id, Some("deactivation"), None)

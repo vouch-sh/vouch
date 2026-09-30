@@ -2,6 +2,7 @@
 //! RFC 7009 — Token Revocation tests.
 
 use super::helpers::*;
+use crate::crypto::hash_token;
 use crate::db::User;
 use crate::services::oidc::ScopeSet;
 
@@ -521,7 +522,7 @@ async fn test_rfc7009_revoke_private_key_jwt_jti_replay_rejected() {
 // ========================================================================
 //
 // Bug: `revoke_token` deleted ALL of a client's sessions via
-// `delete_sessions_for_user(client_id)` when revoking an M2M access token,
+// `SessionCache::delete_for_user(client_id)` when revoking an M2M access token,
 // because M2M sessions are keyed by `user_id == client_id`. Revoking one
 // token invalidated every concurrent live M2M token for that client,
 // violating RFC 7009 §2.1 ("the particular token").
@@ -589,7 +590,7 @@ async fn revoke(app: &axum::Router, client: &TestOAuthClient, token: &str) -> St
 /// particular token").
 ///
 /// Before the fix, `revoke_token` routed every decodable token through
-/// `delete_sessions_for_user(sub)`; for M2M tokens `sub == client_id`, so
+/// `SessionCache::delete_for_user(sub)`; for M2M tokens `sub == client_id`, so
 /// that call deleted every M2M session for the client. This test mints two
 /// distinct M2M access tokens for the same client, revokes only token A, and
 /// asserts token B remains active.
@@ -639,7 +640,7 @@ async fn repro_m2m_revoke_revokes_all_client_tokens() {
 
     // Token B — never named in any revocation request — must remain active.
     // Before the fix this asserted false (`active: false`) because the bulk
-    // `delete_sessions_for_user(client_id)` swept it away alongside token A.
+    // `SessionCache::delete_for_user(client_id)` swept it away alongside token A.
     let intro_b_after = introspect(&app, &client, &token_b).await;
     assert_eq!(
         intro_b_after["active"], true,
@@ -1155,4 +1156,129 @@ async fn repro_m2m_revoke_org_scoped_event_appears_in_org_feed() {
         "email_domain must be the client's own org domain: {:?}",
         events[0]
     );
+}
+
+// RFC 7009 §2.2.1: "If the server responds with HTTP status code 503, the
+// client must assume the token still exists and may retry after a reasonable
+// delay." A revoke whose delete failed answers 503, not 200: on 200 the client
+// discards a token that still works.
+
+/// Asserts `/oauth/revoke` answered the §2.2.1 503 with a `server_error` body.
+fn assert_revoke_unavailable(response: &HttpResponse) {
+    assert_eq!(
+        response.status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{}",
+        response.body
+    );
+    assert!(
+        response.headers.contains_key("retry-after"),
+        "503 carries Retry-After"
+    );
+    let body: serde_json::Value = serde_json::from_str(&response.body).expect("Valid JSON");
+    assert_eq!(body["error"], "server_error");
+}
+
+/// A human token revokes by user; when that delete fails the token still
+/// works, so the endpoint answers 503.
+#[tokio::test]
+async fn test_rfc7009_revoke_user_delete_failure_returns_503() {
+    let (app, state) = test_app_with_modify_hook(|store| {
+        // The revoke's per-user delete is the only store-level
+        // `delete_by_index` in this test.
+        store.set_delete_by_index_remaining_successes(0);
+    })
+    .await;
+    let user = create_test_user(&state.store, "revoke-fault@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let (token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
+
+    let response = http_post_form_full(
+        &app,
+        "/oauth/revoke",
+        &format!("token={token}"),
+        &[("Authorization", &client.basic_auth_header())],
+    )
+    .await;
+    assert_revoke_unavailable(&response);
+
+    let (status, _) = http_get(
+        &app,
+        "/oauth/userinfo",
+        &[("Authorization", &format!("Bearer {token}"))],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the token survives the failed revoke"
+    );
+}
+
+/// An M2M token revokes by hash; when that delete fails the endpoint
+/// answers 503 and the session row remains.
+#[tokio::test]
+async fn test_rfc7009_revoke_token_delete_failure_returns_503() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "m2m-revoke-fault@example.com").await;
+    let client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            grant_types: Some(vec!["client_credentials".to_string()]),
+            ..TestClientSpec::default()
+        },
+    )
+    .await;
+    let token = issue_m2m_token(&app, &client).await;
+    let token_hash = hash_token(&token);
+    state.session_cache.inject_fault(token_hash.clone());
+
+    let response = http_post_form_full(
+        &app,
+        "/oauth/revoke",
+        &format!("token={token}"),
+        &[("Authorization", &client.basic_auth_header())],
+    )
+    .await;
+    assert_revoke_unavailable(&response);
+
+    let row = db::find_session_by_token_hash(&state.store, &token_hash)
+        .await
+        .unwrap();
+    assert!(row.is_some(), "the session row survives the failed revoke");
+}
+
+/// An expired token no longer decodes, so it revokes by hash after the row's
+/// `client_id` check; when that delete fails the endpoint answers 503.
+#[tokio::test]
+async fn test_rfc7009_revoke_expired_row_delete_failure_returns_503() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "revoke-expired-fault@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let (token, token_hash) = create_test_expired_session_row(
+        &state,
+        &user.id,
+        &user.email,
+        Some(&client.client_id),
+        db::SessionPurpose::OAuthAccessToken,
+    )
+    .await;
+    state.session_cache.inject_fault(token_hash.clone());
+
+    let response = http_post_form_full(
+        &app,
+        "/oauth/revoke",
+        &format!("token={token}"),
+        &[("Authorization", &client.basic_auth_header())],
+    )
+    .await;
+    assert_revoke_unavailable(&response);
+
+    let row = db::find_session_by_token_hash(&state.store, &token_hash)
+        .await
+        .unwrap();
+    assert!(row.is_some(), "the session row survives the failed revoke");
+    assert_eq!(logout_events(&state, &user.id).await, 0);
 }

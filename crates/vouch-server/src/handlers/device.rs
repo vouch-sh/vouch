@@ -276,16 +276,17 @@ async fn revoke_sessions_for_device_replay(
         user_id = ?user_id,
         "Device code replay detected — revoking tokens issued from that code"
     );
-    match db::delete_sessions_for_code_replay(&state.store, device_code_hash).await {
-        Ok(token_hashes) => {
-            for token_hash in &token_hashes {
-                state.session_cache.invalidate(token_hash);
-            }
-            if !token_hashes.is_empty() {
+    match state
+        .session_cache
+        .delete_for_code_replay(&state.store, device_code_hash)
+        .await
+    {
+        Ok(revoked_count) => {
+            if revoked_count > 0 {
                 tracing::warn!(
                     target: "security",
                     user_id = ?user_id,
-                    revoked_count = token_hashes.len(),
+                    revoked_count,
                     "Revoked tokens issued from the replayed device code"
                 );
             }
@@ -1036,7 +1037,7 @@ mod tests {
         .await
         .expect("authorize device");
 
-        test_utils::remove_test_authenticator(&state.store, &auth_id).await;
+        test_utils::remove_test_authenticator(&state.store, &state.session_cache, &auth_id).await;
 
         let (status, body) = http_post_form(
             &app,

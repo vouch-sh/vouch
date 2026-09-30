@@ -194,7 +194,9 @@ async fn test_rfc7591_register_rejects_expired_token() {
 
     // Delete the session to simulate revocation/expiry
     let token_hash = crypto::hash_token(&token);
-    db::delete_session_by_token_hash(&state.store, &token_hash)
+    state
+        .session_cache
+        .delete_by_token_hash(&state.store, &token_hash)
         .await
         .expect("Failed to delete session");
 

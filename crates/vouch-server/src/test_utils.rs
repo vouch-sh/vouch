@@ -1320,12 +1320,17 @@ pub async fn create_test_user_in_org(
 /// `db::delete_authenticator` takes a transaction so its cascade cannot land
 /// half-applied; tests that just need a key gone go through here rather than
 /// repeating begin/commit at each call site.
-pub async fn remove_test_authenticator(store: &DocumentStore, authenticator_id: &str) {
+pub async fn remove_test_authenticator(
+    store: &DocumentStore,
+    session_cache: &db::SessionCache,
+    authenticator_id: &str,
+) {
     let mut tx = store.begin().await.expect("Failed to start transaction");
-    db::delete_authenticator(&mut tx, authenticator_id)
+    let deleted = db::delete_authenticator(&mut tx, authenticator_id)
         .await
         .expect("Failed to delete authenticator");
     tx.commit().await.expect("Failed to commit deletion");
+    session_cache.evict(deleted);
 }
 
 /// Create a test authenticator for a user.

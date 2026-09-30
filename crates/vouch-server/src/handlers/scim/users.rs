@@ -1084,7 +1084,14 @@ pub(crate) async fn delete_user(
     // concurrent request deleted it). Surface a 404 and skip the audit event
     // rather than reporting a successful delete — and logging a fraudulent
     // audit entry — for a change that never happened.
-    match db::delete_user(&state.store, &id, db::LastAdminGuard::Enforce).await {
+    match db::delete_user(
+        &state.store,
+        &state.session_cache,
+        &id,
+        db::LastAdminGuard::Enforce,
+    )
+    .await
+    {
         Ok(true) => {}
         Ok(false) => {
             return (
