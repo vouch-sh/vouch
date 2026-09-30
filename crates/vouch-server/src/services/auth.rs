@@ -43,6 +43,56 @@ use crate::services::oidc::jwt_bearer::client_auth::JwtAuthSucceeded;
 use crate::services::oidc::token::{ClientSecretVerification, MtlsCertVerification};
 use vouch_common::protocol;
 
+/// A session that still authorizes requests, and the security key it was
+/// established with.
+pub(crate) struct LiveSession {
+    pub(crate) session: std::sync::Arc<db::Session>,
+    /// `None` for a session established without a security key (enrollment
+    /// bootstrap, `client_credentials`).
+    pub(crate) authenticator: Option<Authenticator>,
+}
+
+/// The live session behind `token_hash`, if any.
+///
+/// Live means the row exists and is unexpired at `arrival` (the session
+/// cache's rule), and the security key it was established with still exists:
+/// deleting a key revokes the sessions it established. Every validator that
+/// turns an access token into a session goes through here, so a key deletion
+/// is enforced the same way at `/v1/*`, userinfo and authorize,
+/// introspection, and token exchange.
+///
+/// # Errors
+///
+/// Returns [`ServiceError::Internal`] if the store fails.
+pub(crate) async fn live_session(
+    state: &AppState,
+    token_hash: &str,
+    arrival: ArrivalTime,
+) -> ServiceResult<Option<LiveSession>> {
+    let Some(session) = state
+        .session_cache
+        .get_session_by_token_hash(&state.store, token_hash, arrival)
+        .await
+        .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
+    else {
+        return Ok(None);
+    };
+    let authenticator = match session.authenticator_id.as_deref() {
+        Some(id) => match db::get_authenticator_by_id(&state.store, id)
+            .await
+            .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
+        {
+            Some(authenticator) => Some(authenticator),
+            None => return Ok(None),
+        },
+        None => None,
+    };
+    Ok(Some(LiveSession {
+        session,
+        authenticator,
+    }))
+}
+
 /// Parameters for verifying authenticator ownership.
 pub(crate) struct AuthenticatorLookupParams<'a> {
     /// The credential ID from the WebAuthn assertion.

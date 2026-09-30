@@ -585,5 +585,6 @@ fn test_session_cookie_max_age_tracks_minted_lifetime() {
 }
 
 mod deactivated_account;
+mod deleted_key;
 
 mod negative_auth;

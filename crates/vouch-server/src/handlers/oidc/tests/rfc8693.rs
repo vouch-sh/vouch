@@ -2043,16 +2043,17 @@ async fn test_rfc8693_id_token_uses_session_aaguid_after_rotation() {
     let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
-    // The invariant: the session-time snapshot survives
-    // even when the original authenticator is no longer present. (We bypass
-    // `delete_authenticator` because it cascades and removes the session
-    // along with the key — the snapshot is what makes the issued claim
-    // independent of *current* authenticator state at issuance time.)
+    // The invariant: the session-time snapshot survives a change to the
+    // authenticator record after the session was created. The key stays
+    // present: deleting it revokes the session (see
+    // `handlers/session/tests/deleted_key.rs`).
     state
         .store
-        .delete(&auth_id)
+        .modify::<db::documents::authenticator::AuthenticatorDoc, _>(&auth_id, |data| {
+            data.aaguid = Some("00000000-0000-0000-0000-000000000000".to_string());
+        })
         .await
-        .expect("delete authenticator without cascade");
+        .expect("change the authenticator's AAGUID after the session");
 
     let (status, body) = http_post_form(
         &app,
