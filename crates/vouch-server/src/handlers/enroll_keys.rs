@@ -153,3 +153,6 @@ pub(crate) async fn delete_key(
         current_session_revoked,
     }))
 }
+
+#[cfg(test)]
+mod tests;

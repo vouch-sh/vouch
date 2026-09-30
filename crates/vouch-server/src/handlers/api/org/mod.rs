@@ -27,3 +27,6 @@ mod scim_tokens;
 pub(crate) use audit::audit_events;
 pub(crate) use policies::validate_policy_api;
 pub(crate) use scim_tokens::{create_scim_token, delete_scim_token, list_scim_tokens};
+
+#[cfg(test)]
+mod tests;

@@ -62,7 +62,7 @@ scripts/audit-normative.py --spec rfc9449  # print one spec's requirements
 files — `requirements.tsv`, `audit-scope.tsv`, `audit-exclusions.tsv`, and
 `coverage-baseline.tsv`. It
 does **not** scan the test suite: the scan and the ratchet live in
-`crates/vouch-tests/tests/spec_coverage.rs`, which owns the baseline it checks.
+`crates/vouch-tests/tests/it/spec_coverage.rs`, which owns the baseline it checks.
 A second implementation here drifted from it by 627 statements before the two
 were split apart.
 

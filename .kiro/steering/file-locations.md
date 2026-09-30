@@ -26,8 +26,8 @@
 | Static assets | `crates/vouch-server/static/` |
 | HTTP signatures | `crates/vouch-httpsig/src/` |
 | Integration tests | `crates/vouch-tests/tests/` |
-| Property-based tests | `crates/vouch-tests/tests/proptest.rs` |
-| Golden file tests | `crates/vouch-tests/tests/golden_files.rs` |
+| Property-based tests | `crates/vouch-tests/tests/it/properties.rs` |
+| Golden file tests | `crates/vouch-tests/tests/it/golden_files.rs` |
 | Fuzz targets | `fuzz/` |
 | Documentation (mdBook) | `docs/` |
 | Packaging/AMI scripts | `packaging/` |

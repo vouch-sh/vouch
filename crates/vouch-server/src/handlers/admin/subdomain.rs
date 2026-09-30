@@ -623,3 +623,6 @@ pub(crate) async fn admin_emergency_rotate_keys(
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

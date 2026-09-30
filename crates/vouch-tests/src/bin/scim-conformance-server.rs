@@ -16,7 +16,7 @@ use anyhow::{Context, Result, bail, ensure};
 use serde_json::json;
 use vouch_server::config::NonEmptySecret;
 use vouch_server::test_utils;
-use vouch_tests::TestHarness;
+use vouch_server::test_utils::TestHarness;
 
 #[tokio::main]
 async fn main() -> Result<()> {

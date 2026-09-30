@@ -700,3 +700,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod task_tests;

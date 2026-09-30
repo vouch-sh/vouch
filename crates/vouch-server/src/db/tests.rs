@@ -9,11 +9,14 @@
 //! - [`arrival_anchored_expiry`] — Request-deciding expiry comparisons read the caller's instant, not an ambient clock.
 //! - [`audit_events`] — Auth/key/device audit event logging and expiry.
 //! - [`authenticators`] — Authenticator (security key) CRUD and counting.
+//! - [`aws_audit`] — AWS credential audit events (`AuditStore::log_credential_event` with AWS details): round trip.
 //! - [`cascade_delete`] — Cascade deletion of users and OAuth clients with their dependent rows, and the transfer of org-scoped applications when their creator is deleted or deactivated.
 //! - [`challenge_states`] — FIDO2 challenge state single-use enforcement.
 //! - [`concurrency`] — Concurrent-replay and CAS regressions for single-use primitives and state-transition helpers.
+//! - [`credential_audit`] — SSH certificate and RFC 8693 token exchange audit events: round trip.
 //! - [`device_auth`] — Device authorization grant (RFC 8628): request lifecycle, polling, atomic consumption, single-use semantics.
 //! - [`email_normalization`] — Email canonicalization across SCIM provisioning and OIDC enrollment.
+//! - [`github`] — GitHub App installations (`db::github`): create, lookups, suspend and delete.
 //! - [`identity_binding`] — Upstream (issuer, subject) identity binding and account matching.
 //! - [`jti_replay`] — JWT-assertion and DPoP JTI replay prevention and expiry cleanup.
 //! - [`jwks_cache`] — Client JWKS cache behavioral invariants.
@@ -22,6 +25,7 @@
 //! - [`occ_modify`] — OCC read-modify-write conversions: every mutation path uses `store.modify`, not blind get+update.
 //! - [`oidc_state`] — Upstream OIDC login state: lifecycle plus atomic consume / concurrent-replay coverage.
 //! - [`org_domain`] — `UserDoc.org_domain`: populated by both production writers, resolved and lazily backfilled by `get_user_org_domain`.
+//! - [`posture_policies`] — Posture policies (`db::posture_policies`): preconfigured activation and custom policy CRUD.
 //! - [`scim_filters`] — SCIM list filter types (which attributes and operators are evaluated) and application-side co/sw matching.
 //! - [`scim_groups`] — SCIM group lifecycle and membership.
 //! - [`scim_provisioning`] — SCIM user creation: duplicate/uniqueness handling, in-transaction domain-ownership validation, deterministic IDs, cross-backend races.
@@ -159,11 +163,14 @@ fn test_org_doc(domain: &str) -> OrganizationDoc {
 mod arrival_anchored_expiry;
 mod audit_events;
 mod authenticators;
+mod aws_audit;
 mod cascade_delete;
 mod challenge_states;
 mod concurrency;
+mod credential_audit;
 mod device_auth;
 mod email_normalization;
+mod github;
 mod identity_binding;
 mod jti_replay;
 mod jwks_cache;
@@ -172,6 +179,7 @@ mod oauth_secrets;
 mod occ_modify;
 mod oidc_state;
 mod org_domain;
+mod posture_policies;
 mod scim_filters;
 mod scim_groups;
 mod scim_provisioning;

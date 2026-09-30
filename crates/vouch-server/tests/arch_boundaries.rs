@@ -18,8 +18,8 @@
 //! Crate-root modules (`lib.rs`, `main.rs`, `config.rs`, `geo.rs`, ...) are
 //! shared glue and composition roots, not a layer; they are not scanned.
 //! Test code is exempt: `#[cfg(test)]` modules, `db/tests.rs`,
-//! `test_utils.rs`, `handlers/oidc/tests/`, and
-//! `handlers/api/org/scim_tokens/tests.rs`.
+//! `test_utils.rs`, `handlers/oidc/tests/`,
+//! `handlers/api/org/scim_tokens/tests.rs`, and `infra/cleanup/task_tests.rs`.
 //!
 //! Deliberate deviations live in [`EXCEPTIONS`] with a reason. The list can
 //! only shrink: an exception that no longer matches a real import fails the
@@ -106,6 +106,7 @@ const TEST_FILES: &[&str] = &[
     "db/tests.rs",
     "test_utils.rs",
     "handlers/api/org/scim_tokens/tests.rs",
+    "infra/cleanup/task_tests.rs",
 ];
 const TEST_DIRS: &[&str] = &["handlers/oidc/tests/"];
 

@@ -1,19 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Integration test utilities for Vouch.
 //!
-//! This crate provides test harnesses and utilities for integration testing
-//! across the Vouch workspace.
-
-#![expect(
-    clippy::expect_used,
-    reason = "test code: panicking on an assertion failure is the point"
-)]
+//! Shared fixtures for the cross-crate tests in `tests/it`: the CLI's mock
+//! FIDO2 device wired to the server's verifier, and the WebAuthn contract
+//! validators. The server test harness lives in `vouch_server::test_utils`.
 
 pub mod contracts;
-pub mod harness;
 pub mod mock_fido;
 
-pub use harness::TestHarness;
 pub use mock_fido::IntegrationMockDevice;
 
 // Re-export commonly used types from other crates

@@ -17,7 +17,7 @@ A statement counts as cited when some test function names its specification
 and section. Linkage is section-level and deliberately optimistic: it
 establishes that a statement is untested, not that a cited one is tested
 well. The scan and the gate live in
-`crates/vouch-tests/tests/spec_coverage.rs`.
+`crates/vouch-tests/tests/it/spec_coverage.rs`.
 
 | Spec | Scope | Statements | Cited | MUST/MUST NOT | MUST gaps |
 |---|---|---:|---:|---:|---:|

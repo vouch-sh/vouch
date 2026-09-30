@@ -78,7 +78,7 @@ in a comment or assertion message, e.g. `// RFC 9421 §2.1.4: ...`. Linkage is
 section-level and deliberately optimistic: it establishes that a statement is
 untested, not that a cited one is tested well.
 
-`crates/vouch-tests/tests/spec_coverage.rs` owns the scan and gates it as a
+`crates/vouch-tests/tests/it/spec_coverage.rs` owns the scan and gates it as a
 ratchet -- the existing backlog is tolerated, but a statement that loses its
 citing test fails the build, and a statement that gains one fails until the
 baseline is pruned, so the backlog can only shrink.

@@ -496,3 +496,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod rotation_tests;

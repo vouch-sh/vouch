@@ -16,9 +16,12 @@
 use super::*;
 use crate::test_utils::*;
 
+mod domain_validation;
+mod email_case;
 mod filters;
 mod groups;
 mod meta;
+mod org_isolation;
 mod protocol;
 mod users;
 mod validation;
