@@ -15,7 +15,7 @@ the baseline it checks; a second implementation here drifted from it by 627
 statements before this was split apart. Regenerate the baseline first:
 
     scripts/audit-normative.py
-    UPDATE_SPEC_COVERAGE_BASELINE=1 cargo test -p vouch-tests --test spec_coverage
+    UPDATE_SPEC_COVERAGE_BASELINE=1 cargo test -p vouch-tests --test it spec_coverage
     scripts/audit-coverage.py
 
 Usage:
@@ -56,7 +56,7 @@ def main() -> int:
     if not BASELINE.exists():
         print(
             "specs/coverage-baseline.tsv is missing; generate it with\n"
-            "  UPDATE_SPEC_COVERAGE_BASELINE=1 cargo test -p vouch-tests --test spec_coverage",
+            "  UPDATE_SPEC_COVERAGE_BASELINE=1 cargo test -p vouch-tests --test it spec_coverage",
             file=sys.stderr,
         )
         return 1

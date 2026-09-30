@@ -77,7 +77,7 @@ produces a report that disagrees with the gate:
 
 ```sh
 scripts/audit-normative.py
-UPDATE_SPEC_COVERAGE_BASELINE=1 cargo test -p vouch-tests --test spec_coverage
+UPDATE_SPEC_COVERAGE_BASELINE=1 cargo test -p vouch-tests --test it spec_coverage
 scripts/audit-coverage.py
 ```
 

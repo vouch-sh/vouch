@@ -1,5 +1,5 @@
 # Normative statements with no citing test: the accepted backlog.
-# Regenerate: UPDATE_SPEC_COVERAGE_BASELINE=1 cargo test -p vouch-tests --test spec_coverage
+# Regenerate: UPDATE_SPEC_COVERAGE_BASELINE=1 cargo test -p vouch-tests --test it spec_coverage
 # This list may only shrink -- see crates/vouch-tests/tests/it/spec_coverage.rs.
 req_id	strength	text
 ctap-2.0-ps-20190130#5#01c2c887	MUST	Note that because this specification defines normative behaviors for them, all authenticators MUST understand the "rk", "up", and "uv" options.
@@ -324,24 +324,24 @@ oidc-core-1_0#14#35645fe7	MUST	In all such cases, a single ASCII space character
 oidc-core-1_0#14#982f7d72	MUST	Therefore, comparisons between JSON strings and other Unicode strings MUST be performed as specified below:
 oidc-core-1_0#14#ad4cb0a2	MUST	Therefore, comparisons between JSON strings and other Unicode strings MUST be performed as specified below: 1. Remove any JSON applied escaping to produce an ar
 oidc-core-1_0#14#b8a32e4c	MUST	Comparisons between the two strings MUST be performed as a Unicode code point to code point equality comparison.
-oidc-core-1_0#15#11b5ef0a	MUST	Authentication Context Class Reference OPs MUST support requests for specific Authentication Context Class Reference values via the "acr_values" parameter, as d
-oidc-core-1_0#15#2a6851c1	MUST	Response Types These OpenID Providers MUST support the "id_token" Response Type and all that are not Self-Issued OPs MUST also support the "code" and "id_token 
-oidc-core-1_0#15#384a0fda	MUST	In addition to the features listed above, OpenID Providers supporting dynamic establishment of relationships with RPs that they do not have a pre-configured rel
-oidc-core-1_0#15#4b0f2fcf	MUST	This list augments the set of features that are already listed elsewhere as being "REQUIRED" or are described with a "MUST", and so is not, by itself, a compreh
-oidc-core-1_0#15#5072a19f	MUST	UserInfo Endpoint All dynamic OPs that issue Access Tokens MUST support the UserInfo Endpoint, as defined in Section 5.3. (Self-Issued OPs do not issue Access T
-oidc-core-1_0#15#5fbf5288	MUST	All OpenID Providers MUST implement the following features defined in this specification.
-oidc-core-1_0#15#6c33323f	MUST	Display Parameter OPs MUST support the "display" parameter, as defined in Section 3.1.2. (Note that the minimum level of support required for this parameter is 
-oidc-core-1_0#15#71ced448	MUST	Dynamic Registration These OPs MUST support Dynamic Client Registration, as defined in OpenID Connect Dynamic Client Registration 1.0 [OpenID.Registration].
-oidc-core-1_0#15#7cfdd529	MUST	Maximum Authentication Age OPs MUST support enforcing a maximum authentication age via the "max_age" parameter, as defined in Section 3.1.2.
-oidc-core-1_0#15#86270d1e	MUST	Authentication Time OPs MUST support returning the time at which the End-User authenticated via the "auth_time" Claim, when requested, as defined in Section 2.
-oidc-core-1_0#15#88e3cbba	MUST	Prompt Parameter OPs MUST support the "prompt" parameter, as defined in Section 3.1.2, including the specified user interface behaviors such as "none" and "logi
-oidc-core-1_0#15#8dd0b5f1	MUST	Preferred Locales OPs MUST support requests for preferred languages and scripts for the user interface and for Claims via the "ui_locales" and "claims_locales" 
-oidc-core-1_0#15#98060688	MUST	Request URI These OPs MUST support requests made using a Request Object value that is retrieved from a Request URI that is provided with the "request_uri" param
-oidc-core-1_0#15#9b678079	MUST	Public Keys Published as Bare Keys These OPs MUST publish their public keys as bare JWK keys (which MAY also be accompanied by X.509 representations of those ke
-oidc-core-1_0#15#cc237010	MUST	Discovery These OPs MUST support Discovery, as defined in OpenID Connect Discovery 1.0 [OpenID.Discovery].
-oidc-core-1_0#15#f1ae9ac9	MUST	Signing ID Tokens with RSA SHA-256 OPs MUST support signing ID Tokens with the RSA SHA-256 algorithm (an "alg" value of "RS256"), unless the OP only supports re
-oidc-core-1_0#15.3#4b6c3f1f	MUST	When using OpenID Connect features, those listed as being "REQUIRED" or are described with a "MUST" are mandatory to implement, when used by a Relying Party.
+oidc-core-1_0#15.1#11b5ef0a	MUST	Authentication Context Class Reference OPs MUST support requests for specific Authentication Context Class Reference values via the "acr_values" parameter, as d
+oidc-core-1_0#15.1#4b0f2fcf	MUST	This list augments the set of features that are already listed elsewhere as being "REQUIRED" or are described with a "MUST", and so is not, by itself, a compreh
+oidc-core-1_0#15.1#5fbf5288	MUST	All OpenID Providers MUST implement the following features defined in this specification.
+oidc-core-1_0#15.1#6c33323f	MUST	Display Parameter OPs MUST support the "display" parameter, as defined in Section 3.1.2. (Note that the minimum level of support required for this parameter is 
+oidc-core-1_0#15.1#7cfdd529	MUST	Maximum Authentication Age OPs MUST support enforcing a maximum authentication age via the "max_age" parameter, as defined in Section 3.1.2.
+oidc-core-1_0#15.1#86270d1e	MUST	Authentication Time OPs MUST support returning the time at which the End-User authenticated via the "auth_time" Claim, when requested, as defined in Section 2.
+oidc-core-1_0#15.1#88e3cbba	MUST	Prompt Parameter OPs MUST support the "prompt" parameter, as defined in Section 3.1.2, including the specified user interface behaviors such as "none" and "logi
+oidc-core-1_0#15.1#8dd0b5f1	MUST	Preferred Locales OPs MUST support requests for preferred languages and scripts for the user interface and for Claims via the "ui_locales" and "claims_locales" 
+oidc-core-1_0#15.1#f1ae9ac9	MUST	Signing ID Tokens with RSA SHA-256 OPs MUST support signing ID Tokens with the RSA SHA-256 algorithm (an "alg" value of "RS256"), unless the OP only supports re
+oidc-core-1_0#15.2#2a6851c1	MUST	Response Types These OpenID Providers MUST support the "id_token" Response Type and all that are not Self-Issued OPs MUST also support the "code" and "id_token 
+oidc-core-1_0#15.2#384a0fda	MUST	In addition to the features listed above, OpenID Providers supporting dynamic establishment of relationships with RPs that they do not have a pre-configured rel
+oidc-core-1_0#15.2#5072a19f	MUST	UserInfo Endpoint All dynamic OPs that issue Access Tokens MUST support the UserInfo Endpoint, as defined in Section 5.3. (Self-Issued OPs do not issue Access T
+oidc-core-1_0#15.2#71ced448	MUST	Dynamic Registration These OPs MUST support Dynamic Client Registration, as defined in OpenID Connect Dynamic Client Registration 1.0 [OpenID.Registration].
+oidc-core-1_0#15.2#98060688	MUST	Request URI These OPs MUST support requests made using a Request Object value that is retrieved from a Request URI that is provided with the "request_uri" param
+oidc-core-1_0#15.2#9b678079	MUST	Public Keys Published as Bare Keys These OPs MUST publish their public keys as bare JWK keys (which MAY also be accompanied by X.509 representations of those ke
+oidc-core-1_0#15.2#cc237010	MUST	Discovery These OPs MUST support Discovery, as defined in OpenID Connect Discovery 1.0 [OpenID.Discovery].
 oidc-core-1_0#15.3#af1bc457	SHOULD	However, if installations choose to support unanticipated interactions between Relying Parties and OpenID Providers that do not have pre-configured relationship
+oidc-core-1_0#15.4#4b6c3f1f	MUST	When using OpenID Connect features, those listed as being "REQUIRED" or are described with a "MUST" are mandatory to implement, when used by a Relying Party.
 oidc-core-1_0#16.11#6ebaa3fe	MUST NOT	In Section 10.16, it normatively requires that any use of the authorization process as a form of delegated End-User authentication to the Client MUST NOT use th
 oidc-core-1_0#16.11#f154a628	MUST	When designing another binding of this specification to a protocol incapable of strongly binding Token Endpoint requests to responses, additional mechanisms to 
 oidc-core-1_0#16.12#55fde4aa	SHOULD	Implementations SHOULD NOT terminate the validation process at the instant of the finding an error but SHOULD continue running until all the octets have been pr
@@ -377,13 +377,13 @@ oidc-core-1_0#3.1.2.2#7397b4c3	MUST	The Authorization Server MUST verify that al
 oidc-core-1_0#3.1.2.2#7671b8c7	MUST	The Authorization Server MUST validate the request received as follows: 2. Verify that a "scope" parameter is present and contains the "openid" scope value. (If
 oidc-core-1_0#3.1.2.2#7af9ffcd	MUST	When an "id_token_hint" is present, the OP MUST validate that it was the issuer of the ID Token.
 oidc-core-1_0#3.1.2.2#a1ccb03f	MUST	If the Authorization Server encounters any error, it MUST return an error response, per Section 3.1.2.6.
-oidc-core-1_0#3.1.2.3#00332b62	MUST	Once the End-User is authenticated, the Authorization Server MUST obtain an authorization decision before releasing information to the Relying Party.
 oidc-core-1_0#3.1.2.3#125a30b5	MUST NOT	The Authorization Server MUST NOT interact with the End-User in the following case:
 oidc-core-1_0#3.1.2.3#14dd7eae	MUST	In this case, the Authorization Server MUST return an error if an End-User is not already Authenticated or could not be silently Authenticated.
 oidc-core-1_0#3.1.2.3#2d1f562b	MUST	The Authorization Server MUST attempt to Authenticate the End-User in the following cases: o The End-User is not already Authenticated.
 oidc-core-1_0#3.1.2.3#2ff64c5e	MUST	When interacting with the End-User, the Authorization Server MUST employ appropriate measures against Cross-Site Request Forgery and Clickjacking as, described 
 oidc-core-1_0#3.1.2.3#e0f8f9ac	MUST	The Authorization Server MUST attempt to Authenticate the End-User in the following cases:
 oidc-core-1_0#3.1.2.3#ee7d8afd	MUST	In this case, the Authorization Server MUST reauthenticate the End-User even if the End-User is already authenticated.
+oidc-core-1_0#3.1.2.4#00332b62	MUST	Once the End-User is authenticated, the Authorization Server MUST obtain an authorization decision before releasing information to the Relying Party.
 oidc-core-1_0#3.1.2.5#6c2beaea	MUST	When using the Authorization Code Flow, the Authorization Response MUST return the parameters defined in Section 4.1.2 of OAuth 2.0 [RFC6749] by adding them as 
 oidc-core-1_0#3.1.2.6#532cb64d	MUST	account_selection_required The End-User is REQUIRED to select a session at the Authorization Server.
 oidc-core-1_0#3.1.2.6#864d8636	MUST NOT	If the Redirection URI is invalid, the Authorization Server MUST NOT redirect the User Agent to the invalid Redirection URI.
@@ -499,8 +499,8 @@ oidc-core-1_0#6.3.2#3b6e8e5f	MUST	To perform Signature Validation, the "alg" Hea
 oidc-core-1_0#6.3.2#a67fa824	MUST	The Authorization Server MUST return an error if signature validation fails.
 oidc-core-1_0#6.3.2#fa1a1c87	MUST	The signature MUST be validated against the appropriate key for that "client_id" and algorithm.
 oidc-core-1_0#6.3.3#6a62748b	MUST	The Authorization Server MUST assemble the set of Authorization Request parameters to be used from the Request Object value and the OAuth 2.0 Authorization Requ
-oidc-core-1_0#7.2#3dfb5dbe	SHOULD NOT	The "registration" parameter SHOULD NOT be used when the OP is not a Self-Issued OP.
-oidc-core-1_0#7.2#9734c0a8	MUST	None of this information is REQUIRED by Self-Issued OPs, so the use of this parameter is OPTIONAL.
+oidc-core-1_0#7.2.1#3dfb5dbe	SHOULD NOT	The "registration" parameter SHOULD NOT be used when the OP is not a Self-Issued OP.
+oidc-core-1_0#7.2.1#9734c0a8	MUST	None of this information is REQUIRED by Self-Issued OPs, so the use of this parameter is OPTIONAL.
 oidc-core-1_0#7.3#64f02aae	MUST NOT	The entire URL MUST NOT exceed 2048 ASCII characters.
 oidc-core-1_0#7.3#b102927d	MUST	Since the Client's "redirect_uri" URI value is communicated as the Client ID, a "redirect_uri" parameter is NOT REQUIRED to also be included in the request.
 oidc-core-1_0#7.4#904329af	MUST	No Access Token is returned for accessing a UserInfo Endpoint, so all Claims returned MUST be in the ID Token.
@@ -955,8 +955,8 @@ rfc5280#4.2.1.13#cd5934b0	MUST	When the LDAP URI scheme [RFC4516] is used, the U
 rfc5280#4.2.1.13#d58db5dc	MUST	When the HTTP or FTP URI scheme is used, the URI MUST point to a single DER encoded CRL as specified in [RFC2585].
 rfc5280#4.2.1.13#e0752cb1	SHOULD	HTTP server implementations accessed via the URI SHOULD specify the media type application/pkix-crl in the content-type header field of the response.
 rfc5280#4.2.1.13#e3305002	MUST	The encoding of the name in the cRLIssuer field MUST be exactly the same as the encoding in issuer field of the CRL.
-rfc5280#4.2.1.14#25468147	MUST	The extension MUST be marked as non-critical by conforming CAs.
 rfc5280#4.2.1.14#e1af336f	MUST	Conforming CAs MUST mark this extension as critical.
+rfc5280#4.2.1.15#25468147	MUST	The extension MUST be marked as non-critical by conforming CAs.
 rfc5280#4.2.1.2#10313f92	MUST	In conforming CA certificates, the value of the subject key identifier MUST be the value placed in the key identifier field of the authority key identifier exte
 rfc5280#4.2.1.2#2d9f7089	SHOULD	For CA certificates, subject key identifiers SHOULD be derived from the public key or a method that generates unique values. Two common methods for generating k
 rfc5280#4.2.1.2#2ee587ac	SHOULD	For CA certificates, subject key identifiers SHOULD be derived from the public key or a method that generates unique values. Two common methods for generating k
@@ -1056,25 +1056,25 @@ rfc5280#5.2.4#b0d114cb	MUST	CRL issuers MUST ensure that the combination of a de
 rfc5280#5.2.4#b1c0cdab	MUST	Further, the CRL issuer MUST use the same private key to sign the delta CRL and any complete CRL that it can be used to update.
 rfc5280#5.2.4#b9f6912a	MUST	A conforming CRL issuer MUST publish the referenced base CRL as a complete CRL.
 rfc5280#5.2.4#c4150393	MUST	When a delta CRL is issued, it MUST cover the same set of reasons and the same set of certificates that were covered by the base CRL it references.
-rfc5280#5.2.5#016ad417	MUST	The scope of these delta CRLs MUST be the same as the scope of this complete CRL.
 rfc5280#5.2.5#13a25f27	MUST	If the scope of the CRL only includes end entity public key certificates, then onlyContainsUserCerts MUST be set to TRUE.
 rfc5280#5.2.5#13fde71c	MUST	Conforming CRLs issuers MUST set the onlyContainsAttributeCerts boolean to FALSE.
-rfc5280#5.2.5#1431f6fa	MUST NOT	This extension MUST NOT appear in delta CRLs.
 rfc5280#5.2.5#1ab2e1b4	MUST	That is, if onlyContainsUserCerts, onlyContainsCACerts, indirectCRL, and onlyContainsAttributeCerts are all FALSE, then either the distributionPoint field or th
 rfc5280#5.2.5#25261120	MUST NOT	Conforming CRLs issuers MUST NOT issue CRLs where the DER encoding of the issuing distribution point extension is an empty sequence.
-rfc5280#5.2.5#2b377cd6	MUST	Conforming CRL issuers MUST mark this extension as non-critical.
 rfc5280#5.2.5#51e56113	MUST	However, implementations that do not support this extension MUST either treat the status of any certificate not listed on this CRL as unknown or locate another 
 rfc5280#5.2.5#59d19bf9	MUST	The identical encoding MUST be used in the distributionPoint fields of the certificate and the CRL.
 rfc5280#5.2.5#5defcf9b	MUST	If the scope of the CRL only includes CA certificates, then onlyContainsCACerts MUST be set to TRUE.
 rfc5280#5.2.5#5e3ceacb	MUST	If the scope of the CRL only includes certificates issued by the CRL issuer, then the indirectCRL boolean MUST be set to FALSE.
 rfc5280#5.2.5#726a7a96	MUST	The reason codes associated with a distribution point MUST be specified in onlySomeReasons.
 rfc5280#5.2.5#7ac21ac2	MUST NOT	If either onlyContainsUserCerts or onlyContainsCACerts is set to TRUE, then the scope of the CRL MUST NOT include any version 1 or version 2 certificates.
-rfc5280#5.2.5#7ae57d4d	MUST	The reasons and cRLIssuer fields MUST be omitted from this CRL extension.
 rfc5280#5.2.5#7f8c63f7	MUST	If the distributionPoint field is present, then it MUST include at least one of names from the corresponding distributionPoint field of the cRLDistributionPoint
 rfc5280#5.2.5#8932c571	MUST	If onlySomeReasons does not appear, the distribution point MUST contain revocations for all reason codes.
 rfc5280#5.2.5#cd5b806b	MUST	If a CRL includes an issuingDistributionPoint extension with onlySomeReasons present, then every certificate in the scope of the CRL that is revoked MUST be ass
 rfc5280#5.2.5#dd3f12f8	MUST	If the distributionPoint field is absent, the CRL MUST contain entries for all revoked unexpired certificates issued by the CRL issuer, if any, within the scope
 rfc5280#5.2.5#e3a70c29	MUST	Otherwise, if the scope of the CRL includes certificates issued by one or more authorities other than the CRL issuer, the indirectCRL boolean MUST be set to TRU
+rfc5280#5.2.6#016ad417	MUST	The scope of these delta CRLs MUST be the same as the scope of this complete CRL.
+rfc5280#5.2.6#1431f6fa	MUST NOT	This extension MUST NOT appear in delta CRLs.
+rfc5280#5.2.6#2b377cd6	MUST	Conforming CRL issuers MUST mark this extension as non-critical.
+rfc5280#5.2.6#7ae57d4d	MUST	The reasons and cRLIssuer fields MUST be omitted from this CRL extension.
 rfc5280#5.2.7#18347c97	MUST	Thus, implementations that support the directoryName form of accessLocation MUST be prepared to find the needed certificate in any of these three attributes.
 rfc5280#5.2.7#1e5e1e20	SHOULD	For FTP, the name of a file that contains a single DER encoded certificate SHOULD have a suffix of ".cer" [RFC2585] and the name of a file that contains a "cert
 rfc5280#5.2.7#26f6f9a2	MUST	Where the information is available via HTTP or FTP, accessLocation MUST be a uniformResourceIdentifier and the URI MUST point to either a single DER encoded cer
@@ -1147,13 +1147,13 @@ rfc5280#8#c508d387	SHOULD	In addition, CAs SHOULD decline to issue certificates 
 rfc5280#8#da770efc	SHOULD	CAs SHOULD maintain secure backup for signing keys.
 rfc5280#8#f1ae8165	MUST	Relying parties that choose to validate the server's certificate when obtaining information pointed to by an https URI in the cRLDistributionPoints, authorityIn
 rfc5280#8#fc5fe37a	SHOULD	To avoid acceptance of invalid paths, CAs SHOULD state name constraints for distinguished names as permittedSubtrees wherever possible.
-rfc5480#2#420593b7	MUST	The object identifier varies based on the algorithm, but the parameters are always ECParameters and they MUST always be present (see Section 2.1.1).
-rfc5480#2#691fe86f	MUST	If the elliptic curve domain parameters are not present, then clients MUST reject the certificate.
-rfc5480#2#6d28cb11	MUST	The key is only restricted by the values indicated in the key usage certificate extension (see Section 3). id-ecPublicKey MUST be supported.
-rfc5480#2#73552ca4	MUST NOT	ECParameters ::= CHOICE { namedCurve OBJECT IDENTIFIER -- implicitCurve NULL -- specifiedCurve SpecifiedECDomain } -- implicitCurve and specifiedCurve MUST NOT 
-rfc5480#2#a09a10c0	MUST	The parameter for id-ecPublicKey is as follows and MUST always be present:
-rfc5480#2#d6965cef	MUST NOT	This choice MUST NOT be used.
-rfc5480#2#d698b669	MUST	This choice MUST be supported.
+rfc5480#2.1#420593b7	MUST	The object identifier varies based on the algorithm, but the parameters are always ECParameters and they MUST always be present (see Section 2.1.1).
+rfc5480#2.1#691fe86f	MUST	If the elliptic curve domain parameters are not present, then clients MUST reject the certificate.
+rfc5480#2.1#6d28cb11	MUST	The key is only restricted by the values indicated in the key usage certificate extension (see Section 3). id-ecPublicKey MUST be supported.
+rfc5480#2.1#73552ca4	MUST NOT	ECParameters ::= CHOICE { namedCurve OBJECT IDENTIFIER -- implicitCurve NULL -- specifiedCurve SpecifiedECDomain } -- implicitCurve and specifiedCurve MUST NOT 
+rfc5480#2.1#a09a10c0	MUST	The parameter for id-ecPublicKey is as follows and MUST always be present:
+rfc5480#2.1#d6965cef	MUST NOT	This choice MUST NOT be used.
+rfc5480#2.1#d698b669	MUST	This choice MUST be supported.
 rfc5480#2.2#4ac50b54	MUST NOT	The hybrid form of the ECC public key from [X9.62] MUST NOT be used.
 rfc5480#2.2#848b2d72	MUST	The public key MUST be rejected if any other value is included in the first octet.
 rfc5480#2.2#adf1ab83	MUST	Implementations of Elliptic Curve Cryptography according to this document MUST support the uncompressed form and MAY support the compressed form of the ECC publ
@@ -1313,7 +1313,7 @@ rfc6749#10.12#62b9d55f	MUST	The binding value used for CSRF protection MUST cont
 rfc6749#10.12#e3f6620f	MUST	The authorization server MUST implement CSRF protection for its authorization endpoint and ensure that a malicious client cannot obtain authorization without th
 rfc6749#10.13#988db0d8	SHOULD	To prevent this form of attack, native applications SHOULD use external browsers instead of embedding browsers within the application when requesting end-user a
 rfc6749#10.14#12d3ca77	MUST	The authorization server and client MUST sanitize (and validate when possible) any value received -- in particular, the value of the "state" and "redirect_uri" 
-rfc6749#10.15#d319304d	MUST NOT	Any specification that uses the authorization process as a form of delegated end-user authentication to the client (e.g., third-party sign-in service) MUST NOT 
+rfc6749#10.16#d319304d	MUST NOT	Any specification that uses the authorization process as a form of delegated end-user authentication to the client (e.g., third-party sign-in service) MUST NOT 
 rfc6749#10.2#05869e62	MUST	The authorization server MUST authenticate the client whenever possible.
 rfc6749#10.2#51097961	MUST	If the authorization server cannot authenticate the client due to the client's nature, the authorization server MUST require the registration of any redirection
 rfc6749#10.2#5c1870b4	SHOULD	The authorization server SHOULD enforce explicit resource owner authentication and provide the resource owner with information about the client and the requeste
@@ -1418,8 +1418,8 @@ rfc6750#5.3#83ece719	SHOULD	Instead, bearer tokens SHOULD be passed in HTTP mess
 rfc6750#5.3#94b3c200	MUST NOT	Don't store bearer tokens in cookies: Implementations MUST NOT store bearer tokens within cookies that can be sent in the clear (which is the default transmissi
 rfc6750#5.3#aceab36d	MUST	Always use TLS (https): Clients MUST always use TLS [RFC5246] (https) or equivalent transport security when making requests with bearer tokens.
 rfc6750#5.3#e5b159d9	SHOULD NOT	Don't pass bearer tokens in page URLs: Bearer tokens SHOULD NOT be passed in page URLs (for example, as query string parameters).
-rfc6797#12.5#4d9f5152	MUST	If a user agent does not implement IDNA2008, the user agent MUST implement IDNA2003.
-rfc6797#12.5#c3d414ab	SHOULD	In order to facilitate their IDNA transition, user agents SHOULD implement IDNA2008 [RFC5890] and MAY implement [RFC5895] (see also Section 7 of [RFC5894]) or [
+rfc6797#13#4d9f5152	MUST	If a user agent does not implement IDNA2008, the user agent MUST implement IDNA2003.
+rfc6797#13#c3d414ab	SHOULD	In order to facilitate their IDNA transition, user agents SHOULD implement IDNA2008 [RFC5890] and MAY implement [RFC5895] (see also Section 7 of [RFC5894]) or [
 rfc6797#6.1#3d41e45f	MUST	All directives MUST appear only once in an STS header field.
 rfc6797#6.1#47df6371	MUST	4. UAs MUST ignore any STS header field containing directives, or other header field value data, that does not conform to the syntax defined in this specificati
 rfc6797#6.1#4f4c1ccc	MUST	The Strict-Transport-Security HTTP response header field (STS header field) indicates to a UA that it MUST enforce the HSTS Policy in regards to the host emitti
@@ -1430,13 +1430,13 @@ rfc6797#7.1#221de30c	MUST	If an STS header field is included, the HSTS Host MUST
 rfc6797#7.1#64c340e6	MUST	When replying to an HTTP request that was conveyed over a secure transport, an HSTS Host SHOULD include in its response message an STS header field that MUST sa
 rfc6797#7.2#0b5e12da	MUST NOT	An HSTS Host MUST NOT include the STS header field in HTTP responses conveyed over non-secure transport.
 rfc6797#7.2#8f84a49d	SHOULD	If an HSTS Host receives an HTTP request message over a non-secure transport, it SHOULD send an HTTP response message containing a status code indicating a perm
-rfc6797#8#08bdc0e6	MUST	If an HTTP response, received over a secure transport, includes an STS header field, conforming to the grammar specified in Section 6.1 ("Strict-Transport-Secur
-rfc6797#8#4011df0d	MUST	If an HTTP response, received over a secure transport, includes an STS header field, conforming to the grammar specified in Section 6.1 ("Strict-Transport-Secur
-rfc6797#8#cdad726c	MUST	o The UA MUST ignore any STS header fields not conforming to the grammar specified in Section 6.1 ("Strict-Transport-Security HTTP Response Header Field").
-rfc6797#8#d2f10f43	MUST	o If an HTTP response is received over insecure transport, the UA MUST ignore any present STS header field(s).
-rfc6797#8#dc10226b	MUST	If an HTTP response, received over a secure transport, includes an STS header field, conforming to the grammar specified in Section 6.1 ("Strict-Transport-Secur
-rfc6797#8#f4592cf3	MUST	If the max-age header field value token has a value of zero, the UA MUST remove its cached HSTS Policy information (including the includeSubDomains directive, i
-rfc6797#8#f998ccb3	MUST	If a UA receives more than one STS header field in an HTTP response message over secure transport, then the UA MUST process only the first such header field.
+rfc6797#8.1#08bdc0e6	MUST	If an HTTP response, received over a secure transport, includes an STS header field, conforming to the grammar specified in Section 6.1 ("Strict-Transport-Secur
+rfc6797#8.1#4011df0d	MUST	If an HTTP response, received over a secure transport, includes an STS header field, conforming to the grammar specified in Section 6.1 ("Strict-Transport-Secur
+rfc6797#8.1#cdad726c	MUST	o The UA MUST ignore any STS header fields not conforming to the grammar specified in Section 6.1 ("Strict-Transport-Security HTTP Response Header Field").
+rfc6797#8.1#d2f10f43	MUST	o If an HTTP response is received over insecure transport, the UA MUST ignore any present STS header field(s).
+rfc6797#8.1#dc10226b	MUST	If an HTTP response, received over a secure transport, includes an STS header field, conforming to the grammar specified in Section 6.1 ("Strict-Transport-Secur
+rfc6797#8.1#f4592cf3	MUST	If the max-age header field value token has a value of zero, the UA MUST remove its cached HSTS Policy information (including the includeSubDomains directive, i
+rfc6797#8.1#f998ccb3	MUST	If a UA receives more than one STS header field in an HTTP response message over secure transport, then the UA MUST process only the first such header field.
 rfc6797#8.1.1#1829b533	MUST	Otherwise, if the substring does not congruently match a Known HSTS Host's domain name, per the matching procedure specified in Section 8.2 ("Known HSTS Host Do
 rfc6797#8.1.1#2b0780c2	MUST NOT	The UA MUST NOT modify the expiry time or the includeSubDomains directive of any superdomain matched Known HSTS Host.
 rfc6797#8.1.1#6756ddec	MUST	The UA MUST evict all expired Known HSTS Hosts from its cache if, at any time, an expired Known HSTS Host exists in the cache.
@@ -1704,6 +1704,7 @@ rfc7523#3.1#b04b6551	MUST	However, if client credentials are present in the requ
 rfc7591#2.3#3bc26542	MUST	When presented to the authorization server as part of a client registration request, the software statement MUST be digitally signed or MACed using JSON Web Sig
 rfc7591#2.3#c99e07e7	SHOULD	It is RECOMMENDED that software statements be digitally signed using the "RS256" signature algorithm, although particular applications MAY specify the use of di
 rfc7591#2.3#eb2faebc	SHOULD	It is RECOMMENDED that software statements contain the "software_id" claim to allow authorization servers to correlate different instances of software using the
+rfc7591#3.1.1#04734205	MUST	If the server supports software statements, client metadata values conveyed in the software statement MUST take precedence over those conveyed using plain JSON 
 rfc7591#4.1.1#fa462cba	SHOULD NOT	Names that match other registered names in a case- insensitive manner SHOULD NOT be accepted.
 rfc7591#4.2.1#fa462cba	SHOULD NOT	Names that match other registered names in a case- insensitive manner SHOULD NOT be accepted.
 rfc7617#2.1#ac61c9b6	MUST	For the password, recipients MUST support all characters defined in the "OpaqueString" profile defined in Section 4.2 of [RFC7613].
@@ -1712,13 +1713,11 @@ rfc7617#2.2#6aa53f19	SHOULD	A client SHOULD assume that resources identified by 
 rfc7617#4#2df23f2c	SHOULD NOT	Because Basic authentication involves the cleartext transmission of passwords, it SHOULD NOT be used (without enhancements such as HTTPS [RFC2818]) to protect s
 rfc7636#4.4#5ee7838e	MUST	When the server issues the authorization code in the authorization response, it MUST associate the "code_challenge" and "code_challenge_method" values with the 
 rfc7636#4.4#f1ad4675	MUST NOT	The server MUST NOT include the "code_challenge" value in client requests in a form that other entities can extract.
-rfc7636#4.4.1#0d565b22	MUST	That is the method that the token endpoint MUST use to verify the "code_verifier".
-rfc7636#4.4.1#193303e7	MUST	If the values are equal, the token endpoint MUST continue processing as normal (as defined by OAuth 2.0 [RFC6749]).
 rfc7636#4.4.1#1fd376ee	MUST	If the server requires Proof Key for Code Exchange (PKCE) by OAuth public clients and the client does not send the "code_challenge" in the request, the authoriz
 rfc7636#4.4.1#2696b300	MUST	If the server supporting PKCE does not support the requested transformation, the authorization endpoint MUST return the authorization error response with "error
-rfc7636#4.4.1#2a57eb2d	MUST	If the values are not equal, an error response indicating "invalid_grant" as described in Section 5.2 of [RFC6749] MUST be returned.
 rfc7636#4.4.1#305e2689	SHOULD	The "error_description" or the response of "error_uri" SHOULD explain the nature of error, e.g., code challenge required.
 rfc7636#4.4.1#9afaead6	SHOULD	The "error_description" or the response of "error_uri" SHOULD explain the nature of error, e.g., transform algorithm not supported.
+rfc7636#4.5#0d565b22	MUST	That is the method that the token endpoint MUST use to verify the "code_verifier".
 rfc7636#5#b306870f	SHOULD	As the OAuth 2.0 [RFC6749] server responses are unchanged by this specification, client implementations of this specification do not need to know if the server 
 rfc7636#6.2.1#4bea5d8f	SHOULD	Because a core goal of this specification is for the resulting representations to be compact, it is RECOMMENDED that the name be short -- not to exceed 8 charac
 rfc7636#7.1#76cfa579	SHOULD	The client SHOULD create a "code_verifier" with a minimum of 256 bits of entropy.
@@ -1964,6 +1963,14 @@ rfc8705#7.4#f9ce43a1	SHOULD	To cope with that threat, the authorization server S
 rfc8705#7.5#48dcffa2	SHOULD	For these reasons, implementors SHOULD use an established and well- tested X.509 library (such as one used by an established TLS library) for validation of X.50
 rfc8725#2.8#9fd141eb	MUST	If the JWT could be used in an application context in which it could be confused with other kinds of JWTs, then mitigations MUST be employed to prevent these su
 rfc8725#3.10#d25b2fe1	SHOULD	Applications SHOULD protect against such attacks, e.g., by matching the URL to a whitelist of allowed locations and ensuring no cookies are sent in the GET requ
+rfc8725#3.12#2ad1a068	MUST	Each application of JWTs defines a profile specifying the required and optional JWT claims and the validation rules associated with them. If more than one kind 
+rfc8725#3.12#4ce62ca5	MUST	Each application of JWTs defines a profile specifying the required and optional JWT claims and the validation rules associated with them. If more than one kind 
+rfc8725#3.12#77eddf5c	MUST	If more than one kind of JWT can be issued by the same issuer, the validation rules for those JWTs MUST be written such that they are mutually exclusive, reject
+rfc8725#3.12#b42a740e	SHOULD	As discussed in Section 3.11, for new JWT applications, the use of explicit typing is RECOMMENDED.
+rfc8725#3.12#c28b558c	MUST	Each application of JWTs defines a profile specifying the required and optional JWT claims and the validation rules associated with them. If more than one kind 
+rfc8725#3.12#cc168de7	MUST	Each application of JWTs defines a profile specifying the required and optional JWT claims and the validation rules associated with them. If more than one kind 
+rfc8725#3.12#de6e8f6b	MUST	Each application of JWTs defines a profile specifying the required and optional JWT claims and the validation rules associated with them. If more than one kind 
+rfc8725#3.12#fd82b888	MUST	Each application of JWTs defines a profile specifying the required and optional JWT claims and the validation rules associated with them. If more than one kind 
 rfc8725#3.3#30c6a609	MUST	All cryptographic operations used in the JWT MUST be validated and the entire JWT MUST be rejected if any of them fail to validate.
 rfc8725#3.3#322307e0	MUST	This is true not only of JWTs with a single set of Header Parameters but also for Nested JWTs in which both outer and inner operations MUST be validated using t
 rfc8725#3.5#079219ed	MUST	The Key Entropy and Random Values advice in Section 10.1 of [RFC7515] and the Password Considerations in Section 8.8 of [RFC7518] MUST be followed.
@@ -1983,10 +1990,10 @@ rfc8941#3.3.3#02ac645a	MUST	Parsers MUST support Strings (after any decoding) wi
 rfc8941#3.3.3#249ff267	MUST	Furthermore, only DQUOTE and "\" can be escaped; other characters after "\" MUST cause parsing to fail.
 rfc8941#3.3.4#acf44b07	MUST	Parsers MUST support Tokens with at least 512 characters.
 rfc8941#3.3.5#f9ed9acf	MUST	Parsers MUST support Byte Sequences with at least 16384 octets after decoding.
-rfc9068#2.2.3#024093d5	SHOULD	An authorization server wanting to include such attributes in a JWT access token SHOULD use the "groups", "roles", and "entitlements" attributes of the "User" r
-rfc9068#2.2.3#1f6a5735	SHOULD	Authorization servers SHOULD encode the corresponding claim values according to the guidance defined in [RFC7643].
 rfc9068#2.2.3#81bd6f2b	SHOULD	If an authorization request includes a scope parameter, the corresponding issued JWT access token SHOULD include a "scope" claim as defined in Section 4.2 of [R
 rfc9068#2.2.3#b5b6c478	MUST	All the individual scope strings in the "scope" claim MUST have meaning for the resources indicated in the "aud" claim.
+rfc9068#2.2.3.1#024093d5	SHOULD	An authorization server wanting to include such attributes in a JWT access token SHOULD use the "groups", "roles", and "entitlements" attributes of the "User" r
+rfc9068#2.2.3.1#1f6a5735	SHOULD	Authorization servers SHOULD encode the corresponding claim values according to the guidance defined in [RFC7643].
 rfc9068#5#09f3f45a	MUST	To prevent cross-JWT confusion, authorization servers MUST use a distinct identifier as an "aud" claim value to uniquely identify access tokens issued by the sa
 rfc9068#6#83465a25	MUST NOT	The client MUST NOT inspect the content of the access token: the authorization server and the resource server might decide to change the token format at any tim
 rfc9101#10.3#d996357b	SHOULD	It is RECOMMENDED by this specification to use this practice for the following endpoints defined in [RFC6749], [RFC6750], and [RFC8414]:
@@ -2679,16 +2686,16 @@ rfc9964#5#eaad87e9	MUST	* The ctx parameter MUST be the empty string for ML-DSA-
 rfc9964#7.3#79d5bc3f	MUST	For the ML-DSA algorithms registered in this document, the priv key parameter is the seed, and therefore, the seed length check MUST be performed.
 rfc9964#7.3#87631ddc	MUST	However, when the priv parameter is expanded using KeyGen_internal, the skEncode and skDecode algorithms MUST be used.
 rfc9964#7.3#8c3fc513	MUST	When an AKP algorithm requires or encourages that a key be validated before being used, all algorithm-related key parameters MUST be validated.
-saml-bindings-2.0-os#1.2#029c8fa4	MUST	saml-bindings-2.0-os 15 March 2005 Copyright © OASIS Open 2005. All Rights Reserved. Page 6 of 46 2 Guidelines for Specifying Additional Protocol Bindings This 
-saml-bindings-2.0-os#1.2#1365f6c1	MUST	saml-bindings-2.0-os 15 March 2005 Copyright © OASIS Open 2005. All Rights Reserved. Page 6 of 46 2 Guidelines for Specifying Additional Protocol Bindings This 
-saml-bindings-2.0-os#1.2#40073946	MUST	saml-bindings-2.0-os 15 March 2005 Copyright © OASIS Open 2005. All Rights Reserved. Page 6 of 46 2 Guidelines for Specifying Additional Protocol Bindings This 
-saml-bindings-2.0-os#1.2#44fa6d2d	MUST	saml-bindings-2.0-os 15 March 2005 Copyright © OASIS Open 2005. All Rights Reserved. Page 6 of 46 2 Guidelines for Specifying Additional Protocol Bindings This 
-saml-bindings-2.0-os#1.2#45bba532	MUST	saml-bindings-2.0-os 15 March 2005 Copyright © OASIS Open 2005. All Rights Reserved. Page 6 of 46 2 Guidelines for Specifying Additional Protocol Bindings This 
-saml-bindings-2.0-os#1.2#4706ba1f	MUST	saml-bindings-2.0-os 15 March 2005 Copyright © OASIS Open 2005. All Rights Reserved. Page 6 of 46 2 Guidelines for Specifying Additional Protocol Bindings This 
-saml-bindings-2.0-os#1.2#4f1586d9	MUST	saml-bindings-2.0-os 15 March 2005 Copyright © OASIS Open 2005. All Rights Reserved. Page 6 of 46 2 Guidelines for Specifying Additional Protocol Bindings This 
-saml-bindings-2.0-os#1.2#58cc00de	MUST	saml-bindings-2.0-os 15 March 2005 Copyright © OASIS Open 2005. All Rights Reserved. Page 6 of 46 2 Guidelines for Specifying Additional Protocol Bindings This 
-saml-bindings-2.0-os#1.2#93dde26d	MUST	Following is a checklist of issues that MUST be addressed by each protocol binding:
-saml-bindings-2.0-os#1.2#e43b988a	MUST	saml-bindings-2.0-os 15 March 2005 Copyright © OASIS Open 2005. All Rights Reserved. Page 6 of 46 2 Guidelines for Specifying Additional Protocol Bindings This 
+saml-bindings-2.0-os#2#21ef5f85	MUST	Bindings This specification defines a selected set of protocol bindings, but others will possibly be developed in the future. It is not possible for the OASIS S
+saml-bindings-2.0-os#2#470384dd	MUST	Bindings This specification defines a selected set of protocol bindings, but others will possibly be developed in the future. It is not possible for the OASIS S
+saml-bindings-2.0-os#2#57e022d9	MUST	Bindings This specification defines a selected set of protocol bindings, but others will possibly be developed in the future. It is not possible for the OASIS S
+saml-bindings-2.0-os#2#5d98ee23	MUST	Bindings This specification defines a selected set of protocol bindings, but others will possibly be developed in the future. It is not possible for the OASIS S
+saml-bindings-2.0-os#2#702ad4e5	MUST	Bindings This specification defines a selected set of protocol bindings, but others will possibly be developed in the future. It is not possible for the OASIS S
+saml-bindings-2.0-os#2#7710d6b2	MUST	Bindings This specification defines a selected set of protocol bindings, but others will possibly be developed in the future. It is not possible for the OASIS S
+saml-bindings-2.0-os#2#81d5efd7	MUST	Bindings This specification defines a selected set of protocol bindings, but others will possibly be developed in the future. It is not possible for the OASIS S
+saml-bindings-2.0-os#2#830b6b6a	MUST	Bindings This specification defines a selected set of protocol bindings, but others will possibly be developed in the future. It is not possible for the OASIS S
+saml-bindings-2.0-os#2#93dde26d	MUST	Following is a checklist of issues that MUST be addressed by each protocol binding:
+saml-bindings-2.0-os#2#c8b449f6	MUST	Bindings This specification defines a selected set of protocol bindings, but others will possibly be developed in the future. It is not possible for the OASIS S
 saml-bindings-2.0-os#3.1.1#28d736b8	MUST	Namely, if a SAML request message is accompanied by RelayState data, then the SAML responder MUST return its SAML protocol response using a binding that also su
 saml-bindings-2.0-os#3.1.2.1#cd2352ea	MUST	Unless otherwise specified, in any SAML binding's use of SSL 3.0 [SSL3] or TLS 1.0 [RFC2246], servers MUST authenticate to clients using a X.509 v3 certificate.
 saml-bindings-2.0-os#3.1.2.1#fd3ddb43	MUST	The client MUST establish server identity based on contents of the certificate (typically through examination of the certificate’s subject DN field, subjectAltN
@@ -3196,12 +3203,12 @@ saml-profiles-2.0-os#4.4.3#8615a4dc	SHOULD	The identity provider SHOULD then pro
 saml-profiles-2.0-os#4.4.3#ca19b5bb	MUST	At least one element MUST be included.
 saml-profiles-2.0-os#4.4.3#d6d18098	SHOULD	The session participant SHOULD reveal as little information as possible in the RelayState value unless the use of the profile does not require such privacy meas
 saml-profiles-2.0-os#4.4.3#eaf25bf8	SHOULD	It is RECOMMENDED that the HTTP exchanges in this step be made over either SSL 3.0 [SSL3] or TLS 1.0 [RFC2246] to maintain confidentiality and message integrity
-saml-profiles-2.0-os#4.4.3.2#441a75ba	MUST	After processing the message or upon encountering an error, the entity MUST issue a <LogoutResponse> message containing an appropriate status code to the reques
-saml-profiles-2.0-os#4.4.3.2#48f6bed8	MUST	The responder MUST authenticate itself to the requesting identity provider, either by signing the <LogoutResponse> or using any other binding-supported mechanis
 saml-profiles-2.0-os#4.4.3.2#94a64ed5	MUST	It MUST examine the identifier and <SessionIndex> elements and determine the set of sessions to be terminated.
-saml-profiles-2.0-os#4.4.3.2#e3fa3a3b	MUST	The <LogoutResponse> message MUST be signed if the HTTP POST or Redirect binding is used.
-saml-profiles-2.0-os#4.4.3.2#eaf25bf8	SHOULD	It is RECOMMENDED that the HTTP exchanges in this step be made over either SSL 3.0 [SSL3] or TLS 1.0 [RFC2246] to maintain confidentiality and message integrity
-saml-profiles-2.0-os#4.4.3.2#f12d7cd0	MUST	4.4.3.4 Session Participant/Authority Issues <LogoutResponse> to Identity Provider The session participant/authority MUST process the <LogoutRequest> message as
+saml-profiles-2.0-os#4.4.3.4#441a75ba	MUST	After processing the message or upon encountering an error, the entity MUST issue a <LogoutResponse> message containing an appropriate status code to the reques
+saml-profiles-2.0-os#4.4.3.4#47da8aad	MUST	Provider The session participant/authority MUST process the <LogoutRequest> message as defined in [SAMLCore].
+saml-profiles-2.0-os#4.4.3.4#48f6bed8	MUST	The responder MUST authenticate itself to the requesting identity provider, either by signing the <LogoutResponse> or using any other binding-supported mechanis
+saml-profiles-2.0-os#4.4.3.4#e3fa3a3b	MUST	The <LogoutResponse> message MUST be signed if the HTTP POST or Redirect binding is used.
+saml-profiles-2.0-os#4.4.3.4#eaf25bf8	SHOULD	It is RECOMMENDED that the HTTP exchanges in this step be made over either SSL 3.0 [SSL3] or TLS 1.0 [RFC2246] to maintain confidentiality and message integrity
 saml-profiles-2.0-os#4.4.3.5#a10f0faa	MUST	After processing the original session participant's <LogoutRequest> as described in the previous steps the identity provider MUST respond to the original reques
 saml-profiles-2.0-os#4.4.4#0b0ae4b3	MUST	The requester MUST authenticate itself to the responder and ensure message integrity, either by signing the message or using a binding-specific mechanism.
 saml-profiles-2.0-os#4.4.4#15378f99	MUST	If the requester is a session participant, it MUST include at least one <SessionIndex> element in the request.
