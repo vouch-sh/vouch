@@ -714,6 +714,29 @@ pub enum UnusableJwk {
     /// The members are present but do not form a public key.
     #[error("Invalid key in JWKS")]
     InvalidKey,
+    /// An RSA modulus outside the sizes the verifier accepts.
+    #[error("RSA key modulus must be 2048 to 8192 bits")]
+    RsaModulusSize,
+}
+
+/// RSA modulus sizes, in bits, the RS256 and PS256 verifier accepts: RFC 7518
+/// §3.3 and §3.5, "A key of size 2048 bits or larger MUST be used", and the
+/// upper bound of jsonwebtoken's `aws_lc_rs` parameters
+/// (`RSA_PKCS1_2048_8192_SHA256`, `RSA_PSS_2048_8192_SHA256`).
+const RSA_MODULUS_BITS: std::ops::RangeInclusive<usize> = 2048..=8192;
+
+/// The size in bits of a big-endian unsigned integer, ignoring leading zeros.
+fn unsigned_bit_length(bytes: &[u8]) -> usize {
+    let Some(first) = bytes.iter().position(|b| *b != 0) else {
+        return 0;
+    };
+    let rest = bytes.len().saturating_sub(first);
+    let top = bytes
+        .get(first)
+        .map_or(0, |b| u8::BITS.saturating_sub(b.leading_zeros()));
+    rest.saturating_sub(1)
+        .saturating_mul(8)
+        .saturating_add(usize::try_from(top).unwrap_or(0))
 }
 
 /// Decode a base64url (no padding) JWK member.
@@ -738,7 +761,8 @@ impl JwkEntry {
     ///   §6.2.1.2: "The length of this octet string MUST be the full size of
     ///   a coordinate for the curve specified in the "crv" parameter."
     /// - RSA: RFC 7518 §6.3.1: "The following members MUST be present for
-    ///   RSA public keys" — `n` and `e`, each non-empty.
+    ///   RSA public keys" — `n` and `e`, each non-empty — and a modulus of
+    ///   2048 to 8192 bits ([`RSA_MODULUS_BITS`]).
     /// - OKP: RFC 8037 §2: "The parameter "crv" MUST be present" and "The
     ///   parameter "x" MUST be present"; `crv` must be `Ed25519`, whose
     ///   encoded point is "a little-endian string of 32 octets" (RFC 8032
@@ -794,8 +818,12 @@ impl JwkEntry {
                     .e
                     .as_deref()
                     .ok_or(UnusableJwk::MissingMember("RSA key missing e component"))?;
-                if jwk_member(n)?.is_empty() || jwk_member(e)?.is_empty() {
+                let modulus = jwk_member(n)?;
+                if modulus.is_empty() || jwk_member(e)?.is_empty() {
                     return Err(UnusableJwk::InvalidKey);
+                }
+                if !RSA_MODULUS_BITS.contains(&unsigned_bit_length(&modulus)) {
+                    return Err(UnusableJwk::RsaModulusSize);
                 }
                 jsonwebtoken::DecodingKey::from_rsa_components(n, e)
                     .map_err(|_| UnusableJwk::InvalidKey)
@@ -2599,6 +2627,56 @@ mod tests {
             okp("AAAA").decoding_key_for(JwsAlgorithm::EdDsa).err(),
             Some(UnusableJwk::InvalidKey)
         );
+    }
+
+    // RFC 7518 §3.3 (RS256) and §3.5 (PS256): "A key of size 2048 bits or
+    // larger MUST be used". The verifier's aws-lc parameters also cap the
+    // modulus at 8192 bits, so a key outside 2048..=8192 is refused at
+    // construction, where registration and the token endpoint share the rule.
+    #[test]
+    fn test_decoding_key_for_rejects_rsa_moduli_outside_2048_to_8192_bits() {
+        let rsa = |modulus: &[u8]| JwkEntry {
+            kty: KeyType::Rsa,
+            kid: None,
+            alg: None,
+            use_: None,
+            crv: None,
+            x: None,
+            y: None,
+            n: Some(URL_SAFE_NO_PAD.encode(modulus)),
+            e: Some("AQAB".to_string()),
+            x5c: None,
+        };
+        let modulus = |top: u8, rest: usize| {
+            let mut bytes = vec![top];
+            bytes.extend(std::iter::repeat_n(0xFF, rest));
+            bytes
+        };
+        for alg in [JwsAlgorithm::Rs256, JwsAlgorithm::Ps256] {
+            assert_eq!(
+                rsa(&modulus(0x7F, 255)).decoding_key_for(alg).err(),
+                Some(UnusableJwk::RsaModulusSize),
+                "2047 bits"
+            );
+            assert!(rsa(&modulus(0x80, 255)).is_usable_for(alg), "2048 bits");
+            let mut leading_zero = vec![0];
+            leading_zero.extend(modulus(0x80, 255));
+            assert!(
+                rsa(&leading_zero).is_usable_for(alg),
+                "2048 bits after a zero byte"
+            );
+            assert!(rsa(&modulus(0x80, 1023)).is_usable_for(alg), "8192 bits");
+            assert_eq!(
+                rsa(&modulus(0x01, 1024)).decoding_key_for(alg).err(),
+                Some(UnusableJwk::RsaModulusSize),
+                "8193 bits"
+            );
+            assert_eq!(
+                rsa(&modulus(0xFF, 127)).decoding_key_for(alg).err(),
+                Some(UnusableJwk::RsaModulusSize),
+                "1024 bits"
+            );
+        }
     }
 
     #[test]

@@ -12,6 +12,8 @@ use crate::crypto;
 use crate::db::{self, RegistrationSource};
 use crate::services::auth::NoClientAuth;
 use crate::test_utils::{TEST_JWK_EC_X, TEST_JWK_EC_Y, TEST_JWK_RSA_N};
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
 // ========================================================================
 // Helper
@@ -902,6 +904,46 @@ async fn test_rfc7591_rejects_implicit_grant() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
     assert_eq!(json["error"], "invalid_client_metadata");
+}
+
+/// Register a `private_key_jwt` client whose only key is an RSA key with
+/// modulus `n`.
+async fn register_with_rsa_key(n: &str, name: &str) -> (StatusCode, serde_json::Value) {
+    let (app, state) = test_app().await;
+    let auth = bearer_token_unique(&state, name).await;
+    let body = serde_json::json!({
+        "token_endpoint_auth_method": "private_key_jwt",
+        "grant_types": ["urn:ietf:params:oauth:grant-type:fido2-assertion"],
+        "response_types": [],
+        "jwks": {"keys": [{"kty": "RSA", "alg": "RS256", "use": "sig", "n": n, "e": "AQAB"}]}
+    });
+    let (status, body) = http_post_json(
+        &app,
+        "/oauth/register",
+        &body.to_string(),
+        &[("Authorization", &auth)],
+    )
+    .await;
+    (status, serde_json::from_str(&body).expect("Valid JSON"))
+}
+
+// RFC 7518 §3.3: "A key of size 2048 bits or larger MUST be used with these
+// algorithms." A client whose only key is smaller could never authenticate:
+// the RS256 verifier refuses the modulus. RFC 7591 §3.2.2: the rejection is
+// `invalid_client_metadata`.
+#[tokio::test]
+async fn test_rfc7591_rejects_rsa_key_below_2048_bits() {
+    let (status, json) = register_with_rsa_key(TEST_JWK_RSA_N, "rsa-2048").await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "control, a 2048-bit key: {json}"
+    );
+
+    let small = URL_SAFE_NO_PAD.encode([0xFF_u8; 128]);
+    let (status, json) = register_with_rsa_key(&small, "rsa-1024").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert_eq!(json["error"], "invalid_client_metadata", "{json}");
 }
 
 #[tokio::test]
