@@ -115,6 +115,11 @@ async fn fetch_jwks(
 
 /// Fetch a JWKS from `uri` and write it to the cache under `parent_id`.
 ///
+/// Only a body that parses as a JWK Set is cached. RFC 7517 §5: "The JSON
+/// object MUST have a \"keys\" member, with its value being an array of JWKs."
+/// Any other answer fails this fetch the way a non-2xx response does, and
+/// leaves the last good cache row in place for the stale-cache fallback.
+///
 /// A cache-write failure is logged and swallowed: the freshly fetched keys are
 /// still correct, and failing the request would turn a caching problem into an
 /// authentication outage.
@@ -131,6 +136,10 @@ pub(crate) async fn fetch_and_cache(
     let jwks_json = fetch_jwks(uri, allow_loopback, http_client).await?;
     let jwks_value: serde_json::Value = serde_json::from_str(&jwks_json).map_err(|e| {
         tracing::debug!("Failed to parse JWKS as JSON value: {e}");
+        ServiceError::oauth(OAuthErrorCode::InvalidClient, "Invalid JWKS format")
+    })?;
+    db::parse_jwks_set(&jwks_value).map_err(|e| {
+        tracing::debug!("Fetched JWKS is not a JWK Set: {e}");
         ServiceError::oauth(OAuthErrorCode::InvalidClient, "Invalid JWKS format")
     })?;
 
@@ -656,6 +665,95 @@ mod tests {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("build test https client")
+    }
+
+    /// Serve one HTTPS response with `body` as JSON on a loopback port, and
+    /// return the port.
+    async fn serve_json_over_tls(body: &'static str) -> u16 {
+        let acceptor = test_utils::test_tls_acceptor();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let port = listener.local_addr().expect("local_addr").port();
+        let _join = tokio::spawn(async move {
+            let (stream, _peer) = listener.accept().await.expect("accept connection");
+            let mut tls = acceptor.accept(stream).await.expect("TLS handshake");
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+                 Connection: close\r\n\r\n",
+                body.len()
+            );
+            if tls.write_all(head.as_bytes()).await.is_err() {
+                return;
+            }
+            let _body = tls.write_all(body.as_bytes()).await;
+            let _flush = tls.shutdown().await;
+        });
+        port
+    }
+
+    // RFC 7517 §5: "The JSON object MUST have a \"keys\" member, with its
+    // value being an array of JWKs." A 200 answer that is JSON but not a JWK
+    // Set fails the fetch and leaves the last good cache row for the
+    // stale-cache fallback, instead of replacing it for a full TTL.
+    #[tokio::test]
+    async fn fetch_and_cache_keeps_the_cached_set_when_the_body_is_not_a_jwk_set() {
+        let state = test_utils::test_app_state().await;
+        let good = serde_json::json!({ "keys": [{ "kty": "EC", "kid": "good" }] });
+        db::upsert_jwks_cache(&state.store, "client-poison", &good)
+            .await
+            .expect("seed cache");
+
+        let port = serve_json_over_tls("{}").await;
+        let url = format!("https://127.0.0.1:{port}/jwks");
+        let err = fetch_and_cache(
+            &state.store,
+            "client-poison",
+            &url,
+            true,
+            &https_client_trusting_any_cert(),
+        )
+        .await
+        .expect_err("a JSON body without \"keys\" is not a JWK Set");
+        assert_invalid_client(&err, "Invalid JWKS format");
+
+        let cached = db::get_jwks_cache(&state.store, "client-poison")
+            .await
+            .expect("read cache")
+            .expect("cache row kept");
+        assert_eq!(cached.value, good, "the last good set stays cached");
+    }
+
+    /// Control: a valid JWK Set replaces the cached one.
+    #[tokio::test]
+    async fn fetch_and_cache_stores_a_valid_jwk_set() {
+        let state = test_utils::test_app_state().await;
+        let old = serde_json::json!({ "keys": [{ "kty": "EC", "kid": "old" }] });
+        db::upsert_jwks_cache(&state.store, "client-refresh", &old)
+            .await
+            .expect("seed cache");
+
+        let port = serve_json_over_tls(r#"{"keys":[{"kty":"EC","kid":"new"}]}"#).await;
+        let url = format!("https://127.0.0.1:{port}/jwks");
+        let value = fetch_and_cache(
+            &state.store,
+            "client-refresh",
+            &url,
+            true,
+            &https_client_trusting_any_cert(),
+        )
+        .await
+        .expect("a valid JWK Set is fetched");
+
+        let cached = db::get_jwks_cache(&state.store, "client-refresh")
+            .await
+            .expect("read cache")
+            .expect("cache row");
+        assert_eq!(cached.value, value);
+        assert_eq!(
+            cached.value,
+            serde_json::json!({ "keys": [{ "kty": "EC", "kid": "new" }] })
+        );
     }
 
     /// End-to-end over real TLS (2d, case a): a chunked JWKS body with no
