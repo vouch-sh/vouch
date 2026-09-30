@@ -326,6 +326,25 @@ impl AgentState {
         *guard = Some(SessionSlot::new(session, server_url));
     }
 
+    /// Store a session only while the agent holds no live one, and report
+    /// whether it was stored.
+    ///
+    /// The check and the write share one critical section: the caller checks
+    /// the session with the server first, and a login landing in that gap
+    /// must not be overwritten by the older session.
+    pub async fn store_session_if_no_live_session(
+        &self,
+        session: Session,
+        server_url: Option<String>,
+    ) -> bool {
+        let mut guard = self.inner.write().await;
+        if guard.as_ref().and_then(SessionSlot::live_session).is_some() {
+            return false;
+        }
+        *guard = Some(SessionSlot::new(session, server_url));
+        true
+    }
+
     /// Clear the current session and every credential it authorized.
     ///
     /// Session, cached credentials, and SSH credentials are dropped in one

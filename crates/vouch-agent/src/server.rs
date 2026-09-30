@@ -5,7 +5,7 @@ use crate::audit::{self, AuditEvent};
 use crate::error::Result;
 use crate::protocol::{
     CacheCredentialParams, GetCachedCredentialParams, INTERNAL_ERROR, JSONRPC_VERSION, Method,
-    PARSE_ERROR, Request, Response, StoreSessionParams, StoreSshCredentialsParams,
+    PARSE_ERROR, Request, Response, StoreMode, StoreSessionParams, StoreSshCredentialsParams,
 };
 use crate::socket::{AuthorizedStream, SocketKind, accept_authorized, bind_socket, socket_path};
 use crate::ssh_agent::SshCredentials;
@@ -324,9 +324,12 @@ async fn handle_store_session(request: &Request, state: &Arc<AgentState>) -> Res
                             );
                             Some(url)
                         } else {
-                            // The caller logged in elsewhere, so the previous
-                            // session is no longer the current one either.
-                            state.clear_session().await;
+                            // A login elsewhere means the previous session is
+                            // no longer the current one either. A restore
+                            // leaves the agent as it found it.
+                            if params.mode == StoreMode::Replace {
+                                state.clear_session().await;
+                            }
                             warn!(
                                 "Rejecting insecure HTTP server URL: {insecure_url}. Set VOUCH_ALLOW_INSECURE=1 to override."
                             );
@@ -358,12 +361,26 @@ async fn handle_store_session(request: &Request, state: &Arc<AgentState>) -> Res
 
     let user_email = params.user_email;
     let session = Session::new(params.token, user_email.clone(), expires_at);
-    state.store_session(session, server_url).await;
+    let stored = match params.mode {
+        StoreMode::Replace => {
+            state.store_session(session, server_url).await;
+            true
+        }
+        StoreMode::IfNoLiveSession => {
+            state
+                .store_session_if_no_live_session(session, server_url)
+                .await
+        }
+    };
 
-    info!("Session stored");
-    audit::log_event(AuditEvent::SessionStored { email: user_email });
+    if stored {
+        info!("Session stored");
+        audit::log_event(AuditEvent::SessionStored { email: user_email });
+    } else {
+        debug!("Kept the live session; the restored one was not stored");
+    }
 
-    success_or_internal_error(request.id, Response::success(request.id, true))
+    success_or_internal_error(request.id, Response::success(request.id, stored))
 }
 
 /// Handle `clear_session` request.
@@ -913,7 +930,7 @@ mod tests {
     }
 
     /// A `store_session` request for `token` with `server_url`.
-    fn store_session_request(id: u64, token: &str, server_url: &str) -> Request {
+    fn store_session_request(id: u64, token: &str, server_url: &str, mode: StoreMode) -> Request {
         let params = StoreSessionParams {
             token: secrecy::SecretString::from(token),
             user_email: format!("{token}@example.com"),
@@ -922,6 +939,7 @@ mod tests {
                 .unwrap()
                 .to_string(),
             server_url: Some(server_url.to_string()),
+            mode,
         };
         Request {
             jsonrpc: JSONRPC_VERSION.to_string(),
@@ -974,13 +992,13 @@ mod tests {
 
         let state = AgentState::new();
         let prod = handle_request(
-            &store_session_request(1, "prod", "https://prod.example.com"),
+            &store_session_request(1, "prod", "https://prod.example.com", StoreMode::Replace),
             &state,
         )
         .await;
         let prod_url = state.get_server_url().await;
         let dev = handle_request(
-            &store_session_request(2, "dev", "http://dev.example.com"),
+            &store_session_request(2, "dev", "http://dev.example.com", StoreMode::Replace),
             &state,
         )
         .await;
@@ -1012,6 +1030,102 @@ mod tests {
         );
     }
 
+    /// A restore stores a session into an empty agent, keeps the live
+    /// session a login stored first, and reports which happened.
+    #[tokio::test]
+    async fn store_if_no_live_session_keeps_a_live_session() {
+        let _guard = ENV_LOCK.lock().await;
+        let dir = tempdir().expect("tempdir");
+        let prior = set_env(&[
+            ("XDG_STATE_HOME", Some(dir.path().as_os_str())),
+            ("VOUCH_ALLOW_INSECURE", None),
+        ]);
+
+        let state = AgentState::new();
+        let restored = handle_request(
+            &store_session_request(
+                1,
+                "restored",
+                "https://prod.example.com",
+                StoreMode::IfNoLiveSession,
+            ),
+            &state,
+        )
+        .await;
+        let after_restore = state
+            .get_session()
+            .await
+            .map(|s| s.user_email().to_string());
+        let login = handle_request(
+            &store_session_request(2, "login", "https://prod.example.com", StoreMode::Replace),
+            &state,
+        )
+        .await;
+        let late_restore = handle_request(
+            &store_session_request(
+                3,
+                "stale",
+                "https://stale.example.com",
+                StoreMode::IfNoLiveSession,
+            ),
+            &state,
+        )
+        .await;
+        let session_after = state
+            .get_session()
+            .await
+            .map(|s| s.user_email().to_string());
+        let url_after = state.get_server_url().await;
+
+        restore_env(prior);
+
+        assert_eq!(restored.result, Some(serde_json::json!(true)));
+        assert_eq!(after_restore.as_deref(), Some("restored@example.com"));
+        assert_eq!(login.result, Some(serde_json::json!(true)));
+        assert_eq!(
+            late_restore.result,
+            Some(serde_json::json!(false)),
+            "a restore reports that it did not replace the live session"
+        );
+        assert_eq!(session_after.as_deref(), Some("login@example.com"));
+        assert_eq!(url_after.as_deref(), Some("https://prod.example.com"));
+    }
+
+    /// A restore whose server URL is refused leaves the agent's live session
+    /// alone; only a login clears it.
+    #[tokio::test]
+    async fn refused_restore_keeps_the_live_session() {
+        let _guard = ENV_LOCK.lock().await;
+        let dir = tempdir().expect("tempdir");
+        let prior = set_env(&[
+            ("XDG_STATE_HOME", Some(dir.path().as_os_str())),
+            ("VOUCH_ALLOW_INSECURE", None),
+        ]);
+
+        let state = AgentState::new();
+        state.store_session(live_session(), None).await;
+        let restore = handle_request(
+            &store_session_request(
+                1,
+                "dev",
+                "http://dev.example.com",
+                StoreMode::IfNoLiveSession,
+            ),
+            &state,
+        )
+        .await;
+        let session_after = state.get_session().await;
+
+        restore_env(prior);
+
+        assert_eq!(
+            restore.error.map(|e| e.code),
+            Some(INVALID_PARAMS),
+            "the insecure URL is still refused"
+        );
+        assert!(session_after.is_some(), "the live session is kept");
+    }
+
     /// `VOUCH_ALLOW_INSECURE` is read with the parser the CLI uses: `false` and
     /// `0` refuse a plain-HTTP URL, and `1` allows it.
     #[tokio::test]
@@ -1026,7 +1140,7 @@ mod tests {
             ]);
             let state = AgentState::new();
             let response = handle_request(
-                &store_session_request(1, "dev", "http://dev.example.com"),
+                &store_session_request(1, "dev", "http://dev.example.com", StoreMode::Replace),
                 &state,
             )
             .await;

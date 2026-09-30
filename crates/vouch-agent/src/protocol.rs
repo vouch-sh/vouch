@@ -127,6 +127,19 @@ pub const NOT_AUTHENTICATED: i32 = -32000;
 pub const SESSION_EXPIRED: i32 = -32001;
 pub const CACHE_MISS: i32 = -32002;
 
+/// Whether a stored session may replace the one the agent holds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StoreMode {
+    /// Replace any session: a login or enroll that just completed.
+    #[default]
+    Replace,
+    /// Store only while the agent holds no live session: a session handed
+    /// back from the config file, which must not overwrite a login that
+    /// finished while it was being checked with the server.
+    IfNoLiveSession,
+}
+
 /// Parameters for `store_session` method.
 #[derive(Serialize, Deserialize)]
 pub struct StoreSessionParams {
@@ -140,6 +153,10 @@ pub struct StoreSessionParams {
     /// Server URL for credential refresh (optional).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_url: Option<String>,
+    /// Whether to replace a live session. Absent means `Replace`, what a
+    /// client that predates the field expects.
+    #[serde(default)]
+    pub mode: StoreMode,
 }
 
 impl std::fmt::Debug for StoreSessionParams {
@@ -149,6 +166,7 @@ impl std::fmt::Debug for StoreSessionParams {
             .field("user_email", &self.user_email)
             .field("expires_at", &self.expires_at)
             .field("server_url", &self.server_url)
+            .field("mode", &self.mode)
             .finish()
     }
 }
