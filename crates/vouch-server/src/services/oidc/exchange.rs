@@ -759,7 +759,7 @@ pub(crate) async fn exchange_token(
             &subject_session.user_id,
             subject_email,
             db::CredentialAuditEnvelope {
-                event_type: "token_issued".to_string(),
+                event_type: db::TOKEN_ISSUED.to_string(),
                 success: true,
                 ..Default::default()
             }
@@ -925,7 +925,7 @@ async fn issue_id_token(
             ctx.user_id,
             ctx.email,
             db::CredentialAuditEnvelope {
-                event_type: "token_issued".to_string(),
+                event_type: db::TOKEN_ISSUED.to_string(),
                 success: true,
                 ..Default::default()
             }

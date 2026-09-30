@@ -12,6 +12,7 @@
 //! machine-only issuances (client-credentials tokens) are not counted.
 
 use crate::arrival::ArrivalTime;
+use crate::db;
 use crate::db::audit::{AuditEvent as AuditRow, AuditEventFilter, AuditEventKind, AuditStore};
 use dogwood_language::{Event, Value};
 
@@ -82,8 +83,20 @@ pub(crate) async fn fetch_user_history(
     Ok(rows)
 }
 
+/// Whether a credential audit payload records a successful issuance: its
+/// envelope `event_type` is [`db::CERTIFICATE_ISSUED`] or
+/// [`db::TOKEN_ISSUED`], and `success` is true.
+fn records_issuance(data: &serde_json::Value) -> bool {
+    let issued = matches!(
+        data.get("event_type").and_then(serde_json::Value::as_str),
+        Some(db::CERTIFICATE_ISSUED | db::TOKEN_ISSUED)
+    );
+    issued && data.get("success").and_then(serde_json::Value::as_bool) == Some(true)
+}
+
 /// Map one audit row to a Dogwood history event. Returns `None` for rows
-/// that carry no principal or an unmapped kind.
+/// that carry no principal, an unmapped kind, or a credential kind that
+/// records no issuance.
 pub(crate) fn history_event(row: &AuditRow, org_id: &str, min_ts: i64) -> Option<Event> {
     let user_id = row.user_id.as_deref()?;
     let kind = AuditEventKind::from_wire(&row.event_type)?;
@@ -105,6 +118,22 @@ pub(crate) fn history_event(row: &AuditRow, org_id: &str, min_ts: i64) -> Option
             .and_then(serde_json::Value::as_str)
             .map(ToString::to_string)
     };
+
+    // A credential-kind row counts only when it records an issued
+    // credential. The GitHub App link flow writes `installation_connected`
+    // and `installation_reconnected` rows of the `github_credential` kind;
+    // replaying those as issuances would trip issuance caps and forbids on
+    // the admin who linked the installation.
+    if matches!(
+        kind,
+        AuditEventKind::SshCredential
+            | AuditEventKind::AwsCredential
+            | AuditEventKind::GitHubCredential
+            | AuditEventKind::TokenExchange
+    ) && !records_issuance(&data)
+    {
+        return None;
+    }
 
     // Dogwood requires non-decreasing ingestion order; clamp against the
     // engine's high-water mark (cross-replica UUIDv7 skew can reorder).

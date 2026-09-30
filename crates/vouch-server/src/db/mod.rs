@@ -144,8 +144,9 @@ pub(crate) use scim::{
 // Re-export audit payload types: the sealed AuditData marker plus the
 // credential envelope + per-kind details
 pub use documents::audit::{
-    AuditData, AwsCredentialDetails, CredentialAuditDetails, CredentialAuditEnvelope,
-    GitHubCredentialDetails, Refusal, ScimAuditData, SshCredentialDetails, TokenExchangeDetails,
+    AuditData, AwsCredentialDetails, CERTIFICATE_ISSUED, CredentialAuditDetails,
+    CredentialAuditEnvelope, GitHubCredentialDetails, Refusal, ScimAuditData, SshCredentialDetails,
+    TOKEN_ISSUED, TokenExchangeDetails,
 };
 pub use documents::oauth::{
     AccessScope, FapiProfile, OAuthClientType, RegistrationSource, ResponseMode,
