@@ -27,6 +27,7 @@ use toml_edit::{Array, DocumentMut, Item, Table, Value};
 
 use crate::config::{Config, OpenAiFederation};
 use crate::install_path::resolve_install_path;
+use crate::server_url::ServerUrl;
 use vouch_common::{fs, paths};
 
 /// Codex provider id Vouch registers itself under.
@@ -59,6 +60,13 @@ pub(crate) async fn run(args: SetupArgs<'_>) -> Result<()> {
         .server_url()
         .with_context(|| vouch_cli::tr!("setup-err-anthropic-not-enrolled"))?;
 
+    // The endpoint receives the Vouch-minted assertion, so it takes TLS
+    // (RFC 8693 §6); a plain-HTTP one is refused before anything is written.
+    let token_endpoint = args
+        .token_endpoint
+        .map(|endpoint| ServerUrl::parse(endpoint, false))
+        .transpose()?;
+
     let vouch_path = resolve_install_path().display().to_string();
 
     // Configure Codex FIRST so a conflict error doesn't leave the user
@@ -69,7 +77,7 @@ pub(crate) async fn run(args: SetupArgs<'_>) -> Result<()> {
         identity_provider_id: args.identity_provider_id.to_string(),
         service_account_id: args.service_account_id.to_string(),
         audience: args.audience.map(str::to_string),
-        token_endpoint: args.token_endpoint.map(str::to_string),
+        token_endpoint: token_endpoint.map(|endpoint| endpoint.as_str().to_string()),
     };
     Config::modify(move |c| c.set_ai_openai(fed))?;
 

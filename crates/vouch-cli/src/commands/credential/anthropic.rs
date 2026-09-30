@@ -35,10 +35,13 @@ pub(crate) async fn get_token(server: &ServerUrl) -> Result<SecretString> {
         .context(tr!(
             "err-anthropic-federation-not-configured-run-vouch-setup"
         ))?;
-    let endpoint = fed
-        .token_endpoint
-        .clone()
-        .unwrap_or_else(|| DEFAULT_ENDPOINT.to_string());
+    // The Vouch-minted assertion goes to this endpoint and the provider
+    // token comes back from it, so it takes TLS whatever the invocation's
+    // opt-in (RFC 7521 §4, RFC 8693 §6).
+    let endpoint = ServerUrl::parse(
+        fed.token_endpoint.as_deref().unwrap_or(DEFAULT_ENDPOINT),
+        false,
+    )?;
     let audience = fed.audience.clone();
 
     let agent = super::aws::detect_agent_source();

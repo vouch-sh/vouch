@@ -63,14 +63,16 @@ pub(crate) struct VouchClient<H: HttpClient = ReqwestClient> {
 impl VouchClient<ReqwestClient> {
     /// Create an authenticated client.
     ///
-    /// Resolves the token once from the agent (if running) or config file.
-    /// Also loads the FAPI client key from the OS keychain (or disk fallback)
-    /// for DPoP proof generation on resource requests.
+    /// Resolves the token once from the agent (if running) or config file,
+    /// and only when that session belongs to `base_url`
+    /// ([`session::token_for`]). Also loads the FAPI client key from the OS
+    /// keychain (or disk fallback) for DPoP proof generation on resource
+    /// requests.
     ///
     /// This is the standard constructor for most commands.
     pub(crate) async fn new(base_url: &ServerUrl) -> Result<Self> {
         let mut client = Self::unauthenticated(base_url)?;
-        let token = session::resolve_token().await?;
+        let token = session::token_for(base_url).await?;
         client.token = Some(token);
         // Load the FAPI key for DPoP on resource endpoints (non-fatal).
         client.fapi_key = key_store::load_client_key();
