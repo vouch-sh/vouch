@@ -63,6 +63,7 @@ use axum::{
 };
 use db::Pool;
 use std::sync::Arc;
+use tower_http::timeout::TimeoutLayer;
 
 /// Redact an email address for safe logging.
 ///
@@ -156,11 +157,18 @@ impl AppState {
 /// - Allows `/health` endpoint for load balancer health checks
 /// - Allows `/health/ready` for readiness probes, which cannot send the PROXY
 ///   header port 443 may require
+/// - Bounds every request by the same `REQUEST_TIMEOUT` (408) as `build_app`:
+///   `/health/ready` queries the database, which can stall after the pool
+///   hands out a connection
 pub fn build_redirect_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/health/ready", get(infra::router::readiness_handler))
         .fallback(redirect_to_https)
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            infra::router::REQUEST_TIMEOUT,
+        ))
         .with_state(state)
 }
 
@@ -472,6 +480,34 @@ mod redirect_tests {
 
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::PERMANENT_REDIRECT);
+    }
+
+    /// `/health/ready` on port 80 answers 408 at `REQUEST_TIMEOUT`, as on the
+    /// application listener, when the database stalls. The pool's only
+    /// connection is held and its acquire timeout is an hour, so the probe
+    /// waits until a request timeout answers it. The clock is paused once the
+    /// connection is held, so the 10 s timeout is reached without waiting.
+    #[tokio::test]
+    async fn test_redirect_health_ready_times_out_when_database_stalls() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_secs(3600))
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let _held = pool.acquire().await.unwrap();
+        tokio::time::pause();
+        let mut state = test_app_state_with_rp_id("vouch.sh");
+        state.db = Pool::Sqlite(pool.clone());
+        let app = build_redirect_router(Arc::new(state));
+
+        let req = Request::builder()
+            .uri("/health/ready")
+            .header("host", "vouch.sh")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::REQUEST_TIMEOUT);
     }
 }
 
