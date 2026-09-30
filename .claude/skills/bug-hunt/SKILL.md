@@ -43,10 +43,10 @@ Work through the steps in order.
    ```
 
 3. Check free space (`df -h .`), then warm the shared build by compiling the
-   test crate's library and one existing small test:
+   test crate's library and its one existing test binary:
 
    ```bash
-   $PROVE negative_auth
+   $PROVE it
    du -sh target
    ```
 
@@ -57,7 +57,7 @@ Work through the steps in order.
 
    Record the `du` figure in the report. Before each later build, stop the
    run if free space is below twice the size of one test binary
-   (`ls -l target/debug/deps/negative_auth-*`). On a "no space left on device"
+   (`ls -l target/debug/deps/it-*`). On a "no space left on device"
    error, stop — do not retry — and run the cleanup in step 6 first. In a
    cloud container with a per-session disk allowance, `df` can misreport; a
    failed write is the reliable signal.
@@ -147,12 +147,12 @@ queue on Cargo's lock anyway). Give each the hypothesis, the recorded SHA, the
    short and unique. Never edit `src/`, `Cargo.toml`, or anyone else's file —
    one change under `src/` rebuilds the workspace for every agent and means the
    test no longer runs against `main`. The pattern is gitignored.
-2. Drive the server through the public surface: `vouch_tests::TestHarness`
-   (`crates/vouch-tests/src/harness.rs`) builds the full router and has
+2. Drive the server through the public surface: `vouch_server::test_utils::TestHarness`
+   (`crates/vouch-server/src/test_utils/harness.rs`) builds the full router and has
    helpers for users, orgs, sessions, OAuth clients and SCIM tokens; the
    `vouch_server` modules that are `pub` (`db`, `services`, `crypto`, `infra`,
    `test_utils`) may be called directly. Handlers are `pub(crate)` — reach
-   them over HTTP. Mirror an existing file in `crates/vouch-tests/tests/`.
+   them over HTTP. Mirror an existing file in `crates/vouch-tests/tests/it/`.
 3. Run only your own binary: `$PROVE bughunt_<id>`. If Cargo prints
    "Blocking waiting for file lock", that is another prover building; wait.
 4. The test must **fail by assertion**, with a message that states the
