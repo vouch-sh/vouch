@@ -1146,7 +1146,6 @@ fn test_precheck_cache_hits_by_fingerprint_and_misses_on_change() {
     let compute = || {
         computed.fetch_add(1, Ordering::SeqCst);
         engine::Precheck::Ok {
-            uses_temporal: false,
             reads_device: false,
         }
     };
@@ -1210,7 +1209,7 @@ fn test_precheck_attributes_broken_custom_by_name() {
         },
     ];
     let set = compose_org_set(&[], &custom);
-    match run_precheck(&set.composed, &custom) {
+    match run_precheck(&set, &custom) {
         engine::Precheck::BrokenCustom(name) => assert_eq!(
             name, "Unparseable",
             "the precheck must name the policy that fails, not a working one"
@@ -1245,11 +1244,43 @@ fn test_deny_error_names_policy_and_remediation() {
     );
 }
 
-/// The precheck reports whether an org's set reads event history. Only
-/// those decisions pay the audit query and replay, so a posture-only org
-/// must come back non-temporal.
+fn lower_set(set: &OrgPolicySet) -> LoweredPolicySet {
+    LoweredPolicySet::from_str(
+        &set.composed,
+        schema::service_schema(),
+        schema::policy_schema().unwrap(),
+    )
+    .unwrap()
+}
+
+/// Whether deciding at `point` reads history under `set`.
+fn history_needed_at(set: &OrgPolicySet, point: catalog::DecisionPoint) -> bool {
+    let posture = sample_posture();
+    let kind = match point {
+        catalog::DecisionPoint::IssueToken => DecisionKind::IssueToken {
+            posture: &posture,
+            ip: None,
+            client_id: "cli",
+        },
+        catalog::DecisionPoint::ExchangeToken => DecisionKind::ExchangeToken {
+            ip: None,
+            client_id: "cli",
+            audience: None,
+        },
+    };
+    engine::history_needed(
+        &lower_set(set),
+        &decision_event(&kind, "user-a", "org-1", 0),
+    )
+}
+
+/// History is fetched only for a decision some temporal rule applies to.
+/// A posture-only org never reads it, and an org whose only temporal rule
+/// gates token exchange does not read it on login.
 #[test]
-fn test_precheck_reports_whether_history_is_needed() {
+fn test_history_needed_is_sliced_by_decision_point() {
+    use catalog::DecisionPoint::{ExchangeToken, IssueToken};
+
     let posture_only = compose_org_set(
         &[
             "disk_encryption".to_string(),
@@ -1258,28 +1289,81 @@ fn test_precheck_reports_whether_history_is_needed() {
         ],
         &[],
     );
-    match run_precheck(&posture_only.composed, &[]) {
-        engine::Precheck::Ok { uses_temporal, .. } => assert!(
-            !uses_temporal,
-            "a posture-only policy set must not require event history"
-        ),
-        other => panic!("posture-only set must pass precheck, got {other:?}"),
-    }
+    assert!(!history_needed_at(&posture_only, IssueToken));
+    assert!(!history_needed_at(&posture_only, ExchangeToken));
 
-    let with_temporal = compose_org_set(
+    let exchange_temporal = compose_org_set(
         &[
             "disk_encryption".to_string(),
-            "token_exchange_step_up".to_string(),
+            "exchange_rate_limit".to_string(),
         ],
         &[],
     );
-    match run_precheck(&with_temporal.composed, &[]) {
-        engine::Precheck::Ok { uses_temporal, .. } => assert!(
-            uses_temporal,
-            "a set containing a temporal policy must require event history"
-        ),
-        other => panic!("mixed set must pass precheck, got {other:?}"),
+    assert!(
+        !history_needed_at(&exchange_temporal, IssueToken),
+        "an exchange-scoped temporal rule must not make logins read history"
+    );
+    assert!(history_needed_at(&exchange_temporal, ExchangeToken));
+
+    let issuance_temporal = compose_org_set(&["issuance_rate_limit".to_string()], &[]);
+    assert!(history_needed_at(&issuance_temporal, IssueToken));
+    assert!(
+        !history_needed_at(&issuance_temporal, ExchangeToken),
+        "an issuance-scoped temporal rule must not make exchanges read history"
+    );
+}
+
+/// Every preconfigured temporal policy reads history at exactly the
+/// decision point its scope names. Skipping history where a rule applies
+/// would evaluate it against an empty trace, which lets a count cap allow.
+#[test]
+fn test_preconfigured_temporal_policies_read_history_at_their_decision_point() {
+    for policy in PRECONFIGURED_POLICIES {
+        let set = compose_org_set(&[policy.slug.as_str().to_string()], &[]);
+        let temporal = !lower_set(&set).is_self_contained_cedar();
+        for point in [
+            catalog::DecisionPoint::IssueToken,
+            catalog::DecisionPoint::ExchangeToken,
+        ] {
+            let scoped_here = policy
+                .policy_text
+                .contains(&format!("action == {}", point.action_literal()));
+            assert_eq!(
+                history_needed_at(&set, point),
+                temporal && scoped_here,
+                "'{}' at {}: history must be read iff a temporal rule applies",
+                policy.slug,
+                point.action_name()
+            );
+        }
     }
+}
+
+/// A temporal rule with an unconstrained action scope applies to every
+/// decision, so every decision reads history.
+#[test]
+fn test_history_needed_for_every_decision_under_unscoped_temporal_rule() {
+    let custom = vec![db::CustomPosturePolicy {
+        id: "p1".to_string(),
+        name: "Any action after a failed login".to_string(),
+        description: None,
+        policy_text: r#"forbid (principal, action, resource)
+when temporal {
+    formerly within 15m Vouch::Action::"Login"::response{ output.result: false }
+};"#
+        .to_string(),
+        active: true,
+        org_id: "org-1".to_string(),
+        builder_spec: None,
+        created_at: jiff::Timestamp::now(),
+        updated_at: jiff::Timestamp::now(),
+    }];
+    let set = compose_org_set(&[], &custom);
+    assert!(history_needed_at(&set, catalog::DecisionPoint::IssueToken));
+    assert!(history_needed_at(
+        &set,
+        catalog::DecisionPoint::ExchangeToken
+    ));
 }
 
 /// Each policy file must carry the `@id` its slug expects: the id is what
@@ -1340,12 +1424,8 @@ when temporal {
         updated_at: jiff::Timestamp::now(),
     }];
     let set = compose_org_set(&[], &temporal_only);
-    match run_precheck(&set.composed, &temporal_only) {
-        engine::Precheck::Ok {
-            uses_temporal,
-            reads_device,
-        } => {
-            assert!(uses_temporal, "the policy reads event history");
+    match run_precheck(&set, &temporal_only) {
+        engine::Precheck::Ok { reads_device } => {
             assert!(
                 !reads_device,
                 "a history-only policy must not demand device posture"
@@ -1356,7 +1436,7 @@ when temporal {
 
     // A posture policy does read the device record.
     let posture_set = compose_org_set(&["disk_encryption".to_string()], &[]);
-    match run_precheck(&posture_set.composed, &[]) {
+    match run_precheck(&posture_set, &[]) {
         engine::Precheck::Ok { reads_device, .. } => {
             assert!(reads_device, "a posture policy reads the device record");
         }
@@ -1510,6 +1590,116 @@ fn test_rule_count_matches_policy_statements() {
         requirement("context.device.firewall_enabled"),
     );
     assert_eq!(rule_count(&mixed), 2);
+}
+
+fn all_preconfigured_slugs() -> Vec<String> {
+    PRECONFIGURED_POLICIES
+        .iter()
+        .map(|p| p.slug.as_str().to_string())
+        .collect()
+}
+
+/// The refs `compose_org_set` builds line up with the lowered rules: one
+/// per rule, and each preconfigured rule's `@id` is its own slug — also
+/// with a multi-rule custom policy in the set.
+#[test]
+fn test_check_attribution_accepts_composed_sets() {
+    let custom = vec![db::CustomPosturePolicy {
+        id: "p1".to_string(),
+        name: "Two rules".to_string(),
+        description: None,
+        policy_text: format!(
+            "{}\n{}",
+            requirement("context.device.disk_encryption_enabled"),
+            requirement("context.device.firewall_enabled"),
+        ),
+        active: true,
+        org_id: "org-1".to_string(),
+        builder_spec: None,
+        created_at: jiff::Timestamp::now(),
+        updated_at: jiff::Timestamp::now(),
+    }];
+    let set = compose_org_set(&all_preconfigured_slugs(), &custom);
+    engine::check_attribution(&lower_set(&set), &set.refs)
+        .unwrap_or_else(|e| panic!("composed refs must align with lowered rules: {e}"));
+    assert!(
+        matches!(run_precheck(&set, &custom), engine::Precheck::Ok { .. }),
+        "an aligned set must pass precheck"
+    );
+}
+
+/// A ref map that does not match the lowered rules — one ref short, or two
+/// policies swapped — is refused rather than trusted, so a deny cannot name
+/// the wrong policy or show its remediation.
+#[test]
+fn test_check_attribution_rejects_misaligned_refs() {
+    let set = compose_org_set(
+        &["disk_encryption".to_string(), "firewall".to_string()],
+        &[],
+    );
+    let lowered = lower_set(&set);
+
+    let short = &set.refs[..set.refs.len() - 1];
+    assert!(
+        engine::check_attribution(&lowered, short).is_err(),
+        "a ref count that differs from the rule count must be refused"
+    );
+
+    let mut swapped = set.refs.clone();
+    let last = swapped.len() - 1;
+    swapped.swap(last - 1, last);
+    assert!(
+        engine::check_attribution(&lowered, &swapped).is_err(),
+        "a ref whose slug differs from its rule's @id must be refused"
+    );
+}
+
+/// A determining rule with no matching ref fails the decision (the caller
+/// reports the engine unavailable) instead of returning an unattributed
+/// deny that hides the broken map.
+#[test]
+fn test_evaluate_refuses_unmapped_determining_rule() {
+    let set = compose_org_set(&["disk_encryption".to_string()], &[]);
+    let base_only = &set.refs[..preconfigured::BASE_ALLOW_RULES];
+    let mut posture = sample_posture();
+    posture.disk_encryption_enabled = Some(false);
+    let result = engine::evaluate(lower_set(&set), base_only, &[], "org-1", 0, |ts| {
+        decision_event(
+            &DecisionKind::IssueToken {
+                posture: &posture,
+                ip: None,
+                client_id: "cli",
+            },
+            "user-a",
+            "org-1",
+            ts,
+        )
+    });
+    assert!(
+        result.is_err(),
+        "a deny whose determining rule has no ref must not be reported as unattributed"
+    );
+
+    // With the full map the same request is a deny naming the policy.
+    let decision = engine::evaluate(lower_set(&set), &set.refs, &[], "org-1", 0, |ts| {
+        decision_event(
+            &DecisionKind::IssueToken {
+                posture: &posture,
+                ip: None,
+                client_id: "cli",
+            },
+            "user-a",
+            "org-1",
+            ts,
+        )
+    })
+    .unwrap();
+    assert!(matches!(
+        decision,
+        engine::OrgDecision::Deny(Some(engine::DenyingPolicy::Preconfigured(
+            PreconfiguredSlug::DiskEncryption
+        )))
+    ));
 }
 
 /// The `BASE_ALLOW_RULES` constant must match the actual rule count of
