@@ -166,10 +166,11 @@ pub async fn find_session_by_token_hash(
 ///
 /// The row is read and deleted in one transaction. Every path that deletes a
 /// session by hash (`POST /logout`, RP-initiated logout, `/oauth/revoke`)
-/// records a `Logout` audit event for the row's user, and the audit event must
-/// be recorded whenever the row actually existed, including an expired row the
-/// cleanup task has not reaped yet. Returning the row gives each caller the
-/// `user_id` and `user_email` for it.
+/// records an audit event whenever the row actually existed, including an
+/// expired row the cleanup task has not reaped yet: `Logout` for a user's
+/// session, `OauthTokenRevoked` for an M2M token revoked at `/oauth/revoke`.
+/// Returning the row gives each caller what the event needs (`user_id`,
+/// `user_email`, `session_type`).
 ///
 /// The return is driven off `StoreTransaction::delete`'s row count, not the
 /// pre-delete read: of two concurrent revokes of the same `token_hash` only
