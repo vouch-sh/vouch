@@ -640,6 +640,29 @@ fn effective_token_endpoint_auth_method(
     }
 }
 
+/// The key material the client will have once this update is applied:
+/// submitted keys replace the stored ones, whether inline or a `jwks_uri`
+/// (RFC 7592 §2.2: values "MUST replace, not augment, the values previously
+/// associated with this client"); leaving the FAPI profile clears them;
+/// otherwise the stored keys stay.
+///
+/// Shared by [`validate_update_fapi`] (to check the keys the client will
+/// hold) and [`compute_fapi_update_fields`] (to persist them), so the check
+/// never judges key material the update replaces — mirrors
+/// [`effective_fapi_profile`] above.
+fn effective_keys<'a>(
+    validated: &'a ValidatedUpdateApp<'_>,
+    client: &'a OAuthClient,
+) -> Option<&'a ClientKeys> {
+    if validated.keys.is_some() {
+        validated.keys.as_ref()
+    } else if !validated.is_fapi && validated.fapi_profile_provided {
+        None
+    } else {
+        client.keys.as_ref()
+    }
+}
+
 /// Validate semantic rules for an update against the existing client record.
 ///
 /// Call after authentication and the ownership check.  This covers rules that
@@ -728,28 +751,24 @@ pub(crate) fn validate_update_fapi(
         return Err(AppValidationError::FapiRequiresConfidentialClient);
     }
 
-    // FAPI validation: require JWKS or JWKS URI (request or existing)
-    if validated.keys.is_none()
-        && client.keys.as_ref().and_then(ClientKeys::inline).is_none()
-        && client.keys.as_ref().and_then(ClientKeys::uri).is_none()
-    {
+    // FAPI validation: the client must hold a JWKS or JWKS URI after the update
+    let keys = effective_keys(validated, client);
+    if keys.is_none() {
         return Err(AppValidationError::FapiMissingJwks);
     }
 
     // Only for private_key_jwt: its JWKS carries client-assertion signing
-    // keys, so an inline JWKS (submitted or already on the client) must have
-    // at least one key usable with the FAPI allowlist. tls_client_auth/
+    // keys, so the inline JWKS the client holds after the update (submitted,
+    // or kept from the stored client) must have at least one key usable with
+    // the FAPI allowlist. A submitted jwks_uri replaces a stored inline set,
+    // and can't be inspected synchronously. tls_client_auth/
     // self_signed_tls_client_auth JWKS conveys certificates via x5c instead
     // (RFC 8705 §2.2.2), so this check does not apply to them. Uses the same
     // effective-auth-method computation `compute_fapi_update_fields` persists
     // by, so the two cannot disagree about which clients this check covers.
     if effective_token_endpoint_auth_method(validated, client)
         == TokenEndpointAuthMethod::PrivateKeyJwt
-        && let Some(jwks) = validated
-            .keys
-            .as_ref()
-            .and_then(ClientKeys::inline)
-            .or(client.keys.as_ref().and_then(ClientKeys::inline))
+        && let Some(jwks) = keys.and_then(ClientKeys::inline)
         && !jwks.has_client_assertion_key(FapiProfile::Fapi2Security)
     {
         return Err(AppValidationError::FapiJwksNoAllowedAlgorithm);
@@ -864,15 +883,8 @@ pub(crate) fn compute_fapi_update_fields<'a>(
     let token_endpoint_auth_method = effective_token_endpoint_auth_method(validated, client);
 
     // One value, so the merge cannot take the inline key set from the update
-    // and the URI from the stored client and end up holding both — which the
-    // two independent branches this replaces could do.
-    let keys = if validated.keys.is_some() {
-        validated.keys.as_ref()
-    } else if !is_fapi && validated.fapi_profile_provided {
-        None
-    } else {
-        client.keys.as_ref()
-    };
+    // and the URI from the stored client and end up holding both.
+    let keys = effective_keys(validated, client);
 
     // Leaving the FAPI profile stops *mandating* DPoP; it does not mean the
     // operator asked to turn it off. `dpop_bound_access_tokens` is not part of
