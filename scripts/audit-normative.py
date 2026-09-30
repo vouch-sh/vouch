@@ -203,9 +203,12 @@ def is_successor(current: list[int], candidate: list[int]) -> bool:
     for level in range(len(candidate)):
         if candidate[:level] != current[:level]:
             continue
-        if level < len(current) and len(candidate) == level + 1:
-            if current[level] < candidate[level] <= current[level] + 3:
-                return True
+        if (
+            level < len(current)
+            and len(candidate) == level + 1
+            and current[level] < candidate[level] <= current[level] + 3
+        ):
+            return True
     return False
 
 
@@ -220,8 +223,14 @@ def title_key(title: str) -> str:
     return title
 
 
-def read_toc(lines: list[str]) -> tuple[set[tuple[str, str]], int]:
-    """Collect the numbered entries of the table of contents.
+def read_toc(lines: list[str]) -> tuple[dict[str, str], int]:
+    """Collect the numbered entries of the table of contents, as the title key
+    of each section number.
+
+    A long title wraps onto indented continuation lines, and the TOC and the
+    body may wrap it at different words, so an entry's key is its whole
+    title, continuation lines joined; a body heading matches when its first
+    line is a prefix of it (see ``toc_lists``).
 
     Modern RFCs (RFC 9449 among them) print the TOC with no dot leaders and no
     page numbers, so a TOC entry is byte-for-byte indistinguishable from the
@@ -233,23 +242,34 @@ def read_toc(lines: list[str]) -> tuple[set[tuple[str, str]], int]:
         if TOC_START_RE.match(line):
             break
     else:
-        return set(), 0
+        return {}, 0
 
-    entries: set[tuple[str, str]] = set()
+    entries: dict[str, str] = {}
     misses = 0
     scanned = 0
     end = i
+    # The entry a wrapped title continues, and how deep that entry is indented.
+    last: tuple[str, int] | None = None
     for j in range(i + 1, min(len(lines), i + 700)):
         line = lines[j]
         if not line.strip():
+            last = None
             continue
         scanned += 1
         m = TOC_ENTRY.match(line)
+        indent = len(line) - len(line.lstrip())
         if m and parse_number(m.group(1)) is not None:
-            entries.add((m.group(1), title_key(m.group(2))))
+            entries[m.group(1)] = title_key(m.group(2))
+            last = (m.group(1), indent)
+            end = j
+            misses = 0
+        elif last is not None and indent > last[1] and not line.lstrip()[0].isdigit():
+            number = last[0]
+            entries[number] += title_key(line)
             end = j
             misses = 0
         else:
+            last = None
             misses += 1
             # Two consecutive non-entry lines of prose mean the TOC has ended.
             if misses >= 4:
@@ -259,8 +279,16 @@ def read_toc(lines: list[str]) -> tuple[set[tuple[str, str]], int]:
     # almost every line is an entry -- so prose between entries means this is
     # not one, and the successor heuristic should be used instead.
     if len(entries) < 3 or scanned == 0 or len(entries) / scanned < 0.6:
-        return set(), 0
+        return {}, 0
     return entries, end
+
+
+def toc_lists(toc: dict[str, str], number: str, title: str) -> bool:
+    """Whether a body heading is the TOC entry for ``number``: its title (the
+    heading's first line) begins the entry's whole title, wherever either one
+    wraps."""
+    key = title_key(title)
+    return bool(key) and toc.get(number, "").startswith(key)
 
 
 def parse_sections(lines: list[str]) -> list[tuple[str, str, list[str]]]:
@@ -285,7 +313,7 @@ def parse_sections(lines: list[str]) -> list[tuple[str, str, list[str]]]:
                 # With a TOC, membership in it is authoritative.  Without one,
                 # fall back to the section-successor heuristic.
                 accepted = (
-                    (number, title_key(title)) in toc
+                    toc_lists(toc, number, title)
                     if toc
                     else is_successor(current, parsed) and not KEYWORD_RE.search(title)
                 )
@@ -476,7 +504,7 @@ def extract(spec_id: str, path: Path) -> list[dict]:
                 found = strengths_in(unit, keyword_re)
                 if not found:
                     continue
-                primary = sorted(found, key=rank)[0]
+                primary = min(found, key=rank)
                 if rank(primary) == 9:
                     continue
                 clean = normalize(unit)

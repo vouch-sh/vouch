@@ -31,7 +31,7 @@
 //! Regenerate it after closing gaps with
 //!
 //! ```text
-//! UPDATE_SPEC_COVERAGE_BASELINE=1 cargo test -p vouch-tests --test spec_coverage
+//! UPDATE_SPEC_COVERAGE_BASELINE=1 cargo test -p vouch-tests --test it spec_coverage
 //! ```
 //!
 //! This test owns the scan so the gate cannot drift from the baseline it
@@ -511,7 +511,7 @@ fn normative_coverage_does_not_regress() {
         let mut out = String::from(
             "# Normative statements with no citing test: the accepted backlog.\n\
              # Regenerate: UPDATE_SPEC_COVERAGE_BASELINE=1 cargo test -p vouch-tests \
-             --test spec_coverage\n\
+             --test it spec_coverage\n\
              # This list may only shrink -- see crates/vouch-tests/tests/it/spec_coverage.rs.\n\
              req_id\tstrength\ttext\n",
         );
@@ -574,7 +574,7 @@ fn normative_coverage_does_not_regress() {
         failures.push_str(&format!(
             "\n{} baseline entr(y/ies) are now cited by a test. The backlog may only \
              shrink, so prune them:\n  UPDATE_SPEC_COVERAGE_BASELINE=1 cargo test -p \
-             vouch-tests --test spec_coverage\n",
+             vouch-tests --test it spec_coverage\n",
             now_cited.len()
         ));
     }
@@ -584,10 +584,42 @@ fn normative_coverage_does_not_regress() {
             "\n{} baseline entr(y/ies) no longer exist in specs/requirements.tsv, so the \
              requirement text changed or the spec was re-cached. Regenerate the corpus and \
              the baseline:\n  scripts/audit-normative.py\n  \
-             UPDATE_SPEC_COVERAGE_BASELINE=1 cargo test -p vouch-tests --test spec_coverage\n",
+             UPDATE_SPEC_COVERAGE_BASELINE=1 cargo test -p vouch-tests --test it spec_coverage\n",
             vanished.len()
         ));
     }
 
     assert!(failures.is_empty(), "{failures}");
+}
+
+/// A section whose heading wraps owns its statements. The table of contents
+/// and the body can wrap a long title at different words (RFC 8725 wraps
+/// §3.12's after "Kinds" in the TOC and after "Kinds of" in the body), and
+/// when the extractor missed the heading, the section's statements were
+/// filed under the one before it, where a citation of the wrong section
+/// covered them.
+#[test]
+fn wrapped_headings_own_their_statements() {
+    let rows = read_tsv(&repo_root().join("specs/requirements.tsv"));
+    for (spec, section, statement) in [
+        (
+            "rfc8725",
+            "3.12",
+            "MUST be written such that they are mutually exclusive",
+        ),
+        ("rfc7636", "4.5", "the token endpoint MUST use to verify"),
+        (
+            "rfc6749",
+            "10.16",
+            "as a form of delegated end-user authentication",
+        ),
+    ] {
+        assert!(
+            rows.iter().any(|r| r.len() >= 7
+                && r[1] == spec
+                && r[2] == section
+                && r[6].contains(statement)),
+            "{spec} §{section} must own its statement \"{statement}\""
+        );
+    }
 }
