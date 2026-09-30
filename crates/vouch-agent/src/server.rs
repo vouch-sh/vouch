@@ -9,9 +9,7 @@ use crate::protocol::{
 };
 use crate::socket::{AuthorizedStream, SocketKind, accept_authorized, bind_socket, socket_path};
 use crate::ssh_agent::SshCredentials;
-use crate::state::{
-    AgentState, CacheRefusal, CachedCredential, Session, SessionInfo, SshStoreRefusal,
-};
+use crate::state::{AgentState, CacheRefusal, CachedCredential, Session, SshStoreRefusal};
 use crate::wire;
 use serde::de::DeserializeOwned;
 
@@ -278,13 +276,8 @@ fn handle_ping(request: &Request) -> Response {
 
 /// Handle `get_session` request.
 async fn handle_get_session(request: &Request, state: &Arc<AgentState>) -> Response {
-    // `get_session()` already filters out expired sessions (returns None).
-    match state.get_session().await {
-        Some(session) => {
-            let mut info = SessionInfo::from(&session);
-            info.server_url = state.get_server_url().await;
-            success_or_internal_error(request.id, Response::success(request.id, info))
-        }
+    match state.session_info().await {
+        Some(info) => success_or_internal_error(request.id, Response::success(request.id, info)),
         None => Response::not_authenticated(request.id),
     }
 }
