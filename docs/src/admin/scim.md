@@ -195,8 +195,8 @@ rejections that happen before the request reaches Vouch's SCIM logic:
 | Method the endpoint does not support (`Allow` lists the supported ones) | `405` | — |
 | Rate limit exceeded (`Retry-After` is set) | `429` | — |
 
-SCIM and the `/api/v1/org/*` API share one rate-limit bucket per client IP (20 requests burst,
-1 per second).
+SCIM and the `/api/v1/org/*` API share one rate-limit bucket per client (an IPv4 address or an
+IPv6 /64; 20 requests burst, 1 per second).
 
 ## De-Provisioning Behavior
 

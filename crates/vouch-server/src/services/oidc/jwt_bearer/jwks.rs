@@ -196,8 +196,15 @@ pub async fn find_matching_key_with_refresh_client(
     tracing::debug!("Key not found in JWKS cache for client {client_id}; force-refreshing");
     // Deliberately the unconditional fetch, not `resolve_cached_jwks`: this path
     // has already decided the cache is not to be trusted (the kid is missing
-    // from it), so the TTL and the stale fallback must both be bypassed. The
-    // 10-second rate limit above is what bounds the fetch rate here.
+    // from it), so the TTL and the stale fallback must both be bypassed.
+    //
+    // The 10-second limit above reads `cached_at`, which only a successful
+    // fetch advances, so it bounds refetches of a working `jwks_uri` alone.
+    // While the URI is failing, every kid-miss assertion costs one fetch: the
+    // within-request gate above caps each auth attempt at one, and nothing
+    // throttles across requests beyond the per-client auth rate limiter. The
+    // mTLS certificate-miss refetch in `services::oidc::token` has the same
+    // bound.
     match jwks::fetch_and_cache(store, client_id, uri, allow_loopback, http_client).await {
         Ok(jwks_value) => match parse_jwks_value(&jwks_value) {
             Ok(fresh_jwks) => find_matching_key(&fresh_jwks, header),

@@ -58,11 +58,11 @@ pub(crate) const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::fro
 /// Build a rate limiter, or a no-op passthrough when certification test mode
 /// is active (`VOUCH_CERTIFICATION_TEST_TOKEN` is set).
 macro_rules! maybe_rate_limit {
-    ($builder:path, $config:expr) => {
+    ($tier:expr, $config:expr) => {
         tower::util::option_layer(if $config.certification_test_token.is_some() {
             None
         } else {
-            Some($builder($config.forwarded_for_proxies())?)
+            Some($tier.layer($config.forwarded_for_proxies())?)
         })
     };
 }
@@ -290,10 +290,7 @@ fn build_rate_limited_routes(
             post(handlers::oidc::fido2_challenge),
         )
         .route("/oauth/device", post(handlers::device::device_code))
-        .layer(maybe_rate_limit!(
-            rate_limit::build_auth_rate_limiter,
-            config
-        )))
+        .layer(maybe_rate_limit!(rate_limit::RateLimitTier::AUTH, config)))
 }
 
 /// Rate-limited credential issuance routes.
@@ -340,7 +337,7 @@ fn build_credential_routes(
 
     Ok(credential_routes
         .layer(maybe_rate_limit!(
-            rate_limit::build_credential_rate_limiter,
+            rate_limit::RateLimitTier::CREDENTIAL,
             config
         ))
         .layer(DefaultBodyLimit::max(CREDENTIAL_BODY_LIMIT)))
@@ -376,7 +373,7 @@ fn build_authorization_endpoint_routes(
             get(handlers::oidc::logout).post(handlers::oidc::logout_post),
         )
         .layer(maybe_rate_limit!(
-            rate_limit::build_general_rate_limiter,
+            rate_limit::RateLimitTier::GENERAL,
             config
         ))
         .layer(DefaultBodyLimit::max(SCIM_BODY_LIMIT))
@@ -411,7 +408,7 @@ fn build_general_limited_routes(
     state: &Arc<AppState>,
     config: &config::ServerConfig,
 ) -> anyhow::Result<Router<Arc<AppState>>> {
-    let rate_limit = maybe_rate_limit!(rate_limit::build_general_rate_limiter, config);
+    let rate_limit = maybe_rate_limit!(rate_limit::RateLimitTier::GENERAL, config);
 
     let org_api_routes = Router::new()
         // Org admin API (JSON; see handlers::api::org's module doc for auth per handler)
@@ -602,7 +599,7 @@ fn build_public_read_routes(
             get(handlers::credentials::get_github_status),
         )
         .layer(maybe_rate_limit!(
-            rate_limit::build_general_rate_limiter,
+            rate_limit::RateLimitTier::GENERAL,
             config
         )))
 }
@@ -682,7 +679,7 @@ fn build_api_management_routes(
         )
         .merge(protected_routes)
         .layer(maybe_rate_limit!(
-            rate_limit::build_general_rate_limiter,
+            rate_limit::RateLimitTier::GENERAL,
             config
         )))
 }
@@ -713,10 +710,7 @@ fn build_browser_auth_routes(
             post(handlers::enroll::browser_register_complete)
                 .layer(DefaultBodyLimit::max(ENROLL_BODY_LIMIT)),
         )
-        .layer(maybe_rate_limit!(
-            rate_limit::build_auth_rate_limiter,
-            config
-        )))
+        .layer(maybe_rate_limit!(rate_limit::RateLimitTier::AUTH, config)))
 }
 
 /// Rate-limited admin member management routes.
@@ -815,7 +809,7 @@ fn build_admin_routes(config: &config::ServerConfig) -> anyhow::Result<Router<Ar
             post(handlers::admin::admin_emergency_rotate_keys),
         )
         .layer(maybe_rate_limit!(
-            rate_limit::build_general_rate_limiter,
+            rate_limit::RateLimitTier::GENERAL,
             config
         )))
 }

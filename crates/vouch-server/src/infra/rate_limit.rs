@@ -14,16 +14,23 @@
 //! accounts for trusted reverse proxies (ingress controllers, Istio sidecars)
 //! via the `VOUCH_TRUSTED_PROXIES` configuration.
 //!
-//! Three tiers are provided:
-//! - **Auth**: Strict limits for login/token endpoints (burst=8, 1 req/2s per IP)
-//! - **Credential**: Moderate limits for credential issuance (burst=15, 1 req/2s per IP)
-//! - **General**: Relaxed limits for SCIM, admin, and authorize endpoints (burst=20, 1 req/s per IP)
+//! Three tiers are provided, as [`RateLimitTier`] constants:
+//! - **Auth**: Strict limits for login/token endpoints (burst=8, 1 req/2s per client)
+//! - **Credential**: Moderate limits for credential issuance (burst=15, 1 req/2s per client)
+//! - **General**: Relaxed limits for SCIM, admin, and authorize endpoints (burst=20, 1 req/s per client)
 //!
-//! `tower-governor` handles its own internal state cleanup via the governor
-//! crate's GCRA algorithm, so no external cleanup task is required.
+//! A client is a [`ClientBucket`]: an IPv4 address, or an IPv6 /64, since one
+//! host can use a whole /64. The connection caps in `infra/conn_caps.rs` count
+//! clients the same way.
+//!
+//! `governor` keeps one state entry per client and never drops one on its
+//! own: only `RateLimiter::retain_recent` removes the entries of clients that
+//! have gone idle. Each tier's layer prunes its limiter on a timer, so the map
+//! holds the clients seen recently rather than every client since startup.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use axum::http::HeaderMap;
@@ -54,8 +61,35 @@ impl TrustedProxyKeyExtractor {
     }
 }
 
+/// The client a rate limit or connection cap counts a request under: an
+/// IPv4 address as is, an IPv6 address by its /64, since one host can use a
+/// whole /64 and would otherwise get a separate allowance for every address
+/// in it. An IPv4-mapped IPv6 address is its IPv4 client, not a member of
+/// the one /64 every mapped address shares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ClientBucket(IpAddr);
+
+impl From<IpAddr> for ClientBucket {
+    fn from(ip: IpAddr) -> Self {
+        const PREFIX_64: u128 = 0xFFFF_FFFF_FFFF_FFFF_0000_0000_0000_0000;
+        Self(match ip.to_canonical() {
+            IpAddr::V4(v4) => IpAddr::V4(v4),
+            IpAddr::V6(v6) => IpAddr::V6(Ipv6Addr::from_bits(v6.to_bits() & PREFIX_64)),
+        })
+    }
+}
+
+impl std::fmt::Display for ClientBucket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            IpAddr::V4(v4) => v4.fmt(f),
+            IpAddr::V6(v6) => write!(f, "{v6}/64"),
+        }
+    }
+}
+
 impl KeyExtractor for TrustedProxyKeyExtractor {
-    type Key = IpAddr;
+    type Key = ClientBucket;
 
     fn name(&self) -> &'static str {
         "TrustedProxyKeyExtractor"
@@ -66,6 +100,7 @@ impl KeyExtractor for TrustedProxyKeyExtractor {
         req: &http::Request<T>,
     ) -> std::result::Result<Self::Key, tower_governor::GovernorError> {
         client_ip_from_request(req.extensions(), req.headers(), &self.trusted_cidrs)
+            .map(ClientBucket::from)
             .ok_or(tower_governor::GovernorError::UnableToExtractKey)
     }
 
@@ -85,71 +120,93 @@ impl KeyExtractor for TrustedProxyKeyExtractor {
 pub type RateLimitLayer =
     GovernorLayer<TrustedProxyKeyExtractor, StateInformationMiddleware, axum::body::Body>;
 
-/// Build a governor config with the given parameters and trusted CIDRs.
+/// The governor config behind a [`RateLimitLayer`].
+type RateLimitConfig =
+    tower_governor::governor::GovernorConfig<TrustedProxyKeyExtractor, StateInformationMiddleware>;
+
+/// How often each tier's limiter drops the entries of idle clients.
 ///
-/// # Errors
-///
-/// Returns an error if the governor config cannot be built (e.g.,
-/// `burst_size` is zero).
-fn build_config(
-    per_second: u64,
-    burst_size: u32,
-    trusted_cidrs: &[IpNet],
-) -> Result<
-    tower_governor::governor::GovernorConfig<TrustedProxyKeyExtractor, StateInformationMiddleware>,
-> {
-    let extractor = TrustedProxyKeyExtractor::new(trusted_cidrs.to_vec());
-    GovernorConfigBuilder::default()
-        .per_second(per_second)
-        .burst_size(burst_size)
-        .key_extractor(extractor)
-        .use_headers()
-        .finish()
-        .context(
-            "failed to build rate limiter config \
-             (burst_size must be > 0)",
-        )
+/// An entry is idle once its client's full burst has replenished (16 s for
+/// the auth tier, the slowest), after which it holds nothing a fresh entry
+/// would not; pruning a minute later bounds the map by the clients seen in
+/// the last minute or so.
+const PRUNE_INTERVAL: Duration = Duration::from_secs(60);
+
+/// A rate-limit tier: one request replenished every `period`, up to `burst`
+/// held in reserve, per [`ClientBucket`].
+#[derive(Debug, Clone, Copy)]
+pub struct RateLimitTier {
+    period: Duration,
+    burst: u32,
 }
 
-/// Build a rate limiting layer for authentication endpoints.
-///
-/// Burst of 8 requests, replenish 1 every 2 seconds per IP. The FAPI 2.0
-/// login flow legitimately makes several rapid requests to rate-limited
-/// endpoints (register, challenge, token, DPoP nonce retry), so the burst
-/// must accommodate a full login sequence while still preventing
-/// brute-force.
-///
-/// # Errors
-///
-/// Returns an error if the rate limiter config cannot be built.
-pub fn build_auth_rate_limiter(trusted_cidrs: &[IpNet]) -> Result<RateLimitLayer> {
-    Ok(GovernorLayer::new(build_config(2, 8, trusted_cidrs)?))
-}
+impl RateLimitTier {
+    /// Authentication endpoints: burst of 8, one every 2 seconds. The FAPI
+    /// 2.0 login flow legitimately makes several rapid requests to
+    /// rate-limited endpoints (register, challenge, token, DPoP nonce
+    /// retry), so the burst must accommodate a full login sequence while
+    /// still preventing brute-force.
+    pub const AUTH: Self = Self {
+        period: Duration::from_secs(2),
+        burst: 8,
+    };
 
-/// Build a rate limiting layer for credential issuance endpoints.
-///
-/// Burst of 15 requests, replenish 1 every 2 seconds per IP.
-/// kubectl spawns multiple parallel `vouch credential eks` processes
-/// on startup, so the burst must accommodate concurrent requests.
-///
-/// # Errors
-///
-/// Returns an error if the rate limiter config cannot be built.
-pub fn build_credential_rate_limiter(trusted_cidrs: &[IpNet]) -> Result<RateLimitLayer> {
-    Ok(GovernorLayer::new(build_config(2, 15, trusted_cidrs)?))
-}
+    /// Credential issuance: burst of 15, one every 2 seconds. kubectl spawns
+    /// multiple parallel `vouch credential eks` processes on startup, so the
+    /// burst must accommodate concurrent requests.
+    pub const CREDENTIAL: Self = Self {
+        period: Duration::from_secs(2),
+        burst: 15,
+    };
 
-/// Build a rate limiting layer for general API endpoints.
-///
-/// Burst of 20 requests, replenish at 1 per second per IP.
-/// Used for SCIM, admin, and authorize endpoints that need protection
-/// but handle diverse traffic patterns.
-///
-/// # Errors
-///
-/// Returns an error if the rate limiter config cannot be built.
-pub fn build_general_rate_limiter(trusted_cidrs: &[IpNet]) -> Result<RateLimitLayer> {
-    Ok(GovernorLayer::new(build_config(1, 20, trusted_cidrs)?))
+    /// General API endpoints: burst of 20, one per second. Used for SCIM,
+    /// admin, and authorize endpoints that need protection but handle
+    /// diverse traffic patterns.
+    pub const GENERAL: Self = Self {
+        period: Duration::from_secs(1),
+        burst: 20,
+    };
+
+    /// A layer enforcing this tier, keyed by the client behind any trusted
+    /// proxy in `trusted_cidrs`.
+    ///
+    /// Must run inside a Tokio runtime; see [`Self::config`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the governor config cannot be built (e.g. a
+    /// zero burst).
+    pub fn layer(self, trusted_cidrs: &[IpNet]) -> Result<RateLimitLayer> {
+        Ok(GovernorLayer::new(self.config(trusted_cidrs)?))
+    }
+
+    /// This tier's governor config, with a task that prunes its limiter's
+    /// idle entries every [`PRUNE_INTERVAL`] and ends once the config is
+    /// dropped. Must run inside a Tokio runtime, which spawns the task.
+    fn config(self, trusted_cidrs: &[IpNet]) -> Result<Arc<RateLimitConfig>> {
+        let config = GovernorConfigBuilder::default()
+            .period(self.period)
+            .burst_size(self.burst)
+            .key_extractor(TrustedProxyKeyExtractor::new(trusted_cidrs.to_vec()))
+            .use_headers()
+            .finish()
+            .context("failed to build rate limiter config (burst_size must be > 0)")?;
+        let limiter = Arc::downgrade(config.limiter());
+        tokio::spawn(async move {
+            let mut ticks = tokio::time::interval(PRUNE_INTERVAL);
+            ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            ticks.tick().await;
+            loop {
+                ticks.tick().await;
+                let Some(limiter) = limiter.upgrade() else {
+                    return;
+                };
+                limiter.retain_recent();
+                limiter.shrink_to_fit();
+            }
+        });
+        Ok(Arc::new(config))
+    }
 }
 
 /// Resolve the client IP of a request, accounting for trusted reverse proxies.
@@ -414,5 +471,100 @@ mod tests {
             client_ip_from_request(&ext, &forwarded_for("1.2.3.4"), &cidrs(&["10.0.0.0/8"])),
             None
         );
+    }
+
+    // ========================================================================
+    // ClientBucket and the tiers
+    // ========================================================================
+
+    fn bucket(ip: &str) -> ClientBucket {
+        ClientBucket::from(ip.parse::<IpAddr>().unwrap())
+    }
+
+    #[test]
+    fn ipv6_addresses_in_one_64_share_a_bucket() {
+        assert_eq!(bucket("2001:db8:1:2::1"), bucket("2001:db8:1:2:ffff::9"));
+        assert_ne!(bucket("2001:db8:1:2::1"), bucket("2001:db8:1:3::1"));
+        assert_eq!(bucket("2001:db8:1:2::1").to_string(), "2001:db8:1:2::/64");
+    }
+
+    #[test]
+    fn ipv4_addresses_are_their_own_bucket() {
+        assert_ne!(bucket("203.0.113.1"), bucket("203.0.113.2"));
+        assert_eq!(bucket("203.0.113.1").to_string(), "203.0.113.1");
+    }
+
+    #[test]
+    fn ipv4_mapped_ipv6_is_its_ipv4_bucket() {
+        assert_eq!(bucket("::ffff:203.0.113.1"), bucket("203.0.113.1"));
+        assert_ne!(bucket("::ffff:203.0.113.1"), bucket("::ffff:203.0.113.2"));
+    }
+
+    /// A request to `/` from `peer`, carrying the connection info the
+    /// application listener attaches.
+    fn request_from(peer: IpAddr) -> http::Request<axum::body::Body> {
+        let mut request = http::Request::builder()
+            .uri("/")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::new(
+                peer, 443,
+            )));
+        request
+    }
+
+    async fn status_for(app: &axum::Router, peer: IpAddr) -> http::StatusCode {
+        use tower::ServiceExt;
+        app.clone()
+            .oneshot(request_from(peer))
+            .await
+            .unwrap()
+            .status()
+    }
+
+    fn limited(layer: RateLimitLayer) -> axum::Router {
+        axum::Router::new()
+            .route("/", axum::routing::get(|| async { "ok" }))
+            .layer(layer)
+    }
+
+    // The auth tier allows a burst of 8. A host that spreads its requests over
+    // its /64 gets the same eight, not eight per address.
+    #[tokio::test]
+    async fn auth_tier_limits_one_ipv6_64_as_one_client() {
+        let app = limited(RateLimitTier::AUTH.layer(&[]).unwrap());
+        let mut statuses = Vec::new();
+        for host in 1..=12u16 {
+            let peer = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, host));
+            statuses.push(status_for(&app, peer).await);
+        }
+        let limited_count = statuses
+            .iter()
+            .filter(|s| **s == http::StatusCode::TOO_MANY_REQUESTS)
+            .count();
+        assert_eq!(limited_count, 4, "{statuses:?}");
+    }
+
+    // governor drops an entry only in `retain_recent`. With a 1 ns period an
+    // entry is idle as soon as it is made, on governor's own clock; the prune
+    // timer runs on Tokio's, which the paused runtime advances.
+    #[tokio::test(start_paused = true)]
+    async fn tier_prunes_idle_client_entries() {
+        let tier = RateLimitTier {
+            period: Duration::from_nanos(1),
+            burst: 1,
+        };
+        let config = tier.config(&[]).unwrap();
+        let app = limited(GovernorLayer::new(Arc::clone(&config)));
+        for host in 1..=50u8 {
+            status_for(&app, IpAddr::from([198, 51, 100, host])).await;
+        }
+        assert_eq!(config.limiter().len(), 50, "one entry per client");
+
+        tokio::time::sleep(PRUNE_INTERVAL.saturating_add(Duration::from_secs(1))).await;
+        tokio::task::yield_now().await;
+        assert_eq!(config.limiter().len(), 0, "idle entries are pruned");
     }
 }
