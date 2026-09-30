@@ -763,14 +763,8 @@ pub(crate) async fn exchange_token(
             &subject_session.user_id,
             subject_email,
             db::CredentialAuditEnvelope {
-                event_type: db::TOKEN_ISSUED.to_string(),
-                success: true,
-                ..Default::default()
-            }
-            .with_client(
-                params.client_info.client_ip(),
-                params.client_info.user_agent().map(String::from),
-            ),
+                ..db::CredentialAuditEnvelope::succeeded(db::TOKEN_ISSUED, params.client_info)
+            },
             &db::TokenExchangeDetails {
                 client_id: params.client.client_id.clone(),
                 audience: audience.map(String::from),
@@ -929,14 +923,8 @@ async fn issue_id_token(
             ctx.user_id,
             ctx.email,
             db::CredentialAuditEnvelope {
-                event_type: db::TOKEN_ISSUED.to_string(),
-                success: true,
-                ..Default::default()
-            }
-            .with_client(
-                ctx.client_info.client_ip(),
-                ctx.client_info.user_agent().map(String::from),
-            ),
+                ..db::CredentialAuditEnvelope::succeeded(db::TOKEN_ISSUED, ctx.client_info)
+            },
             &db::TokenExchangeDetails {
                 client_id: ctx.client_id.to_string(),
                 audience: ctx.audience.map(String::from),
