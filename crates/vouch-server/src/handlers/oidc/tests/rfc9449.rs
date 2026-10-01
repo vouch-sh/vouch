@@ -377,7 +377,13 @@ async fn test_dpop_userinfo_key_mismatch_rejected() {
 
 #[tokio::test]
 async fn test_dpop_scheme_without_proof_rejected() {
-    // RFC 9449: Using DPoP authorization scheme without a DPoP proof header should fail
+    // RFC 9449 §7.1: Using the DPoP authorization scheme without a DPoP proof
+    // header is a request that "does not include valid credentials", so the
+    // resource server must answer with a 401 challenge (not 400). This matches
+    // `DpopError::at_resource` at `/v1/*`, which maps `MissingProof` to 401
+    // `invalid_token`. The same DPoP-scheme request without a proof at `/v1/*`
+    // returns 401, so userinfo must agree on the status code across the
+    // deployment.
     let (app, state) = test_app().await;
 
     let user = create_test_user(&state.store, "dpop-noproof@example.com").await;
@@ -402,9 +408,98 @@ async fn test_dpop_scheme_without_proof_rejected() {
 
     assert_eq!(
         response.status,
-        StatusCode::BAD_REQUEST,
-        "DPoP scheme without proof should be rejected: {}",
+        StatusCode::UNAUTHORIZED,
+        "DPoP scheme without proof must be a 401 challenge, not 400: {}",
         response.body
+    );
+    // RFC 9449 §7.1 mandates the challenge be made with a `WWW-Authenticate`
+    // header; `oauth_error` only attaches it to 401 responses, so the move
+    // from 400 to 401 must surface an HTTP-level challenge.
+    let www_auth = www_authenticate(&response);
+    assert!(
+        www_auth.starts_with("Bearer"),
+        "401 must carry a WWW-Authenticate Bearer challenge: {www_auth}"
+    );
+    assert!(
+        www_auth.contains("invalid_dpop_proof"),
+        "challenge must name the invalid_dpop_proof error: {www_auth}"
+    );
+}
+
+/// RFC 9449 §7.1: a DPoP-bound token presented under the `DPoP` scheme
+/// **without** a `DPoP` proof header is a request that "does not include
+/// valid credentials", so the resource endpoint must answer with a 401
+/// challenge. Both resource surfaces of the deployment — `/oauth/userinfo`
+/// and `/v1/*` — must agree on this status code; `/v1/*` already maps the
+/// same `DpopError::MissingProof` to 401 via `DpopError::at_resource`. This
+/// test is the regression guard for the userinfo side: before the fix it
+/// returned 400 (no `WWW-Authenticate`), diverging from `/v1/*`'s 401.
+#[tokio::test]
+async fn test_rfc9449_userinfo_dpop_bound_token_missing_proof_returns_401_like_v1() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "dpop-bound-noproof@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (_dpop_key, dpop_jwk) = generate_dpop_key_pair();
+    let jkt = dpop_jkt(&dpop_jwk);
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Dpop(&jkt),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // DPoP-bound token, DPoP scheme, NO DPoP proof header, at userinfo.
+    let userinfo = http_get_full(
+        &app,
+        "/oauth/userinfo",
+        &[("Authorization", &format!("DPoP {}", token))],
+    )
+    .await;
+    assert_eq!(
+        userinfo.status,
+        StatusCode::UNAUTHORIZED,
+        "userinfo must return 401 for a DPoP-bound token missing its proof (RFC 9449 §7.1): {}",
+        userinfo.body
+    );
+    let www_auth = www_authenticate(&userinfo);
+    assert!(
+        www_auth.starts_with("Bearer"),
+        "userinfo 401 must carry a WWW-Authenticate challenge: {www_auth}"
+    );
+    // The challenge must carry the error parameter itself — not just a bare
+    // `Bearer resource_metadata=...` header that the RFC 9728 middleware
+    // re-adds to any headerless 401. Asserting `invalid_dpop_proof` here
+    // locks in that `oauth_error` attached the error-carrying challenge.
+    assert!(
+        www_auth.contains("invalid_dpop_proof"),
+        "userinfo 401 challenge must carry the invalid_dpop_proof error: {www_auth}"
+    );
+
+    // The same DPoP-bound token at a /v1/* resource with no proof must also
+    // return 401; the two surfaces of one deployment must agree.
+    let v1 = http_get_full(
+        &app,
+        "/v1/keys",
+        &[("Authorization", &format!("DPoP {}", token))],
+    )
+    .await;
+    assert_eq!(
+        v1.status,
+        StatusCode::UNAUTHORIZED,
+        "/v1/keys must return 401 for a DPoP-bound token missing its proof: {}",
+        v1.body
+    );
+
+    // The headline guarantee: both surfaces answer the same token, scheme,
+    // and missing proof with the same status code.
+    assert_eq!(
+        userinfo.status, v1.status,
+        "userinfo and /v1/* must agree on the status for a DPoP-bound token missing its proof"
     );
 }
 

@@ -1269,6 +1269,32 @@ pub async fn http_get_with_cert(
     (status, String::from_utf8_lossy(&body_bytes).to_string())
 }
 
+/// Like [`http_get_with_cert`] but returns the full response including headers,
+/// mirroring [`http_get_full`] for the mTLS client-certificate path.
+pub async fn http_get_full_with_cert(
+    app: &Router,
+    uri: &str,
+    headers: &[(&str, &str)],
+    cert_der: Option<Vec<u8>>,
+) -> HttpResponse {
+    let request = build_test_request_with_cert("GET", uri, None, headers, cert_der);
+    let response: axum::response::Response = app
+        .clone()
+        .oneshot(request)
+        .await
+        .expect("Failed to execute request");
+    let status = response.status();
+    let response_headers = response.headers().clone();
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("Failed to read response body");
+    HttpResponse {
+        status,
+        body: String::from_utf8_lossy(&body_bytes).to_string(),
+        headers: response_headers,
+    }
+}
+
 /// Create a test user in the database.
 pub async fn create_test_user(store: &DocumentStore, email: &str) -> User {
     let (user_id, _created) = db::upsert_user(store, email, Some("Test User"))

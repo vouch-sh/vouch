@@ -199,8 +199,15 @@ pub(crate) async fn userinfo(
                     .into_response();
             }
             Err(DpopError::MissingProof) => {
+                // RFC 9449 §7.1: a request that does not include valid DPoP
+                // credentials must be answered with a 401 challenge so the
+                // client can retry with proof of possession. `oauth_error`
+                // attaches `WWW-Authenticate` to 401 responses, emitting the
+                // challenge the §7.1 mandate calls for. This matches
+                // `DpopError::at_resource` at `/v1/*`, which also maps
+                // `MissingProof` to 401.
                 return oauth_error(
-                    StatusCode::BAD_REQUEST,
+                    StatusCode::UNAUTHORIZED,
                     OAuthErrorCode::InvalidDpopProof,
                     "DPoP scheme requires DPoP proof header",
                 );

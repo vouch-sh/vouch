@@ -708,7 +708,11 @@ async fn test_rfc8705_token_mtls_plus_private_key_jwt_invalid_client_when_jwt_ba
 /// RFC 8705 §3 + RFC 9449 §7.1: When a token is cert-bound (`cnf.x5t#S256`)
 /// but the caller uses the `Authorization: DPoP <token>` scheme without
 /// supplying a `DPoP` proof header, the userinfo endpoint must reject with
-/// `400 invalid_dpop_proof` "DPoP scheme requires DPoP proof header".
+/// `401 invalid_dpop_proof` "DPoP scheme requires DPoP proof header". The
+/// proof check fires before the binding check, so this reaches the same
+/// `DpopError::MissingProof` arm as a DPoP-bound token; RFC 9449 §7.1 mandates
+/// a 401 challenge for a request that does not include valid credentials, and
+/// `/v1/*` answers the same mTLS-bound token under the DPoP scheme with 401.
 #[tokio::test]
 async fn test_rfc8705_userinfo_mtls_bound_token_with_dpop_scheme_rejected() {
     let (app, state) = test_app().await;
@@ -730,7 +734,7 @@ async fn test_rfc8705_userinfo_mtls_bound_token_with_dpop_scheme_rejected() {
     .await;
 
     // DPoP authorization scheme but no DPoP header.
-    let (status, body) = http_get_with_cert(
+    let response = http_get_full_with_cert(
         &app,
         "/oauth/userinfo",
         &[("Authorization", &format!("DPoP {token}"))],
@@ -739,18 +743,30 @@ async fn test_rfc8705_userinfo_mtls_bound_token_with_dpop_scheme_rejected() {
     .await;
 
     assert_eq!(
-        status,
-        StatusCode::BAD_REQUEST,
-        "DPoP scheme without proof must return 400: {body}"
+        response.status,
+        StatusCode::UNAUTHORIZED,
+        "DPoP scheme without proof must return a 401 challenge, not 400: {}",
+        response.body
     );
-    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let json: serde_json::Value = serde_json::from_str(&response.body).expect("Valid JSON");
     assert_eq!(json["error"], "invalid_dpop_proof");
     assert!(
         json["error_description"]
             .as_str()
             .unwrap_or("")
             .contains("DPoP scheme requires DPoP proof header"),
-        "error_description must mention DPoP proof requirement: {body}"
+        "error_description must mention DPoP proof requirement: {}",
+        response.body
+    );
+    // RFC 9449 §7.1: the 401 must carry a WWW-Authenticate challenge.
+    let www_auth = www_authenticate(&response);
+    assert!(
+        www_auth.starts_with("Bearer"),
+        "401 must carry a WWW-Authenticate Bearer challenge: {www_auth}"
+    );
+    assert!(
+        www_auth.contains("invalid_dpop_proof"),
+        "challenge must name the invalid_dpop_proof error: {www_auth}"
     );
 }
 
