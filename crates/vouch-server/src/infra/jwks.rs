@@ -120,6 +120,13 @@ async fn fetch_jwks(
 /// Any other answer fails this fetch the way a non-2xx response does, and
 /// leaves the last good cache row in place for the stale-cache fallback.
 ///
+/// An empty `keys` array is rejected the same way: it parses as a JWK Set but
+/// contains no key that could ever verify an assertion, so caching it would
+/// destroy the last good row the stale-cache fallback depends on — the same
+/// cache-poisoning vector a non-JWK-Set body like `200 {}` poses. This mirrors
+/// the inline-JWKS writer's `JwksMissingKeys` rule
+/// (`handlers::applications::validate`).
+///
 /// A cache-write failure is logged and swallowed: the freshly fetched keys are
 /// still correct, and failing the request would turn a caching problem into an
 /// authentication outage.
@@ -138,10 +145,18 @@ pub(crate) async fn fetch_and_cache(
         tracing::debug!("Failed to parse JWKS as JSON value: {e}");
         ServiceError::oauth(OAuthErrorCode::InvalidClient, "Invalid JWKS format")
     })?;
-    db::parse_jwks_set(&jwks_value).map_err(|e| {
+    let jwks_set = db::parse_jwks_set(&jwks_value).map_err(|e| {
         tracing::debug!("Fetched JWKS is not a JWK Set: {e}");
         ServiceError::oauth(OAuthErrorCode::InvalidClient, "Invalid JWKS format")
     })?;
+    if jwks_set.keys.is_empty() {
+        // An empty key set can never verify an assertion; caching it would
+        // overwrite the last good row, defeating the stale-cache fallback.
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidClient,
+            "JWKS contains no keys",
+        ));
+    }
 
     if let Err(e) = db::upsert_jwks_cache(store, parent_id, &jwks_value).await {
         tracing::warn!("Failed to update JWKS cache for {parent_id}: {e}");
@@ -349,6 +364,41 @@ mod tests {
         assert!(
             matches!(origin, JwksOrigin::Fetched),
             "a fetch was attempted, even though it fell back to the stale cache"
+        );
+    }
+
+    /// The empty-keys fix lets the stale-while-revalidate fallback recover: a
+    /// fetch that returns `{"keys": []}` fails (instead of succeeding and
+    /// clobbering the cache), so the `Err` arm serves the last good row within
+    /// the stale window — the resilience behavior the original #1626 fix
+    /// intended for non-JWK-Set answers, extended to the empty-keys neighbor.
+    #[tokio::test]
+    async fn resolve_serves_stale_cache_when_the_fetch_returns_an_empty_keys_set() {
+        let state = test_utils::test_app_state().await;
+        // Past the 1h TTL (so a fetch runs) and within the 24h stale window (so
+        // a failed fetch falls back). Holds a usable key the fallback must serve.
+        let cached = cache_doc(JWKS_CACHE_TTL_SECONDS + 60, "stale-good-key");
+
+        let port = serve_json_over_tls(r#"{"keys":[]}"#).await;
+        let url = format!("https://127.0.0.1:{port}/jwks");
+        let (value, origin) = resolve_cached_jwks(
+            &state.store,
+            "client-empty-resolve",
+            &url,
+            Some(&cached),
+            true,
+            &https_client_trusting_any_cert(),
+        )
+        .await
+        .expect("a failed empty-keys fetch falls back to the stale cache");
+
+        assert_eq!(
+            value, cached.value,
+            "the stale good set is served, not an empty one"
+        );
+        assert!(
+            matches!(origin, JwksOrigin::Fetched),
+            "a fetch was attempted before the fallback"
         );
     }
 
@@ -718,6 +768,40 @@ mod tests {
         assert_invalid_client(&err, "Invalid JWKS format");
 
         let cached = db::get_jwks_cache(&state.store, "client-poison")
+            .await
+            .expect("read cache")
+            .expect("cache row kept");
+        assert_eq!(cached.value, good, "the last good set stays cached");
+    }
+
+    /// Sibling of the regression above: `{"keys": []}` parses as a JWK Set —
+    /// RFC 7517 §5 requires a `keys` *array*, not a non-empty one — but carries
+    /// no key that could ever verify an assertion. Caching it would overwrite
+    /// the last good row the stale-cache fallback depends on, the same
+    /// cache-poisoning vector `200 {}` poses. Mirrors the inline-JWKS writer's
+    /// `JwksMissingKeys` rule (`handlers::applications::validate`).
+    #[tokio::test]
+    async fn fetch_and_cache_rejects_an_empty_keys_array_and_keeps_the_cached_set() {
+        let state = test_utils::test_app_state().await;
+        let good = serde_json::json!({ "keys": [{ "kty": "EC", "kid": "good" }] });
+        db::upsert_jwks_cache(&state.store, "client-empty", &good)
+            .await
+            .expect("seed cache");
+
+        let port = serve_json_over_tls(r#"{"keys":[]}"#).await;
+        let url = format!("https://127.0.0.1:{port}/jwks");
+        let err = fetch_and_cache(
+            &state.store,
+            "client-empty",
+            &url,
+            true,
+            &https_client_trusting_any_cert(),
+        )
+        .await
+        .expect_err("an empty keys array is a useless JWK Set and must not be cached");
+        assert_invalid_client(&err, "JWKS contains no keys");
+
+        let cached = db::get_jwks_cache(&state.store, "client-empty")
             .await
             .expect("read cache")
             .expect("cache row kept");
