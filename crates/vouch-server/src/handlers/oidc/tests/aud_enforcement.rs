@@ -777,3 +777,58 @@ async fn test_exchange_keeps_narrowed_subject_narrowed() {
         "https://downstream.example"
     );
 }
+
+/// The narrowing rule governs issued access tokens only. An ID token
+/// federates with an external relying party and takes the requested
+/// audience as is, defaulting to the issuer, whatever the subject's `aud`.
+#[tokio::test]
+async fn test_id_token_exchange_ignores_subject_narrowing() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "exchange-narrowed-idt@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let other_owner = create_test_user(&state.store, "exchange-other-idt@example.com").await;
+    let client_b = create_test_client(
+        &state.store,
+        &other_owner.id,
+        TestClientSpec {
+            jwks: TestJwks::Shared,
+            ..Default::default()
+        },
+    )
+    .await;
+    let subject = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            client_id: Some("client-a"),
+            audience: Some("https://rs.example"),
+            ..Default::default()
+        },
+    )
+    .await;
+    let id_token = "&requested_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Aid_token";
+
+    let (status, json) = exchange_as(&app, &client_b, &subject, id_token).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let claims = decode_jwt_payload(json["access_token"].as_str().expect("id token"));
+    assert_eq!(
+        claims["aud"], claims["iss"],
+        "the default audience is the issuer"
+    );
+
+    let (status, json) = exchange_as(
+        &app,
+        &client_b,
+        &subject,
+        &format!("{id_token}&audience={}", client_b.client_id),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let issued = json["access_token"].as_str().expect("id token");
+    assert_eq!(
+        decode_jwt_payload(issued)["aud"],
+        client_b.client_id.as_str()
+    );
+}

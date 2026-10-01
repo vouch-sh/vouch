@@ -357,6 +357,131 @@ async fn test_exchange_rate_limit_ignores_exchanges_outside_window() {
     assert_eq!(status, 200, "exchanges from 2h ago must not count: {json}");
 }
 
+// ── Token exchange: `input.audience` live/history parity ─────────────────
+//
+// The gate's `context.input.audience` and a replayed event's `input.audience`
+// both carry the audience the exchange grants, so the documented
+// `input.audience: context.input.audience` pattern matches for every request
+// shape, including a narrowed subject with no `audience` parameter.
+
+/// Build and activate a custom temporal policy for `org_id`.
+async fn activate_custom_policy(harness: &TestHarness, org_id: &str, name: &str, text: &str) {
+    let created = db::create_custom_policy(
+        &harness.state.store,
+        db::CreateCustomPolicyParams {
+            name,
+            description: None,
+            policy_text: text,
+            org_id,
+            builder_spec: None,
+        },
+    )
+    .await
+    .expect("create custom policy");
+    db::update_custom_policy(
+        &harness.state.store,
+        &created.id,
+        org_id,
+        db::UpdateCustomPolicyParams {
+            name: None,
+            description: db::FieldUpdate::Keep,
+            policy_text: None,
+            active: Some(true),
+            builder_spec: db::FieldUpdate::Keep,
+        },
+    )
+    .await
+    .expect("activate custom policy");
+}
+
+/// A narrowed subject (aud != client_id) exchanged with no `audience`
+/// parameter: the documented `input.audience: context.input.audience`
+/// temporal pattern must match a prior exchange that recorded the granted
+/// audience, which for this shape is the subject's own `aud`.
+#[tokio::test]
+async fn test_exchange_audience_consistency_matches_narrowed_subject() {
+    let harness = TestHarness::new().await;
+    let org = harness
+        .create_org("aud-consistency.example.com")
+        .await
+        .expect("org");
+    let user = harness
+        .create_user_in_org("aud-consistency@example.com", &org.id, false)
+        .await
+        .expect("user in org");
+    let auth_id = harness
+        .create_authenticator(&user.id)
+        .await
+        .expect("authenticator");
+
+    // Narrowed subject: `aud` ("https://rs.example") != `client_id`
+    // ("client-a"), so exchange cannot widen it back to a token Vouch accepts.
+    let subject = test_utils::create_test_session_with(
+        &harness.state,
+        test_utils::TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            client_id: Some("client-a"),
+            audience: Some("https://rs.example"),
+            ..Default::default()
+        },
+    )
+    .await;
+    let client = harness
+        .create_oauth_client(&user.id)
+        .await
+        .expect("oauth client");
+    let auth_header = client.basic_auth_header();
+
+    // Deny unless the user has previously exchanged a token for the same
+    // audience.
+    activate_custom_policy(
+        &harness,
+        &org.id,
+        "Audience Consistency",
+        r#"
+forbid (principal, action == Vouch::Action::"ExchangeToken", resource)
+when temporal {
+    !(formerly within 8h Vouch::Action::"ExchangeToken"::response{
+        input.audience: context.input.audience
+    })
+};"#,
+    )
+    .await;
+
+    // No prior history: the filter matches nothing, the forbid fires.
+    let (status, json) = do_exchange(&harness, &subject, &auth_header).await;
+    assert_exchange_policy_denied(status, &json, "no prior exchange for the audience");
+
+    // A prior exchange recorded the granted audience, the subject's own
+    // `aud`. The gate sees the same value, so the filter matches and the
+    // forbid does not fire.
+    let seed = format!(
+        r#"{{"event_type":"{}","success":true,"client_ip":"1.2.3.4","client_id":"{}","audience":"https://rs.example","issued_token_type":"urn:ietf:params:oauth:token-type:access_token"}}"#,
+        db::TOKEN_ISSUED,
+        client.client_id,
+    );
+    seed_event(
+        &harness,
+        AuditEventKind::TokenExchange,
+        &user.id,
+        300,
+        &seed,
+    )
+    .await;
+
+    let (status, json) = do_exchange(&harness, &subject, &auth_header).await;
+    assert_eq!(
+        status, 200,
+        "prior exchange for the same granted audience must allow: {json}"
+    );
+    assert!(
+        json.get("access_token").is_some(),
+        "matching prior exchange must issue a token: {json}"
+    );
+}
+
 // ── FIDO2 grant: aggregation policies ────────────────────────────────────
 //
 // The helpers below are duplicated from fido2_posture_e2e.rs (separate
