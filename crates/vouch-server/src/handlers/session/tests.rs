@@ -515,10 +515,21 @@ async fn test_dpop_non_use_nonce_error_omits_nonce_header() {
     );
     let body: serde_json::Value =
         serde_json::from_str(&response.body).expect("valid JSON error body");
+    // RFC 9449 §7.1: a proof that fails the §4.3 checks is
+    // `invalid_dpop_proof`, in the body and in the DPoP challenge.
     assert_eq!(
         body.get("code").and_then(|v| v.as_str()),
-        Some("invalid_token"),
-        "non-UseNonce DPoP errors must remain invalid_token, got: {body}"
+        Some("invalid_dpop_proof"),
+        "{body}"
+    );
+    let challenge = response
+        .headers
+        .get("www-authenticate")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    assert!(
+        challenge.starts_with(r#"DPoP error="invalid_dpop_proof""#),
+        "{challenge}"
     );
 }
 

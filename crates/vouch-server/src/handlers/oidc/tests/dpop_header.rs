@@ -402,7 +402,8 @@ async fn control_userinfo_two_dpop_headers_rejected() {
         ],
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    // RFC 9449 §7.1: a protected resource answers with a 401 challenge.
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
     assert_eq!(json(&body)["error"], "invalid_dpop_proof", "{body}");
 
     let proof = create_dpop_proof(&key, &jwk, "GET", &uri, None, Some(&token));

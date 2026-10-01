@@ -15,7 +15,7 @@ use axum::{
 };
 use axum_extra::extract::cookie::CookieJar;
 use std::sync::Arc;
-use vouch_common::SessionStatus;
+use vouch_common::{SessionStatus, protocol};
 
 use super::session::{AuthenticatedToken, OptionalAuthenticatedToken};
 use super::{clear_session_cookie, hash_token};
@@ -27,8 +27,9 @@ use crate::db::ClientInfo;
 /// sender constraint included. RFC 9449 §7.2: a protected resource supporting
 /// both schemes "MUST reject a DPoP-bound access token received as a bearer
 /// token". A missing or rejected token, or one whose account is missing or
-/// deactivated, yields `authenticated: false` rather than a 401, except `use_dpop_nonce`, whose fresh `DPoP-Nonce` the client
-/// needs to retry (RFC 9449 §8).
+/// deactivated, yields `authenticated: false` rather than a 401, except
+/// `use_dpop_nonce`, whose fresh `DPoP-Nonce` the client needs to retry
+/// (RFC 9449 §8).
 pub(crate) async fn status(
     arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
@@ -36,11 +37,23 @@ pub(crate) async fn status(
 ) -> Result<Json<SessionStatus>, ServiceError> {
     let token = match token {
         Ok(OptionalAuthenticatedToken(Some(AuthenticatedToken { token, .. }))) => token,
+        Err(e @ ServiceError::ApiWithHeaders { .. })
+            if matches!(&e, ServiceError::ApiWithHeaders { code, .. }
+                if code == protocol::ERROR_USE_DPOP_NONCE) =>
+        {
+            return Err(e);
+        }
         Ok(OptionalAuthenticatedToken(None))
-        | Err(ServiceError::Api {
-            status: StatusCode::UNAUTHORIZED,
-            ..
-        }) => {
+        | Err(
+            ServiceError::Api {
+                status: StatusCode::UNAUTHORIZED,
+                ..
+            }
+            | ServiceError::ApiWithHeaders {
+                status: StatusCode::UNAUTHORIZED,
+                ..
+            },
+        ) => {
             return Ok(Json(SessionStatus {
                 authenticated: false,
                 email: None,
@@ -741,8 +754,9 @@ mod tests {
         assert_eq!(status_json(status, &body)["authenticated"], false, "{body}");
     }
 
-    // RFC 9449 §8: a proof carrying a nonce the server does not hold gets
-    // `use_dpop_nonce` and a fresh `DPoP-Nonce`, so the client can retry.
+    // RFC 9449 §9: a resource server's nonce demand is "an HTTP 401
+    // (Unauthorized) error code with an accompanying WWW-Authenticate: DPoP
+    // value and DPoP-Nonce value".
     #[tokio::test]
     async fn test_auth_status_passes_use_dpop_nonce_through() {
         let (app, state) = test_app().await;
@@ -771,6 +785,15 @@ mod tests {
             response.headers.contains_key("dpop-nonce"),
             "use_dpop_nonce must carry a fresh DPoP-Nonce: {}",
             response.body
+        );
+        let challenge = response
+            .headers
+            .get("www-authenticate")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        assert!(
+            challenge.starts_with(r#"DPoP error="use_dpop_nonce""#),
+            "{challenge}"
         );
     }
 

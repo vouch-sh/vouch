@@ -373,11 +373,21 @@ async fn test_dpop_userinfo_key_mismatch_rejected() {
         "DPoP with mismatched key should be rejected: {}",
         response.body
     );
+    // RFC 9449 Figure 16 answers a failed key binding with `invalid_token`
+    // in a DPoP challenge.
+    let challenge = www_authenticate(&response);
+    assert!(
+        challenge.starts_with(r#"DPoP error="invalid_token""#),
+        "{challenge}"
+    );
 }
 
 #[tokio::test]
 async fn test_dpop_scheme_without_proof_rejected() {
-    // RFC 9449: Using DPoP authorization scheme without a DPoP proof header should fail
+    // RFC 9449 §7.1: "Such a challenge is made using the 401 (Unauthorized)
+    // response status code ... In such challenges: The scheme name is DPoP."
+    // "An algs parameter SHOULD be included". A missing proof fails the
+    // §4.3 checks, so the error is `invalid_dpop_proof`.
     let (app, state) = test_app().await;
 
     let user = create_test_user(&state.store, "dpop-noproof@example.com").await;
@@ -402,9 +412,19 @@ async fn test_dpop_scheme_without_proof_rejected() {
 
     assert_eq!(
         response.status,
-        StatusCode::BAD_REQUEST,
+        StatusCode::UNAUTHORIZED,
         "DPoP scheme without proof should be rejected: {}",
         response.body
+    );
+    let challenge = www_authenticate(&response);
+    assert!(challenge.starts_with("DPoP "), "{challenge}");
+    assert!(
+        challenge.contains(r#"error="invalid_dpop_proof""#),
+        "{challenge}"
+    );
+    assert!(
+        challenge.contains(r#"algs="ES256 PS256 EdDSA""#),
+        "{challenge}"
     );
 }
 
@@ -1710,11 +1730,8 @@ async fn test_rfc9449_userinfo_multiple_dpop_headers_rejected() {
     )
     .await;
 
-    assert_eq!(
-        status,
-        StatusCode::BAD_REQUEST,
-        "Multiple DPoP headers must return 400: {body}"
-    );
+    // RFC 9449 §4.3 item 1 fails; §7.1 answers with a 401 challenge.
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
     let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
     assert_eq!(json["error"], "invalid_dpop_proof");
     assert!(

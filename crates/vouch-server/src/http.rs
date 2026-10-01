@@ -61,15 +61,25 @@ pub(crate) fn sanitize_challenge_value(value: &str) -> String {
 /// SHOULD NOT include error information, and the bare scheme is valid under
 /// RFC 9110 Section 11.6.1's challenge grammar (auth-params are optional).
 pub(crate) fn bearer_challenge(params: &[(&str, &str)]) -> String {
+    challenge(protocol::AUTH_SCHEME_BEARER, params)
+}
+
+/// Build an RFC 9449 Section 7.1 `WWW-Authenticate: DPoP ...` challenge,
+/// sanitized like [`bearer_challenge`].
+pub(crate) fn dpop_challenge(params: &[(&str, &str)]) -> String {
+    challenge(protocol::AUTH_SCHEME_DPOP, params)
+}
+
+fn challenge(scheme: &str, params: &[(&str, &str)]) -> String {
     if params.is_empty() {
-        return protocol::AUTH_SCHEME_BEARER.to_string();
+        return scheme.to_string();
     }
     let mut rendered = Vec::with_capacity(params.len());
     for (name, value) in params {
         let value = sanitize_challenge_value(value);
         rendered.push(format!("{name}=\"{value}\""));
     }
-    format!("{} {}", protocol::AUTH_SCHEME_BEARER, rendered.join(", "))
+    format!("{scheme} {}", rendered.join(", "))
 }
 
 #[cfg(test)]
