@@ -293,7 +293,9 @@ pub(crate) enum AssertionFailure {
     /// assertion no longer names a registered key.
     #[error("the security key was deleted during sign-in")]
     KeyDeleted,
-    /// Committing the signature counter failed. Nothing was committed.
+    /// Committing the signature counter failed. The signature already
+    /// verified at this point, so this is a post-verification server fault:
+    /// nothing was committed, but the ceremony authenticated the owner.
     #[error("failed to commit the signature counter: {0}")]
     Storage(anyhow::Error),
 }
@@ -310,12 +312,23 @@ impl AssertionFailure {
     /// rejection happened before or at the signature, so the credential ID
     /// and `user_handle` are still only request-supplied.
     ///
-    /// A verification task that did not complete, and a failed counter
-    /// commit, are server faults that decided nothing about the assertion.
-    /// They are handled like a storage fault during the credential lookup
-    /// ([`LookupError::Service`]): no `login_failed` row, and the caller
-    /// answers with a server error. `Principal::ServerFault` would not fit —
-    /// it records a user the server *verified*, and here nothing was.
+    /// A verification task that did not complete is a server fault that
+    /// decided nothing about the assertion. It is handled like a storage
+    /// fault during the credential lookup ([`LookupError::Service`]): no
+    /// `login_failed` row, and the caller answers with a server error.
+    /// `Principal::ServerFault` would not fit — it records a user the server
+    /// *verified*, and here nothing was.
+    ///
+    /// A failed counter commit ([`Self::Storage`]) is different: it fires
+    /// only after the signature already verified (the `spawn_blocking` task
+    /// returned `Ok`), so a registered key signed the assertion and the owner
+    /// was cryptographically authenticated. The server then failed to persist
+    /// the bookkeeping, so the row records the fault against the verified
+    /// owner as a [`Principal::ServerFault`] — the variant designed for
+    /// exactly this case — so the verified ceremony never vanishes from
+    /// `AuthEvents`. The `user_id` column stays NULL, so a storage outage
+    /// cannot feed `failed_login_burst` and lock the user out. The caller
+    /// still answers with a 500; a 401 would leak that the signature verified.
     ///
     /// A key deleted during the ceremony is not the owner's failed login, so
     /// its row stays unattributed and cannot feed `failed_login_burst`.
@@ -328,7 +341,10 @@ impl AssertionFailure {
             Self::Rejected(_) | Self::KeyDeleted => Some(db::Principal::Unverified {
                 asserted: Some(owner_user_id.to_string()),
             }),
-            Self::TaskFailed | Self::Storage(_) => None,
+            Self::Storage(_) => Some(db::Principal::ServerFault {
+                verified: owner_user_id.to_string(),
+            }),
+            Self::TaskFailed => None,
         }
     }
 }
@@ -1399,7 +1415,10 @@ mod tests {
     // counter regression — is attributable to the credential's owner.
     // A verification task that never finished decided nothing: like a
     // storage fault during the credential lookup, it writes no login_failed
-    // row.
+    // row. A failed counter commit, by contrast, fires only after the
+    // signature verified, so the owner was authenticated and the row records
+    // a `ServerFault` against them — a verified ceremony must never vanish
+    // from AuthEvents.
     #[test]
     fn assertion_task_failure_writes_no_login_failed_row() {
         assert!(AssertionFailure::TaskFailed.principal("user-1").is_none());
@@ -1426,6 +1445,31 @@ mod tests {
                 "{failure} must stay unattributed"
             );
         }
+    }
+
+    // A key deleted during the ceremony is not the owner's failed login, so
+    // its row stays unattributed.
+    #[test]
+    fn assertion_key_deleted_writes_unattributed_row() {
+        let owner = "user-1";
+        assert!(matches!(
+            AssertionFailure::KeyDeleted.principal(owner),
+            Some(db::Principal::Unverified { asserted: Some(ref id) }) if id == owner
+        ));
+    }
+
+    // A failed counter commit fires only after the signature verified, so
+    // the owner was authenticated: the row records a `ServerFault` against
+    // the verified owner, not `None`. The `user_id` column stays NULL (so a
+    // storage outage cannot feed `failed_login_burst`), and the payload
+    // carries the verified id as `fault_user_id`.
+    #[test]
+    fn assertion_storage_fault_writes_server_fault_row() {
+        let owner = "user-1";
+        assert!(matches!(
+            AssertionFailure::Storage(anyhow::anyhow!("db unavailable")).principal(owner),
+            Some(db::Principal::ServerFault { ref verified }) if verified == owner
+        ));
     }
     use crate::test_utils::{
         TEST_ISSUER, create_test_user, make_test_access_token, make_test_oidc_key,
@@ -1859,5 +1903,81 @@ mod tests {
             .err()
             .expect("a deleted key yields no login");
         assert!(matches!(err, AssertionFailure::KeyDeleted));
+    }
+
+    // A verified assertion whose counter commit hits a storage fault must
+    // surface `AssertionFailure::Storage` (the signature verified before the
+    // commit ran) and `principal` must name the verified owner as a
+    // `ServerFault` — not `None`, which would drop a verified ceremony from
+    // AuthEvents. The hook bumps the authenticator document's version on
+    // every OCC attempt without touching the counter, so the commit's
+    // `admits` decision keeps succeeding while the CAS keeps failing, until
+    // the retry loop exhausts into `transition_versioned`'s `bail!` — the
+    // only path that surfaces `Storage`.
+    #[tokio::test]
+    async fn a_storage_fault_after_a_verified_assertion_names_the_owner() {
+        use crate::db::documents::authenticator::AuthenticatorDoc;
+
+        let state = test_app_state().await;
+        let (key, authenticator_id) = registered_key(&state, "storage-fault@example.com", 4).await;
+        let mut params = signed_assertion(&key, 5, 4);
+        let stored = db::get_authenticator_by_id(&state.store, &authenticator_id)
+            .await
+            .unwrap()
+            .unwrap();
+        params.public_key = stored.public_key;
+        let owner_id = stored.user_id;
+
+        // The writer bumps the version; the hooked clone drives the commit
+        // through it. Both share the in-memory pool, so they see one row.
+        let writer = state.store.clone();
+        let mut hooked = state.store.clone();
+        let auth_id_for_hook = authenticator_id.clone();
+        hooked.set_modify_test_hook(std::sync::Arc::new(move |doc_id: &str, _attempt: u32| {
+            let writer = writer.clone();
+            let doc_id = doc_id.to_string();
+            let auth_id = auth_id_for_hook.clone();
+            Box::pin(async move {
+                if doc_id != auth_id {
+                    return;
+                }
+                let doc = writer
+                    .get::<AuthenticatorDoc>(&doc_id)
+                    .await
+                    .expect("hook get")
+                    .expect("authenticator exists");
+                let mut data = doc.data;
+                // Bump the version without changing the counter, so the
+                // commit's `admits` decision keeps succeeding and the CAS
+                // keeps failing until retries exhaust.
+                data.name = format!("bump-at-v{}", doc.version);
+                writer.update(&doc_id, &data).await.expect("hook update");
+            })
+        }));
+
+        let err = verify_login_assertion(&hooked, &authenticator_id, params)
+            .await
+            .err()
+            .expect("a storage fault during the counter commit");
+        assert!(
+            matches!(err, AssertionFailure::Storage(_)),
+            "expected Storage, got {err:?}"
+        );
+        assert!(
+            matches!(
+                err.principal(&owner_id),
+                Some(db::Principal::ServerFault { ref verified }) if verified == &owner_id
+            ),
+            "a storage fault after verification names the verified owner"
+        );
+
+        // The auth failed — `verify_login_assertion` returned `Err` — so the
+        // stored counter must still hold the original value (the commit
+        // never succeeded, despite the hook's name bumps).
+        let after = db::get_authenticator_by_id(&state.store, &authenticator_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.counter, 4);
     }
 }

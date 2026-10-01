@@ -27,10 +27,10 @@ use crate::crypto::jwt::JwtType;
 use crate::db::{self, AuthEventParams, AuthEventType, ClientInfo, Principal};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use crate::services::auth::{
-    AuthenticatorLookupParams, ClientAuthProof, CreateOAuthTokenParams, GrantProof,
-    LoginAssertionParams, LookupError, SenderConstraintProof, TokenBinding, TokenIssuanceProof,
-    create_oauth_access_token, lookup_and_verify_authenticator, record_lookup_failure,
-    verify_login_assertion,
+    AssertionFailure, AuthenticatorLookupParams, ClientAuthProof, CreateOAuthTokenParams,
+    GrantProof, LoginAssertionParams, LookupError, SenderConstraintProof, TokenBinding,
+    TokenIssuanceProof, create_oauth_access_token, lookup_and_verify_authenticator,
+    record_lookup_failure, verify_login_assertion,
 };
 use crate::services::oidc::ScopeSet;
 use crate::services::oidc::authorization_details::AuthorizationDetails;
@@ -410,6 +410,8 @@ pub(crate) async fn exchange_fido2_assertion(
             // regression is reported only once the signature verified, so it
             // counts against the credential's owner; every other failure leaves
             // the `user_handle` request-supplied and the row unattributed.
+            // `Storage` fires after the signature verified, so its row is a
+            // `ServerFault` attributed to the verified owner.
             let failure_event = AuthEventParams {
                 user_id: principal,
                 event_type: AuthEventType::LoginFailed,
@@ -421,6 +423,14 @@ pub(crate) async fn exchange_fido2_assertion(
                 idp_issuer: None,
             };
             db::record_auth_event(&state.audit, failure_event, Some(user.email.clone())).await;
+            if matches!(e, AssertionFailure::Storage(_)) {
+                // A verified ceremony whose counter commit hit a storage
+                // fault: `invalid_grant` would leak that the signature
+                // verified, so the row is recorded first and the response
+                // stays a 500.
+                tracing::error!("FIDO2 assertion grant: counter commit failed: {e}");
+                return Err(ServiceError::Internal("Counter commit failed".to_string()));
+            }
             return Err(ServiceError::oauth(
                 OAuthErrorCode::InvalidGrant,
                 "Authentication failed",

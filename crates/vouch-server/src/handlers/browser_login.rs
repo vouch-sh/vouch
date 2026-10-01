@@ -651,7 +651,7 @@ pub(crate) async fn browser_login_complete(
     // thread — see verify_login_assertion for rationale).
     let stored_counter = authenticator.counter.cast_unsigned();
 
-    use crate::services::auth::{LoginAssertionParams, verify_login_assertion};
+    use crate::services::auth::{AssertionFailure, LoginAssertionParams, verify_login_assertion};
     let verification_result = match verify_login_assertion(
         &state.store,
         &authenticator.id,
@@ -683,10 +683,10 @@ pub(crate) async fn browser_login_complete(
                     "WebAuthn verification failed".to_string(),
                 ));
             };
-            // A counter regression is reported only once the signature
-            // verified, so it counts against the credential's owner. For every
-            // other failure the `user_handle` and credential ID are still only
-            // request-supplied: the row must not count against the owner.
+            // `Storage` fires after the signature verified, so its row is a
+            // `ServerFault` attributed to the verified owner. Every other
+            // failure here rejected before or at the signature: the row must
+            // not count against the owner, and the response is a 401.
             log_login_failure(
                 &state.audit,
                 client_info.clone(),
@@ -696,6 +696,13 @@ pub(crate) async fn browser_login_complete(
                 &e.to_string(),
             )
             .await;
+            if matches!(e, AssertionFailure::Storage(_)) {
+                // A verified ceremony whose counter commit hit a storage
+                // fault: a 401 would leak that the signature verified, so the
+                // row is recorded first and the response stays a 500.
+                tracing::error!("Browser WebAuthn login: counter commit failed: {e}");
+                return Err(ServiceError::Internal("Counter commit failed".to_string()));
+            }
             return Err(ServiceError::api(
                 StatusCode::UNAUTHORIZED,
                 "auth_failed",
@@ -2198,5 +2205,178 @@ mod tests {
             successes.is_empty(),
             "no LoginSuccess may be recorded when session creation did not complete"
         );
+    }
+
+    // Regression (commit 1d6af603): a verified browser WebAuthn assertion
+    // whose counter commit hits a storage fault must leave a `LoginFailed`
+    // AuthEvents row naming the verified owner (`fault_user_id`), and the
+    // response must be a 500 — not a 401 (which would leak that the signature
+    // verified) and not a missing row (which would drop a verified ceremony
+    // from the audit trail). Pre-fix, `AssertionFailure::Storage` mapped to
+    // `principal() => None`, so the handler returned 500 with no audit row.
+    //
+    // The hook bumps the authenticator document's version on every OCC
+    // attempt (without touching the counter) so the commit's `admits`
+    // decision keeps succeeding while the CAS keeps failing, exhausting the
+    // retry loop into the `bail!` that surfaces `AssertionFailure::Storage`.
+    // A shared slot lets the hook, installed at app construction, target the
+    // authenticator created later in the test.
+    #[tokio::test]
+    async fn test_browser_login_counter_commit_storage_fault_records_server_fault_row() {
+        use crate::db::documents::authenticator::AuthenticatorDoc;
+        use aws_lc_rs::digest::{SHA256, digest};
+        use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair};
+        use std::sync::{Arc, Mutex};
+
+        let target: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let target_for_hook = Arc::clone(&target);
+        let (app, state) = test_utils::test_app_with_modify_hook(move |store| {
+            let writer = store.clone();
+            store.set_modify_test_hook(Arc::new(move |doc_id: &str, _attempt: u32| {
+                let writer = writer.clone();
+                let doc_id = doc_id.to_string();
+                let target = Arc::clone(&target_for_hook);
+                Box::pin(async move {
+                    let want = target.lock().expect("slot lock").clone();
+                    if want.as_deref() != Some(doc_id.as_str()) {
+                        return;
+                    }
+                    let doc = writer
+                        .get::<AuthenticatorDoc>(&doc_id)
+                        .await
+                        .expect("hook get")
+                        .expect("authenticator exists");
+                    let mut data = doc.data;
+                    data.name = format!("bump-at-v{}", doc.version);
+                    writer.update(&doc_id, &data).await.expect("hook update");
+                })
+            }));
+        })
+        .await;
+
+        // Register a real Ed25519 credential so the assertion verifies.
+        let user = test_utils::create_test_user(&state.store, "commit-fault@example.com").await;
+        let key = Ed25519KeyPair::generate().expect("keygen");
+        let cose = ciborium::Value::Map(vec![
+            (1.into(), 1.into()),    // kty: OKP
+            (3.into(), (-8).into()), // alg: EdDSA
+            ((-1).into(), 6.into()), // crv: Ed25519
+            (
+                (-2).into(),
+                ciborium::Value::Bytes(key.public_key().as_ref().to_vec()),
+            ),
+        ]);
+        let mut public_key = Vec::new();
+        ciborium::into_writer(&cose, &mut public_key).expect("encode COSE");
+        let credential_id = format!("cred-commit-fault-{}", uuid::Uuid::now_v7());
+        let auth_id = db::create_authenticator(
+            &state.store,
+            &db::CreateAuthenticatorParams {
+                user_id: &user.id,
+                name: "Commit-Fault Key",
+                credential_id: credential_id.as_bytes(),
+                public_key: &public_key,
+                aaguid: None,
+                user_handle: Some(user.id.as_bytes()),
+                attestation_verified: false,
+                counter: 4,
+            },
+        )
+        .await
+        .expect("create authenticator");
+        *target.lock().expect("slot lock") = Some(auth_id.clone());
+
+        // Build an auth_state JWT with a known challenge.
+        let challenge = b"browser-commit-fault-challenge".to_vec();
+        let now = jiff::Timestamp::now();
+        let auth_state = BrowserAuthenticationState {
+            challenge: challenge.clone(),
+            rp_id: state.config().rp_id.clone(),
+            created_at: now.as_second(),
+            exp: now.as_second().saturating_add(300),
+            pending_auth: None,
+        };
+        let state_jwt = auth_state
+            .encode(&state.state_signer)
+            .await
+            .expect("encode auth state");
+
+        // Sign a valid assertion: SHA256(rp_id) || UP+UV || sign_count.
+        let rp_id = state.config().rp_id.clone();
+        let origin = state.config().base_url.to_string();
+        let sign_count: u32 = 5;
+        let mut authenticator_data = digest(&SHA256, rp_id.as_bytes()).as_ref().to_vec();
+        authenticator_data.push(0x05); // UP + UV
+        authenticator_data.extend_from_slice(&sign_count.to_be_bytes());
+        let client_data_json = serde_json::to_vec(&serde_json::json!({
+            "type": "webauthn.get",
+            "challenge": URL_SAFE_NO_PAD.encode(&challenge),
+            "origin": origin,
+        }))
+        .expect("client data");
+        let mut signed = authenticator_data.clone();
+        signed.extend_from_slice(digest(&SHA256, &client_data_json).as_ref());
+        let signature = key.sign(&signed).as_ref().to_vec();
+
+        let user_uuid = Uuid::parse_str(&user.id).expect("user id is a uuid");
+        let enc = |b: &[u8]| URL_SAFE_NO_PAD.encode(b);
+        let body = serde_json::json!({
+            "state": state_jwt,
+            "credential_id": enc(credential_id.as_bytes()),
+            "authenticator_data": enc(&authenticator_data),
+            "client_data_json": enc(&client_data_json),
+            "signature": enc(&signature),
+            "user_handle": enc(user_uuid.as_bytes()),
+        })
+        .to_string();
+
+        let (status, resp_body) = test_utils::http_post_json(
+            &app,
+            "/login/webauthn/complete",
+            &body,
+            &[("Origin", state.config().base_url.as_str())],
+        )
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{resp_body}");
+
+        // The verified ceremony must not vanish from AuthEvents: a
+        // `LoginFailed` row names the verified owner in `fault_user_id`,
+        // and the `user_id` column stays NULL so a storage outage cannot
+        // feed `failed_login_burst`.
+        let rows = state
+            .audit
+            .query_events(&AuditEventFilter {
+                event_types: Some(vec!["login_failed".to_string()]),
+                ..AuditEventFilter::default()
+            })
+            .await
+            .expect("query audit events");
+        assert_eq!(rows.len(), 1, "one login_failed row: {rows:?}");
+        let row = rows.first().expect("login_failed row");
+        assert_eq!(row.user_id, None, "a server fault must not be attributed");
+        let data: serde_json::Value = serde_json::from_str(&row.data).expect("event data JSON");
+        assert!(data.get("user_id").is_none(), "{data}");
+        assert_eq!(
+            data.get("fault_user_id")
+                .and_then(serde_json::Value::as_str),
+            Some(user.id.as_str())
+        );
+        // The counter commit never succeeded: the stored counter is unchanged.
+        let after = db::get_authenticator_by_id(&state.store, &auth_id)
+            .await
+            .expect("read authenticator")
+            .expect("authenticator present");
+        assert_eq!(after.counter, 4);
+
+        // No LoginSuccess may be recorded.
+        let successes = state
+            .audit
+            .query_events(&AuditEventFilter {
+                event_types: Some(vec!["login_success".to_string()]),
+                ..AuditEventFilter::default()
+            })
+            .await
+            .expect("query audit events");
+        assert!(successes.is_empty(), "no login_success on a failed commit");
     }
 }

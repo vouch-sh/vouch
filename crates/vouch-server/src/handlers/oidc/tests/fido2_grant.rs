@@ -530,6 +530,193 @@ async fn test_fido2_token_authenticator_storage_fault_is_server_error() {
     assert!(rows.is_empty(), "no login_failed row for a 5xx: {rows:?}");
 }
 
+// Regression (commit 1d6af603): a *verified* FIDO2 assertion whose counter
+// commit hits a storage fault is a post-verification server fault. It must
+// leave a `LoginFailed` AuthEvents row naming the verified owner
+// (`fault_user_id`) and answer with a 500 — not `invalid_grant` (which would
+// leak that the signature verified) and not a missing row (which would drop a
+// verified ceremony from the audit trail). The lookup storage-fault test
+// above fires *before* verification and correctly leaves no row; this one
+// fires *after* verification and so must leave a `ServerFault` row.
+//
+// The hook bumps the authenticator document's version on every OCC attempt
+// (without touching the counter) so the commit's `admits` decision keeps
+// succeeding while the CAS keeps failing, exhausting the retry loop into
+// the `bail!` that surfaces `AssertionFailure::Storage`. A shared slot lets
+// the hook, installed at app construction, target the authenticator created
+// later in the test.
+#[tokio::test]
+async fn test_fido2_token_counter_commit_storage_fault_records_server_fault_row() {
+    use crate::db::documents::authenticator::AuthenticatorDoc;
+    use aws_lc_rs::digest::{SHA256, digest};
+    use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair};
+    use std::sync::{Arc, Mutex};
+
+    let target: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let target_for_hook = Arc::clone(&target);
+    let (app, state) = test_app_with_modify_hook(move |store| {
+        let writer = store.clone();
+        store.set_modify_test_hook(Arc::new(move |doc_id: &str, _attempt: u32| {
+            let writer = writer.clone();
+            let doc_id = doc_id.to_string();
+            let target = Arc::clone(&target_for_hook);
+            Box::pin(async move {
+                let want = target.lock().expect("slot lock").clone();
+                if want.as_deref() != Some(doc_id.as_str()) {
+                    return;
+                }
+                let doc = writer
+                    .get::<AuthenticatorDoc>(&doc_id)
+                    .await
+                    .expect("hook get")
+                    .expect("authenticator exists");
+                let mut data = doc.data;
+                data.name = format!("bump-at-v{}", doc.version);
+                writer.update(&doc_id, &data).await.expect("hook update");
+            })
+        }));
+    })
+    .await;
+
+    let owner = create_test_user(&state.store, "fido2-commit-fault@example.com").await;
+    let (client, pkcs8) = create_test_jwt_client(&state.store, &owner.id).await;
+    let client_assertion = build_client_assertion(
+        &client.client_id,
+        "https://test.example.com/oauth/token",
+        &pkcs8,
+        None,
+    );
+
+    // Obtain a real challenge + state JWT from the challenge endpoint.
+    let (status, body) = post_challenge(&app, &client.client_id, &pkcs8).await;
+    assert_eq!(status, StatusCode::OK, "challenge endpoint: {body}");
+    let challenge_resp: serde_json::Value =
+        serde_json::from_str(&body).expect("challenge response JSON");
+    let state_jwt = challenge_resp["state"]
+        .as_str()
+        .expect("state JWT")
+        .to_string();
+    let rp_id = challenge_resp["rp_id"].as_str().expect("rp_id").to_string();
+    let challenge_b64 = challenge_resp["challenge"]
+        .as_str()
+        .expect("challenge")
+        .to_string();
+    assert_eq!(rp_id, "test.example.com");
+
+    // Register a real Ed25519 credential owned by `owner` so the assertion
+    // verifies.
+    let key = Ed25519KeyPair::generate().expect("keygen");
+    let cose = ciborium::Value::Map(vec![
+        (1.into(), 1.into()),    // kty: OKP
+        (3.into(), (-8).into()), // alg: EdDSA
+        ((-1).into(), 6.into()), // crv: Ed25519
+        (
+            (-2).into(),
+            ciborium::Value::Bytes(key.public_key().as_ref().to_vec()),
+        ),
+    ]);
+    let mut public_key = Vec::new();
+    ciborium::into_writer(&cose, &mut public_key).expect("encode COSE");
+    let credential_id = format!("cred-fido2-commit-fault-{}", uuid::Uuid::now_v7());
+    let auth_id = db::create_authenticator(
+        &state.store,
+        &db::CreateAuthenticatorParams {
+            user_id: &owner.id,
+            name: "Commit-Fault Key",
+            credential_id: credential_id.as_bytes(),
+            public_key: &public_key,
+            aaguid: None,
+            user_handle: Some(owner.id.as_bytes()),
+            attestation_verified: false,
+            counter: 4,
+        },
+    )
+    .await
+    .expect("create authenticator");
+    *target.lock().expect("slot lock") = Some(auth_id.clone());
+
+    // Sign a valid assertion: SHA256(rp_id) || UP+UV || sign_count.
+    let sign_count: u32 = 5;
+    let mut authenticator_data = digest(&SHA256, rp_id.as_bytes()).as_ref().to_vec();
+    authenticator_data.push(0x05); // UP + UV
+    authenticator_data.extend_from_slice(&sign_count.to_be_bytes());
+    let client_data_json = serde_json::to_vec(&serde_json::json!({
+        "type": "webauthn.get",
+        "challenge": challenge_b64,
+        "origin": format!("https://{rp_id}"),
+    }))
+    .expect("client data");
+    let mut signed = authenticator_data.clone();
+    signed.extend_from_slice(digest(&SHA256, &client_data_json).as_ref());
+    let signature = key.sign(&signed).as_ref().to_vec();
+
+    let owner_uuid = uuid::Uuid::parse_str(&owner.id).expect("owner id is a uuid");
+    let assertion_payload = serde_json::json!({
+        "state": state_jwt,
+        "credential_id": URL_SAFE_NO_PAD.encode(credential_id.as_bytes()),
+        "authenticator_data": URL_SAFE_NO_PAD.encode(&authenticator_data),
+        "signature": URL_SAFE_NO_PAD.encode(&signature),
+        "client_data_json": URL_SAFE_NO_PAD.encode(&client_data_json),
+        "user_handle": URL_SAFE_NO_PAD.encode(owner_uuid.as_bytes()),
+    });
+    let assertion =
+        URL_SAFE_NO_PAD.encode(serde_json::to_vec(&assertion_payload).expect("JSON encode"));
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Afido2-assertion\
+             &assertion={assertion}\
+             &client_assertion_type=urn%3Aietf%3Aparams%3Aoauth%3Aclient-assertion-type%3Ajwt-bearer\
+             &client_assertion={client_assertion}"
+        ),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["error"], "server_error", "{body}");
+
+    // The verified ceremony must not vanish from AuthEvents: a `LoginFailed`
+    // row names the verified owner in `fault_user_id`, and the `user_id`
+    // column stays NULL so a storage outage cannot feed `failed_login_burst`.
+    let rows = login_failed_rows(&state, None).await;
+    assert_eq!(rows.len(), 1, "one login_failed row: {rows:?}");
+    let row = rows.first().expect("login_failed row");
+    assert_eq!(row.user_id, None, "a server fault must not be attributed");
+    let data = payload(row);
+    assert!(data.get("user_id").is_none(), "{data}");
+    assert_eq!(
+        data.get("fault_user_id")
+            .and_then(serde_json::Value::as_str),
+        Some(owner.id.as_str())
+    );
+    assert_eq!(
+        data.get("authenticator_id")
+            .and_then(serde_json::Value::as_str),
+        Some(auth_id.as_str())
+    );
+
+    // The counter commit never succeeded: the stored counter is unchanged.
+    let after = db::get_authenticator_by_id(&state.store, &auth_id)
+        .await
+        .expect("read authenticator")
+        .expect("authenticator present");
+    assert_eq!(after.counter, 4);
+
+    // No LoginSuccess may be recorded.
+    let successes = state
+        .audit
+        .query_events(&db::AuditEventFilter {
+            event_types: Some(vec!["login_success".to_string()]),
+            ..db::AuditEventFilter::default()
+        })
+        .await
+        .expect("query audit events");
+    assert!(successes.is_empty(), "no login_success on a failed commit");
+}
+
 /// Register an authenticator for `owner_id` and return its base64url
 /// credential ID.
 async fn owner_credential_id(state: &crate::AppState, owner_id: &str) -> String {
