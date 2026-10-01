@@ -27,10 +27,10 @@ use crate::crypto::jwt::JwtType;
 use crate::db::{self, AuthEventParams, AuthEventType, ClientInfo, Principal};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use crate::services::auth::{
-    AuthenticatorLookupParams, ClientAuthProof, CreateOAuthTokenParams, GrantProof,
-    LoginAssertionParams, LookupError, SenderConstraintProof, TokenBinding, TokenIssuanceProof,
-    create_oauth_access_token, lookup_and_verify_authenticator, record_lookup_failure,
-    verify_login_assertion,
+    AssertionFailure, AuthenticatorLookupParams, ClientAuthProof, CreateOAuthTokenParams,
+    GrantProof, LoginAssertionParams, LookupError, SenderConstraintProof, TokenBinding,
+    TokenIssuanceProof, create_oauth_access_token, lookup_and_verify_authenticator,
+    record_lookup_failure, verify_login_assertion,
 };
 use crate::services::oidc::ScopeSet;
 use crate::services::oidc::authorization_details::AuthorizationDetails;
@@ -410,6 +410,8 @@ pub(crate) async fn exchange_fido2_assertion(
             // regression is reported only once the signature verified, so it
             // counts against the credential's owner; every other failure leaves
             // the `user_handle` request-supplied and the row unattributed.
+            // `Storage` fires after the signature verified, so its row is a
+            // `ServerFault` attributed to the verified owner.
             let failure_event = AuthEventParams {
                 user_id: principal,
                 event_type: AuthEventType::LoginFailed,
@@ -421,6 +423,14 @@ pub(crate) async fn exchange_fido2_assertion(
                 idp_issuer: None,
             };
             db::record_auth_event(&state.audit, failure_event, Some(user.email.clone())).await;
+            if matches!(e, AssertionFailure::Storage(_)) {
+                // A verified ceremony whose counter commit hit a storage
+                // fault: `invalid_grant` would leak that the signature
+                // verified, so the row is recorded first and the response
+                // stays a 500.
+                tracing::error!("FIDO2 assertion grant: counter commit failed: {e}");
+                return Err(ServiceError::Internal("Counter commit failed".to_string()));
+            }
             return Err(ServiceError::oauth(
                 OAuthErrorCode::InvalidGrant,
                 "Authentication failed",
@@ -435,10 +445,10 @@ pub(crate) async fn exchange_fido2_assertion(
         assertion_result.user_verified,
     );
 
-    // From here on every exit records an audit event (`LoginFailed` from
-    // the posture gate, `LoginSuccess` otherwise): verification committed
-    // the counter, and a verified ceremony must never vanish from
-    // AuthEvents.
+    // From here on every exit records an audit event: `LoginFailed` from
+    // the posture gate or from a server fault during issuance, and
+    // `LoginSuccess` once the token exists. Verification committed the
+    // counter, and a verified ceremony must never vanish from AuthEvents.
 
     // Capture client metadata for the audit events below.
     let client_ip = params.client_info.client_ip();
@@ -478,72 +488,97 @@ pub(crate) async fn exchange_fido2_assertion(
         return Err(denied);
     }
 
-    // Log the successful auth event
+    // Create OAuth access token
+    let scope = params.scope.map_or_else(ScopeSet::all, ScopeSet::parse);
+
+    let issued = async {
+        // Org domain, read once at session creation for the federation claims.
+        let org_domain = match user.org_id.as_deref() {
+            Some(org_id) => {
+                db::get_user_org_domain(&state.store, &user.id, org_id, user.org_domain.as_deref())
+                    .await
+                    .map_err(|e| {
+                        ServiceError::Internal(format!("Failed to fetch org domain: {e}"))
+                    })?
+            }
+            None => None,
+        };
+
+        // Build the chokepoint proof here: `GrantProof::Fido2Assertion` can
+        // only be constructed by code that holds a `ChallengeStateClaim`,
+        // produced above by `try_consume_challenge_state`.
+        let proof = TokenIssuanceProof {
+            grant: GrantProof::Fido2Assertion(challenge_claim),
+            client_auth,
+            sender_constraint,
+        };
+        let session_result = create_oauth_access_token(
+            state,
+            CreateOAuthTokenParams {
+                user_id: &user.id,
+                email: &user.email,
+                authenticator_id: Some(&authenticator.id),
+                client_id: &params.client.client_id,
+                scope: Some(scope.clone()),
+                binding: params.binding,
+                act: None,
+                audience: None,
+                max_lifetime_secs: None,
+                // The ceremony-receipt instant from `verify_login_assertion` —
+                // the `auth_time` any token resting on this ceremony must report
+                // (see `LoginAssertionResult::verified_at`). Stamping this
+                // handler's own clock instead would overstate freshness to the
+                // key-deletion step-up gate by the verification-to-issuance
+                // processing delay, and diverge from the browser-login and
+                // device-code flows, which both carry the ceremony instant.
+                hardware_verification: HardwareVerification::Verified {
+                    auth_time: Some(assertion_result.verified_at.instant()),
+                },
+                session_purpose: db::SessionPurpose::OAuthAccessToken,
+                authorization_details: ad_value.as_ref(),
+                hardware_aaguid: authenticator.aaguid.as_deref(),
+                org_domain: org_domain.as_deref(),
+                source_code_hash: None,
+            },
+            proof,
+            arrival,
+        )
+        .await?;
+        Ok::<_, ServiceError>((org_domain, session_result))
+    }
+    .await;
+
+    // `LoginSuccess` is proof of a completed hardware login to temporal
+    // policies, so it is written only once the token exists. A failure after
+    // verification is the server's: the row names the verified user without
+    // attributing the failure to them, so it cannot feed
+    // `failed_login_burst`.
+    let (event_type, principal, failure_reason) = match &issued {
+        Ok(_) => (
+            AuthEventType::LoginSuccess,
+            Principal::Verified(user.id.clone()),
+            None,
+        ),
+        Err(e) => (
+            AuthEventType::LoginFailed,
+            Principal::ServerFault {
+                verified: user.id.clone(),
+            },
+            Some(format!("post_verification: {e}")),
+        ),
+    };
     let auth_event_params = AuthEventParams {
-        user_id: Principal::Verified(user.id.clone()),
-        event_type: AuthEventType::LoginSuccess,
+        user_id: principal,
+        event_type,
         authenticator_id: Some(authenticator.id.clone()),
-        success: true,
+        success: issued.is_ok(),
         client: params.client_info,
-        failure_reason: None,
+        failure_reason,
         client_id: None,
         idp_issuer: None,
     };
     db::record_auth_event(&state.audit, auth_event_params, Some(user.email.clone())).await;
-
-    // Create OAuth access token
-    let scope = params.scope.map_or_else(ScopeSet::all, ScopeSet::parse);
-
-    // Org domain, read once at session creation for the federation claims.
-    let org_domain = match user.org_id.as_deref() {
-        Some(org_id) => {
-            db::get_user_org_domain(&state.store, &user.id, org_id, user.org_domain.as_deref())
-                .await
-                .map_err(|e| ServiceError::Internal(format!("Failed to fetch org domain: {e}")))?
-        }
-        None => None,
-    };
-
-    // Build the chokepoint proof here: `GrantProof::Fido2Assertion` can
-    // only be constructed by code that holds a `ChallengeStateClaim`,
-    // produced above by `try_consume_challenge_state`.
-    let proof = TokenIssuanceProof {
-        grant: GrantProof::Fido2Assertion(challenge_claim),
-        client_auth,
-        sender_constraint,
-    };
-    let session_result = create_oauth_access_token(
-        state,
-        CreateOAuthTokenParams {
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: Some(&authenticator.id),
-            client_id: &params.client.client_id,
-            scope: Some(scope.clone()),
-            binding: params.binding,
-            act: None,
-            audience: None,
-            max_lifetime_secs: None,
-            // The ceremony-receipt instant from `verify_login_assertion` —
-            // the `auth_time` any token resting on this ceremony must report
-            // (see `LoginAssertionResult::verified_at`). Stamping this
-            // handler's own clock instead would overstate freshness to the
-            // key-deletion step-up gate by the verification-to-issuance
-            // processing delay, and diverge from the browser-login and
-            // device-code flows, which both carry the ceremony instant.
-            hardware_verification: HardwareVerification::Verified {
-                auth_time: Some(assertion_result.verified_at.instant()),
-            },
-            session_purpose: db::SessionPurpose::OAuthAccessToken,
-            authorization_details: ad_value.as_ref(),
-            hardware_aaguid: authenticator.aaguid.as_deref(),
-            org_domain: org_domain.as_deref(),
-            source_code_hash: None,
-        },
-        proof,
-        arrival,
-    )
-    .await?;
+    let (org_domain, session_result) = issued?;
 
     // Every access-token grant records an oauth_token_issued audit row.
     // The user-org half of `resolve_event_org_domain`'s "prefer user, fall

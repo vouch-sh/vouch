@@ -293,7 +293,9 @@ pub(crate) enum AssertionFailure {
     /// assertion no longer names a registered key.
     #[error("the security key was deleted during sign-in")]
     KeyDeleted,
-    /// Committing the signature counter failed. Nothing was committed.
+    /// Committing the signature counter failed. The signature already
+    /// verified at this point, so this is a post-verification server fault:
+    /// nothing was committed, but the ceremony authenticated the owner.
     #[error("failed to commit the signature counter: {0}")]
     Storage(anyhow::Error),
 }
@@ -310,12 +312,23 @@ impl AssertionFailure {
     /// rejection happened before or at the signature, so the credential ID
     /// and `user_handle` are still only request-supplied.
     ///
-    /// A verification task that did not complete, and a failed counter
-    /// commit, are server faults that decided nothing about the assertion.
-    /// They are handled like a storage fault during the credential lookup
-    /// ([`LookupError::Service`]): no `login_failed` row, and the caller
-    /// answers with a server error. `Principal::ServerFault` would not fit —
-    /// it records a user the server *verified*, and here nothing was.
+    /// A verification task that did not complete is a server fault that
+    /// decided nothing about the assertion. It is handled like a storage
+    /// fault during the credential lookup ([`LookupError::Service`]): no
+    /// `login_failed` row, and the caller answers with a server error.
+    /// `Principal::ServerFault` would not fit — it records a user the server
+    /// *verified*, and here nothing was.
+    ///
+    /// A failed counter commit ([`Self::Storage`]) is different: it fires
+    /// only after the signature already verified (the `spawn_blocking` task
+    /// returned `Ok`), so a registered key signed the assertion and the owner
+    /// was cryptographically authenticated. The server then failed to persist
+    /// the bookkeeping, so the row records the fault against the verified
+    /// owner as a [`Principal::ServerFault`] — the variant designed for
+    /// exactly this case — so the verified ceremony never vanishes from
+    /// `AuthEvents`. The `user_id` column stays NULL, so a storage outage
+    /// cannot feed `failed_login_burst` and lock the user out. The caller
+    /// still answers with a 500; a 401 would leak that the signature verified.
     ///
     /// A key deleted during the ceremony is not the owner's failed login, so
     /// its row stays unattributed and cannot feed `failed_login_burst`.
@@ -328,7 +341,10 @@ impl AssertionFailure {
             Self::Rejected(_) | Self::KeyDeleted => Some(db::Principal::Unverified {
                 asserted: Some(owner_user_id.to_string()),
             }),
-            Self::TaskFailed | Self::Storage(_) => None,
+            Self::Storage(_) => Some(db::Principal::ServerFault {
+                verified: owner_user_id.to_string(),
+            }),
+            Self::TaskFailed => None,
         }
     }
 }
@@ -1399,7 +1415,10 @@ mod tests {
     // counter regression — is attributable to the credential's owner.
     // A verification task that never finished decided nothing: like a
     // storage fault during the credential lookup, it writes no login_failed
-    // row.
+    // row. A failed counter commit, by contrast, fires only after the
+    // signature verified, so the owner was authenticated and the row records
+    // a `ServerFault` against them — a verified ceremony must never vanish
+    // from AuthEvents.
     #[test]
     fn assertion_task_failure_writes_no_login_failed_row() {
         assert!(AssertionFailure::TaskFailed.principal("user-1").is_none());
@@ -1427,9 +1446,35 @@ mod tests {
             );
         }
     }
+
+    // A key deleted during the ceremony is not the owner's failed login, so
+    // its row stays unattributed.
+    #[test]
+    fn assertion_key_deleted_writes_unattributed_row() {
+        let owner = "user-1";
+        assert!(matches!(
+            AssertionFailure::KeyDeleted.principal(owner),
+            Some(db::Principal::Unverified { asserted: Some(ref id) }) if id == owner
+        ));
+    }
+
+    // A failed counter commit fires only after the signature verified, so
+    // the owner was authenticated: the row records a `ServerFault` against
+    // the verified owner, not `None`. The `user_id` column stays NULL (so a
+    // storage outage cannot feed `failed_login_burst`), and the payload
+    // carries the verified id as `fault_user_id`.
+    #[test]
+    fn assertion_storage_fault_writes_server_fault_row() {
+        let owner = "user-1";
+        assert!(matches!(
+            AssertionFailure::Storage(anyhow::anyhow!("db unavailable")).principal(owner),
+            Some(db::Principal::ServerFault { ref verified }) if verified == owner
+        ));
+    }
     use crate::test_utils::{
-        TEST_ISSUER, create_test_user, make_test_access_token, make_test_oidc_key,
-        remove_test_authenticator, test_app, test_app_state,
+        TEST_ISSUER, TestSigningAuthenticator, authenticator_version_bump_hook,
+        create_test_signing_authenticator, create_test_user, make_test_access_token,
+        make_test_oidc_key, remove_test_authenticator, test_app, test_app_state,
     };
 
     #[tokio::test]
@@ -1730,72 +1775,34 @@ mod tests {
     const COUNTER_RP_ID: &str = "counter.example.com";
     const COUNTER_ORIGIN: &str = "https://counter.example.com";
 
-    /// A registered Ed25519 security key: its signing half, and the id of
-    /// its stored authenticator, whose counter starts at `stored`.
+    /// A registered Ed25519 security key and the id of its stored
+    /// authenticator, whose counter starts at `stored`.
     async fn registered_key(
         state: &crate::AppState,
         email: &str,
         stored: u32,
-    ) -> (aws_lc_rs::signature::Ed25519KeyPair, String) {
-        use aws_lc_rs::signature::KeyPair;
-
-        let key = aws_lc_rs::signature::Ed25519KeyPair::generate().unwrap();
-        let cose = ciborium::Value::Map(vec![
-            (1.into(), 1.into()),    // kty: OKP
-            (3.into(), (-8).into()), // alg: EdDSA
-            ((-1).into(), 6.into()), // crv: Ed25519
-            (
-                (-2).into(),
-                ciborium::Value::Bytes(key.public_key().as_ref().to_vec()),
-            ),
-        ]);
-        let mut public_key = Vec::new();
-        ciborium::into_writer(&cose, &mut public_key).unwrap();
-
+    ) -> (TestSigningAuthenticator, String) {
         let user = create_test_user(&state.store, email).await;
-        let authenticator = db::create_authenticator(
-            &state.store,
-            &db::CreateAuthenticatorParams {
-                user_id: &user.id,
-                name: "Counter Key",
-                credential_id: email.as_bytes(),
-                public_key: &public_key,
-                aaguid: None,
-                user_handle: None,
-                attestation_verified: false,
-                counter: stored,
-            },
-        )
-        .await
-        .unwrap();
-        (key, authenticator)
+        let key =
+            create_test_signing_authenticator(&state.store, &user.id, email.as_bytes(), stored)
+                .await;
+        let authenticator_id = key.authenticator_id.clone();
+        (key, authenticator_id)
     }
 
     /// An assertion signed by `key` reporting `counter`, checked against a
     /// stored counter of `stored` as read at lookup.
     fn signed_assertion(
-        key: &aws_lc_rs::signature::Ed25519KeyPair,
+        key: &TestSigningAuthenticator,
         counter: u32,
         stored: u32,
     ) -> LoginAssertionParams {
-        use aws_lc_rs::digest::{SHA256, digest};
-
         let challenge = b"counter-commit-challenge".to_vec();
-        let mut authenticator_data = digest(&SHA256, COUNTER_RP_ID.as_bytes()).as_ref().to_vec();
-        authenticator_data.push(0x05); // UP + UV
-        authenticator_data.extend_from_slice(&counter.to_be_bytes());
-        let client_data_json = serde_json::to_vec(&serde_json::json!({
-            "type": "webauthn.get",
-            "challenge": URL_SAFE_NO_PAD.encode(&challenge),
-            "origin": COUNTER_ORIGIN,
-        }))
-        .unwrap();
-        let mut signed = authenticator_data.clone();
-        signed.extend_from_slice(digest(&SHA256, &client_data_json).as_ref());
+        let assertion = key.sign_assertion(COUNTER_RP_ID, COUNTER_ORIGIN, &challenge, counter);
         LoginAssertionParams {
-            authenticator_data,
-            client_data_json,
-            signature: key.sign(&signed).as_ref().to_vec(),
+            authenticator_data: assertion.authenticator_data,
+            client_data_json: assertion.client_data_json,
+            signature: assertion.signature,
             public_key: Vec::new(),
             rp_id: COUNTER_RP_ID.to_string(),
             expected_origin: COUNTER_ORIGIN.to_string(),
@@ -1859,5 +1866,54 @@ mod tests {
             .err()
             .expect("a deleted key yields no login");
         assert!(matches!(err, AssertionFailure::KeyDeleted));
+    }
+
+    // A verified assertion whose counter commit fails at the storage layer
+    // surfaces `AssertionFailure::Storage`, and `principal` names the
+    // verified owner as a `ServerFault`, so the ceremony stays in AuthEvents.
+    #[tokio::test]
+    async fn a_storage_fault_after_a_verified_assertion_names_the_owner() {
+        let state = test_app_state().await;
+        let (key, authenticator_id) = registered_key(&state, "storage-fault@example.com", 4).await;
+        let mut params = signed_assertion(&key, 5, 4);
+        let stored = db::get_authenticator_by_id(&state.store, &authenticator_id)
+            .await
+            .unwrap()
+            .unwrap();
+        params.public_key = stored.public_key;
+        let owner_id = stored.user_id;
+
+        // The hooked clone drives the commit; the hook bumps the version
+        // through the unhooked store. Both share the in-memory pool.
+        let mut hooked = state.store.clone();
+        hooked.set_modify_test_hook(authenticator_version_bump_hook(
+            state.store.clone(),
+            std::sync::Arc::new(std::sync::Mutex::new(Some(authenticator_id.clone()))),
+        ));
+
+        let err = verify_login_assertion(&hooked, &authenticator_id, params)
+            .await
+            .err()
+            .expect("a storage fault during the counter commit");
+        assert!(
+            matches!(err, AssertionFailure::Storage(_)),
+            "expected Storage, got {err:?}"
+        );
+        assert!(
+            matches!(
+                err.principal(&owner_id),
+                Some(db::Principal::ServerFault { ref verified }) if verified == &owner_id
+            ),
+            "a storage fault after verification names the verified owner"
+        );
+
+        // The auth failed — `verify_login_assertion` returned `Err` — so the
+        // stored counter must still hold the original value (the commit
+        // never succeeded, despite the hook's name bumps).
+        let after = db::get_authenticator_by_id(&state.store, &authenticator_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.counter, 4);
     }
 }

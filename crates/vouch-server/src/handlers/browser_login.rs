@@ -651,7 +651,7 @@ pub(crate) async fn browser_login_complete(
     // thread — see verify_login_assertion for rationale).
     let stored_counter = authenticator.counter.cast_unsigned();
 
-    use crate::services::auth::{LoginAssertionParams, verify_login_assertion};
+    use crate::services::auth::{AssertionFailure, LoginAssertionParams, verify_login_assertion};
     let verification_result = match verify_login_assertion(
         &state.store,
         &authenticator.id,
@@ -683,10 +683,10 @@ pub(crate) async fn browser_login_complete(
                     "WebAuthn verification failed".to_string(),
                 ));
             };
-            // A counter regression is reported only once the signature
-            // verified, so it counts against the credential's owner. For every
-            // other failure the `user_handle` and credential ID are still only
-            // request-supplied: the row must not count against the owner.
+            // `Storage` fires after the signature verified, so its row is a
+            // `ServerFault` attributed to the verified owner. Every other
+            // failure here rejected before or at the signature: the row must
+            // not count against the owner, and the response is a 401.
             log_login_failure(
                 &state.audit,
                 client_info.clone(),
@@ -696,6 +696,13 @@ pub(crate) async fn browser_login_complete(
                 &e.to_string(),
             )
             .await;
+            if matches!(e, AssertionFailure::Storage(_)) {
+                // A verified ceremony whose counter commit hit a storage
+                // fault: a 401 would leak that the signature verified, so the
+                // row is recorded first and the response stays a 500.
+                tracing::error!("Browser WebAuthn login: counter commit failed: {e}");
+                return Err(ServiceError::Internal("Counter commit failed".to_string()));
+            }
             return Err(ServiceError::api(
                 StatusCode::UNAUTHORIZED,
                 "auth_failed",
@@ -2198,5 +2205,117 @@ mod tests {
             successes.is_empty(),
             "no LoginSuccess may be recorded when session creation did not complete"
         );
+    }
+
+    // A verified browser assertion whose counter commit fails at the storage
+    // layer answers 500, not a 401 that would say the signature verified,
+    // and leaves a `login_failed` row naming the verified owner as a server
+    // fault, so the ceremony stays in AuthEvents.
+    #[tokio::test]
+    async fn test_browser_login_counter_commit_storage_fault_records_server_fault_row() {
+        use std::sync::{Arc, Mutex};
+
+        let target = Arc::new(Mutex::new(None));
+        let hook_target = Arc::clone(&target);
+        let (app, state) = test_utils::test_app_with_modify_hook(move |store| {
+            store.set_modify_test_hook(test_utils::authenticator_version_bump_hook(
+                store.clone(),
+                hook_target,
+            ));
+        })
+        .await;
+
+        let user = test_utils::create_test_user(&state.store, "commit-fault@example.com").await;
+        let credential_id = format!("cred-commit-fault-{}", Uuid::now_v7());
+        let key = test_utils::create_test_signing_authenticator(
+            &state.store,
+            &user.id,
+            credential_id.as_bytes(),
+            4,
+        )
+        .await;
+        let auth_id = key.authenticator_id.clone();
+        *target.lock().expect("target lock") = Some(auth_id.clone());
+
+        let challenge = b"browser-commit-fault-challenge".to_vec();
+        let now = jiff::Timestamp::now();
+        let auth_state = BrowserAuthenticationState {
+            challenge: challenge.clone(),
+            rp_id: state.config().rp_id.clone(),
+            created_at: now.as_second(),
+            exp: now.as_second().saturating_add(300),
+            pending_auth: None,
+        };
+        let state_jwt = auth_state
+            .encode(&state.state_signer)
+            .await
+            .expect("encode auth state");
+        let assertion = key.sign_assertion(
+            &state.config().rp_id,
+            state.config().base_url.as_str(),
+            &challenge,
+            5,
+        );
+
+        let user_uuid = Uuid::parse_str(&user.id).expect("user id is a uuid");
+        let enc = |b: &[u8]| URL_SAFE_NO_PAD.encode(b);
+        let body = serde_json::json!({
+            "state": state_jwt,
+            "credential_id": enc(&key.credential_id),
+            "authenticator_data": enc(&assertion.authenticator_data),
+            "client_data_json": enc(&assertion.client_data_json),
+            "signature": enc(&assertion.signature),
+            "user_handle": enc(user_uuid.as_bytes()),
+        })
+        .to_string();
+
+        let (status, resp_body) = test_utils::http_post_json(
+            &app,
+            "/login/webauthn/complete",
+            &body,
+            &[("Origin", state.config().base_url.as_str())],
+        )
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{resp_body}");
+
+        // The verified ceremony must not vanish from AuthEvents: a
+        // `LoginFailed` row names the verified owner in `fault_user_id`,
+        // and the `user_id` column stays NULL so a storage outage cannot
+        // feed `failed_login_burst`.
+        let rows = state
+            .audit
+            .query_events(&AuditEventFilter {
+                event_types: Some(vec!["login_failed".to_string()]),
+                ..AuditEventFilter::default()
+            })
+            .await
+            .expect("query audit events");
+        assert_eq!(rows.len(), 1, "one login_failed row: {rows:?}");
+        let row = rows.first().expect("login_failed row");
+        assert_eq!(row.user_id, None, "a server fault must not be attributed");
+        let data: serde_json::Value = serde_json::from_str(&row.data).expect("event data JSON");
+        assert!(data.get("user_id").is_none(), "{data}");
+        assert_eq!(
+            data.get("fault_user_id")
+                .and_then(serde_json::Value::as_str),
+            Some(user.id.as_str())
+        );
+        // The counter commit never succeeded: the stored counter is unchanged.
+        let after = db::get_authenticator_by_id(&state.store, &auth_id)
+            .await
+            .expect("read authenticator")
+            .expect("authenticator present");
+        assert_eq!(after.counter, 4);
+
+        // No LoginSuccess may be recorded.
+        let successes = state
+            .audit
+            .query_events(&AuditEventFilter {
+                event_types: Some(vec!["login_success".to_string()]),
+                ..AuditEventFilter::default()
+            })
+            .await
+            .expect("query audit events");
+        assert!(successes.is_empty(), "no login_success on a failed commit");
     }
 }

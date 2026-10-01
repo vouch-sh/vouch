@@ -542,6 +542,70 @@ async fn test_fido2_grant_records_token_issued_audit_event() {
     );
 }
 
+/// A failure after the assertion verified is the server's: the grant answers
+/// 500, records `login_failed` naming the verified user as a server fault,
+/// and records no `login_success`, which temporal policies treat as proof of
+/// a completed hardware login. The org-domain read before issuance fails
+/// here because the org document no longer decodes.
+#[tokio::test]
+async fn test_fido2_grant_issuance_fault_records_server_fault_not_success() {
+    let harness = TestHarness::new().await;
+    let org = harness
+        .create_org("issuance-fault.example.com")
+        .await
+        .expect("org");
+    let user = harness
+        .create_user_in_org("issuance-fault@issuance-fault.example.com", &org.id, false)
+        .await
+        .expect("user in org");
+
+    let device = IntegrationMockDevice::new();
+    let _auth_id = register_mock_device_in_db(&harness, &user.id, &device).await;
+    let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
+    let (challenge, state) = get_challenge(&harness, &client, &pkcs8).await;
+    test_utils::corrupt_document(&harness.state.store, &org.id).await;
+
+    let (status, json) = exchange_fido2_assertion(AssertionExchange {
+        harness: &harness,
+        device: &device,
+        challenge: &challenge,
+        state_jwt: &state,
+        user_id: &user.id,
+        client: &client,
+        pkcs8: &pkcs8,
+        authorization_details: None,
+    })
+    .await;
+    assert_eq!(
+        status, 500,
+        "a post-verification fault is a server error: {json}"
+    );
+
+    let events = |event_type: &str| {
+        let filter = db::AuditEventFilter {
+            event_types: Some(vec![event_type.to_string()]),
+            ..Default::default()
+        };
+        let audit = harness.state.audit.clone();
+        async move {
+            audit
+                .query_events(&filter)
+                .await
+                .expect("query audit events")
+        }
+    };
+    assert!(
+        events("login_success").await.is_empty(),
+        "no login_success without an issued token"
+    );
+    let failed = events("login_failed").await;
+    assert_eq!(failed.len(), 1, "one login_failed row: {failed:?}");
+    assert_eq!(failed[0].user_id, None, "a server fault is not attributed");
+    let data: serde_json::Value = serde_json::from_str(&failed[0].data).expect("event JSON");
+    assert_eq!(data["fault_user_id"], user.id.as_str(), "{data}");
+    assert!(token_issued_events(&harness, &user.id).await.is_empty());
+}
+
 /// The FIDO2 assertion grant must stamp the access-token `auth_time` claim
 /// from the ceremony-receipt instant (`LoginAssertionResult::verified_at`),
 /// not a fresh `Timestamp::now()` captured later in the handler — the
