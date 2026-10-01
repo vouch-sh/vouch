@@ -2235,10 +2235,36 @@ async fn test_browser_register_start_refuses_deactivated_user() {
         StatusCode::UNAUTHORIZED,
         "deactivated user must not start key registration: {body}"
     );
-    // The cookie extraction refuses the account, which this endpoint answers
-    // as an invalid session.
+    // `keys.js` shows the message, so the refusal names the account state
+    // in the catalog's words rather than as an invalid session.
     let error: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
-    assert_eq!(error["code"], "invalid_session");
+    assert_eq!(error["code"], "account_inactive");
+    assert_eq!(
+        error["message"],
+        Tr::new("keys-error-account-inactive").to_string()
+    );
+}
+
+#[tokio::test]
+async fn test_browser_register_start_without_cookie_is_invalid_session() {
+    let (app, _state) = test_app().await;
+    for cookie in [
+        None,
+        Some(format!("{}=not-a-jwt", vouch_common::SESSION_COOKIE_NAME)),
+    ] {
+        let mut headers = vec![("Origin", "https://test.example.com")];
+        if let Some(cookie) = cookie.as_deref() {
+            headers.push(("Cookie", cookie));
+        }
+        let (status, body) = http_post_json(&app, "/enroll/webauthn/start", "{}", &headers).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{cookie:?}: {body}");
+        let error: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+        assert_eq!(error["code"], "invalid_session", "{cookie:?}");
+        assert_eq!(
+            error["message"],
+            Tr::new("enroll-error-session-invalid").to_string()
+        );
+    }
 }
 
 #[tokio::test]
@@ -2271,7 +2297,7 @@ async fn test_browser_register_start_refuses_vanished_user() {
         "deleted user must not start key registration: {body}"
     );
     let error: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
-    assert_eq!(error["code"], "invalid_session");
+    assert_eq!(error["code"], "account_inactive");
     assert!(
         calls.load(Ordering::SeqCst) >= 1,
         "the forced Ok(None) must have reached the extraction's user read"
@@ -2342,17 +2368,17 @@ async fn test_browser_register_complete_refuses_deactivated_user() {
         ],
     )
     .await;
-    // After the `load_active_user` fix, a deactivated user is rejected with
-    // the same shape every other authed handler returns: 401 "User account
-    // is deactivated", not the legacy 403 "user_deactivated".
     assert_eq!(
         status,
         StatusCode::UNAUTHORIZED,
         "deactivated user must not complete key registration: {resp}"
     );
     let error: serde_json::Value = serde_json::from_str(&resp).expect("valid JSON");
-    assert_eq!(error["code"], "unauthorized");
-    assert_eq!(error["message"], "User account is deactivated");
+    assert_eq!(error["code"], "account_inactive");
+    assert_eq!(
+        error["message"],
+        Tr::new("keys-error-account-inactive").to_string()
+    );
 }
 
 // ── browser_register_complete — deleted user (in-flight delete_user race) ──
@@ -2478,14 +2504,12 @@ async fn test_browser_register_complete_refuses_vanished_user() {
         json["code"], "invalid_attestation",
         "deleted user must not reach WebAuthn verification: {json}"
     );
-    // `load_active_user` rejects `Ok(None)` with 401 "User not found".
     assert_eq!(
         status,
         StatusCode::UNAUTHORIZED,
         "deleted user rejected: {resp}"
     );
-    assert_eq!(json["code"], "unauthorized");
-    assert_eq!(json["message"], "User not found");
+    assert_eq!(json["code"], "account_inactive");
 
     // The cookie extraction's `load_active_user` read is the ONLY
     // `get_user_by_id` on this path, so the forced `Ok(None)` must have

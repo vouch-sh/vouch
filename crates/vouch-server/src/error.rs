@@ -78,6 +78,11 @@ pub enum ServiceError {
         headers: Vec<(axum::http::HeaderName, axum::http::HeaderValue)>,
     },
 
+    /// The token was valid, but the account it names is deleted or
+    /// deactivated.
+    #[error("{0}")]
+    InactiveAccount(InactiveAccount),
+
     /// RFC 9470: Step-up authentication required.
     ///
     /// A resource server determines the current token's authentication is
@@ -109,6 +114,20 @@ pub enum ServiceError {
     /// Internal error.
     #[error("internal error: {0}")]
     Internal(String),
+}
+
+/// Response code for [`ServiceError::InactiveAccount`].
+const INACTIVE_ACCOUNT_CODE: &str = "unauthorized";
+
+/// Why an authenticated account may not act.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum InactiveAccount {
+    /// The user row is gone.
+    #[error("User not found")]
+    NotFound,
+    /// An administrator deactivated the account.
+    #[error("User account is deactivated")]
+    Deactivated,
 }
 
 impl From<anyhow::Error> for ServiceError {
@@ -399,6 +418,14 @@ impl ServiceError {
                     error_uri: None,
                 }),
             ),
+            Self::InactiveAccount(reason) => (
+                StatusCode::UNAUTHORIZED,
+                Json(OAuthErrorResponse {
+                    error: INACTIVE_ACCOUNT_CODE.to_string(),
+                    error_description: Some(reason.to_string()),
+                    error_uri: None,
+                }),
+            ),
             // RFC 9449 §7.2: `ApiWithHeaders` carries the same 401 bearer-token
             // errors as `Api` (emitted by `extract_resource_token` for DPoP
             // nonce refresh) plus response headers like `DPoP-Nonce`. The tuple
@@ -487,6 +514,11 @@ impl ServiceError {
             Self::Validation(msg) => (StatusCode::BAD_REQUEST, "invalid_request", msg.clone()),
             Self::Forbidden(msg) => (StatusCode::FORBIDDEN, "forbidden", (*msg).to_string()),
             Self::Conflict(msg) => (StatusCode::CONFLICT, "conflict", msg.clone()),
+            Self::InactiveAccount(reason) => (
+                StatusCode::UNAUTHORIZED,
+                INACTIVE_ACCOUNT_CODE,
+                reason.to_string(),
+            ),
             Self::Api {
                 status,
                 code,

@@ -5,7 +5,7 @@ use crate::AppState;
 use crate::arrival::ArrivalTime;
 use crate::crypto::hash_token;
 use crate::db;
-use crate::error::ServiceError;
+use crate::error::{InactiveAccount, ServiceError};
 use crate::handlers::extractors::OptionalClientCert;
 use crate::http::strip_auth_scheme;
 use crate::services::auth::{self, DecodedToken, ValidatedResourceToken};
@@ -399,15 +399,11 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for OptionalAuthenticatedTok
         .await?;
         let user = match load_active_user(state, &token.sub).await {
             Ok(user) => user,
-            Err(ServiceError::Api {
-                status: StatusCode::UNAUTHORIZED,
-                message,
-                ..
-            }) => {
+            Err(ServiceError::InactiveAccount(reason)) => {
                 return Err(ServiceError::api(
                     StatusCode::UNAUTHORIZED,
                     "invalid_token",
-                    message,
+                    reason.to_string(),
                 ));
             }
             Err(e) => return Err(e),
@@ -544,16 +540,10 @@ pub(crate) async fn load_active_user(
 ) -> Result<db::User, ServiceError> {
     let user = db::get_user_by_id(&state.store, user_id)
         .await?
-        .ok_or_else(|| {
-            ServiceError::api(StatusCode::UNAUTHORIZED, "unauthorized", "User not found")
-        })?;
+        .ok_or(ServiceError::InactiveAccount(InactiveAccount::NotFound))?;
 
     if !user.active {
-        return Err(ServiceError::api(
-            StatusCode::UNAUTHORIZED,
-            "unauthorized",
-            "User account is deactivated",
-        ));
+        return Err(ServiceError::InactiveAccount(InactiveAccount::Deactivated));
     }
 
     Ok(user)
@@ -693,7 +683,9 @@ pub(crate) async fn get_resource_auth_context(
             // distinguishable from a revoked session.
             if !matches!(
                 e,
-                ServiceError::Api { .. } | ServiceError::ApiWithHeaders { .. }
+                ServiceError::Api { .. }
+                    | ServiceError::ApiWithHeaders { .. }
+                    | ServiceError::InactiveAccount(_)
             ) {
                 tracing::error!(error = %e, "Session validation failed; treating UI request as unauthenticated");
             }
