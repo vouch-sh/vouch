@@ -1273,6 +1273,16 @@ pub(crate) async fn enroll_keys_page(
     }
 }
 
+/// The answer to a deleted or deactivated account at key registration.
+/// `keys.js` shows the message in the browser, so it is translated.
+fn inactive_account_refusal() -> ServiceError {
+    ServiceError::api(
+        StatusCode::UNAUTHORIZED,
+        "account_inactive",
+        Tr::new("keys-error-account-inactive").to_string(),
+    )
+}
+
 /// Start browser-based `WebAuthn` registration.
 /// POST /enroll/webauthn/start
 /// Authentication is via session cookie (set by oidc_callback).
@@ -1287,15 +1297,16 @@ pub(crate) async fn browser_register_start(
 ) -> Result<Json<BrowserRegisterStartResponse>, ServiceError> {
     // Get session from cookie. A deactivated or deleted user's surviving
     // enrollment cookie is refused here, so it cannot begin new hardware-key
-    // registration.
+    // registration. Every other failure reads as an invalid session.
     let AuthenticatedToken { token, .. } = extract_session_from_cookie(&state, &jar, arrival)
         .await
-        .map_err(|_| {
-            ServiceError::api(
+        .map_err(|e| match e {
+            ServiceError::InactiveAccount(_) => inactive_account_refusal(),
+            _ => ServiceError::api(
                 StatusCode::UNAUTHORIZED,
                 "invalid_session",
                 Tr::new("enroll-error-session-invalid").to_string(),
-            )
+            ),
         })?;
 
     let user_id = Uuid::parse_str(&token.sub).map_err(|e| {
@@ -1488,7 +1499,12 @@ pub(crate) async fn browser_register_complete(
     let AuthenticatedToken {
         token: session,
         user: account,
-    } = extract_session_from_cookie(&state, &jar, arrival).await?;
+    } = extract_session_from_cookie(&state, &jar, arrival)
+        .await
+        .map_err(|e| match e {
+            ServiceError::InactiveAccount(_) => inactive_account_refusal(),
+            e => e,
+        })?;
     if session.sub != checked.reg_state.user_id.to_string() {
         tracing::warn!(
             caller_sub = %session.sub,
