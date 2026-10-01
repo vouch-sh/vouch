@@ -4,8 +4,9 @@
 //! Aggregation policies (`failed_login_burst`, `issuance_rate_limit`) gate
 //! the FIDO2 assertion grant; recency/absence/correlation policies
 //! (`token_exchange_step_up`, `logout_invalidates_exchange`,
-//! `exchange_ip_consistency`) gate RFC 8693 token exchange — the WIF/agent
-//! credential path, which arrives without a fresh hardware login.
+//! `exchange_ip_consistency`) and the `exchange_rate_limit` cap gate RFC 8693
+//! token exchange — the WIF/agent credential path, which arrives without a
+//! fresh hardware login.
 //!
 //! History is seeded through `AuditStore::insert_user_event_for_test`
 //! (backdated rows), then the per-org engine replays it on first decision.
@@ -285,6 +286,75 @@ async fn test_exchange_ip_consistency_denies_different_ip() {
     .await;
     let (status, json) = do_exchange(&harness, &token, &auth).await;
     assert_exchange_policy_denied(status, &json, "different-IP login must not satisfy the pin");
+}
+
+// ── Token exchange: rate limit ───────────────────────────────────────────
+
+/// Seed `count` exchanges for `user_id`, the newest `secs_ago` seconds old.
+/// The payload is the credential envelope a successful exchange writes; a
+/// row without it records no issuance and is not counted.
+async fn seed_exchanges(harness: &TestHarness, user_id: &str, count: i64, secs_ago: i64) {
+    let issued = format!(r#"{{"event_type":"{}","success":true}}"#, db::TOKEN_ISSUED);
+    for i in 0..count {
+        seed_event(
+            harness,
+            AuditEventKind::TokenExchange,
+            user_id,
+            secs_ago.saturating_add(i),
+            &issued,
+        )
+        .await;
+    }
+}
+
+/// Thirty exchanges in the last hour trip the rate limit.
+#[tokio::test]
+async fn test_exchange_rate_limit_denies_at_cap() {
+    let (harness, user, token, auth) = exchange_scenario(
+        &["exchange_rate_limit"],
+        "xrate-deny.example.com",
+        "xrate-deny@example.com",
+    )
+    .await;
+    seed_exchanges(&harness, &user.id, 30, 600).await;
+    let (status, json) = do_exchange(&harness, &token, &auth).await;
+    assert_exchange_policy_denied(status, &json, "30 exchanges in 1h");
+    assert!(
+        json["error_description"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Exchange Rate Limit"),
+        "denial must name the policy: {json}"
+    );
+}
+
+/// Twenty-nine exchanges stay under the cap.
+#[tokio::test]
+async fn test_exchange_rate_limit_under_cap_allows() {
+    let (harness, user, token, auth) = exchange_scenario(
+        &["exchange_rate_limit"],
+        "xrate-allow.example.com",
+        "xrate-allow@example.com",
+    )
+    .await;
+    seed_exchanges(&harness, &user.id, 29, 600).await;
+    let (status, json) = do_exchange(&harness, &token, &auth).await;
+    assert_eq!(status, 200, "29 exchanges must stay under the cap: {json}");
+}
+
+/// Exchanges older than the hour no longer count, through the real audit
+/// query as well as the policy window.
+#[tokio::test]
+async fn test_exchange_rate_limit_ignores_exchanges_outside_window() {
+    let (harness, user, token, auth) = exchange_scenario(
+        &["exchange_rate_limit"],
+        "xrate-old.example.com",
+        "xrate-old@example.com",
+    )
+    .await;
+    seed_exchanges(&harness, &user.id, 30, 2 * 3600).await;
+    let (status, json) = do_exchange(&harness, &token, &auth).await;
+    assert_eq!(status, 200, "exchanges from 2h ago must not count: {json}");
 }
 
 // ── FIDO2 grant: aggregation policies ────────────────────────────────────
@@ -643,6 +713,29 @@ async fn test_issuance_rate_limit_under_cap_allows_and_records() {
         10,
         "the FIDO2 grant must write an oauth_token_issued audit row"
     );
+}
+
+/// Ten issuances from two hours ago are outside the one-hour window.
+#[tokio::test]
+async fn test_issuance_rate_limit_ignores_issuances_outside_window() {
+    let (harness, user, device, client, pkcs8) = grant_scenario(
+        &["issuance_rate_limit"],
+        "rate-old.example.com",
+        "rate-old@example.com",
+    )
+    .await;
+    for i in 0..10_i64 {
+        seed_event(
+            &harness,
+            AuditEventKind::OauthTokenIssued,
+            &user.id,
+            2 * 3600 + i,
+            "{}",
+        )
+        .await;
+    }
+    let (status, json) = fido2_grant(&harness, &device, &user.id, &client, &pkcs8).await;
+    assert_eq!(status, 200, "issuances from 2h ago must not count: {json}");
 }
 
 // ── failed_login_burst counts only verified principals ───────────────────

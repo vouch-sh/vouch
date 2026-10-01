@@ -17,6 +17,12 @@
 //! uses, so an org whose only temporal rule gates token exchange does not
 //! pay the audit query on every login.
 //!
+//! An evaluation error denies. Cedar skips a policy whose condition errors
+//! at runtime (an integer overflow on a client-supplied posture value, for
+//! one), so a `forbid` that errors would otherwise drop out and the base
+//! permit would allow. [`evaluate`] turns an allow that carries evaluation
+//! errors into a deny attributed to the policy that errored.
+//!
 //! Deny attribution maps a determining rule's index back to the policy that
 //! authored it. [`check_attribution`] proves that map against the lowered
 //! set once per configuration, and [`evaluate`] refuses a determining rule
@@ -229,11 +235,22 @@ pub(crate) fn evaluate(
     let Some(response) = authorizer.is_authorized(&request) else {
         return Err("no decision returned for a request event".to_string());
     };
-    for error in response.diagnostics().errors() {
+    let errors: Vec<&str> = response.diagnostics().errors().collect();
+    for error in &errors {
         tracing::warn!(org_id, "policy evaluation error: {error}");
     }
+    let erroring = erroring_policy(&errors, &rules, refs);
     match response.decision() {
-        Decision::Allow => Ok(OrgDecision::Allow),
+        Decision::Allow if errors.is_empty() => Ok(OrgDecision::Allow),
+        // A rule that errored was skipped, so this allow never heard from
+        // it: fail closed.
+        Decision::Allow => {
+            tracing::warn!(
+                org_id,
+                "policy evaluation errored; denying the allow it would have produced"
+            );
+            Ok(OrgDecision::Deny(erroring))
+        }
         Decision::Deny => {
             let mut denying = None;
             for reason in response.diagnostics().reason() {
@@ -255,7 +272,29 @@ pub(crate) fn evaluate(
                     denying = Some(policy.clone());
                 }
             }
-            Ok(OrgDecision::Deny(denying))
+            Ok(OrgDecision::Deny(denying.or(erroring)))
         }
     }
+}
+
+/// The non-base policy named by the first evaluation error that names one.
+/// Cedar reports a failing condition as "error while evaluating policy
+/// `<id>`: …"; the id is matched in backticks against the lowered rules, so
+/// an error that names no rule (a temporal or provider failure) attributes
+/// nothing rather than guessing.
+fn erroring_policy(
+    errors: &[&str],
+    rules: &[DogwoodRuleRef],
+    refs: &[PolicyRef],
+) -> Option<DenyingPolicy> {
+    errors.iter().find_map(|error| {
+        rules
+            .iter()
+            .find(|rule| error.contains(&format!("`{}`", rule.cedar_policy_id)))
+            .and_then(|rule| refs.get(rule.rule_index))
+            .and_then(|policy_ref| match policy_ref {
+                PolicyRef::BasePermit => None,
+                PolicyRef::Policy(policy) => Some(policy.clone()),
+            })
+    })
 }

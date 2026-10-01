@@ -2324,3 +2324,264 @@ fn test_history_counts_only_credential_rows_that_record_an_issuance() {
         "a failed issuance is not an issuance"
     );
 }
+
+// ============================================================
+// Evaluation errors, windows, and replay edge cases
+// ============================================================
+
+/// Decide one request for `user-a` with the given active policies and
+/// replayed history, exactly as `authorize_decision` does after precheck.
+fn decide_with_history(
+    slugs: &[&str],
+    custom: &[db::CustomPosturePolicy],
+    history: &[AuditEvent],
+    kind: &DecisionKind<'_>,
+) -> engine::OrgDecision {
+    let slugs: Vec<String> = slugs.iter().map(ToString::to_string).collect();
+    let set = compose_org_set(&slugs, custom);
+    let mut history = history.to_vec();
+    history.sort_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)));
+    let now = jiff::Timestamp::now().as_second();
+    engine::evaluate(lower_set(&set), &set.refs, &history, "org-1", now, |ts| {
+        decision_event(kind, "user-a", "org-1", ts)
+    })
+    .unwrap()
+}
+
+fn exchange_from(ip: &str) -> DecisionKind<'static> {
+    DecisionKind::ExchangeToken {
+        ip: ip.parse().ok(),
+        client_id: "cli",
+        audience: None,
+    }
+}
+
+fn rows(kind: &str, count: u32, secs_ago: i64) -> Vec<AuditEvent> {
+    (0..count)
+        .map(|i| history_row(kind, "user-a", secs_ago.saturating_add(i64::from(i)), i))
+        .collect()
+}
+
+fn denied_by(decision: &engine::OrgDecision) -> Option<String> {
+    match decision {
+        engine::OrgDecision::Allow => None,
+        engine::OrgDecision::Deny(Some(engine::DenyingPolicy::Preconfigured(slug))) => {
+            Some(slug.as_str().to_string())
+        }
+        engine::OrgDecision::Deny(Some(engine::DenyingPolicy::Custom { name })) => {
+            Some(name.clone())
+        }
+        engine::OrgDecision::Deny(None) => Some("unattributed".to_string()),
+    }
+}
+
+/// Cedar skips a policy whose condition errors at runtime. Posture is
+/// client-supplied, so a value chosen to overflow a custom policy's
+/// arithmetic would drop that `forbid` and let the base permit allow. An
+/// evaluation error must deny, attributed to the policy that errored.
+#[test]
+fn test_evaluation_error_in_forbid_denies() {
+    let policy = custom_policy(
+        "Short screen lock",
+        &requirement("context.device.screen_lock_idle_timeout_secs * 1000 <= 600000"),
+    );
+    validate_policy_text(&policy.policy_text).expect("the policy validates");
+
+    let mut posture = sample_posture();
+    posture.screen_lock_idle_timeout_secs = Some(300);
+    let kind = DecisionKind::IssueToken {
+        posture: &posture,
+        ip: None,
+        client_id: "cli",
+    };
+    assert_eq!(
+        denied_by(&decide_with_history(
+            &[],
+            std::slice::from_ref(&policy),
+            &[],
+            &kind
+        )),
+        None,
+        "a value that meets the requirement allows"
+    );
+
+    // i64::MAX * 1000 overflows: the forbid errors instead of firing.
+    let mut overflowing = sample_posture();
+    overflowing.screen_lock_idle_timeout_secs = Some(u64::MAX);
+    let kind = DecisionKind::IssueToken {
+        posture: &overflowing,
+        ip: None,
+        client_id: "cli",
+    };
+    assert_eq!(
+        denied_by(&decide_with_history(
+            &[],
+            std::slice::from_ref(&policy),
+            &[],
+            &kind
+        )),
+        Some("Short screen lock".to_string()),
+        "an erroring forbid must deny and name the policy that errored"
+    );
+
+    // The playground reports the same verdict the enforcement path reaches.
+    assert!(
+        !evaluate_one(&policy.policy_text, &overflowing),
+        "the playground must not report a pass for an erroring policy"
+    );
+}
+
+/// Count caps only see events inside their window: a burst older than the
+/// window no longer counts.
+#[test]
+fn test_count_policies_ignore_events_outside_their_window() {
+    let posture = sample_posture();
+    let issue = DecisionKind::IssueToken {
+        posture: &posture,
+        ip: None,
+        client_id: "cli",
+    };
+
+    // issuance_rate_limit: 10 issuances within 1h.
+    let recent = rows("oauth_token_issued", 10, 600);
+    assert_eq!(
+        denied_by(&decide_with_history(
+            &["issuance_rate_limit"],
+            &[],
+            &recent,
+            &issue
+        )),
+        Some("issuance_rate_limit".to_string())
+    );
+    let old = rows("oauth_token_issued", 10, 2 * 3600);
+    assert_eq!(
+        denied_by(&decide_with_history(
+            &["issuance_rate_limit"],
+            &[],
+            &old,
+            &issue
+        )),
+        None,
+        "issuances older than 1h must not count toward the cap"
+    );
+
+    // failed_login_burst: 5 failed logins within 10m.
+    let recent = rows("login_failed", 5, 120);
+    assert_eq!(
+        denied_by(&decide_with_history(
+            &["failed_login_burst"],
+            &[],
+            &recent,
+            &issue
+        )),
+        Some("failed_login_burst".to_string())
+    );
+    let old = rows("login_failed", 5, 15 * 60);
+    assert_eq!(
+        denied_by(&decide_with_history(
+            &["failed_login_burst"],
+            &[],
+            &old,
+            &issue
+        )),
+        None,
+        "failed logins older than 10m must not count toward the burst"
+    );
+}
+
+/// exchange_rate_limit: 30 exchanges in the last hour deny the 31st; 29
+/// do not, and 30 that have aged out of the hour do not.
+#[test]
+fn test_exchange_rate_limit_cap_and_window() {
+    let exchange = exchange_from("127.0.0.1");
+    assert_eq!(
+        denied_by(&decide_with_history(
+            &["exchange_rate_limit"],
+            &[],
+            &rows("token_exchange", 30, 600),
+            &exchange
+        )),
+        Some("exchange_rate_limit".to_string()),
+        "30 exchanges in 1h reach the cap"
+    );
+    assert_eq!(
+        denied_by(&decide_with_history(
+            &["exchange_rate_limit"],
+            &[],
+            &rows("token_exchange", 29, 600),
+            &exchange
+        )),
+        None,
+        "29 exchanges stay under the cap"
+    );
+    assert_eq!(
+        denied_by(&decide_with_history(
+            &["exchange_rate_limit"],
+            &[],
+            &rows("token_exchange", 30, 2 * 3600),
+            &exchange
+        )),
+        None,
+        "exchanges older than 1h must not count toward the cap"
+    );
+}
+
+/// Replay must be non-decreasing; a row older than the engine's high-water
+/// mark (cross-replica skew) is clamped up to it rather than reordered.
+#[test]
+fn test_history_event_clamps_out_of_order_rows() {
+    let row = history_row("login_success", "user-a", 600, 0);
+    let row_ts = row.created_at.as_second();
+    let later = row_ts + 60;
+    let clamped = events::history_event(&row, "org-1", later).unwrap();
+    assert_eq!(
+        clamped.timestamp(),
+        later,
+        "an earlier row is clamped to the high-water mark"
+    );
+    let unclamped = events::history_event(&row, "org-1", row_ts - 60).unwrap();
+    assert_eq!(
+        unclamped.timestamp(),
+        row_ts,
+        "a row past the mark keeps its own time"
+    );
+}
+
+/// An audit row whose payload is not JSON still replays, but without its
+/// correlation fields, so a pinned predicate stops matching: a login with
+/// an unreadable IP cannot satisfy exchange_ip_consistency.
+#[test]
+fn test_malformed_audit_payload_cannot_satisfy_correlation() {
+    let mut good = history_row("login_success", "user-a", 300, 0);
+    good.data = r#"{"client_ip":"127.0.0.1"}"#.to_string();
+    let exchange = exchange_from("127.0.0.1");
+    assert_eq!(
+        denied_by(&decide_with_history(
+            &["exchange_ip_consistency"],
+            &[],
+            &[good.clone()],
+            &exchange
+        )),
+        None,
+        "a readable same-IP login satisfies the pin"
+    );
+
+    let mut malformed = good;
+    malformed.data = "{not json".to_string();
+    let event = events::history_event(&malformed, "org-1", 0).unwrap();
+    let ip = event
+        .fields("input")
+        .find(|(name, _)| *name == "ip")
+        .map(|(_, value)| value.clone());
+    assert_eq!(ip, Some(dogwood_language::Value::String(String::new())));
+    assert_eq!(
+        denied_by(&decide_with_history(
+            &["exchange_ip_consistency"],
+            &[],
+            &[malformed],
+            &exchange
+        )),
+        Some("exchange_ip_consistency".to_string()),
+        "a login whose IP cannot be read must not satisfy the pin"
+    );
+}

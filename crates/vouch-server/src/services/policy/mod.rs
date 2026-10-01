@@ -118,12 +118,16 @@ fn decide_lowered(lowered: LoweredPolicySet, event: &Event) -> Result<EngineDeci
     let response = authorizer
         .is_authorized(event)
         .ok_or("no decision returned for a request event")?;
+    let mut errored = false;
     for error in response.diagnostics().errors() {
+        errored = true;
         tracing::warn!("policy evaluation error: {error}");
     }
+    // An errored rule was skipped by Cedar; the enforcement path denies in
+    // that case, so the playground must not report a pass.
     match response.decision() {
-        Decision::Allow => Ok(EngineDecision::Allow),
-        Decision::Deny => Ok(EngineDecision::Deny),
+        Decision::Allow if !errored => Ok(EngineDecision::Allow),
+        Decision::Allow | Decision::Deny => Ok(EngineDecision::Deny),
     }
 }
 
