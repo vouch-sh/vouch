@@ -24,7 +24,7 @@ Specific incorrect patterns to detect:
 - `is_fapi()` checked separately rather than folded into `secret_is_credential`.
 - `uses_client_secret() && !client.is_fapi()` (hand-rolled equivalent of `secret_is_credential`).
 - `can_add_secret` as a field or variable name (renamed to `secret_is_credential` in commit `776cf615`).
-- A template Revoke gate of the form `secret.active && secrets_count > 1` without an `!app.secret_is_credential` bypass.
+- A template Revoke gate of the form `secret.status == SecretStatus::Active && secrets_count > 1` without an `!app.secret_is_credential` bypass.
 
 ## Violation examples
 
@@ -75,7 +75,7 @@ let can_add_secret =
 
 **Template Revoke gate missing the non-credential bypass (the bug from commit `14a80c87`):**
 ```jinja
-{% if secret.active && secrets_count > 1 %}
+{% if secret.status == SecretStatus::Active && secrets_count > 1 %}
 <form action="/applications/{{ app.id }}/secrets/{{ secret.id }}/delete" ...>
     <button>Revoke</button>
 </form>
@@ -145,7 +145,7 @@ let secret_is_credential = client
         <button>Add Secret</button>
     </form>
     {% endif %}
-    {% if secret.active && (!app.secret_is_credential || secrets_count > 1) %}
+    {% if secret.status == SecretStatus::Expired || (secret.status == SecretStatus::Active && (!app.secret_is_credential || secrets_count > 1)) %}
     <form action="/applications/{{ app.id }}/secrets/{{ secret.id }}/delete" method="POST">
         <button>Revoke</button>
     </form>
