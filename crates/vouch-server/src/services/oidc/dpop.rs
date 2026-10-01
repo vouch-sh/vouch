@@ -15,7 +15,9 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 
-use axum::http::HeaderMap;
+use axum::Json;
+use axum::http::{HeaderMap, HeaderName, HeaderValue, header};
+use axum::response::{IntoResponse, Response};
 use vouch_common::protocol;
 
 use crate::arrival::ArrivalTime;
@@ -23,7 +25,8 @@ use crate::crypto::alg::JwsAlgorithm;
 use crate::crypto::jwk::Jwk;
 use crate::crypto::jwt::{HeaderAlg, Jws, JwsError};
 use crate::db::{self, store::DocumentStore};
-use crate::error::{OAuthErrorCode, ServiceError};
+use crate::error::{OAuthErrorCode, OAuthErrorResponse, ServiceError};
+use crate::http;
 use crate::services::RecencyWindow;
 use crate::services::oidc::claims::PossessionError;
 use axum::http::StatusCode;
@@ -151,40 +154,141 @@ pub enum DpopError {
 }
 
 impl DpopError {
-    /// The response a resource server gives for a proof that failed
-    /// validation: `401 invalid_token`, except a backend failure (`500
-    /// server_error`) and a nonce demand, which a resource server answers
-    /// with a 401 `use_dpop_nonce` and a fresh `DPoP-Nonce` header (RFC 9449
-    /// §9) so the client can retry once.
-    pub(crate) fn at_resource(self) -> ServiceError {
+    /// The challenge a protected resource answers this error with, or `None`
+    /// for a backend failure, which is a server error rather than a refusal
+    /// of the client's credentials.
+    ///
+    /// RFC 9449 §7.1: "invalid_dpop_proof is used to indicate that the DPoP
+    /// proof itself was deemed invalid based on the criteria of Section
+    /// 4.3." A missing or duplicated proof header fails §4.3 items 1 and 2.
+    /// RFC 9449 §9: a nonce demand is "an HTTP 401 (Unauthorized) error code
+    /// with an accompanying WWW-Authenticate: DPoP value and DPoP-Nonce
+    /// value".
+    pub(crate) fn resource_challenge(self) -> Option<DpopChallenge> {
         match self {
-            Self::Database(ref e) => {
+            Self::Database(e) => {
                 tracing::error!("DPoP backend failure: {e}");
-                ServiceError::api(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "server_error",
-                    "DPoP validation backend error",
-                )
+                None
             }
-            Self::UseNonce(nonce) => ServiceError::api_with_header(
-                StatusCode::UNAUTHORIZED,
-                OAuthErrorCode::UseDpopNonce.as_str(),
-                "Authorization server requires nonce in DPoP proof",
-                (protocol::HEADER_DPOP_NONCE, nonce.as_str()),
+            Self::UseNonce(nonce) => Some(DpopChallenge {
+                error: OAuthErrorCode::UseDpopNonce,
+                description: "Resource server requires nonce in DPoP proof".to_string(),
+                nonce: Some(nonce),
+            }),
+            Self::MissingProof => Some(DpopChallenge {
+                error: OAuthErrorCode::InvalidDpopProof,
+                description: PossessionError::MissingDpopProof.as_str().to_string(),
+                nonce: None,
+            }),
+            e @ (Self::MultipleProofs
+            | Self::InvalidFormat(_)
+            | Self::InvalidSignature
+            | Self::UnsupportedAlgorithm(_)
+            | Self::Expired
+            | Self::ReplayDetected
+            | Self::MethodMismatch
+            | Self::UriMismatch
+            | Self::InvalidNonce
+            | Self::TokenHashMismatch) => Some(DpopChallenge {
+                error: OAuthErrorCode::InvalidDpopProof,
+                description: e.to_string(),
+                nonce: None,
+            }),
+        }
+    }
+
+    /// [`Self::resource_challenge`] as the error a `/v1/*` handler returns.
+    pub(crate) fn at_resource(self) -> ServiceError {
+        match self.resource_challenge() {
+            Some(challenge) => challenge.into(),
+            None => ServiceError::api(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "DPoP validation backend error",
             ),
-            Self::MissingProof => ServiceError::api(
-                StatusCode::UNAUTHORIZED,
-                "invalid_token",
-                PossessionError::MissingDpopProof.as_str(),
-            ),
-            e => {
-                tracing::debug!("DPoP validation failed: {e}");
-                ServiceError::api(
-                    StatusCode::UNAUTHORIZED,
-                    "invalid_token",
-                    "Invalid DPoP proof",
-                )
-            }
+        }
+    }
+}
+
+/// A protected resource's 401 refusal of DPoP credentials. `/v1/*` and
+/// `/oauth/userinfo` render the same status, error code, and headers; only
+/// the body shape differs.
+///
+/// RFC 9449 §7.1: "Such a challenge is made using the 401 (Unauthorized)
+/// response status code ... In such challenges: The scheme name is DPoP."
+/// and "An algs parameter SHOULD be included to signal to the client the JWS
+/// algorithms that are acceptable for the DPoP proof JWT."
+#[derive(Debug)]
+pub(crate) struct DpopChallenge {
+    error: OAuthErrorCode,
+    description: String,
+    nonce: Option<String>,
+}
+
+impl DpopChallenge {
+    /// A token whose binding the request does not satisfy. RFC 9449 Figure
+    /// 16 answers a failed key binding with `invalid_token`.
+    pub(crate) fn binding(failure: PossessionError) -> Self {
+        Self {
+            error: OAuthErrorCode::InvalidToken,
+            description: failure.as_str().to_string(),
+            nonce: None,
+        }
+    }
+
+    /// The `WWW-Authenticate` challenge and, for a nonce demand, the
+    /// `DPoP-Nonce` header.
+    fn headers(&self) -> Vec<(HeaderName, HeaderValue)> {
+        let mut algs = Vec::with_capacity(SUPPORTED_ALGORITHMS.len());
+        for alg in SUPPORTED_ALGORITHMS {
+            algs.push(alg.as_str());
+        }
+        let algs = algs.join(" ");
+        let challenge = http::dpop_challenge(&[
+            ("error", self.error.as_str()),
+            ("error_description", &self.description),
+            ("algs", &algs),
+        ]);
+        let mut headers = Vec::with_capacity(2);
+        if let Ok(value) = HeaderValue::from_str(&challenge) {
+            headers.push((header::WWW_AUTHENTICATE, value));
+        }
+        if let Some(nonce) = &self.nonce
+            && let Ok(value) = HeaderValue::from_str(nonce)
+        {
+            headers.push((HeaderName::from_static(protocol::HEADER_DPOP_NONCE), value));
+        }
+        headers
+    }
+
+    /// The challenge with an RFC 6749 §5.2 error body, as `/oauth/userinfo`
+    /// answers.
+    pub(crate) fn into_oauth_response(self) -> Response {
+        let headers = self.headers();
+        let mut response = (
+            StatusCode::UNAUTHORIZED,
+            Json(OAuthErrorResponse {
+                error: self.error.as_str().to_string(),
+                error_description: Some(self.description),
+                error_uri: None,
+            }),
+        )
+            .into_response();
+        for (name, value) in headers {
+            response.headers_mut().append(name, value);
+        }
+        response
+    }
+}
+
+impl From<DpopChallenge> for ServiceError {
+    fn from(challenge: DpopChallenge) -> Self {
+        let headers = challenge.headers();
+        Self::ApiWithHeaders {
+            status: StatusCode::UNAUTHORIZED,
+            code: challenge.error.as_str().to_string(),
+            message: challenge.description,
+            headers,
         }
     }
 }

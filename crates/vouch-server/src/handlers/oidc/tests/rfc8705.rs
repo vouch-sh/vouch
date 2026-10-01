@@ -6,6 +6,7 @@ use crate::crypto::webauthn_verify::AuthTime;
 use crate::db::documents::oauth::OAuthClientDoc;
 use crate::db::{self, AuthorizeDeviceAuthParams, DeviceApproval, User};
 use crate::handlers;
+use crate::services::oidc::claims::PossessionError;
 use crate::services::oidc::mtls::parse_client_certificate;
 
 // ========================================================================
@@ -707,8 +708,9 @@ async fn test_rfc8705_token_mtls_plus_private_key_jwt_invalid_client_when_jwt_ba
 
 /// RFC 8705 §3 + RFC 9449 §7.1: When a token is cert-bound (`cnf.x5t#S256`)
 /// but the caller uses the `Authorization: DPoP <token>` scheme without
-/// supplying a `DPoP` proof header, the userinfo endpoint must reject with
-/// `400 invalid_dpop_proof` "DPoP scheme requires DPoP proof header".
+/// supplying a `DPoP` proof header, the userinfo endpoint rejects with a
+/// `401 invalid_dpop_proof` challenge: the proof check runs before the
+/// binding check.
 #[tokio::test]
 async fn test_rfc8705_userinfo_mtls_bound_token_with_dpop_scheme_rejected() {
     let (app, state) = test_app().await;
@@ -738,19 +740,13 @@ async fn test_rfc8705_userinfo_mtls_bound_token_with_dpop_scheme_rejected() {
     )
     .await;
 
-    assert_eq!(
-        status,
-        StatusCode::BAD_REQUEST,
-        "DPoP scheme without proof must return 400: {body}"
-    );
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
     let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
     assert_eq!(json["error"], "invalid_dpop_proof");
-    assert!(
-        json["error_description"]
-            .as_str()
-            .unwrap_or("")
-            .contains("DPoP scheme requires DPoP proof header"),
-        "error_description must mention DPoP proof requirement: {body}"
+    assert_eq!(
+        json["error_description"],
+        PossessionError::MissingDpopProof.as_str(),
+        "{body}"
     );
 }
 

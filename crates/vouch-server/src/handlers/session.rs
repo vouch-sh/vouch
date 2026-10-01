@@ -11,7 +11,7 @@ use crate::http::strip_auth_scheme;
 use crate::services::auth::{self, DecodedToken, ValidatedResourceToken};
 use crate::services::keys as key_svc;
 use crate::services::oidc::claims::PossessionError;
-use crate::services::oidc::dpop::{self, DpopError};
+use crate::services::oidc::dpop::{self, DpopChallenge, DpopError};
 use crate::services::oidc::mtls::ClientCertificate;
 use axum::extract::FromRequestParts;
 use axum::http::StatusCode;
@@ -154,11 +154,7 @@ async fn extract_resource_token(
             }
         }
         (AuthScheme::DPoP, None) => {
-            return Err(ServiceError::api(
-                StatusCode::UNAUTHORIZED,
-                "invalid_token",
-                PossessionError::NotDpopBound.as_str(),
-            ));
+            return Err(DpopChallenge::binding(PossessionError::NotDpopBound).into());
         }
         (AuthScheme::DPoP, Some(cnf)) => {
             // Validate DPoP proof header against cnf.jkt
@@ -175,11 +171,7 @@ async fn extract_resource_token(
             .await
             .map_err(DpopError::at_resource)?;
             if !cnf.confirms_dpop(&validated) {
-                return Err(ServiceError::api(
-                    StatusCode::UNAUTHORIZED,
-                    "invalid_token",
-                    PossessionError::DpopKeyMismatch.as_str(),
-                ));
+                return Err(DpopChallenge::binding(PossessionError::DpopKeyMismatch).into());
             }
             dpop_source = validated.source;
         }

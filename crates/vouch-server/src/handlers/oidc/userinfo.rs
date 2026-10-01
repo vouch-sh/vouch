@@ -14,10 +14,10 @@ use crate::error::OAuthErrorCode;
 use crate::error::OAuthErrorResponse;
 use crate::handlers::extractors::OptionalClientCert;
 use crate::services::auth::decode_token;
+use crate::services::oidc::OAuthScope;
 use crate::services::oidc::claims::PossessionError;
-use crate::services::oidc::dpop;
+use crate::services::oidc::dpop::{self, DpopChallenge};
 use crate::services::oidc::token::validate_session_token;
-use crate::services::oidc::{DpopError, OAuthScope};
 use crate::{AppState, http};
 use axum::{
     Json,
@@ -73,7 +73,6 @@ struct UserInfoForm {
 /// Supports `Bearer` and `DPoP` authorization schemes (RFC 9449 Section 7.1),
 /// and access token in POST body (RFC 6750 Section 2.2, Bearer only).
 /// Enforces mTLS certificate binding per RFC 8705 Section 3.
-#[expect(clippy::too_many_lines, reason = "linear OIDC userinfo claim assembly")]
 pub(crate) async fn userinfo(
     arrival: ArrivalTime,
     State(state): State<Arc<AppState>>,
@@ -166,65 +165,27 @@ pub(crate) async fn userinfo(
                 match decoded.cnf() {
                     Some(cnf) if cnf.jkt.is_some() => {
                         if !cnf.confirms_dpop(&proof) {
-                            return oauth_error(
-                                StatusCode::UNAUTHORIZED,
-                                OAuthErrorCode::InvalidDpopProof,
-                                "DPoP proof key does not match token binding",
-                            );
+                            return DpopChallenge::binding(PossessionError::DpopKeyMismatch)
+                                .into_oauth_response();
                         }
                     }
                     Some(_) | None => {
                         // Token is not DPoP-bound (mTLS-only or no cnf)
                         // but DPoP scheme was used
-                        return oauth_error(
-                            StatusCode::UNAUTHORIZED,
-                            OAuthErrorCode::InvalidDpopProof,
-                            PossessionError::NotDpopBound.as_str(),
-                        );
+                        return DpopChallenge::binding(PossessionError::NotDpopBound)
+                            .into_oauth_response();
                     }
                 }
             }
-            Err(DpopError::UseNonce(nonce)) => {
-                return (
-                    StatusCode::UNAUTHORIZED,
-                    [(protocol::HEADER_DPOP_NONCE, nonce.as_str())],
-                    Json(OAuthErrorResponse {
-                        error: OAuthErrorCode::UseDpopNonce.as_str().to_string(),
-                        error_description: Some(
-                            "Authorization server requires nonce in DPoP proof".to_string(),
-                        ),
-                        error_uri: None,
-                    }),
-                )
-                    .into_response();
-            }
-            Err(DpopError::MissingProof) => {
-                return oauth_error(
-                    StatusCode::BAD_REQUEST,
-                    OAuthErrorCode::InvalidDpopProof,
-                    "DPoP scheme requires DPoP proof header",
-                );
-            }
-            Err(e @ DpopError::MultipleProofs) => {
-                return oauth_error(
-                    StatusCode::BAD_REQUEST,
-                    OAuthErrorCode::InvalidDpopProof,
-                    &e.to_string(),
-                );
-            }
-            Err(e @ DpopError::Database(_)) => {
-                return oauth_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    OAuthErrorCode::ServerError,
-                    &e.to_string(),
-                );
-            }
             Err(e) => {
-                return oauth_error(
-                    StatusCode::UNAUTHORIZED,
-                    OAuthErrorCode::InvalidDpopProof,
-                    &e.to_string(),
-                );
+                return match e.resource_challenge() {
+                    Some(challenge) => challenge.into_oauth_response(),
+                    None => oauth_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        OAuthErrorCode::ServerError,
+                        "DPoP validation backend error",
+                    ),
+                };
             }
         }
     }
