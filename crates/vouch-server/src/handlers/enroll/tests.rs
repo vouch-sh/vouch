@@ -2235,10 +2235,13 @@ async fn test_browser_register_start_refuses_deactivated_user() {
         StatusCode::UNAUTHORIZED,
         "deactivated user must not start key registration: {body}"
     );
-    // The cookie extraction refuses the account, which this endpoint answers
-    // as an invalid session.
+    // The cookie extraction refuses the deactivated account with the specific
+    // `unauthorized` reason, which `browser_register_start` now propagates
+    // (matching `browser_register_complete`) instead of collapsing it to a
+    // generic `invalid_session` — see d6b8bb1d.
     let error: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
-    assert_eq!(error["code"], "invalid_session");
+    assert_eq!(error["code"], "unauthorized");
+    assert_eq!(error["message"], "User account is deactivated");
 }
 
 #[tokio::test]
@@ -2271,11 +2274,43 @@ async fn test_browser_register_start_refuses_vanished_user() {
         "deleted user must not start key registration: {body}"
     );
     let error: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
-    assert_eq!(error["code"], "invalid_session");
+    assert_eq!(error["code"], "unauthorized");
+    assert_eq!(error["message"], "User not found");
     assert!(
         calls.load(Ordering::SeqCst) >= 1,
         "the forced Ok(None) must have reached the extraction's user read"
     );
+}
+
+#[tokio::test]
+async fn test_browser_register_start_collapses_invalid_cookie_to_invalid_session() {
+    // A present-but-invalid cookie is a genuine session-validation failure
+    // (the JWT decode fails → `extract_resource_token` returns `code:
+    // "invalid_token"`), distinct from a deactivated or vanished account's
+    // `"unauthorized"` reason. The narrowed `map_err` must still collapse
+    // these to the generic `invalid_session` message so token-validation
+    // internals aren't leaked to the browser caller, and so `keys.js`'s
+    // alert surfaces "Invalid or expired session" (suggesting re-auth).
+    let (app, _state) = test_app().await;
+
+    let cookie = format!("{}=not-a-real-jwt", vouch_common::SESSION_COOKIE_NAME);
+    let (status, body) = http_post_json(
+        &app,
+        "/enroll/webauthn/start",
+        "{}",
+        &[
+            ("Cookie", cookie.as_str()),
+            ("Origin", "https://test.example.com"),
+        ],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "an invalid cookie is a session-validation failure: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+    assert_eq!(error["code"], "invalid_session");
 }
 
 #[tokio::test]

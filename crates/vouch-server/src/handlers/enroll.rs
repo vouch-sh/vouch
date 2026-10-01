@@ -1285,17 +1285,31 @@ pub(crate) async fn browser_register_start(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
 ) -> Result<Json<BrowserRegisterStartResponse>, ServiceError> {
-    // Get session from cookie. A deactivated or deleted user's surviving
-    // enrollment cookie is refused here, so it cannot begin new hardware-key
-    // registration.
+    // Get session from cookie. `extract_session_from_cookie` runs
+    // `load_active_user`, so a deactivated or deleted user's surviving
+    // enrollment cookie surfaces here as `401 "unauthorized"` carrying the
+    // specific message ("User account is deactivated" / "User not found") the
+    // browser shows via `keys.js`'s alert, matching `browser_register_complete`.
+    //
+    // Only genuine cookie/session-validation failures (`code: "invalid_token"`,
+    // returned by `extract_resource_token`) are collapsed to the generic
+    // `invalid_session` message, so token-validation internals aren't leaked
+    // to a browser caller. `d6b8bb1d` moved `load_active_user` inside the
+    // extractor; matching on `code` (rather than `|_|`) keeps that
+    // account-state reason from being swallowed into `invalid_session`.
     let AuthenticatedToken { token, .. } = extract_session_from_cookie(&state, &jar, arrival)
         .await
-        .map_err(|_| {
-            ServiceError::api(
-                StatusCode::UNAUTHORIZED,
-                "invalid_session",
-                Tr::new("enroll-error-session-invalid").to_string(),
-            )
+        .map_err(|e| match &e {
+            ServiceError::Api { status, code, .. }
+                if *status == StatusCode::UNAUTHORIZED && code.as_str() == "invalid_token" =>
+            {
+                ServiceError::api(
+                    StatusCode::UNAUTHORIZED,
+                    "invalid_session",
+                    Tr::new("enroll-error-session-invalid").to_string(),
+                )
+            }
+            _ => e,
         })?;
 
     let user_id = Uuid::parse_str(&token.sub).map_err(|e| {
