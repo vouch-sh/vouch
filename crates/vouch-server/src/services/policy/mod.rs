@@ -13,7 +13,8 @@
 //!
 //! One decision evaluates as: precheck the org's set (lower + validate,
 //! cached by a fingerprint of its configuration), fetch the requesting
-//! principal's recent audit history, then decide with a fresh authorizer.
+//! principal's recent audit history when a temporal rule can apply to the
+//! request's action, then decide with a fresh authorizer.
 //! [`engine`] explains why per-decision replay is both sound and correct
 //! across replicas.
 //!
@@ -117,12 +118,16 @@ fn decide_lowered(lowered: LoweredPolicySet, event: &Event) -> Result<EngineDeci
     let response = authorizer
         .is_authorized(event)
         .ok_or("no decision returned for a request event")?;
+    let mut errored = false;
     for error in response.diagnostics().errors() {
+        errored = true;
         tracing::warn!("policy evaluation error: {error}");
     }
+    // An errored rule was skipped by Cedar; the enforcement path denies in
+    // that case, so the playground must not report a pass.
     match response.decision() {
-        Decision::Allow => Ok(EngineDecision::Allow),
-        Decision::Deny => Ok(EngineDecision::Deny),
+        Decision::Allow if !errored => Ok(EngineDecision::Allow),
+        Decision::Allow | Decision::Deny => Ok(EngineDecision::Deny),
     }
 }
 
@@ -386,10 +391,12 @@ fn compose_org_set(
     }
 }
 
-/// Static precheck of an org's composed set: it must lower AND validate.
-/// On failure, bisect the custom policies (each alone with the base
-/// permits) so the failure names a single policy the admin can fix.
-fn run_precheck(composed: &str, active_custom: &[db::CustomPosturePolicy]) -> engine::Precheck {
+/// Static precheck of an org's composed set: it must lower AND validate,
+/// and its rule-to-policy map must agree with the lowered rules. On a lower
+/// or validation failure, bisect the custom policies (each alone with the
+/// base permits) so the failure names a single policy the admin can fix.
+fn run_precheck(set: &OrgPolicySet, active_custom: &[db::CustomPosturePolicy]) -> engine::Precheck {
+    let composed = set.composed.as_str();
     let Some(policy_schema) = schema::policy_schema() else {
         return engine::Precheck::EngineError("policy schema unavailable".to_string());
     };
@@ -401,16 +408,7 @@ fn run_precheck(composed: &str, active_custom: &[db::CustomPosturePolicy]) -> en
                 let errors: Vec<String> =
                     report.validation_errors().map(|e| e.to_string()).collect();
                 if errors.is_empty() {
-                    // A set with no temporal leaves needs no event history.
-                    Ok(engine::Precheck::Ok {
-                        uses_temporal: !lowered.is_self_contained_cedar(),
-                        // Posture is only demanded when some policy reads
-                        // it. Checking the composed text is deliberate: a
-                        // miss means posture arrives absent, its typed
-                        // defaults apply, and the policy denies — the safe
-                        // direction.
-                        reads_device: composed.contains("context.device"),
-                    })
+                    Ok(lowered)
                 } else {
                     Err(format!(
                         "composed set failed validation: {}",
@@ -419,7 +417,21 @@ fn run_precheck(composed: &str, active_custom: &[db::CustomPosturePolicy]) -> en
                 }
             });
     let composed_error = match composed_result {
-        Ok(verdict) => return verdict,
+        Ok(lowered) => {
+            // Not attributable to one custom policy: the refs are built by
+            // the server, so a mismatch is an engine error.
+            if let Err(msg) = engine::check_attribution(&lowered, &set.refs) {
+                return engine::Precheck::EngineError(msg);
+            }
+            return engine::Precheck::Ok {
+                // Posture is only demanded when some policy reads
+                // it. Checking the composed text is deliberate: a
+                // miss means posture arrives absent, its typed
+                // defaults apply, and the policy denies — the safe
+                // direction.
+                reads_device: composed.contains("context.device"),
+            };
+        }
         Err(e) => e,
     };
     for custom in active_custom {
@@ -563,13 +575,11 @@ async fn authorize_decision(
     let set = compose_org_set(active_slugs, active_custom);
     let started = std::time::Instant::now();
 
-    let needs_history = match state.policy.precheck(org_id, fingerprint, || {
-        run_precheck(&set.composed, active_custom)
-    }) {
-        engine::Precheck::Ok {
-            uses_temporal,
-            reads_device: _,
-        } => uses_temporal,
+    match state
+        .policy
+        .precheck(org_id, fingerprint, || run_precheck(&set, active_custom))
+    {
+        engine::Precheck::Ok { reads_device: _ } => {}
         engine::Precheck::BrokenCustom(name) => {
             // A policy that fails precheck denies every request in the org
             // until it is re-authored, so it needs the same evidence trail as
@@ -590,19 +600,6 @@ async fn authorize_decision(
         }
     };
 
-    // Orgs running only device-posture policies never read event history,
-    // so they pay neither the audit query nor the replay.
-    let history = if needs_history {
-        events::fetch_user_history(&state.audit, user_id, arrival)
-            .await
-            .map_err(|msg| {
-                tracing::error!(org_id, "policy history fetch failed: {msg}");
-                ServiceError::Internal("policy engine unavailable".to_string())
-            })?
-    } else {
-        Vec::new()
-    };
-
     let Some(policy_schema) = schema::policy_schema() else {
         return Err(ServiceError::Internal(
             "policy schema unavailable".to_string(),
@@ -615,9 +612,26 @@ async fn authorize_decision(
                 ServiceError::Internal("policy engine unavailable".to_string())
             })?;
 
-    // The same instant the history window was cut at, so a policy rule and the
+    // The same instant the history window is cut at, so a policy rule and the
     // events it reasons about are judged on one clock.
     let now = arrival.as_second();
+
+    // A decision no temporal rule applies to — every posture-only decision,
+    // and a login in an org whose only temporal rules gate token exchange —
+    // pays neither the audit query nor the replay.
+    let needs_history =
+        engine::history_needed(&lowered, &decision_event(&kind, user_id, org_id, now));
+    let history = if needs_history {
+        events::fetch_user_history(&state.audit, user_id, arrival)
+            .await
+            .map_err(|msg| {
+                tracing::error!(org_id, "policy history fetch failed: {msg}");
+                ServiceError::Internal("policy engine unavailable".to_string())
+            })?
+    } else {
+        Vec::new()
+    };
+
     let decision = engine::evaluate(lowered, &set.refs, &history, org_id, now, |ts| {
         decision_event(&kind, user_id, org_id, ts)
     })
@@ -693,9 +707,9 @@ pub(crate) async fn evaluate_posture_policies(
     let posture_required = match state.policy.precheck(
         org_id,
         engine::fingerprint(&active_slugs, &custom_pairs),
-        || run_precheck(&set.composed, &active_custom),
+        || run_precheck(&set, &active_custom),
     ) {
-        engine::Precheck::Ok { reads_device, .. } => reads_device,
+        engine::Precheck::Ok { reads_device } => reads_device,
         // A set that does not precheck denies anyway; demanding posture
         // first would only replace that denial with a worse message.
         engine::Precheck::BrokenCustom(_) | engine::Precheck::EngineError(_) => false,

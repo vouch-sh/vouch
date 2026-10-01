@@ -1146,7 +1146,6 @@ fn test_precheck_cache_hits_by_fingerprint_and_misses_on_change() {
     let compute = || {
         computed.fetch_add(1, Ordering::SeqCst);
         engine::Precheck::Ok {
-            uses_temporal: false,
             reads_device: false,
         }
     };
@@ -1210,7 +1209,7 @@ fn test_precheck_attributes_broken_custom_by_name() {
         },
     ];
     let set = compose_org_set(&[], &custom);
-    match run_precheck(&set.composed, &custom) {
+    match run_precheck(&set, &custom) {
         engine::Precheck::BrokenCustom(name) => assert_eq!(
             name, "Unparseable",
             "the precheck must name the policy that fails, not a working one"
@@ -1245,11 +1244,43 @@ fn test_deny_error_names_policy_and_remediation() {
     );
 }
 
-/// The precheck reports whether an org's set reads event history. Only
-/// those decisions pay the audit query and replay, so a posture-only org
-/// must come back non-temporal.
+fn lower_set(set: &OrgPolicySet) -> LoweredPolicySet {
+    LoweredPolicySet::from_str(
+        &set.composed,
+        schema::service_schema(),
+        schema::policy_schema().unwrap(),
+    )
+    .unwrap()
+}
+
+/// Whether deciding at `point` reads history under `set`.
+fn history_needed_at(set: &OrgPolicySet, point: catalog::DecisionPoint) -> bool {
+    let posture = sample_posture();
+    let kind = match point {
+        catalog::DecisionPoint::IssueToken => DecisionKind::IssueToken {
+            posture: &posture,
+            ip: None,
+            client_id: "cli",
+        },
+        catalog::DecisionPoint::ExchangeToken => DecisionKind::ExchangeToken {
+            ip: None,
+            client_id: "cli",
+            audience: None,
+        },
+    };
+    engine::history_needed(
+        &lower_set(set),
+        &decision_event(&kind, "user-a", "org-1", 0),
+    )
+}
+
+/// History is fetched only for a decision some temporal rule applies to.
+/// A posture-only org never reads it, and an org whose only temporal rule
+/// gates token exchange does not read it on login.
 #[test]
-fn test_precheck_reports_whether_history_is_needed() {
+fn test_history_needed_is_sliced_by_decision_point() {
+    use catalog::DecisionPoint::{ExchangeToken, IssueToken};
+
     let posture_only = compose_org_set(
         &[
             "disk_encryption".to_string(),
@@ -1258,28 +1289,81 @@ fn test_precheck_reports_whether_history_is_needed() {
         ],
         &[],
     );
-    match run_precheck(&posture_only.composed, &[]) {
-        engine::Precheck::Ok { uses_temporal, .. } => assert!(
-            !uses_temporal,
-            "a posture-only policy set must not require event history"
-        ),
-        other => panic!("posture-only set must pass precheck, got {other:?}"),
-    }
+    assert!(!history_needed_at(&posture_only, IssueToken));
+    assert!(!history_needed_at(&posture_only, ExchangeToken));
 
-    let with_temporal = compose_org_set(
+    let exchange_temporal = compose_org_set(
         &[
             "disk_encryption".to_string(),
-            "token_exchange_step_up".to_string(),
+            "exchange_rate_limit".to_string(),
         ],
         &[],
     );
-    match run_precheck(&with_temporal.composed, &[]) {
-        engine::Precheck::Ok { uses_temporal, .. } => assert!(
-            uses_temporal,
-            "a set containing a temporal policy must require event history"
-        ),
-        other => panic!("mixed set must pass precheck, got {other:?}"),
+    assert!(
+        !history_needed_at(&exchange_temporal, IssueToken),
+        "an exchange-scoped temporal rule must not make logins read history"
+    );
+    assert!(history_needed_at(&exchange_temporal, ExchangeToken));
+
+    let issuance_temporal = compose_org_set(&["issuance_rate_limit".to_string()], &[]);
+    assert!(history_needed_at(&issuance_temporal, IssueToken));
+    assert!(
+        !history_needed_at(&issuance_temporal, ExchangeToken),
+        "an issuance-scoped temporal rule must not make exchanges read history"
+    );
+}
+
+/// Every preconfigured temporal policy reads history at exactly the
+/// decision point its scope names. Skipping history where a rule applies
+/// would evaluate it against an empty trace, which lets a count cap allow.
+#[test]
+fn test_preconfigured_temporal_policies_read_history_at_their_decision_point() {
+    for policy in PRECONFIGURED_POLICIES {
+        let set = compose_org_set(&[policy.slug.as_str().to_string()], &[]);
+        let temporal = !lower_set(&set).is_self_contained_cedar();
+        for point in [
+            catalog::DecisionPoint::IssueToken,
+            catalog::DecisionPoint::ExchangeToken,
+        ] {
+            let scoped_here = policy
+                .policy_text
+                .contains(&format!("action == {}", point.action_literal()));
+            assert_eq!(
+                history_needed_at(&set, point),
+                temporal && scoped_here,
+                "'{}' at {}: history must be read iff a temporal rule applies",
+                policy.slug,
+                point.action_name()
+            );
+        }
     }
+}
+
+/// A temporal rule with an unconstrained action scope applies to every
+/// decision, so every decision reads history.
+#[test]
+fn test_history_needed_for_every_decision_under_unscoped_temporal_rule() {
+    let custom = vec![db::CustomPosturePolicy {
+        id: "p1".to_string(),
+        name: "Any action after a failed login".to_string(),
+        description: None,
+        policy_text: r#"forbid (principal, action, resource)
+when temporal {
+    formerly within 15m Vouch::Action::"Login"::response{ output.result: false }
+};"#
+        .to_string(),
+        active: true,
+        org_id: "org-1".to_string(),
+        builder_spec: None,
+        created_at: jiff::Timestamp::now(),
+        updated_at: jiff::Timestamp::now(),
+    }];
+    let set = compose_org_set(&[], &custom);
+    assert!(history_needed_at(&set, catalog::DecisionPoint::IssueToken));
+    assert!(history_needed_at(
+        &set,
+        catalog::DecisionPoint::ExchangeToken
+    ));
 }
 
 /// Each policy file must carry the `@id` its slug expects: the id is what
@@ -1340,12 +1424,8 @@ when temporal {
         updated_at: jiff::Timestamp::now(),
     }];
     let set = compose_org_set(&[], &temporal_only);
-    match run_precheck(&set.composed, &temporal_only) {
-        engine::Precheck::Ok {
-            uses_temporal,
-            reads_device,
-        } => {
-            assert!(uses_temporal, "the policy reads event history");
+    match run_precheck(&set, &temporal_only) {
+        engine::Precheck::Ok { reads_device } => {
             assert!(
                 !reads_device,
                 "a history-only policy must not demand device posture"
@@ -1356,7 +1436,7 @@ when temporal {
 
     // A posture policy does read the device record.
     let posture_set = compose_org_set(&["disk_encryption".to_string()], &[]);
-    match run_precheck(&posture_set.composed, &[]) {
+    match run_precheck(&posture_set, &[]) {
         engine::Precheck::Ok { reads_device, .. } => {
             assert!(reads_device, "a posture policy reads the device record");
         }
@@ -1510,6 +1590,116 @@ fn test_rule_count_matches_policy_statements() {
         requirement("context.device.firewall_enabled"),
     );
     assert_eq!(rule_count(&mixed), 2);
+}
+
+fn all_preconfigured_slugs() -> Vec<String> {
+    PRECONFIGURED_POLICIES
+        .iter()
+        .map(|p| p.slug.as_str().to_string())
+        .collect()
+}
+
+/// The refs `compose_org_set` builds line up with the lowered rules: one
+/// per rule, and each preconfigured rule's `@id` is its own slug — also
+/// with a multi-rule custom policy in the set.
+#[test]
+fn test_check_attribution_accepts_composed_sets() {
+    let custom = vec![db::CustomPosturePolicy {
+        id: "p1".to_string(),
+        name: "Two rules".to_string(),
+        description: None,
+        policy_text: format!(
+            "{}\n{}",
+            requirement("context.device.disk_encryption_enabled"),
+            requirement("context.device.firewall_enabled"),
+        ),
+        active: true,
+        org_id: "org-1".to_string(),
+        builder_spec: None,
+        created_at: jiff::Timestamp::now(),
+        updated_at: jiff::Timestamp::now(),
+    }];
+    let set = compose_org_set(&all_preconfigured_slugs(), &custom);
+    engine::check_attribution(&lower_set(&set), &set.refs)
+        .unwrap_or_else(|e| panic!("composed refs must align with lowered rules: {e}"));
+    assert!(
+        matches!(run_precheck(&set, &custom), engine::Precheck::Ok { .. }),
+        "an aligned set must pass precheck"
+    );
+}
+
+/// A ref map that does not match the lowered rules — one ref short, or two
+/// policies swapped — is refused rather than trusted, so a deny cannot name
+/// the wrong policy or show its remediation.
+#[test]
+fn test_check_attribution_rejects_misaligned_refs() {
+    let set = compose_org_set(
+        &["disk_encryption".to_string(), "firewall".to_string()],
+        &[],
+    );
+    let lowered = lower_set(&set);
+
+    let short = &set.refs[..set.refs.len() - 1];
+    assert!(
+        engine::check_attribution(&lowered, short).is_err(),
+        "a ref count that differs from the rule count must be refused"
+    );
+
+    let mut swapped = set.refs.clone();
+    let last = swapped.len() - 1;
+    swapped.swap(last - 1, last);
+    assert!(
+        engine::check_attribution(&lowered, &swapped).is_err(),
+        "a ref whose slug differs from its rule's @id must be refused"
+    );
+}
+
+/// A determining rule with no matching ref fails the decision (the caller
+/// reports the engine unavailable) instead of returning an unattributed
+/// deny that hides the broken map.
+#[test]
+fn test_evaluate_refuses_unmapped_determining_rule() {
+    let set = compose_org_set(&["disk_encryption".to_string()], &[]);
+    let base_only = &set.refs[..preconfigured::BASE_ALLOW_RULES];
+    let mut posture = sample_posture();
+    posture.disk_encryption_enabled = Some(false);
+    let result = engine::evaluate(lower_set(&set), base_only, &[], "org-1", 0, |ts| {
+        decision_event(
+            &DecisionKind::IssueToken {
+                posture: &posture,
+                ip: None,
+                client_id: "cli",
+            },
+            "user-a",
+            "org-1",
+            ts,
+        )
+    });
+    assert!(
+        result.is_err(),
+        "a deny whose determining rule has no ref must not be reported as unattributed"
+    );
+
+    // With the full map the same request is a deny naming the policy.
+    let decision = engine::evaluate(lower_set(&set), &set.refs, &[], "org-1", 0, |ts| {
+        decision_event(
+            &DecisionKind::IssueToken {
+                posture: &posture,
+                ip: None,
+                client_id: "cli",
+            },
+            "user-a",
+            "org-1",
+            ts,
+        )
+    })
+    .unwrap();
+    assert!(matches!(
+        decision,
+        engine::OrgDecision::Deny(Some(engine::DenyingPolicy::Preconfigured(
+            PreconfiguredSlug::DiskEncryption
+        )))
+    ));
 }
 
 /// The `BASE_ALLOW_RULES` constant must match the actual rule count of
@@ -2132,5 +2322,266 @@ fn test_history_counts_only_credential_rows_that_record_an_issuance() {
     assert!(
         events::history_event(&row(db::TOKEN_ISSUED, false), "org-1", 0).is_none(),
         "a failed issuance is not an issuance"
+    );
+}
+
+// ============================================================
+// Evaluation errors, windows, and replay edge cases
+// ============================================================
+
+/// Decide one request for `user-a` with the given active policies and
+/// replayed history, exactly as `authorize_decision` does after precheck.
+fn decide_with_history(
+    slugs: &[&str],
+    custom: &[db::CustomPosturePolicy],
+    history: &[AuditEvent],
+    kind: &DecisionKind<'_>,
+) -> engine::OrgDecision {
+    let slugs: Vec<String> = slugs.iter().map(ToString::to_string).collect();
+    let set = compose_org_set(&slugs, custom);
+    let mut history = history.to_vec();
+    history.sort_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)));
+    let now = jiff::Timestamp::now().as_second();
+    engine::evaluate(lower_set(&set), &set.refs, &history, "org-1", now, |ts| {
+        decision_event(kind, "user-a", "org-1", ts)
+    })
+    .unwrap()
+}
+
+fn exchange_from(ip: &str) -> DecisionKind<'static> {
+    DecisionKind::ExchangeToken {
+        ip: ip.parse().ok(),
+        client_id: "cli",
+        audience: None,
+    }
+}
+
+fn rows(kind: &str, count: u32, secs_ago: i64) -> Vec<AuditEvent> {
+    (0..count)
+        .map(|i| history_row(kind, "user-a", secs_ago.saturating_add(i64::from(i)), i))
+        .collect()
+}
+
+fn denied_by(decision: &engine::OrgDecision) -> Option<String> {
+    match decision {
+        engine::OrgDecision::Allow => None,
+        engine::OrgDecision::Deny(Some(engine::DenyingPolicy::Preconfigured(slug))) => {
+            Some(slug.as_str().to_string())
+        }
+        engine::OrgDecision::Deny(Some(engine::DenyingPolicy::Custom { name })) => {
+            Some(name.clone())
+        }
+        engine::OrgDecision::Deny(None) => Some("unattributed".to_string()),
+    }
+}
+
+/// Cedar skips a policy whose condition errors at runtime. Posture is
+/// client-supplied, so a value chosen to overflow a custom policy's
+/// arithmetic would drop that `forbid` and let the base permit allow. An
+/// evaluation error must deny, attributed to the policy that errored.
+#[test]
+fn test_evaluation_error_in_forbid_denies() {
+    let policy = custom_policy(
+        "Short screen lock",
+        &requirement("context.device.screen_lock_idle_timeout_secs * 1000 <= 600000"),
+    );
+    validate_policy_text(&policy.policy_text).expect("the policy validates");
+
+    let mut posture = sample_posture();
+    posture.screen_lock_idle_timeout_secs = Some(300);
+    let kind = DecisionKind::IssueToken {
+        posture: &posture,
+        ip: None,
+        client_id: "cli",
+    };
+    assert_eq!(
+        denied_by(&decide_with_history(
+            &[],
+            std::slice::from_ref(&policy),
+            &[],
+            &kind
+        )),
+        None,
+        "a value that meets the requirement allows"
+    );
+
+    // i64::MAX * 1000 overflows: the forbid errors instead of firing.
+    let mut overflowing = sample_posture();
+    overflowing.screen_lock_idle_timeout_secs = Some(u64::MAX);
+    let kind = DecisionKind::IssueToken {
+        posture: &overflowing,
+        ip: None,
+        client_id: "cli",
+    };
+    assert_eq!(
+        denied_by(&decide_with_history(
+            &[],
+            std::slice::from_ref(&policy),
+            &[],
+            &kind
+        )),
+        Some("Short screen lock".to_string()),
+        "an erroring forbid must deny and name the policy that errored"
+    );
+
+    // The playground reports the same verdict the enforcement path reaches.
+    assert!(
+        !evaluate_one(&policy.policy_text, &overflowing),
+        "the playground must not report a pass for an erroring policy"
+    );
+}
+
+/// Count caps only see events inside their window: a burst older than the
+/// window no longer counts.
+#[test]
+fn test_count_policies_ignore_events_outside_their_window() {
+    let posture = sample_posture();
+    let issue = DecisionKind::IssueToken {
+        posture: &posture,
+        ip: None,
+        client_id: "cli",
+    };
+
+    // issuance_rate_limit: 10 issuances within 1h.
+    let recent = rows("oauth_token_issued", 10, 600);
+    assert_eq!(
+        denied_by(&decide_with_history(
+            &["issuance_rate_limit"],
+            &[],
+            &recent,
+            &issue
+        )),
+        Some("issuance_rate_limit".to_string())
+    );
+    let old = rows("oauth_token_issued", 10, 2 * 3600);
+    assert_eq!(
+        denied_by(&decide_with_history(
+            &["issuance_rate_limit"],
+            &[],
+            &old,
+            &issue
+        )),
+        None,
+        "issuances older than 1h must not count toward the cap"
+    );
+
+    // failed_login_burst: 5 failed logins within 10m.
+    let recent = rows("login_failed", 5, 120);
+    assert_eq!(
+        denied_by(&decide_with_history(
+            &["failed_login_burst"],
+            &[],
+            &recent,
+            &issue
+        )),
+        Some("failed_login_burst".to_string())
+    );
+    let old = rows("login_failed", 5, 15 * 60);
+    assert_eq!(
+        denied_by(&decide_with_history(
+            &["failed_login_burst"],
+            &[],
+            &old,
+            &issue
+        )),
+        None,
+        "failed logins older than 10m must not count toward the burst"
+    );
+}
+
+/// exchange_rate_limit: 30 exchanges in the last hour deny the 31st; 29
+/// do not, and 30 that have aged out of the hour do not.
+#[test]
+fn test_exchange_rate_limit_cap_and_window() {
+    let exchange = exchange_from("127.0.0.1");
+    assert_eq!(
+        denied_by(&decide_with_history(
+            &["exchange_rate_limit"],
+            &[],
+            &rows("token_exchange", 30, 600),
+            &exchange
+        )),
+        Some("exchange_rate_limit".to_string()),
+        "30 exchanges in 1h reach the cap"
+    );
+    assert_eq!(
+        denied_by(&decide_with_history(
+            &["exchange_rate_limit"],
+            &[],
+            &rows("token_exchange", 29, 600),
+            &exchange
+        )),
+        None,
+        "29 exchanges stay under the cap"
+    );
+    assert_eq!(
+        denied_by(&decide_with_history(
+            &["exchange_rate_limit"],
+            &[],
+            &rows("token_exchange", 30, 2 * 3600),
+            &exchange
+        )),
+        None,
+        "exchanges older than 1h must not count toward the cap"
+    );
+}
+
+/// Replay must be non-decreasing; a row older than the engine's high-water
+/// mark (cross-replica skew) is clamped up to it rather than reordered.
+#[test]
+fn test_history_event_clamps_out_of_order_rows() {
+    let row = history_row("login_success", "user-a", 600, 0);
+    let row_ts = row.created_at.as_second();
+    let later = row_ts + 60;
+    let clamped = events::history_event(&row, "org-1", later).unwrap();
+    assert_eq!(
+        clamped.timestamp(),
+        later,
+        "an earlier row is clamped to the high-water mark"
+    );
+    let unclamped = events::history_event(&row, "org-1", row_ts - 60).unwrap();
+    assert_eq!(
+        unclamped.timestamp(),
+        row_ts,
+        "a row past the mark keeps its own time"
+    );
+}
+
+/// An audit row whose payload is not JSON still replays, but without its
+/// correlation fields, so a pinned predicate stops matching: a login with
+/// an unreadable IP cannot satisfy exchange_ip_consistency.
+#[test]
+fn test_malformed_audit_payload_cannot_satisfy_correlation() {
+    let mut good = history_row("login_success", "user-a", 300, 0);
+    good.data = r#"{"client_ip":"127.0.0.1"}"#.to_string();
+    let exchange = exchange_from("127.0.0.1");
+    assert_eq!(
+        denied_by(&decide_with_history(
+            &["exchange_ip_consistency"],
+            &[],
+            &[good.clone()],
+            &exchange
+        )),
+        None,
+        "a readable same-IP login satisfies the pin"
+    );
+
+    let mut malformed = good;
+    malformed.data = "{not json".to_string();
+    let event = events::history_event(&malformed, "org-1", 0).unwrap();
+    let ip = event
+        .fields("input")
+        .find(|(name, _)| *name == "ip")
+        .map(|(_, value)| value.clone());
+    assert_eq!(ip, Some(dogwood_language::Value::String(String::new())));
+    assert_eq!(
+        denied_by(&decide_with_history(
+            &["exchange_ip_consistency"],
+            &[],
+            &[malformed],
+            &exchange
+        )),
+        Some("exchange_ip_consistency".to_string()),
+        "a login whose IP cannot be read must not satisfy the pin"
     );
 }
