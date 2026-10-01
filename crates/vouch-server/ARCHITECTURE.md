@@ -344,8 +344,8 @@ sequenceDiagram
   alt assertion verifies
     SRV->>DB: update counter
     SRV->>SRV: evaluate_posture_policies
-    SRV->>DB: audit login_success
     SRV->>SRV: build TokenIssuanceProof
+    SRV->>DB: audit login_success
     SRV-->>CLI: access token, cnf.jkt bound to the DPoP key
   else rp_id, origin, challenge, UP, UV, counter or signature fails
     SRV->>DB: audit login_failed

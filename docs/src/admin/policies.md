@@ -110,7 +110,7 @@ of an identity the upstream IdP verified. The following still appear as `login_f
 
 - An unknown credential, a `user_handle` that does not own the presented credential, or a
   signature that fails to verify. The request-supplied id is kept as `data.asserted_user_id`.
-- A server fault after a successful browser login. The id is kept as `data.fault_user_id`.
+- A server fault after a successful browser login or `vouch login`. The id is kept as `data.fault_user_id`.
 
 A storage fault during the credential lookup, or a signature verification that fails to run to
 completion, is a server error, not a failed login, and writes no `login_failed` event. Filter the audit log by `user_id` and you see only the attributed failures;
