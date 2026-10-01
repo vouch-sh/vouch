@@ -13,6 +13,7 @@ The `ServiceError` enum lives in `crates/vouch-server/src/error.rs` and currentl
 - `OAuth { code, description }` → status from `code.status_code()`
 - `Api { status, code, message }` → arbitrary status + code
 - `ApiWithHeaders { status, code, message, headers }` → arbitrary status + code + response headers
+- `InactiveAccount(InactiveAccount)` → 401 `unauthorized`
 - `StepUpRequired { acr_values, max_age }` → 401 `insufficient_user_authentication` + `WWW-Authenticate`
 - `OccConflict`, `Database`, `Internal` → 500 (intentionally opaque)
 
