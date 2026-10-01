@@ -387,6 +387,25 @@ pub(crate) async fn exchange_token(
         ));
     }
 
+    // Compute the granted audience once, before the policy gate and both
+    // issuance forks, so the gate's `context.input.audience` and the audit
+    // row's `input.audience` (replayed from history) carry the same value.
+    // `exchanged_audience` returns the requested audience unchanged for a
+    // non-narrowed subject (and a narrowed subject with an explicit audience);
+    // only a narrowed subject with no requested audience yields the subject's
+    // own `aud`. Threading this single value to the gate, the issued token,
+    // and the audit row keeps the documented temporal pattern
+    // `input.audience: context.input.audience` consistent for every request
+    // shape — without it, the live gate would see `""` for an omitted audience
+    // while the audit row recorded the granted `aud`, so the pattern could
+    // never match for narrowed subjects.
+    let DecodedToken::AccessToken(subject_claims) = &subject_decoded;
+    let policy_audience = subject_claims.exchanged_audience(
+        params.audience,
+        &params.client.client_id,
+        &config.base_url,
+    )?;
+
     // Temporal policy gate (WIF/agent credential path): active exchange
     // policies — step-up recency, IP consistency, logout-invalidates —
     // are enforced here, before any token is minted.
@@ -398,7 +417,7 @@ pub(crate) async fn exchange_token(
             &subject_user.email,
             params.client_info.client_ip(),
             &params.client.client_id,
-            params.audience,
+            policy_audience,
             arrival,
         )
         .await
@@ -593,11 +612,11 @@ pub(crate) async fn exchange_token(
         arrival.as_second(),
     );
 
-    // RFC 9068: Audience is the explicit audience param (target resource server),
-    // falling back to client_id if no audience specified. The ID-token fork
-    // below federates with external relying parties and takes the requested
-    // audience as is; the access-token fork keeps a narrowed subject narrowed.
-    let audience = params.audience;
+    // RFC 9068: Audience is the effective (granted) audience — `policy_audience`
+    // computed above — used for both the issued token and the audit row, so
+    // both issuance forks and history replay see the same `input.audience` the
+    // policy gate saw.
+    let audience = policy_audience;
 
     // Get authenticator_id from the session record (server-side, not from JWT)
     let authenticator_id = subject_session.authenticator_id.as_deref();
@@ -646,12 +665,6 @@ pub(crate) async fn exchange_token(
         )
         .await;
     }
-
-    // A narrowed subject token keeps its narrowing, as a bound one keeps its
-    // binding, so exchange cannot widen it back to a token Vouch accepts.
-    let DecodedToken::AccessToken(ref subject_claims) = subject_decoded;
-    let audience =
-        subject_claims.exchanged_audience(audience, &params.client.client_id, &config.base_url)?;
 
     // RFC 9396: Inherit authorization_details from subject token session.
     let inherited_ad_value = subject_session.authorization_details.as_ref();
