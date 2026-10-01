@@ -24,6 +24,8 @@ use crate::crypto::alg::JwsAlgorithm;
 use crate::crypto::document_crypto::{HpkeDocumentCrypto, PlaintextDocumentCrypto};
 use crate::db::audit::AuditStore;
 use crate::db::store::DocumentStore;
+#[cfg(test)]
+use crate::db::store::ModifyTestHook;
 use crate::db::{CreateOAuthClientParams, Domain, Pool, RegistrationSource};
 use crate::infra::router::build_app;
 
@@ -1350,6 +1352,138 @@ pub async fn create_test_authenticator(store: &DocumentStore, user_id: &str) -> 
     )
     .await
     .expect("Failed to create authenticator")
+}
+
+/// A registered Ed25519 authenticator whose assertions verify.
+pub struct TestSigningAuthenticator {
+    key: aws_lc_rs::signature::Ed25519KeyPair,
+    /// The authenticator row's ID.
+    pub authenticator_id: String,
+    /// The credential ID the row was registered under.
+    pub credential_id: Vec<u8>,
+}
+
+/// The parts of a signed `webauthn.get` assertion.
+pub struct TestAssertion {
+    /// `authenticatorData`: RP ID hash, UP and UV flags, `sign_count`.
+    pub authenticator_data: Vec<u8>,
+    /// `clientDataJSON` naming the challenge and origin.
+    pub client_data_json: Vec<u8>,
+    /// Signature over `authenticator_data || SHA-256(client_data_json)`.
+    pub signature: Vec<u8>,
+}
+
+/// Register an Ed25519 authenticator for `user_id` with stored counter
+/// `counter`, under `credential_id`, with `user_id` as its user handle.
+pub async fn create_test_signing_authenticator(
+    store: &DocumentStore,
+    user_id: &str,
+    credential_id: &[u8],
+    counter: u32,
+) -> TestSigningAuthenticator {
+    use aws_lc_rs::signature::KeyPair;
+
+    let key = aws_lc_rs::signature::Ed25519KeyPair::generate().expect("generate Ed25519 key");
+    let cose = ciborium::Value::Map(vec![
+        (1.into(), 1.into()),    // kty: OKP
+        (3.into(), (-8).into()), // alg: EdDSA
+        ((-1).into(), 6.into()), // crv: Ed25519
+        (
+            (-2).into(),
+            ciborium::Value::Bytes(key.public_key().as_ref().to_vec()),
+        ),
+    ]);
+    let mut public_key = Vec::new();
+    ciborium::into_writer(&cose, &mut public_key).expect("encode COSE key");
+    let authenticator_id = db::create_authenticator(
+        store,
+        &CreateAuthenticatorParams {
+            user_id,
+            name: "Signing Key",
+            credential_id,
+            public_key: &public_key,
+            aaguid: None,
+            user_handle: Some(user_id.as_bytes()),
+            attestation_verified: false,
+            counter,
+        },
+    )
+    .await
+    .expect("create signing authenticator");
+    TestSigningAuthenticator {
+        key,
+        authenticator_id,
+        credential_id: credential_id.to_vec(),
+    }
+}
+
+impl TestSigningAuthenticator {
+    /// Sign a user-verified assertion for `rp_id` and `origin` over
+    /// `challenge`, reporting `sign_count`.
+    #[must_use]
+    pub fn sign_assertion(
+        &self,
+        rp_id: &str,
+        origin: &str,
+        challenge: &[u8],
+        sign_count: u32,
+    ) -> TestAssertion {
+        use aws_lc_rs::digest::{SHA256, digest};
+        use base64::Engine;
+
+        let mut authenticator_data = digest(&SHA256, rp_id.as_bytes()).as_ref().to_vec();
+        authenticator_data.push(0x05); // UP + UV
+        authenticator_data.extend_from_slice(&sign_count.to_be_bytes());
+        let client_data_json = serde_json::to_vec(&serde_json::json!({
+            "type": "webauthn.get",
+            "challenge": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(challenge),
+            "origin": origin,
+        }))
+        .expect("encode client data");
+        let mut signed = authenticator_data.clone();
+        signed.extend_from_slice(digest(&SHA256, &client_data_json).as_ref());
+        TestAssertion {
+            signature: self.key.sign(&signed).as_ref().to_vec(),
+            authenticator_data,
+            client_data_json,
+        }
+    }
+}
+
+/// A modify hook that bumps the version of the authenticator named in
+/// `target` on every optimistic-concurrency attempt without touching its
+/// counter. A counter commit's decision keeps passing while its
+/// compare-and-update keeps losing, until the retries run out and the commit
+/// fails at the storage layer.
+#[cfg(test)]
+pub(crate) fn authenticator_version_bump_hook(
+    writer: DocumentStore,
+    target: Arc<std::sync::Mutex<Option<String>>>,
+) -> ModifyTestHook {
+    use crate::db::documents::authenticator::AuthenticatorDoc;
+
+    Arc::new(move |doc_id: &str, _attempt: u32| {
+        let writer = writer.clone();
+        let doc_id = doc_id.to_string();
+        let target = Arc::clone(&target);
+        Box::pin(async move {
+            let wanted = target.lock().expect("target lock").clone();
+            if wanted.as_deref() != Some(doc_id.as_str()) {
+                return;
+            }
+            let doc = writer
+                .get::<AuthenticatorDoc>(&doc_id)
+                .await
+                .expect("read authenticator")
+                .expect("authenticator exists");
+            let mut data = doc.data;
+            data.name = format!("bump-at-v{}", doc.version);
+            writer
+                .update(&doc_id, &data)
+                .await
+                .expect("bump authenticator version");
+        })
+    })
 }
 
 /// Overwrite a document's stored body with text that does not decode, so the

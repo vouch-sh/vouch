@@ -1472,8 +1472,9 @@ mod tests {
         ));
     }
     use crate::test_utils::{
-        TEST_ISSUER, create_test_user, make_test_access_token, make_test_oidc_key,
-        remove_test_authenticator, test_app, test_app_state,
+        TEST_ISSUER, TestSigningAuthenticator, authenticator_version_bump_hook,
+        create_test_signing_authenticator, create_test_user, make_test_access_token,
+        make_test_oidc_key, remove_test_authenticator, test_app, test_app_state,
     };
 
     #[tokio::test]
@@ -1774,72 +1775,34 @@ mod tests {
     const COUNTER_RP_ID: &str = "counter.example.com";
     const COUNTER_ORIGIN: &str = "https://counter.example.com";
 
-    /// A registered Ed25519 security key: its signing half, and the id of
-    /// its stored authenticator, whose counter starts at `stored`.
+    /// A registered Ed25519 security key and the id of its stored
+    /// authenticator, whose counter starts at `stored`.
     async fn registered_key(
         state: &crate::AppState,
         email: &str,
         stored: u32,
-    ) -> (aws_lc_rs::signature::Ed25519KeyPair, String) {
-        use aws_lc_rs::signature::KeyPair;
-
-        let key = aws_lc_rs::signature::Ed25519KeyPair::generate().unwrap();
-        let cose = ciborium::Value::Map(vec![
-            (1.into(), 1.into()),    // kty: OKP
-            (3.into(), (-8).into()), // alg: EdDSA
-            ((-1).into(), 6.into()), // crv: Ed25519
-            (
-                (-2).into(),
-                ciborium::Value::Bytes(key.public_key().as_ref().to_vec()),
-            ),
-        ]);
-        let mut public_key = Vec::new();
-        ciborium::into_writer(&cose, &mut public_key).unwrap();
-
+    ) -> (TestSigningAuthenticator, String) {
         let user = create_test_user(&state.store, email).await;
-        let authenticator = db::create_authenticator(
-            &state.store,
-            &db::CreateAuthenticatorParams {
-                user_id: &user.id,
-                name: "Counter Key",
-                credential_id: email.as_bytes(),
-                public_key: &public_key,
-                aaguid: None,
-                user_handle: None,
-                attestation_verified: false,
-                counter: stored,
-            },
-        )
-        .await
-        .unwrap();
-        (key, authenticator)
+        let key =
+            create_test_signing_authenticator(&state.store, &user.id, email.as_bytes(), stored)
+                .await;
+        let authenticator_id = key.authenticator_id.clone();
+        (key, authenticator_id)
     }
 
     /// An assertion signed by `key` reporting `counter`, checked against a
     /// stored counter of `stored` as read at lookup.
     fn signed_assertion(
-        key: &aws_lc_rs::signature::Ed25519KeyPair,
+        key: &TestSigningAuthenticator,
         counter: u32,
         stored: u32,
     ) -> LoginAssertionParams {
-        use aws_lc_rs::digest::{SHA256, digest};
-
         let challenge = b"counter-commit-challenge".to_vec();
-        let mut authenticator_data = digest(&SHA256, COUNTER_RP_ID.as_bytes()).as_ref().to_vec();
-        authenticator_data.push(0x05); // UP + UV
-        authenticator_data.extend_from_slice(&counter.to_be_bytes());
-        let client_data_json = serde_json::to_vec(&serde_json::json!({
-            "type": "webauthn.get",
-            "challenge": URL_SAFE_NO_PAD.encode(&challenge),
-            "origin": COUNTER_ORIGIN,
-        }))
-        .unwrap();
-        let mut signed = authenticator_data.clone();
-        signed.extend_from_slice(digest(&SHA256, &client_data_json).as_ref());
+        let assertion = key.sign_assertion(COUNTER_RP_ID, COUNTER_ORIGIN, &challenge, counter);
         LoginAssertionParams {
-            authenticator_data,
-            client_data_json,
-            signature: key.sign(&signed).as_ref().to_vec(),
+            authenticator_data: assertion.authenticator_data,
+            client_data_json: assertion.client_data_json,
+            signature: assertion.signature,
             public_key: Vec::new(),
             rp_id: COUNTER_RP_ID.to_string(),
             expected_origin: COUNTER_ORIGIN.to_string(),
@@ -1905,19 +1868,11 @@ mod tests {
         assert!(matches!(err, AssertionFailure::KeyDeleted));
     }
 
-    // A verified assertion whose counter commit hits a storage fault must
-    // surface `AssertionFailure::Storage` (the signature verified before the
-    // commit ran) and `principal` must name the verified owner as a
-    // `ServerFault` — not `None`, which would drop a verified ceremony from
-    // AuthEvents. The hook bumps the authenticator document's version on
-    // every OCC attempt without touching the counter, so the commit's
-    // `admits` decision keeps succeeding while the CAS keeps failing, until
-    // the retry loop exhausts into `transition_versioned`'s `bail!` — the
-    // only path that surfaces `Storage`.
+    // A verified assertion whose counter commit fails at the storage layer
+    // surfaces `AssertionFailure::Storage`, and `principal` names the
+    // verified owner as a `ServerFault`, so the ceremony stays in AuthEvents.
     #[tokio::test]
     async fn a_storage_fault_after_a_verified_assertion_names_the_owner() {
-        use crate::db::documents::authenticator::AuthenticatorDoc;
-
         let state = test_app_state().await;
         let (key, authenticator_id) = registered_key(&state, "storage-fault@example.com", 4).await;
         let mut params = signed_assertion(&key, 5, 4);
@@ -1928,32 +1883,13 @@ mod tests {
         params.public_key = stored.public_key;
         let owner_id = stored.user_id;
 
-        // The writer bumps the version; the hooked clone drives the commit
-        // through it. Both share the in-memory pool, so they see one row.
-        let writer = state.store.clone();
+        // The hooked clone drives the commit; the hook bumps the version
+        // through the unhooked store. Both share the in-memory pool.
         let mut hooked = state.store.clone();
-        let auth_id_for_hook = authenticator_id.clone();
-        hooked.set_modify_test_hook(std::sync::Arc::new(move |doc_id: &str, _attempt: u32| {
-            let writer = writer.clone();
-            let doc_id = doc_id.to_string();
-            let auth_id = auth_id_for_hook.clone();
-            Box::pin(async move {
-                if doc_id != auth_id {
-                    return;
-                }
-                let doc = writer
-                    .get::<AuthenticatorDoc>(&doc_id)
-                    .await
-                    .expect("hook get")
-                    .expect("authenticator exists");
-                let mut data = doc.data;
-                // Bump the version without changing the counter, so the
-                // commit's `admits` decision keeps succeeding and the CAS
-                // keeps failing until retries exhaust.
-                data.name = format!("bump-at-v{}", doc.version);
-                writer.update(&doc_id, &data).await.expect("hook update");
-            })
-        }));
+        hooked.set_modify_test_hook(authenticator_version_bump_hook(
+            state.store.clone(),
+            std::sync::Arc::new(std::sync::Mutex::new(Some(authenticator_id.clone()))),
+        ));
 
         let err = verify_login_assertion(&hooked, &authenticator_id, params)
             .await

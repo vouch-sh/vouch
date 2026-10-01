@@ -2207,86 +2207,36 @@ mod tests {
         );
     }
 
-    // Regression (commit 1d6af603): a verified browser WebAuthn assertion
-    // whose counter commit hits a storage fault must leave a `LoginFailed`
-    // AuthEvents row naming the verified owner (`fault_user_id`), and the
-    // response must be a 500 — not a 401 (which would leak that the signature
-    // verified) and not a missing row (which would drop a verified ceremony
-    // from the audit trail). Pre-fix, `AssertionFailure::Storage` mapped to
-    // `principal() => None`, so the handler returned 500 with no audit row.
-    //
-    // The hook bumps the authenticator document's version on every OCC
-    // attempt (without touching the counter) so the commit's `admits`
-    // decision keeps succeeding while the CAS keeps failing, exhausting the
-    // retry loop into the `bail!` that surfaces `AssertionFailure::Storage`.
-    // A shared slot lets the hook, installed at app construction, target the
-    // authenticator created later in the test.
+    // A verified browser assertion whose counter commit fails at the storage
+    // layer answers 500, not a 401 that would say the signature verified,
+    // and leaves a `login_failed` row naming the verified owner as a server
+    // fault, so the ceremony stays in AuthEvents.
     #[tokio::test]
     async fn test_browser_login_counter_commit_storage_fault_records_server_fault_row() {
-        use crate::db::documents::authenticator::AuthenticatorDoc;
-        use aws_lc_rs::digest::{SHA256, digest};
-        use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair};
         use std::sync::{Arc, Mutex};
 
-        let target: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-        let target_for_hook = Arc::clone(&target);
+        let target = Arc::new(Mutex::new(None));
+        let hook_target = Arc::clone(&target);
         let (app, state) = test_utils::test_app_with_modify_hook(move |store| {
-            let writer = store.clone();
-            store.set_modify_test_hook(Arc::new(move |doc_id: &str, _attempt: u32| {
-                let writer = writer.clone();
-                let doc_id = doc_id.to_string();
-                let target = Arc::clone(&target_for_hook);
-                Box::pin(async move {
-                    let want = target.lock().expect("slot lock").clone();
-                    if want.as_deref() != Some(doc_id.as_str()) {
-                        return;
-                    }
-                    let doc = writer
-                        .get::<AuthenticatorDoc>(&doc_id)
-                        .await
-                        .expect("hook get")
-                        .expect("authenticator exists");
-                    let mut data = doc.data;
-                    data.name = format!("bump-at-v{}", doc.version);
-                    writer.update(&doc_id, &data).await.expect("hook update");
-                })
-            }));
+            store.set_modify_test_hook(test_utils::authenticator_version_bump_hook(
+                store.clone(),
+                hook_target,
+            ));
         })
         .await;
 
-        // Register a real Ed25519 credential so the assertion verifies.
         let user = test_utils::create_test_user(&state.store, "commit-fault@example.com").await;
-        let key = Ed25519KeyPair::generate().expect("keygen");
-        let cose = ciborium::Value::Map(vec![
-            (1.into(), 1.into()),    // kty: OKP
-            (3.into(), (-8).into()), // alg: EdDSA
-            ((-1).into(), 6.into()), // crv: Ed25519
-            (
-                (-2).into(),
-                ciborium::Value::Bytes(key.public_key().as_ref().to_vec()),
-            ),
-        ]);
-        let mut public_key = Vec::new();
-        ciborium::into_writer(&cose, &mut public_key).expect("encode COSE");
-        let credential_id = format!("cred-commit-fault-{}", uuid::Uuid::now_v7());
-        let auth_id = db::create_authenticator(
+        let credential_id = format!("cred-commit-fault-{}", Uuid::now_v7());
+        let key = test_utils::create_test_signing_authenticator(
             &state.store,
-            &db::CreateAuthenticatorParams {
-                user_id: &user.id,
-                name: "Commit-Fault Key",
-                credential_id: credential_id.as_bytes(),
-                public_key: &public_key,
-                aaguid: None,
-                user_handle: Some(user.id.as_bytes()),
-                attestation_verified: false,
-                counter: 4,
-            },
+            &user.id,
+            credential_id.as_bytes(),
+            4,
         )
-        .await
-        .expect("create authenticator");
-        *target.lock().expect("slot lock") = Some(auth_id.clone());
+        .await;
+        let auth_id = key.authenticator_id.clone();
+        *target.lock().expect("target lock") = Some(auth_id.clone());
 
-        // Build an auth_state JWT with a known challenge.
         let challenge = b"browser-commit-fault-challenge".to_vec();
         let now = jiff::Timestamp::now();
         let auth_state = BrowserAuthenticationState {
@@ -2300,32 +2250,21 @@ mod tests {
             .encode(&state.state_signer)
             .await
             .expect("encode auth state");
-
-        // Sign a valid assertion: SHA256(rp_id) || UP+UV || sign_count.
-        let rp_id = state.config().rp_id.clone();
-        let origin = state.config().base_url.to_string();
-        let sign_count: u32 = 5;
-        let mut authenticator_data = digest(&SHA256, rp_id.as_bytes()).as_ref().to_vec();
-        authenticator_data.push(0x05); // UP + UV
-        authenticator_data.extend_from_slice(&sign_count.to_be_bytes());
-        let client_data_json = serde_json::to_vec(&serde_json::json!({
-            "type": "webauthn.get",
-            "challenge": URL_SAFE_NO_PAD.encode(&challenge),
-            "origin": origin,
-        }))
-        .expect("client data");
-        let mut signed = authenticator_data.clone();
-        signed.extend_from_slice(digest(&SHA256, &client_data_json).as_ref());
-        let signature = key.sign(&signed).as_ref().to_vec();
+        let assertion = key.sign_assertion(
+            &state.config().rp_id,
+            state.config().base_url.as_str(),
+            &challenge,
+            5,
+        );
 
         let user_uuid = Uuid::parse_str(&user.id).expect("user id is a uuid");
         let enc = |b: &[u8]| URL_SAFE_NO_PAD.encode(b);
         let body = serde_json::json!({
             "state": state_jwt,
-            "credential_id": enc(credential_id.as_bytes()),
-            "authenticator_data": enc(&authenticator_data),
-            "client_data_json": enc(&client_data_json),
-            "signature": enc(&signature),
+            "credential_id": enc(&key.credential_id),
+            "authenticator_data": enc(&assertion.authenticator_data),
+            "client_data_json": enc(&assertion.client_data_json),
+            "signature": enc(&assertion.signature),
             "user_handle": enc(user_uuid.as_bytes()),
         })
         .to_string();
