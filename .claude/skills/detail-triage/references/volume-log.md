@@ -36,6 +36,7 @@ judgement columns come from the batch's record in `.local/`.
 | 2026-09-27 | 2 | 2 | 0 | 0 | 2 | 2 of 2 | #1579 amended into a four-path class fix (RFC 7591 create sibling, profile-taking `has_client_assertion_key`); #1580 rebuilt without its env var (mTLS port never walks X-Forwarded-For); both superseded | 0 | 0 (type-level guardrail; `detail` CLI unavailable) |
 | 2026-09-28 | 5 | 5 | 0 | 0 | 5 | 5 of 5 | #1593 amended (shared caps builder, docs, overlay parser); #1594 superseded by #1598 (one select-and-build JWK rule); #1597/#1592 closed wontfix (empty env is a config error, 19 numeric siblings); #1595 amended (one shared test TLS acceptor; no new private-key copies); #1596 closed (per-route timeout, class left open) | 0 (09-25–27 records not local) | 0 (type-level guardrail; deadline lint pending) |
 | 2026-09-29 | 1 | 1 | 1 | 1 | 1 | 1 of 1 | #1603–#1605 (Doc Drift, blamed on #1584/#1585/#1586) and #1606 (Dead Code, non-persisted agent struct) merged as-is; #1609 superseded by #1610: per-connection exemption by peer provenance replaces a second per-IP map | 1 of 1 (09-28 port-80 residue) | 0 (type-level guardrail: `Peer::Tcp`/`Peer::Header`) |
+| 2026-10-01 | 5 | 5 | 0 | 0 | 5 | 5 of 5 | #1686 closed (empty JWKS is valid, fails closed); #1689 superseded by #1690 (per-fork gate audience); #1688 superseded by #1691 (typed inactive-account refusal, translated); #1685 amended (FIDO2 grant success row after issuance, shared fixtures); #1687 superseded by the DPoP challenge class fix | 0 | 0 (type-level: `DpopChallenge`, `ServiceError::InactiveAccount`) |
 
 Batches before 2026-08-20 have no record, so only their counted columns exist:
 run the script. `escape-unaware-delimiter-normalization` exists on Detail's side
@@ -861,3 +862,19 @@ listener shares one `ConnCaps`.
 - When an exemption depends on where a value came from, carry that source in
   the type rather than in a config-wide mode switch. A mode switch is right
   for some listeners and wrong for the rest.
+
+## 2026-10-01
+
+Five issues, all blamed on our 09-30 class fixes (#1655, #1659, #1666 twice, #1674); PR≤3d 5 of 5,
+Detail PR 0. None was recorded residue. Each finding was real, but Detail's fixes were mis-scoped:
+#1689 changed the ID-token `aud` for narrowed subjects, #1688 surfaced "Missing access token"
+untranslated, #1687 fixed one arm of a hand-written DPoP error table, and #1686 rejected a valid
+JWK Set. The user chose the class fix for DPoP challenges (one `DpopChallenge`, `DPoP` scheme with
+`algs`, body mirrors challenge) after reading RFC 9449 §7.1/§9 verbatim.
+
+### Process
+
+- When a fix changes an error's type or variant, find every `match` on the old shape before
+  merging: two load-bearing pattern matches on `ServiceError::Api` 401 surfaced in this batch.
+- Read the comments a Detail diff deletes. #1689 deleted the one sentence that named the
+  constraint it broke.
