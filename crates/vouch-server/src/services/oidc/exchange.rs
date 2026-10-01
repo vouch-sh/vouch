@@ -387,6 +387,27 @@ pub(crate) async fn exchange_token(
         ));
     }
 
+    // RFC 9068: the audience is the explicit audience param (target resource
+    // server), falling back to client_id if no audience is specified.
+    //
+    // The audience the chosen fork grants. The policy gate judges this value
+    // because it is what that fork's audit row records, and history replays
+    // the row as `input.audience`. The ID-token fork federates with external
+    // relying parties and grants the requested audience as is. The
+    // access-token fork keeps a narrowed subject narrowed, as a bound one
+    // keeps its binding, so exchange cannot widen it back to a token Vouch
+    // accepts.
+    let DecodedToken::AccessToken(ref subject_claims) = subject_decoded;
+    let audience = if params.requested_token_type == Some(RequestedTokenType::IdToken) {
+        params.audience
+    } else {
+        subject_claims.exchanged_audience(
+            params.audience,
+            &params.client.client_id,
+            &config.base_url,
+        )?
+    };
+
     // Temporal policy gate (WIF/agent credential path): active exchange
     // policies — step-up recency, IP consistency, logout-invalidates —
     // are enforced here, before any token is minted.
@@ -398,7 +419,7 @@ pub(crate) async fn exchange_token(
             &subject_user.email,
             params.client_info.client_ip(),
             &params.client.client_id,
-            params.audience,
+            audience,
             arrival,
         )
         .await
@@ -593,12 +614,6 @@ pub(crate) async fn exchange_token(
         arrival.as_second(),
     );
 
-    // RFC 9068: Audience is the explicit audience param (target resource server),
-    // falling back to client_id if no audience specified. The ID-token fork
-    // below federates with external relying parties and takes the requested
-    // audience as is; the access-token fork keeps a narrowed subject narrowed.
-    let audience = params.audience;
-
     // Get authenticator_id from the session record (server-side, not from JWT)
     let authenticator_id = subject_session.authenticator_id.as_deref();
 
@@ -646,12 +661,6 @@ pub(crate) async fn exchange_token(
         )
         .await;
     }
-
-    // A narrowed subject token keeps its narrowing, as a bound one keeps its
-    // binding, so exchange cannot widen it back to a token Vouch accepts.
-    let DecodedToken::AccessToken(ref subject_claims) = subject_decoded;
-    let audience =
-        subject_claims.exchanged_audience(audience, &params.client.client_id, &config.base_url)?;
 
     // RFC 9396: Inherit authorization_details from subject token session.
     let inherited_ad_value = subject_session.authorization_details.as_ref();
