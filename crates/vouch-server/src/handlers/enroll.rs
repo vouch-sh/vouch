@@ -62,7 +62,8 @@ const MAX_TOKEN_RESPONSE_SIZE: usize = 256 * 1024;
 #[derive(Template)]
 #[template(path = "device_verify.html")]
 pub(crate) struct DeviceVerifyTemplate {
-    pub error: Option<String>,
+    /// `Tr` rather than `String`, so every construction names a catalog key.
+    pub error: Option<Tr<'static>>,
     /// Pre-filled code from `verification_uri_complete` (RFC 8628 §3.3.1),
     /// already normalized and format-validated; `None` leaves the box empty.
     pub user_code: Option<String>,
@@ -391,7 +392,7 @@ pub(crate) async fn device_verify_submit(
     // (consonants: BCDFGHJKLMNPQRSTVWXZ). Reject anything else immediately.
     if !is_valid_user_code_format(&user_code) {
         return DeviceVerifyTemplate {
-            error: Some("Invalid code. Please check and try again.".to_string()),
+            error: Some(Tr::new("device-error-invalid-code")),
             user_code: None,
         }
         .into_response();
@@ -402,14 +403,15 @@ pub(crate) async fn device_verify_submit(
         Ok(Some(req)) => req,
         Ok(None) => {
             return DeviceVerifyTemplate {
-                error: Some("Invalid code. Please check and try again.".to_string()),
+                error: Some(Tr::new("device-error-invalid-code")),
                 user_code: None,
             }
             .into_response();
         }
-        Err(_) => {
+        Err(e) => {
+            tracing::error!("Device authorization lookup failed: {e}");
             return DeviceVerifyTemplate {
-                error: Some("An error occurred. Please try again.".to_string()),
+                error: Some(Tr::new("device-error-lookup-failed")),
                 user_code: None,
             }
             .into_response();
@@ -420,7 +422,7 @@ pub(crate) async fn device_verify_submit(
     let now = arrival.timestamp();
     if now > request.expires_at {
         return DeviceVerifyTemplate {
-            error: Some("This code has expired. Please request a new one.".to_string()),
+            error: Some(Tr::new("device-error-expired")),
             user_code: None,
         }
         .into_response();
@@ -429,7 +431,7 @@ pub(crate) async fn device_verify_submit(
     // Check if already used
     if !matches!(request.state, db::DeviceAuthState::Pending) {
         return DeviceVerifyTemplate {
-            error: Some("This code has already been used.".to_string()),
+            error: Some(Tr::new("device-error-used")),
             user_code: None,
         }
         .into_response();

@@ -54,7 +54,6 @@ pub(crate) struct UnlinkedInstallation {
 pub(crate) struct GitHubConnectTemplate {
     pub org_name: String,
     pub github_app_url: String,
-    pub error: Option<String>,
     /// Already connected GitHub accounts.
     pub connected_accounts: Vec<String>,
     /// Authentication context for header display.
@@ -504,7 +503,6 @@ pub(crate) async fn github_connect_page(
     GitHubConnectTemplate {
         org_name: state.config().get_org_display_name().to_string(),
         github_app_url,
-        error: None,
         connected_accounts,
         auth,
         github_linked: user.github_login.is_some(),

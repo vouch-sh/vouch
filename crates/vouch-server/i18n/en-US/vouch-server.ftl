@@ -1214,3 +1214,10 @@ admin-scim-tokens-error-description-length = Description must be { $max } charac
 admin-scim-tokens-error-expiration = Expiration must be between 1 and 365 days
 admin-scim-tokens-error-limit = Maximum of { $max } SCIM tokens per organization. Revoke one before creating another.
 admin-scim-tokens-error-not-found = SCIM token not found
+
+## Device code entry errors
+
+device-error-invalid-code = Invalid code. Please check and try again.
+device-error-lookup-failed = An error occurred. Please try again.
+device-error-expired = This code has expired. Please request a new one.
+device-error-used = This code has already been used.

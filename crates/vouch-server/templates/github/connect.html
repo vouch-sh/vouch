@@ -18,12 +18,6 @@
             <p class="text-gray-400">{{ self.tr("github-connect-subtitle") }}</p>
         </div>
 
-        {% if let Some(error) = error %}
-        <div class="bg-red-900/30 border border-red-700 rounded-lg p-4 mb-6" role="alert">
-            <p class="text-red-400 text-sm">{{ error }}</p>
-        </div>
-        {% endif %}
-
         {# Linking an installation requires a linked GitHub account #}
         {% if !github_linked %}
         <div class="bg-blue-900/20 border border-blue-700/30 rounded-lg p-4 mb-6">

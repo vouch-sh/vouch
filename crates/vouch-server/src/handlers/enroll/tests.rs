@@ -3469,3 +3469,23 @@ async fn test_enrollment_open_mode_gates_email_domain_without_asserted_domain() 
         .expect("db query ok");
     assert!(user.is_none(), "a whitespace-domain email must not enroll");
 }
+
+/// A malformed device code renders the catalog message, not a literal.
+#[tokio::test]
+async fn device_invalid_code_renders_catalog_message() {
+    let (app, _state) = test_utils::test_app_with_idps(two_idps()).await;
+
+    let (status, body) = test_utils::http_post_form(
+        &app,
+        "/device",
+        "user_code=not-a-code",
+        &[("Origin", "https://test.example.com")],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body.contains(&Tr::new("device-error-invalid-code").to_string()),
+        "{body}"
+    );
+}
