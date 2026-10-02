@@ -371,13 +371,21 @@ pub struct StepUpChallenge {
 /// `error="insufficient_user_authentication"`, extracting any `acr_values`
 /// and `max_age` parameters.
 ///
-/// Returns `None` for non-step-up Bearer challenges (e.g., `error="invalid_token"`).
+/// Returns `None` for non-step-up challenges (e.g., `error="invalid_token"`).
+///
+/// RFC 9470 §3 defines the error "for the challenge of the Bearer
+/// authentication scheme's error parameter (from [RFC6750]) and other OAuth
+/// authentication schemes, such as those seen in [RFC9449]", so a DPoP
+/// challenge is accepted as well as a Bearer one.
 pub fn parse_www_authenticate(header: &str) -> Option<StepUpChallenge> {
-    // Must be a Bearer challenge
-    if header
-        .strip_prefix(protocol::AUTH_SCHEME_BEARER)
-        .is_none_or(|rest| !rest.starts_with(' '))
-    {
+    let is_oauth_scheme = [protocol::AUTH_SCHEME_BEARER, protocol::AUTH_SCHEME_DPOP]
+        .iter()
+        .any(|scheme| {
+            header
+                .strip_prefix(scheme)
+                .is_some_and(|rest| rest.starts_with(' '))
+        });
+    if !is_oauth_scheme {
         return None;
     }
 
@@ -747,6 +755,19 @@ mod tests {
     fn test_parse_www_authenticate_non_step_up_error() {
         let header = "Bearer error=\"invalid_token\"";
         assert!(parse_www_authenticate(header).is_none());
+    }
+
+    // RFC 9470 §3: the error is defined for "other OAuth authentication
+    // schemes, such as those seen in [RFC9449]".
+    #[test]
+    fn test_parse_www_authenticate_step_up_dpop_scheme() {
+        let header = "DPoP error=\"insufficient_user_authentication\", max_age=\"300\", \
+                      algs=\"ES256\"";
+        let challenge = parse_www_authenticate(header).unwrap();
+        assert_eq!(challenge.max_age, Some(300));
+        assert!(
+            parse_www_authenticate("DPoPx error=\"insufficient_user_authentication\"").is_none()
+        );
     }
 
     #[test]

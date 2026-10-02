@@ -599,3 +599,36 @@ mod deactivated_account;
 mod deleted_key;
 
 mod negative_auth;
+
+/// RFC 9449 Figure 16 answers a token the resource refuses with
+/// `WWW-Authenticate: DPoP error="invalid_token"`, and §7.1: "In such
+/// challenges: The scheme name is DPoP." A DPoP-scheme request whose token
+/// does not decode gets exactly one challenge, in the DPoP scheme, at both
+/// `/v1` resources and userinfo.
+#[tokio::test]
+async fn test_dpop_scheme_undecodable_token_gets_one_dpop_challenge() {
+    let (app, _state) = test_app().await;
+    for path in ["/api/v1/applications", "/oauth/userinfo"] {
+        let response = http_get_full(
+            &app,
+            path,
+            &[("Authorization", "DPoP not-a-token"), ("DPoP", "unused")],
+        )
+        .await;
+        assert_eq!(response.status, StatusCode::UNAUTHORIZED, "{path}");
+        let challenges: Vec<_> = response
+            .headers
+            .get_all("www-authenticate")
+            .iter()
+            .collect();
+        assert_eq!(challenges.len(), 1, "{path}: {challenges:?}");
+        let challenge = challenges
+            .first()
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        assert!(
+            challenge.starts_with(r#"DPoP error="invalid_token""#),
+            "{path}: {challenge}"
+        );
+    }
+}

@@ -398,6 +398,7 @@ async fn test_dpop_scheme_without_proof_rejected() {
             user_id: &user.id,
             email: &user.email,
             auth_id: Some(&auth_id),
+            binding: TestBinding::Dpop("unused-jkt"),
             ..Default::default()
         },
     )
@@ -880,9 +881,18 @@ async fn test_rfc9449_dpop_rs256_algorithm_rejected() {
 
     let user = create_test_user(&state.store, "dpop-rs256@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let client = create_test_oauth_client(&state.store, &user.id).await;
-
-    let (access_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
+    // DPoP-bound, so userinfo reaches the proof check.
+    let access_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Dpop("unused-jkt"),
+            ..Default::default()
+        },
+    )
+    .await;
 
     use aws_lc_rs::encoding::AsDer;
     use aws_lc_rs::rsa::{KeyPair as RsaKeyPair, KeySize};

@@ -95,16 +95,22 @@ async fn extract_resource_token(
     // 1. Extract token from Authorization header or cookie
     let (token, auth_scheme) = extract_token_from_request(headers, jar)?;
 
+    // A refusal of the token itself answers in the scheme the client used, so
+    // a DPoP client gets a DPoP challenge (RFC 9449 Figure 16) whichever check
+    // refused it.
+    let refuse_token = |description: &str| -> ServiceError {
+        match auth_scheme {
+            AuthScheme::DPoP => DpopChallenge::token(description).into(),
+            AuthScheme::Bearer | AuthScheme::Cookie => {
+                ServiceError::api(StatusCode::UNAUTHORIZED, "invalid_token", description)
+            }
+        }
+    };
+
     // 2. Decode as ES256 at+jwt using the OIDC signing key
     let config = state.config();
-    let decoded =
-        auth::decode_token(&token, &state.oidc_key, &config.base_url).ok_or_else(|| {
-            ServiceError::api(
-                StatusCode::UNAUTHORIZED,
-                "invalid_token",
-                "Invalid or expired access token",
-            )
-        })?;
+    let decoded = auth::decode_token(&token, &state.oidc_key, &config.base_url)
+        .ok_or_else(|| refuse_token("Invalid or expired access token"))?;
 
     let DecodedToken::AccessToken(access_claims) = decoded;
 
@@ -116,9 +122,7 @@ async fn extract_resource_token(
             path = %uri,
             "rejected access token: audience does not cover resource"
         );
-        return Err(ServiceError::api(
-            StatusCode::UNAUTHORIZED,
-            "invalid_token",
+        return Err(refuse_token(
             "Access token audience does not cover this resource",
         ));
     }
@@ -128,13 +132,7 @@ async fn extract_resource_token(
     let token_hash = hash_token(&token);
     let session = auth::ValidatedSession::lookup(state, &token_hash, arrival)
         .await?
-        .ok_or_else(|| {
-            ServiceError::api(
-                StatusCode::UNAUTHORIZED,
-                "invalid_token",
-                "Session not found or revoked",
-            )
-        })?
+        .ok_or_else(|| refuse_token("Session not found or revoked"))?
         .session;
 
     // 4. The scheme the token arrived under must fit what the token is. A

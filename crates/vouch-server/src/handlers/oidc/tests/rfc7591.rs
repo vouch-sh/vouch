@@ -2800,15 +2800,21 @@ async fn test_rfc7591_dpop_bound_token_with_replayed_nonce() {
         "fresh nonce must differ from the replayed nonce"
     );
 
-    // Header: WWW-Authenticate challenge (RFC 6750 §3.1).
-    let www_auth = response
+    // RFC 9449 §7.1: "In such challenges: The scheme name is DPoP." One
+    // failure gets one challenge, not a DPoP one beside a Bearer one.
+    let challenges: Vec<_> = response
         .headers
-        .get("www-authenticate")
+        .get_all("www-authenticate")
+        .iter()
+        .collect();
+    assert_eq!(challenges.len(), 1, "{challenges:?}");
+    let www_auth = challenges
+        .first()
         .and_then(|v| v.to_str().ok())
         .expect("WWW-Authenticate must be present on 401");
     assert!(
-        www_auth.contains("error=\"use_dpop_nonce\""),
-        "WWW-Authenticate must carry error=\"use_dpop_nonce\": {www_auth}"
+        www_auth.starts_with(r#"DPoP error="use_dpop_nonce""#),
+        "WWW-Authenticate must be a DPoP use_dpop_nonce challenge: {www_auth}"
     );
 }
 

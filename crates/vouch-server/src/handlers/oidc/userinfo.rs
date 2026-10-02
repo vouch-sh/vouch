@@ -123,60 +123,61 @@ pub(crate) async fn userinfo(
             .into_response();
     };
 
-    // RFC 9449 Section 7.1: If DPoP scheme is used, validate the DPoP proof at resource endpoint
+    // Under the DPoP scheme every refusal answers with a DPoP challenge (RFC
+    // 9449 Figure 16). The token is checked before the proof, as on `/v1/*`,
+    // so a refused token never records a proof `jti`.
+    let refuse_token = |description: &str| -> Response {
+        if is_dpop_scheme {
+            DpopChallenge::token(description).into_oauth_response()
+        } else {
+            oauth_error(
+                StatusCode::UNAUTHORIZED,
+                OAuthErrorCode::InvalidToken,
+                description,
+            )
+        }
+    };
+
+    // The audience is not checked: the userinfo endpoint receives tokens from
+    // any client (aud = client_id per RFC 9068).
+    let config = state.config();
+    let Some(decoded) = decode_token(&token, &state.oidc_key, &config.base_url) else {
+        return refuse_token("Invalid or expired token");
+    };
+
+    let result = match validate_session_token(&state, &token, arrival).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return refuse_token("Invalid or expired token"),
+        Err(e) => {
+            return oauth_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                OAuthErrorCode::ServerError,
+                &e.to_string(),
+            );
+        }
+    };
+
+    let dpop_cnf = decoded.cnf().filter(|cnf| cnf.jkt.is_some());
     if is_dpop_scheme {
-        let full_uri = format!("{}/oauth/userinfo", state.config().base_url);
-        match dpop::validate_dpop_at_resource(
+        // RFC 9449 §7.1 covers only DPoP-bound tokens and is silent on an
+        // unbound token under the DPoP scheme; it is refused here as on
+        // `/v1/*`, so the scheme always means a checked proof.
+        let Some(cnf) = dpop_cnf else {
+            return DpopChallenge::binding(PossessionError::NotDpopBound).into_oauth_response();
+        };
+        let full_uri = format!("{}/oauth/userinfo", config.base_url);
+        let proof = match dpop::validate_dpop_at_resource(
             &token,
             &headers,
             method.as_str(),
             &full_uri,
             &state.store,
-            state.config().dpop_max_age_seconds,
+            config.dpop_max_age_seconds,
             arrival,
         )
         .await
         {
-            Ok(proof) => {
-                // DPoP proof is valid (signature, ath, jti, nonce all verified).
-                //
-                // RFC 9449 Section 7.1: Verify sender-constrained token binding by
-                // comparing the proof's jkt against the access token's cnf.jkt claim.
-                // This ensures the DPoP proof was made with the same key that was
-                // bound to the token at issuance time.
-                //
-                // RFC 9449 §7.1 covers only DPoP-bound tokens and is silent on
-                // an unbound token under the DPoP scheme; it is refused here as
-                // on `/v1/*`, so the scheme always means a checked proof.
-                // Decode the access token to extract DPoP binding (cnf claim).
-                // Note: audience is NOT validated here because the userinfo endpoint
-                // receives tokens from any client (aud = client_id per RFC 9068).
-                let config = state.config();
-                let decoded = match decode_token(&token, &state.oidc_key, &config.base_url) {
-                    Some(d) => d,
-                    None => {
-                        return oauth_error(
-                            StatusCode::UNAUTHORIZED,
-                            OAuthErrorCode::InvalidToken,
-                            "Invalid or expired token",
-                        );
-                    }
-                };
-                match decoded.cnf() {
-                    Some(cnf) if cnf.jkt.is_some() => {
-                        if !cnf.confirms_dpop(&proof) {
-                            return DpopChallenge::binding(PossessionError::DpopKeyMismatch)
-                                .into_oauth_response();
-                        }
-                    }
-                    Some(_) | None => {
-                        // Token is not DPoP-bound (mTLS-only or no cnf)
-                        // but DPoP scheme was used
-                        return DpopChallenge::binding(PossessionError::NotDpopBound)
-                            .into_oauth_response();
-                    }
-                }
-            }
+            Ok(proof) => proof,
             Err(e) => {
                 return match e.resource_challenge() {
                     Some(challenge) => challenge.into_oauth_response(),
@@ -187,52 +188,26 @@ pub(crate) async fn userinfo(
                     ),
                 };
             }
+        };
+        // RFC 9449 Section 7.1: the proof's key must be the key the token is
+        // bound to.
+        if !cnf.confirms_dpop(&proof) {
+            return DpopChallenge::binding(PossessionError::DpopKeyMismatch).into_oauth_response();
         }
-    }
-
-    // RFC 9449 Section 7.1: If a Bearer scheme is used but the token is
-    // DPoP-bound (cnf.jkt claim), reject it — the client MUST use the DPoP scheme.
-    if !is_dpop_scheme {
-        let config = state.config();
-        if let Some(decoded) = decode_token(&token, &state.oidc_key, &config.base_url)
-            && decoded.cnf().is_some_and(|cnf| cnf.jkt.is_some())
-        {
-            return oauth_error(
-                StatusCode::UNAUTHORIZED,
-                OAuthErrorCode::InvalidToken,
-                "Token is DPoP-bound but was presented with Bearer scheme. Use DPoP scheme instead",
-            );
-        }
+    } else if dpop_cnf.is_some() {
+        // RFC 9449 Section 7.2: a DPoP-bound token sent as Bearer is refused.
+        return oauth_error(
+            StatusCode::UNAUTHORIZED,
+            OAuthErrorCode::InvalidToken,
+            "Token is DPoP-bound but was presented with Bearer scheme. Use DPoP scheme instead",
+        );
     }
 
     // RFC 8705 Section 3: Verify mTLS certificate binding.
-    if let Err(resp) = verify_mtls_binding(
-        &token,
-        &state.oidc_key,
-        &state.config().base_url,
-        &client_cert,
-    ) {
+    if let Err(resp) = verify_mtls_binding(&token, &state.oidc_key, &config.base_url, &client_cert)
+    {
         return *resp;
     }
-
-    // Validate the session token
-    let result = match validate_session_token(&state, &token, arrival).await {
-        Ok(Some(r)) => r,
-        Ok(None) => {
-            return oauth_error(
-                StatusCode::UNAUTHORIZED,
-                OAuthErrorCode::InvalidToken,
-                "Invalid or expired token",
-            );
-        }
-        Err(e) => {
-            return oauth_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                OAuthErrorCode::ServerError,
-                &e.to_string(),
-            );
-        }
-    };
 
     // Determine whether email claims should be returned based on granted scope.
     // `scope: None` means no scope was granted — token exchange produces this

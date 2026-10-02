@@ -185,23 +185,29 @@ fn missing_token_response() -> Response {
 /// Convert a `ServiceError` into an RFC 6750-compliant response for an RFC 7592
 /// registration endpoint.
 ///
-/// This wraps [`ServiceError::into_oauth_response`] and, for 401 responses,
-/// appends a `WWW-Authenticate: Bearer error="invalid_token", ...` header as
-/// required by RFC 6750 Section 3.1 for protected resources.
+/// This wraps [`ServiceError::into_oauth_response`] and, for a 401 that does
+/// not already carry a challenge, appends `WWW-Authenticate: Bearer
+/// error="invalid_token", ...` as RFC 6750 Section 3.1 describes.
 ///
-/// `ServiceError::ApiWithHeaders` (emitted by `extract_resource_token` for
-/// DPoP nonce refresh — RFC 9449 §7.2) carries additional response headers like
-/// `DPoP-Nonce` that `into_oauth_response`'s tuple return type cannot convey.
-/// Those headers are extracted before the error is consumed and reattached to
-/// the built response so the client can retry with a fresh nonce.
+/// `ServiceError::ApiWithHeaders` (a `DpopChallenge` from
+/// `extract_resource_token`) carries its `WWW-Authenticate: DPoP` challenge and
+/// any `DPoP-Nonce`, which `into_oauth_response`'s tuple return type cannot
+/// convey; they are reattached to the built response.
 fn into_registration_response(err: ServiceError) -> Response {
     let extra_headers = match &err {
         ServiceError::ApiWithHeaders { headers, .. } => Some(headers.clone()),
         _ => None,
     };
+    // A DPoP refusal already carries its DPoP challenge; adding a Bearer one
+    // would offer two schemes for one failure.
+    let carries_challenge = extra_headers.as_ref().is_some_and(|headers| {
+        headers
+            .iter()
+            .any(|(name, _)| name == axum::http::header::WWW_AUTHENTICATE)
+    });
 
     let (status, json) = err.into_oauth_response();
-    let mut response = if status == StatusCode::UNAUTHORIZED {
+    let mut response = if status == StatusCode::UNAUTHORIZED && !carries_challenge {
         let description = json
             .error_description
             .clone()
