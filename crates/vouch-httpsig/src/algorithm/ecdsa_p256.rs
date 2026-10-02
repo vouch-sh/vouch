@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-//! `ecdsa-p256-sha256` algorithm (RFC 9421 Section 3.3.3).
+//! `ecdsa-p256-sha256` algorithm (RFC 9421 Section 3.3.4).
 //!
-//! Uses DER-encoded ECDSA signatures (NOT the R||S format used by JWS/JWT).
+//! The signature is the 64-octet concatenation of `r` and `s`, each a
+//! big-endian unsigned integer zero-padded to 32 octets (the same form JWS
+//! ES256 uses), not a DER `ECDSA-Sig-Value`.
 
 use aws_lc_rs::rand::SystemRandom;
 use aws_lc_rs::signature::{
-    ECDSA_P256_SHA256_ASN1, ECDSA_P256_SHA256_ASN1_SIGNING, EcdsaKeyPair, KeyPair,
+    ECDSA_P256_SHA256_FIXED, ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, KeyPair,
     UnparsedPublicKey,
 };
 
@@ -26,7 +28,7 @@ impl EcdsaP256Signer {
     ///
     /// Returns [`HttpSigError::SigningFailed`] if the key cannot be parsed.
     pub fn from_pkcs8(der: &[u8], key_id: &str) -> Result<Self, HttpSigError> {
-        let key_pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, der)
+        let key_pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, der)
             .map_err(|e| HttpSigError::SigningFailed(format!("PKCS#8 parse: {e}")))?;
         Ok(Self {
             key_pair,
@@ -41,7 +43,7 @@ impl EcdsaP256Signer {
     /// Returns [`HttpSigError::SigningFailed`] on key generation failure.
     pub fn generate(key_id: &str) -> Result<Self, HttpSigError> {
         let rng = SystemRandom::new();
-        let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &rng)
+        let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng)
             .map_err(|e| HttpSigError::SigningFailed(format!("key generation: {e}")))?;
         Self::from_pkcs8(pkcs8.as_ref(), key_id)
     }
@@ -110,7 +112,7 @@ impl VerifyingAlgorithm for EcdsaP256Verifier {
     }
 
     fn verify(&self, base: &[u8], signature: &[u8]) -> Result<(), HttpSigError> {
-        let public_key = UnparsedPublicKey::new(&ECDSA_P256_SHA256_ASN1, &self.public_key);
+        let public_key = UnparsedPublicKey::new(&ECDSA_P256_SHA256_FIXED, &self.public_key);
         public_key
             .verify(base, signature)
             .map_err(|e| HttpSigError::VerificationFailed(format!("ECDSA verify: {e}")))
@@ -163,19 +165,37 @@ mod tests {
         assert_eq!(signer.key_id(), "my-key-id");
     }
 
-    // RFC 9421 §3.3.4: the signature is the raw (r, s) pair, not DER.
+    // RFC 9421 §3.3.4: "These encoded values are concatenated into a single
+    // 64-octet array consisting of the encoded value of r followed by the
+    // encoded value of s."
     #[test]
-    fn test_der_signature_format() {
+    fn test_signature_is_64_octet_r_s() {
         let signer = EcdsaP256Signer::generate("k").unwrap();
-        let sig = signer.sign(b"data").unwrap();
-        // DER-encoded ECDSA signature starts with 0x30 (SEQUENCE tag)
-        assert_eq!(sig.first(), Some(&0x30), "should be DER-encoded");
-        // DER ECDSA sigs for P-256 are typically 70-72 bytes (not fixed 64)
-        assert!(
-            sig.len() >= 68 && sig.len() <= 73,
-            "DER sig length: {}",
-            sig.len()
-        );
+        for _ in 0..32 {
+            let sig = signer.sign(b"data").unwrap();
+            assert_eq!(sig.len(), 64, "r || s is always 64 octets");
+        }
+    }
+
+    // RFC 9421 §3.3.4: the verifier input "is a 64-octet array consisting of
+    // the encoded values of r and s concatenated in order", so a DER
+    // ECDSA-Sig-Value over the same base does not verify.
+    #[test]
+    fn test_verify_rejects_der_signature() {
+        let rng = SystemRandom::new();
+        let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng).unwrap();
+        let signer = EcdsaP256Signer::from_pkcs8(pkcs8.as_ref(), "k").unwrap();
+        let der_key = EcdsaKeyPair::from_pkcs8(
+            &aws_lc_rs::signature::ECDSA_P256_SHA256_ASN1_SIGNING,
+            pkcs8.as_ref(),
+        )
+        .unwrap();
+
+        let message = b"signature base";
+        let der_sig = der_key.sign(&rng, message).unwrap();
+        assert_eq!(der_sig.as_ref().first(), Some(&0x30), "DER SEQUENCE tag");
+
+        assert!(signer.verifier().verify(message, der_sig.as_ref()).is_err());
     }
 
     // RFC 9421 §3.3.4: a different key does not verify.
