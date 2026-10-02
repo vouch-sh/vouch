@@ -308,13 +308,7 @@ fn prompt_role_arn(prompt: &str, default: Option<&str>) -> Result<Option<String>
 }
 
 /// Prompt for a required Identity Center application ARN, re-prompting until
-/// it parses with the `application/<ssoins-…>/…` resource shape or cancelled.
-///
-/// The rejection message promises `application/...` as the expected shape; the
-/// validator enforces it, so an SSO *instance* ARN (`instance/<ssoins-…>`) is
-/// rejected here instead of being stored and failing later at the AWS
-/// `CreateTokenWithIAM` boundary with the generic
-/// `err-failed-obtain-identity-center-token` wrapper.
+/// [`is_valid_idc_application_arn`] accepts it or the user cancels.
 fn prompt_idc_application(prompt: &str, default: Option<&str>) -> Result<Option<String>> {
     loop {
         let text = match default {
@@ -1596,40 +1590,19 @@ fn instance_id_from_application_arn(application_arn: &str) -> Option<&str> {
     candidate.starts_with("ssoins-").then_some(candidate)
 }
 
-/// Whether `arn` is a well-formed Identity Center *application* ARN: an SSO
-/// service ARN whose resource segment carries the `application/<ssoins-…>/…`
-/// shape — not an SSO *instance* ARN (`arn:…:sso:::instance/ssoins-…`).
-///
-/// The wizard's rejection message promises `application/...` as the expected
-/// shape; this makes the input check enforce it, so an instance ARN is
-/// rejected at the prompt — and on the non-interactive
-/// `--identity-center-application` flag path via [`store_org`] / [`run`] —
-/// rather than being stored as `AwsIdentityCenter.application_arn` and failing
-/// later at the AWS `CreateTokenWithIAM` boundary with the generic
-/// `err-failed-obtain-identity-center-token` wrapper.
-///
-/// Reuses [`instance_id_from_application_arn`], which already encodes the
-/// correct `application/<ssoins-…>/…` shape requirement, so the validator and
-/// the entitlement pass agree on what an application ARN looks like. The
-/// `application/<ssoins-…>` shape is a property of the SSO/Identity Center
-/// service and is not partition-specific, so application ARNs in non-commercial
-/// partitions (`aws-cn` / `aws-us-gov` / ISO) still pass.
+/// Whether `arn` is an Identity Center application ARN
+/// (`arn:PARTITION:sso::ACCOUNT:application/ssoins-…/apl-…`) rather than an
+/// instance ARN (`arn:PARTITION:sso:::instance/ssoins-…`). Shares
+/// [`instance_id_from_application_arn`] with the entitlement pass so both agree
+/// on the shape.
 fn is_valid_idc_application_arn(arn: &str) -> bool {
     Arn::parse(arn).is_ok_and(|a| a.service == "sso")
         && instance_id_from_application_arn(arn).is_some()
 }
 
 /// Validate the Identity Center application ARN and region and build the
-/// [`AwsIdentityCenter`] to persist, or return the appropriate config error.
-///
-/// Pure (no filesystem, no process environment), so the wizard prompt
-/// ([`prompt_idc_application`]) and [`store_org`] share one validation path
-/// that is unit-testable without touching the process environment —
-/// `std::env` mutation is `unsafe` under edition 2024 and the workspace denies
-/// `unsafe_code`, the same reason [`config_parent_dir`] is factored out of
-/// [`load_or_create_aws_config`]. An invalid application ARN (e.g. an SSO
-/// *instance* ARN) is rejected here before it can be persisted, so neither the
-/// interactive wizard nor the non-interactive flag path stores a bad ARN.
+/// [`AwsIdentityCenter`] that [`store_org`] persists. Pure, so it is testable
+/// without the process environment.
 fn build_idc_identity_center(
     identity_center_application: Option<&str>,
     region: Option<&str>,
@@ -2155,14 +2128,6 @@ mod tests {
     }
 
     // -- is_valid_idc_application_arn --------------------------------------------
-    //
-    // `prompt_idc_application` (wizard) and `build_idc_identity_center` →
-    // `store_org` (flag path) both gate on this validator. The headline bug: an
-    // SSO *instance* ARN (`arn:…:sso:::instance/ssoins-…`) parsed as
-    // `service == "sso"` and was accepted, stored, then surfaced later as a
-    // generic token-acquisition error. The validator reuses
-    // `instance_id_from_application_arn` so the input check enforces the
-    // `application/<ssoins-…>/…` shape its own rejection message promises.
 
     /// A well-formed application ARN in the commercial partition is accepted.
     #[test]
@@ -2172,10 +2137,7 @@ mod tests {
         ));
     }
 
-    /// The headline bug: an SSO *instance* ARN has `service == "sso"` but a
-    /// `instance/<ssoins-…>` resource, not `application/…`, so it MUST be
-    /// rejected — before the fix the service-only check let it through to
-    /// storage.
+    /// An instance ARN has `service == "sso"` but is not an application ARN.
     #[test]
     fn test_is_valid_idc_application_arn_rejects_instance_arn() {
         assert!(!is_valid_idc_application_arn(
@@ -2187,10 +2149,7 @@ mod tests {
         ));
     }
 
-    /// The `application/<ssoins-…>` shape is not partition-specific, so
-    /// application ARNs in non-commercial partitions are accepted too — the
-    /// entitlement pass gates on partition for AAM availability, not for ARN
-    /// shape. See the bug report's "Note on non-commercial partitions".
+    /// The application shape is the same in every partition.
     #[test]
     fn test_is_valid_idc_application_arn_accepts_noncommercial_partitions() {
         assert!(is_valid_idc_application_arn(
@@ -2233,17 +2192,8 @@ mod tests {
     }
 
     // -- build_idc_identity_center ------------------------------------------------
-    //
-    // The shared, pure validation behind `store_org`. A bad application ARN
-    // (e.g. an instance ARN) must be rejected BEFORE `Config::load()` /
-    // `config.save()` is reached, so neither the wizard nor the non-interactive
-    // flag path persists it. Extracted from `store_org` (mirroring
-    // `config_parent_dir`) so the validation is unit-testable without touching
-    // the process environment, which `std::env` mutation being `unsafe` under
-    // edition 2024 denies.
 
-    /// A valid application ARN plus region builds an `AwsIdentityCenter` with
-    /// the ARN and region stored verbatim — the happy path is unchanged.
+    /// A valid application ARN plus region is stored verbatim.
     #[test]
     fn build_idc_identity_center_valid_builds_idc() -> anyhow::Result<()> {
         let idc = build_idc_identity_center(
@@ -2259,11 +2209,8 @@ mod tests {
         Ok(())
     }
 
-    /// The headline bug's persistence vector on the flag path: an SSO
-    /// *instance* ARN supplied via `--identity-center-application …` must be
-    /// rejected by `store_org`'s validation BEFORE being written to vouch org
-    /// config. The error must be a `CliError::ConfigError` (so it maps to the
-    /// same exit code as other config errors).
+    /// An instance ARN given as `--identity-center-application` is a
+    /// `CliError::ConfigError` and is never persisted.
     #[test]
     fn build_idc_identity_center_rejects_instance_arn_with_region() -> anyhow::Result<()> {
         let err = match build_idc_identity_center(
@@ -2286,8 +2233,7 @@ mod tests {
     /// An invalid ARN is rejected even when the region is missing: a malformed
     /// ARN is a more fundamental input error than a missing region, and
     /// rejecting it unconditionally means a bad ARN can never be persisted
-    /// regardless of the other flags. (Before the fix the service-only check
-    /// let an instance ARN through to storage.)
+    /// regardless of the other flags.
     #[test]
     fn build_idc_identity_center_rejects_instance_arn_without_region() -> anyhow::Result<()> {
         let err = match build_idc_identity_center(Some("arn:aws:sso:::instance/ssoins-1"), None) {
