@@ -218,18 +218,31 @@ pub(crate) fn extract_client_credentials<T: ClientAuthFields>(
     })
 }
 
-/// Extract client authentication from a request (RFC 7521 Section 4.2).
+/// Enforce RFC 6749 §2.3 (and RFC 7521 §4.2) mutual exclusion of client
+/// authentication methods within a single request.
 ///
-/// Handles mutual exclusion: a request MUST NOT use more than one client
-/// authentication method (e.g., Basic auth header + client_assertion = error).
+/// A request MUST NOT present more than one client-authentication
+/// mechanism. `client_assertion` MUST NOT travel alongside a Basic header
+/// or a body `client_secret`, and `client_secret_basic`
+/// (`Authorization: Basic` header) MUST NOT be combined with
+/// `client_secret_post` (body `client_secret`). Both rules are
+/// `invalid_request` per RFC 6749 §5.2 ("utilizes more than one mechanism
+/// for authenticating the client").
+///
+/// Shared by [`extract_client_auth`] and the token endpoint's non-JWT
+/// authorization-code path (`resolve_non_jwt_auth`), so the rule is
+/// enforced identically whether or not a request carries a
+/// `client_assertion`. `resolve_non_jwt_auth` otherwise routes through
+/// [`extract_client_credentials`], which short-circuits on a parseable
+/// Basic header and silently drops a co-presented body `client_secret`.
 #[expect(
     clippy::result_large_err,
     reason = "Err is an HTTP Response; size is acceptable in error path"
 )]
-pub(crate) fn extract_client_auth<T: ClientAuthFields>(
+pub(crate) fn enforce_client_auth_mutual_exclusion<T: ClientAuthFields>(
     headers: &HeaderMap,
     params: &T,
-) -> Result<ExtractedClientAuth, Response> {
+) -> Result<(), Response> {
     let has_basic = headers
         .get(header::AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
@@ -238,13 +251,56 @@ pub(crate) fn extract_client_auth<T: ClientAuthFields>(
     let has_client_secret = params.client_secret().is_some();
     let has_client_assertion = params.client_assertion().is_some();
 
-    // RFC 7521 Section 4.2: MUST NOT use more than one method
+    // RFC 7521 Section 4.2: an assertion never travels with another
+    // credential of any kind.
     if has_client_assertion && (has_basic || has_client_secret) {
         return Err(oauth_error_response(
             OAuthErrorCode::InvalidRequest,
             "client_assertion cannot be combined with Basic auth or client_secret",
         ));
     }
+
+    // RFC 6749 §2.3 / §5.2: a request MUST NOT "utilize more than one
+    // mechanism for authenticating the client." `client_secret_basic`
+    // (Authorization: Basic header) and `client_secret_post` (body
+    // `client_secret`) are two distinct delivery mechanisms registered
+    // separately under RFC 7591 §2; presenting both — even when they carry
+    // the same `client_id` — is `invalid_request`. Without this guard the
+    // body secret is silently dropped by `extract_client_credentials`,
+    // which short-circuits on a parseable Basic header.
+    if has_basic && has_client_secret {
+        return Err(oauth_error_response(
+            OAuthErrorCode::InvalidRequest,
+            "must not use more than one client authentication method \
+             (Basic header and client_secret body parameter)",
+        ));
+    }
+
+    Ok(())
+}
+
+/// Extract client authentication from a request (RFC 7521 Section 4.2).
+///
+/// Handles mutual exclusion: a request MUST NOT use more than one client
+/// authentication method (RFC 6749 §2.3 / §5.2), enforced by
+/// [`enforce_client_auth_mutual_exclusion`]. Basic auth header plus
+/// `client_assertion`, any secret delivery combined with `client_assertion`,
+/// or `client_secret_basic` (Basic header) plus `client_secret_post` (body
+/// `client_secret`) are all rejected as `invalid_request`.
+#[expect(
+    clippy::result_large_err,
+    reason = "Err is an HTTP Response; size is acceptable in error path"
+)]
+pub(crate) fn extract_client_auth<T: ClientAuthFields>(
+    headers: &HeaderMap,
+    params: &T,
+) -> Result<ExtractedClientAuth, Response> {
+    enforce_client_auth_mutual_exclusion(headers, params)?;
+
+    let has_basic = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .is_some_and(|h| strip_basic_scheme(h).is_some());
 
     // JWT client assertion
     if let Some(assertion) = params.client_assertion() {
@@ -642,6 +698,51 @@ mod tests {
         assert_eq!(
             actual_auth_method(M::PrivateKeyJwt, false, false, false),
             M::None
+        );
+    }
+
+    /// RFC 6749 §2.3: "The client MUST NOT use more than one authentication
+    /// method in each request." Presenting both an `Authorization: Basic`
+    /// header (`client_secret_basic`) and a `client_secret` body parameter
+    /// (`client_secret_post`) is two mechanisms and must be rejected as
+    /// `invalid_request` (RFC 6749 §5.2).
+    #[test]
+    fn test_basic_and_body_secret_combined_is_rejected() {
+        let headers = basic_header("Basic");
+        let params = BodyParams {
+            client_id: Some("client-1".to_string()),
+            client_secret: Some("s3cret".to_string()),
+        };
+        let result = extract_client_auth(&headers, &params);
+        let err = result.err().expect(
+            "RFC 6749 §2.3 forbids presenting both Basic header and body client_secret; got Ok",
+        );
+        assert_eq!(
+            err.status(),
+            StatusCode::BAD_REQUEST,
+            "Basic + body client_secret must be rejected as invalid_request"
+        );
+    }
+
+    /// RFC 6749 §2.3: even when the body `client_secret` differs from the
+    /// Basic-header secret, the request presents two credentials and MUST
+    /// be rejected — the body secret must not be silently dropped in favor
+    /// of the Basic credential.
+    #[test]
+    fn test_basic_with_conflicting_body_secret_is_rejected() {
+        let headers = basic_header("Basic");
+        let params = BodyParams {
+            client_id: Some("client-1".to_string()),
+            client_secret: Some("wrong".to_string()),
+        };
+        let result = extract_client_auth(&headers, &params);
+        let err = result.err().expect(
+            "RFC 6749 §2.3 forbids presenting both Basic header and a body client_secret; got Ok",
+        );
+        assert_eq!(
+            err.status(),
+            StatusCode::BAD_REQUEST,
+            "Basic + conflicting body client_secret must be rejected as invalid_request"
         );
     }
 }

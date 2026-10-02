@@ -3,8 +3,8 @@
 
 use super::client_auth::{
     ClientAuthFields, ClientAuthPresentation, ExtractedClientAuth, client_auth_proof,
-    complete_client_auth, extract_client_auth, extract_client_credentials,
-    with_client_auth_challenge,
+    complete_client_auth, enforce_client_auth_mutual_exclusion, extract_client_auth,
+    extract_client_credentials, with_client_auth_challenge,
 };
 use crate::AppState;
 use crate::arrival::ArrivalTime;
@@ -573,6 +573,13 @@ async fn resolve_non_jwt_auth(
     client_cert: &OptionalClientCert,
     arrival: ArrivalTime,
 ) -> Result<(OAuthClient, ClientAuthProof), Response> {
+    // RFC 6749 §2.3 / RFC 7521 §4.2: enforce mutual exclusion of client
+    // authentication methods BEFORE `extract_client_credentials`, which
+    // short-circuits on a parseable Basic header and would silently drop a
+    // co-presented body `client_secret`. This path does not go through
+    // `extract_client_auth` (it runs the non-JWT auth itself), so it must
+    // call the shared guard explicitly.
+    enforce_client_auth_mutual_exclusion(headers, auth)?;
     let creds = extract_client_credentials(headers, auth);
     let Some((c, _presentation)) = creds else {
         return Err(ServiceError::oauth(
