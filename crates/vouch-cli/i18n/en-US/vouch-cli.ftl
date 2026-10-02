@@ -1837,6 +1837,7 @@ err-failed-serialize-execcredential = failed to serialize ExecCredential
 err-failed-serialize-form-data = failed to serialize form data
 err-failed-serialize-message = failed to serialize message
 err-failed-serialize-redshift-credentials = failed to serialize Redshift credentials
+err-cached-redshift-credentials-malformed = cached Redshift credentials are missing a field
 err-failed-serialize-request = failed to serialize request
 err-failed-serialize-token-exchange-request = failed to serialize token-exchange request
 err-failed-start-key-registration = failed to start key registration

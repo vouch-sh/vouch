@@ -11,7 +11,7 @@
 //! 3. Output JSON with DbUser, DbPassword, and Expiration to stdout
 
 use anyhow::{Context, Result, bail};
-use secrecy::ExposeSecret;
+use secrecy::{ExposeSecret, SecretString};
 use vouch_cli::tr;
 
 use crate::commands::credential::aws::{
@@ -50,8 +50,24 @@ pub(crate) async fn run(
     region: Option<&str>,
     role: Option<&str>,
 ) -> Result<()> {
-    // Validate inputs
-    match &target {
+    let creds = fetch_cached_redshift_credentials(server, &target, db_name, region, role).await?;
+    let json = serde_json::to_string(&credentials_json(&creds))
+        .context(tr!("err-failed-serialize-redshift-credentials"))?;
+    // Machine-readable JSON output: stays English (consumed by Redshift driver).
+    println!("{json}");
+    Ok(())
+}
+
+/// Fetch Redshift credentials through the credential cache, resolving the
+/// role and region first. Shared by `credential redshift` and `exec`/`env`.
+pub(crate) async fn fetch_cached_redshift_credentials(
+    server: &ServerUrl,
+    target: &RedshiftTarget<'_>,
+    db_name: Option<&str>,
+    region: Option<&str>,
+    role: Option<&str>,
+) -> Result<RedshiftCredentials> {
+    match target {
         RedshiftTarget::Cluster { cluster_id, .. } => {
             validate_sigv4_input(cluster_id, "cluster ID")?;
         }
@@ -69,54 +85,73 @@ pub(crate) async fn run(
     // the cache key ensures agent and non-agent invocations never share a
     // cached entry, which would otherwise hand the agent credentials minted
     // without ReadOnlyAccess / `vouch:AccessType=ai` tags (issue #426).
-    let agent_source = detect_agent_source();
-    let agent_suffix = agent_source
-        .as_deref()
-        .map_or(String::new(), |src| format!(":agent:{src}"));
-
-    let cache_key = match &target {
-        RedshiftTarget::Cluster { cluster_id, .. } => {
-            format!("redshift:{cluster_id}:{role_arn}{agent_suffix}")
-        }
-        RedshiftTarget::Serverless { workgroup } => {
-            format!("redshift-serverless:{workgroup}:{role_arn}{agent_suffix}")
-        }
-    };
-
-    let agent = agent_source;
-    let data = cache::get_or_fetch(&cache_key, "Redshift credentials", || async {
+    let agent = detect_agent_source();
+    let key = cache_key(target, db_name, &region_name, &role_arn, agent.as_deref());
+    let data = cache::get_or_fetch(&key, "Redshift credentials", || async {
         let creds = fetch_redshift_credentials(
             server,
-            &target,
+            target,
             db_name,
             &region_name,
             &role_arn,
             agent.as_deref(),
         )
         .await?;
-
-        let expires_at = creds.expiration.clone();
-        let output = serde_json::json!({
-            "DbUser": creds.db_user,
-            "DbPassword": creds.db_password.expose_secret(),
-            "Expiration": creds.expiration,
-        });
-
-        Ok((output, expires_at))
+        Ok((credentials_json(&creds), creds.expiration.clone()))
     })
     .await?;
 
-    let json =
-        serde_json::to_string(&data).context(tr!("err-failed-serialize-redshift-credentials"))?;
-    // Machine-readable JSON output: stays English (consumed by Redshift driver).
-    println!("{json}");
-    Ok(())
+    let field = |name: &str| {
+        data.get(name)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .context(tr!("err-cached-redshift-credentials-malformed"))
+    };
+    Ok(RedshiftCredentials {
+        db_user: field("DbUser")?,
+        db_password: SecretString::from(field("DbPassword")?),
+        expiration: field("Expiration")?,
+    })
+}
+
+/// The JSON shape `credential redshift` prints and the cache stores.
+fn credentials_json(creds: &RedshiftCredentials) -> serde_json::Value {
+    serde_json::json!({
+        "DbUser": creds.db_user,
+        "DbPassword": creds.db_password.expose_secret(),
+        "Expiration": creds.expiration,
+    })
+}
+
+/// The credential cache key. Every input that changes the minted credentials
+/// is part of it: the target, database, duration, region, role, and agent.
+fn cache_key(
+    target: &RedshiftTarget<'_>,
+    db_name: Option<&str>,
+    region: &str,
+    role_arn: &str,
+    agent: Option<&str>,
+) -> String {
+    let agent_suffix = agent.map_or(String::new(), |src| format!(":agent:{src}"));
+    let db = db_name.unwrap_or_default();
+    match target {
+        RedshiftTarget::Cluster {
+            cluster_id,
+            duration,
+        } => {
+            let duration = duration.unwrap_or(DEFAULT_DURATION_SECONDS);
+            format!("redshift:{cluster_id}:{db}:{duration}:{region}:{role_arn}{agent_suffix}")
+        }
+        RedshiftTarget::Serverless { workgroup } => {
+            format!("redshift-serverless:{workgroup}:{db}:{region}:{role_arn}{agent_suffix}")
+        }
+    }
 }
 
 /// Fetch Redshift credentials through the full Vouch → STS → Redshift flow.
 ///
 /// Routes to the provisioned cluster or serverless API based on `target`.
-pub(crate) async fn fetch_redshift_credentials(
+async fn fetch_redshift_credentials(
     server: &ServerUrl,
     target: &RedshiftTarget<'_>,
     db_name: Option<&str>,
@@ -209,59 +244,66 @@ mod tests {
 
     #[test]
     fn test_output_json_shape() {
-        let output = serde_json::json!({
-            "DbUser": "IAMR:test-role",
-            "DbPassword": "temp-password",
-            "Expiration": "2025-02-27T19:44:51.001Z",
+        let output = credentials_json(&RedshiftCredentials {
+            db_user: "IAMR:test-role".to_string(),
+            db_password: SecretString::from("temp-password"),
+            expiration: "2025-02-27T19:44:51.001Z".to_string(),
         });
 
         let obj = output.as_object().unwrap();
         assert_eq!(obj.len(), 3);
-        assert!(obj.contains_key("DbUser"));
-        assert!(obj.contains_key("DbPassword"));
-        assert!(obj.contains_key("Expiration"));
+        assert_eq!(obj["DbUser"], "IAMR:test-role");
+        assert_eq!(obj["DbPassword"], "temp-password");
+        assert_eq!(obj["Expiration"], "2025-02-27T19:44:51.001Z");
     }
 
-    /// Mirror the cache-key construction in `run()` so we can lock in the
-    /// invariant that agent and non-agent invocations land on different keys.
-    fn build_redshift_cache_key(
-        target: &RedshiftTarget<'_>,
-        role_arn: &str,
-        agent: Option<&str>,
-    ) -> String {
-        let agent_suffix = agent.map_or(String::new(), |src| format!(":agent:{src}"));
-        match target {
-            RedshiftTarget::Cluster { cluster_id, .. } => {
-                format!("redshift:{cluster_id}:{role_arn}{agent_suffix}")
-            }
-            RedshiftTarget::Serverless { workgroup } => {
-                format!("redshift-serverless:{workgroup}:{role_arn}{agent_suffix}")
-            }
-        }
-    }
+    const ROLE: &str = "arn:aws:iam::123456789012:role/MyRole";
+    const CLUSTER: RedshiftTarget<'static> = RedshiftTarget::Cluster {
+        cluster_id: "my-cluster",
+        duration: None,
+    };
+    const SERVERLESS: RedshiftTarget<'static> = RedshiftTarget::Serverless {
+        workgroup: "my-workgroup",
+    };
 
     #[test]
     fn test_cluster_cache_key_format() {
-        let target = RedshiftTarget::Cluster {
-            cluster_id: "my-cluster",
-            duration: None,
-        };
-        let role_arn = "arn:aws:iam::123456789012:role/MyRole";
         assert_eq!(
-            build_redshift_cache_key(&target, role_arn, None),
-            "redshift:my-cluster:arn:aws:iam::123456789012:role/MyRole"
+            cache_key(&CLUSTER, Some("dev"), "us-east-1", ROLE, None),
+            format!("redshift:my-cluster:dev:900:us-east-1:{ROLE}")
         );
     }
 
     #[test]
     fn test_serverless_cache_key_format() {
-        let target = RedshiftTarget::Serverless {
-            workgroup: "my-workgroup",
-        };
-        let role_arn = "arn:aws:iam::123456789012:role/MyRole";
         assert_eq!(
-            build_redshift_cache_key(&target, role_arn, None),
-            "redshift-serverless:my-workgroup:arn:aws:iam::123456789012:role/MyRole"
+            cache_key(&SERVERLESS, None, "us-east-1", ROLE, None),
+            format!("redshift-serverless:my-workgroup::us-east-1:{ROLE}")
+        );
+    }
+
+    /// Credentials minted for one database, duration, or region are not
+    /// reused for another.
+    #[test]
+    fn test_cache_key_differs_by_request_parameters() {
+        let base = cache_key(&CLUSTER, Some("a"), "us-east-1", ROLE, None);
+        assert_ne!(
+            base,
+            cache_key(&CLUSTER, Some("b"), "us-east-1", ROLE, None)
+        );
+        assert_ne!(base, cache_key(&CLUSTER, None, "us-east-1", ROLE, None));
+        assert_ne!(
+            base,
+            cache_key(&CLUSTER, Some("a"), "us-west-2", ROLE, None)
+        );
+        let longer = RedshiftTarget::Cluster {
+            cluster_id: "my-cluster",
+            duration: Some(3600),
+        };
+        assert_ne!(base, cache_key(&longer, Some("a"), "us-east-1", ROLE, None));
+        assert_ne!(
+            cache_key(&SERVERLESS, Some("a"), "us-east-1", ROLE, None),
+            cache_key(&SERVERLESS, Some("b"), "us-east-1", ROLE, None)
         );
     }
 
@@ -270,38 +312,21 @@ mod tests {
     /// `vouch:AccessType=ai` tags; a cache hit on a non-agent entry would
     /// silently hand back full-access credentials.
     #[test]
-    fn test_cluster_cache_key_differs_when_agent_detected() {
-        let target = RedshiftTarget::Cluster {
-            cluster_id: "my-cluster",
-            duration: None,
-        };
-        let role_arn = "arn:aws:iam::123456789012:role/MyRole";
-        let without = build_redshift_cache_key(&target, role_arn, None);
-        let with = build_redshift_cache_key(&target, role_arn, Some("claude-code"));
-        assert_ne!(without, with);
-    }
-
-    #[test]
-    fn test_serverless_cache_key_differs_when_agent_detected() {
-        let target = RedshiftTarget::Serverless {
-            workgroup: "my-workgroup",
-        };
-        let role_arn = "arn:aws:iam::123456789012:role/MyRole";
-        let without = build_redshift_cache_key(&target, role_arn, None);
-        let with = build_redshift_cache_key(&target, role_arn, Some("claude-code"));
-        assert_ne!(without, with);
+    fn test_cache_key_differs_when_agent_detected() {
+        for target in [&CLUSTER, &SERVERLESS] {
+            assert_ne!(
+                cache_key(target, None, "us-east-1", ROLE, None),
+                cache_key(target, None, "us-east-1", ROLE, Some("claude-code"))
+            );
+        }
     }
 
     #[test]
     fn test_cache_key_differs_between_agents() {
-        let target = RedshiftTarget::Cluster {
-            cluster_id: "my-cluster",
-            duration: None,
-        };
-        let role_arn = "arn:aws:iam::123456789012:role/MyRole";
-        let claude = build_redshift_cache_key(&target, role_arn, Some("claude-code"));
-        let cursor = build_redshift_cache_key(&target, role_arn, Some("cursor"));
-        assert_ne!(claude, cursor);
+        assert_ne!(
+            cache_key(&CLUSTER, None, "us-east-1", ROLE, Some("claude-code")),
+            cache_key(&CLUSTER, None, "us-east-1", ROLE, Some("cursor"))
+        );
     }
 
     #[test]
