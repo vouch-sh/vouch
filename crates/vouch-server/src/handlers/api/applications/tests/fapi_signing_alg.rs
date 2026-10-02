@@ -11,6 +11,7 @@
 use crate::crypto::alg::JwsAlgorithm;
 use crate::db;
 use crate::db::TokenEndpointAuthMethod;
+use crate::test_utils::TEST_JWK_RSA_N;
 use crate::test_utils::TestHarness;
 use crate::test_utils::{TestClientSpec, TestJwks, create_test_client};
 use base64::Engine;
@@ -206,4 +207,85 @@ async fn console_upgrade_moves_every_stored_signing_alg_off_rs256() {
         Some(JwsAlgorithm::Es256)
     );
     assert_eq!(client.request_object_signing_alg, Some(JwsAlgorithm::Es256));
+}
+
+// A non-FAPI RFC 7591 client registered with `request_object_signing_alg=RS256`
+// and an inline RSA JWKS can be upgraded to FAPI 2.0 through the console PATCH
+// handler by submitting a fresh ES256-only inline JWKS. The upgrade rewrites
+// the request-object pin RS256→ES256 (`set_fapi_profile`), so the submitted
+// ES256 key matches the post-write pin and must be accepted — the buggy
+// `validate_update_fapi` check judged it against the stored RS256 pin and
+// rejected with `request_object_jwks_algorithm_unsupported`.
+#[tokio::test]
+async fn bug_fapi_upgrade_with_rs256_request_object_pin_accepts_es256_jwks() {
+    let h = TestHarness::new().await;
+    let (_u, _a, token) = h
+        .create_authenticated_user("bug-fapi-reqobj-upg@example.com")
+        .await
+        .unwrap();
+
+    // Step 1: register a non-FAPI client via RFC 7591 DCR with
+    // request_object_signing_alg=RS256 and an inline RSA JWKS.
+    let rsa_jwks = serde_json::json!({
+        "keys": [{
+            "kty": "RSA", "alg": "RS256", "use": "sig",
+            "n": TEST_JWK_RSA_N, "e": "AQAB", "kid": "rsa-1"
+        }]
+    });
+    let reg_body = serde_json::json!({
+        "client_name": "RS256 JAR Client",
+        "application_type": "web",
+        "redirect_uris": ["https://rp.example.com/cb"],
+        "grant_types": ["authorization_code"],
+        "response_types": ["code"],
+        "token_endpoint_auth_method": "client_secret_basic",
+        "request_object_signing_alg": "RS256",
+        "require_signed_request_object": true,
+        "jwks": rsa_jwks,
+    });
+    let resp = h
+        .post_json_authenticated("/oauth/register", &reg_body, &token)
+        .await
+        .unwrap();
+    assert_eq!(resp.status, 201, "DCR failed: {}", resp.body.clone());
+    let reg: serde_json::Value = resp.json().unwrap();
+    let client_id = reg["client_id"].as_str().unwrap().to_string();
+
+    let client = db::get_oauth_client_by_client_id(&h.state.store, &client_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        client.request_object_signing_alg,
+        Some(JwsAlgorithm::Rs256),
+        "setup: DCR client must have RS256 request-object pin"
+    );
+    assert!(
+        !client.is_fapi(),
+        "setup: DCR client must start as non-FAPI"
+    );
+    let app_id = client.id;
+
+    // Step 2: PATCH-upgrade to FAPI 2.0 Security Profile with a fresh
+    // ES256-only inline JWKS — the most direct inline-only upgrade path.
+    let patch = serde_json::json!({
+        "fapi_profile": "fapi2_security",
+        "jwks": jwks_string(),
+    });
+    let resp = h
+        .patch_json_authenticated(&format!("/api/v1/applications/{app_id}"), &patch, &token)
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status, 200, "upgrade failed: {}", resp.body.clone());
+    let client = db::get_oauth_client_by_id(&h.state.store, &app_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(client.is_fapi(), "client must now be FAPI");
+    assert_eq!(
+        client.request_object_signing_alg,
+        Some(JwsAlgorithm::Es256),
+        "the request-object pin must be rewritten RS256→ES256 by the upgrade"
+    );
 }
