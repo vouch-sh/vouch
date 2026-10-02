@@ -49,7 +49,15 @@ pub(crate) struct ConsoleArgs {
     pub via: Option<String>,
 
     /// Identity Center application ARN disambiguator for multi-instance setups.
-    #[arg(long, conflicts_with = "via")]
+    ///
+    /// IdC-only flag: its sole consumer is `resolve_identity_center`, reachable
+    /// only from the IdC path. `requires = "account"` plus
+    /// `conflicts_with_all` against the STS-only flags (`role`, `profile`,
+    /// `via`) rejects any invocation that would route to the STS path, where
+    /// `get_sts_console_creds` never reads this field and the flag would be
+    /// silently dropped. This is the reciprocal of `via`'s
+    /// `conflicts_with_all` guard.
+    #[arg(long, conflicts_with_all = ["role", "profile", "via"], requires = "account")]
     pub idc_application: Option<String>,
 }
 
@@ -263,7 +271,18 @@ pub(crate) async fn run(server: &ServerUrl, args: ConsoleArgs) -> Result<()> {
 )]
 mod tests {
     use super::*;
+    use crate::commands::aws::AwsCommands;
     use crate::commands::credential::aws::test_support::ENV_LOCK;
+    use clap::Parser;
+
+    /// Wrapper to exercise `ConsoleArgs` clap validation through the real
+    /// `AwsCommands` subcommand enum (the `Console` variant), mirroring the
+    /// `setup` parse-time validation tests (#672).
+    #[derive(Parser)]
+    struct TestCli {
+        #[command(subcommand)]
+        cmd: AwsCommands,
+    }
 
     // Agent-block test --------------------------------------------------------
     //
@@ -333,5 +352,129 @@ mod tests {
         assert!(s.contains("Issuer=https%3A%2F%2Fvouch.example.com"));
         assert!(s.contains("Destination=https%3A%2F%2Fconsole.aws.amazon.com%2F"));
         assert!(s.contains("SigninToken=tok-123"));
+    }
+
+    // Parse-time validation tests ---------------------------------------------
+    //
+    // `--idc-application` is an IdC-only flag (sole consumer is
+    // `resolve_identity_center`, reachable only from the IdC path). Without
+    // the `requires = "account"` / `conflicts_with_all` guard, `--idc-application`
+    // parses whenever `--account` is absent, dispatches to the STS path via
+    // `args.account.is_none()`, and is silently dropped by
+    // `get_sts_console_creds` which never reads it. These tests pin the guard
+    // that makes every STS-routed invocation of `--idc-application` fail at
+    // parse time instead.
+
+    /// `--idc-application` alone must be rejected: `requires = "account"`.
+    #[test]
+    fn console_rejects_idc_application_without_account() {
+        let err = TestCli::try_parse_from([
+            "vouch",
+            "console",
+            "--idc-application",
+            "arn:aws:sso:::application/test",
+        ])
+        .err()
+        .unwrap();
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument,
+            "expected missing --account, got: {err}"
+        );
+    }
+
+    /// `--idc-application` with `--role` must be rejected as a conflict: the
+    /// IdC-only flag cannot coexist with the STS-only `--role`. Without the
+    /// `conflicts_with_all` guard, clap silently accepts this combination
+    /// (its `requires = "account"` is voided because `account` conflicts with
+    /// the present `--role`), routing to the STS path and dropping the flag.
+    #[test]
+    fn console_rejects_idc_application_with_role() {
+        let err = TestCli::try_parse_from([
+            "vouch",
+            "console",
+            "--idc-application",
+            "arn:aws:sso:::application/test",
+            "--role",
+            "arn:aws:iam::111111111111:role/dev",
+        ])
+        .err()
+        .unwrap();
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::ArgumentConflict,
+            "expected --idc-application/--role conflict, got: {err}"
+        );
+    }
+
+    /// `--idc-application` with `--profile` must likewise be rejected as a
+    /// conflict: `--profile` is an STS-only flag and cannot carry the IdC-only
+    /// disambiguator.
+    #[test]
+    fn console_rejects_idc_application_with_profile() {
+        let err = TestCli::try_parse_from([
+            "vouch",
+            "console",
+            "--idc-application",
+            "arn:aws:sso:::application/test",
+            "--profile",
+            "my-profile",
+        ])
+        .err()
+        .unwrap();
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::ArgumentConflict,
+            "expected --idc-application/--profile conflict, got: {err}"
+        );
+    }
+
+    /// The full IdC path (`--idc-application` + `--account` + `--permission-set`)
+    /// must still parse and route to the IdC path; the new guard adds no
+    /// regression to the valid IdC invocation.
+    #[test]
+    fn console_allows_idc_application_with_account_and_permission_set() {
+        let cli = TestCli::try_parse_from([
+            "vouch",
+            "console",
+            "--idc-application",
+            "arn:aws:sso:::application/test",
+            "--account",
+            "111111111111",
+            "--permission-set",
+            "AdministratorAccess",
+        ])
+        .unwrap();
+        assert!(
+            matches!(
+                cli.cmd,
+                AwsCommands::Console(ref c) if c.idc_application.as_deref()
+                    == Some("arn:aws:sso:::application/test")
+                    && c.account.as_deref() == Some("111111111111")
+                    && c.permission_set.as_deref() == Some("AdministratorAccess")
+            ),
+            "expected IdC-path Console args with idc-application/account/permission-set"
+        );
+    }
+
+    /// A bare `--role` must still parse (STS path, role auto-resolved); the
+    /// new `conflicts_with_all` against `role` only fires when `--idc-application`
+    /// is also present, so the standard STS invocation is unaffected.
+    #[test]
+    fn console_allows_role_alone_for_sts_path() {
+        let cli = TestCli::try_parse_from([
+            "vouch",
+            "console",
+            "--role",
+            "arn:aws:iam::111111111111:role/dev",
+        ])
+        .unwrap();
+        assert!(
+            matches!(
+                cli.cmd,
+                AwsCommands::Console(ref c) if c.role.is_some() && c.account.is_none()
+            ),
+            "expected STS-path Console args with role set and account unset"
+        );
     }
 }
