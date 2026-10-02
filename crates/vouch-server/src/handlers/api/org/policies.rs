@@ -101,11 +101,7 @@ pub(crate) async fn validate_policy_api(
         return Ok(invalid(Some(policy_text), format!("{e}")));
     }
 
-    // Normalize the caller-supplied posture to match the production
-    // enforcement path: extract_device_posture calls normalize() before
-    // evaluation, so the preview must apply the same transformation or it
-    // can disagree with production for mixed-case CLI-collected values
-    // (e.g. os_distribution: "Ubuntu" vs the documented lowercase "ubuntu").
+    // Enforcement normalizes in `extract_device_posture`; the preview must too.
     let mut test_posture = req
         .test_posture
         .unwrap_or_else(posture::catalog::sample_posture);
@@ -248,14 +244,8 @@ mod tests {
         );
     }
 
-    /// The handler must normalize a caller-supplied `test_posture` before
-    /// evaluating it, mirroring the production enforcement path
-    /// (`extract_device_posture` calls `normalize()`). The CLI collects
-    /// mixed-case string values (e.g. `os_distribution: "Ubuntu"` from
-    /// `/etc/os-release`), while documented example policies use lowercase
-    /// literals (e.g. `context.device.os_distribution == "ubuntu"`). Without
-    /// normalization the playground returns `pass=false` for a posture that
-    /// production allows (`pass=true`).
+    /// The preview normalizes `test_posture` as enforcement does, so a
+    /// mixed-case `os_distribution` matches the lowercase policy literal.
     #[tokio::test]
     async fn test_policy_validate_normalizes_test_posture() {
         let (app, state) = test_app().await;
