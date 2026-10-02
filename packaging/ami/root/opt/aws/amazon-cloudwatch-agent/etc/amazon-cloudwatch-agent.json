@@ -38,20 +38,5 @@
       "InstanceId": "${aws:InstanceId}"
     },
     "force_flush_interval": 60
-  },
-  "logs": {
-    "logs_collected": {
-      "journald": {
-        "collect_list": [
-          {
-            "log_group_name": "/vouch-server/vouch-server",
-            "log_stream_name": "{instance_id}",
-            "priority": "info",
-            "retention_in_days": 3
-          }
-        ]
-      }
-    },
-    "force_flush_interval": 5
   }
 }

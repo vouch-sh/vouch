@@ -147,12 +147,19 @@ Nothing on the image logs to a file. `vouch-server` writes to stdout, systemd ca
 the journal, and the bundled CloudWatch agent streams the whole journal into a single log group,
 `/vouch-server/vouch-server`, with one stream per instance ID and a 3-day retention. Everything
 lands in one place: the server's own output, systemd unit transitions, kernel messages, OOM kills,
-and dm-verity failures. Filter by the `_SYSTEMD_UNIT` value in a Logs Insights query when you want
-one service.
+and dm-verity failures. Each event is the plain text of one journal message, exactly as the
+process wrote it; journal metadata such as the unit name is not shipped.
 
-That single group is also the only record of a server that fails before it starts. If
-`vouch-server.service` cannot exec, systemd's failure message is the only evidence, and it is in
-the journal like everything else.
+Collection starts at the beginning of the boot, not when the agent starts, so that single group is
+also the only record of a server that fails before it starts. If `vouch-server.service` cannot
+exec, systemd's failure message is the only evidence, and it is in the journal like everything
+else.
+
+The pipeline is defined in
+`/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.d/journald.yaml` as OpenTelemetry
+collector configuration, not in the agent's JSON `journald` section. The JSON form tails the
+journal from the moment the agent starts and wraps every entry in a JSON envelope of all journal
+fields, and it has no setting for either.
 
 Two journald settings in `/etc/systemd/journald.conf.d/10-vouch.conf` back this up:
 
