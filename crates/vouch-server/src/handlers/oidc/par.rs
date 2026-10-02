@@ -319,19 +319,6 @@ pub(crate) async fn par(
 
     let dpop_jkt = dpop_proof.as_ref().map(|p| p.jkt.as_str());
 
-    // RFC 9449 Section 10: If both a DPoP proof header and a dpop_jkt request
-    // parameter are present, the JWK thumbprints MUST match.
-    if let (Some(proof_jkt), Some(param_jkt)) = (dpop_jkt, &params.dpop_jkt) {
-        let is_match: bool = proof_jkt.as_bytes().ct_eq(param_jkt.as_bytes()).into();
-        if !is_match {
-            return par_error_response(
-                OAuthErrorCode::InvalidDpopProof,
-                presentation,
-                "dpop_jkt parameter does not match DPoP proof JWK thumbprint",
-            );
-        }
-    }
-
     // Helper: convert ServiceError to PAR error response fields.
     //
     // RFC 9126 Section 2.3: "Since initial processing of the pushed
@@ -353,7 +340,11 @@ pub(crate) async fn par(
 
     // RFC 9101: If request parameter is present, validate the Request Object JWT
     // and extract parameters from it instead of using the form fields.
-    let (validated, jar_response_mode) = if let Some(ref request_jwt) = params.request {
+    // RFC 9101 §6.3: with a Request Object, the authorization server "MUST
+    // only use the parameters in the Request Object, even if the same
+    // parameter is provided in the query parameter." Every parameter, the
+    // response mode included, comes from the one source this branch picks.
+    let (validated, requested_response_mode) = if let Some(ref request_jwt) = params.request {
         let request_params = match validate_request_object(
             &state,
             request_jwt,
@@ -379,8 +370,6 @@ pub(crate) async fn par(
             );
         }
 
-        // Capture response_mode from the JAR claims before consuming request_params.
-        // JAR claims take precedence over the plain form body.
         let jar_rm = request_params.response_mode.clone();
         let v = match validate_authorize_request(request_params) {
             Ok(v) => v,
@@ -416,7 +405,7 @@ pub(crate) async fn par(
                 return par_error_response(error_code, presentation, &description);
             }
         };
-        (v, None)
+        (v, params.response_mode.clone())
     };
 
     // RFC 9700: PKCE required for public clients and Native/SPA types.
@@ -454,10 +443,10 @@ pub(crate) async fn par(
     // The request parameter takes precedence since it's the explicit binding.
     let effective_dpop_jkt = validated.dpop_jkt().or(dpop_jkt);
 
-    // RFC 9449 Section 10: When a dpop_jkt value is present (either from the
-    // JAR claims or the plain form body) AND a DPoP proof header was provided,
-    // the two JWK thumbprints MUST match. The earlier check (above) only covers
-    // params.dpop_jkt; this covers the JAR-sourced dpop_jkt value.
+    // RFC 9449 §10.1: "If both mechanisms are used at the same time, the
+    // authorization server MUST reject the request if the JWK Thumbprint in
+    // dpop_jkt does not match the public key in the DPoP header." The
+    // `dpop_jkt` is the Request Object's when there is one, else the form's.
     if let (Some(requested_jkt), Some(proof)) = (effective_dpop_jkt, &dpop_proof) {
         let is_match: bool = requested_jkt.as_bytes().ct_eq(proof.jkt.as_bytes()).into();
         if !is_match {
@@ -473,11 +462,7 @@ pub(crate) async fn par(
     let max_age_i64 = validated.max_age().and_then(|v| i64::try_from(v).ok());
     let ad_value = validated.authorization_details_value();
     let prompt_str = validated.prompt().map(|p| p.to_space_separated());
-    // JAR claims take precedence over the plain form body for response_mode.
-    let response_mode_str = jar_response_mode
-        .as_deref()
-        .or(params.response_mode.as_deref());
-    let response_mode = match parse_response_mode(response_mode_str) {
+    let response_mode = match parse_response_mode(requested_response_mode.as_deref()) {
         Ok(mode) => mode,
         Err(e) => {
             let (error_code, description) = service_error_codes(&e);
