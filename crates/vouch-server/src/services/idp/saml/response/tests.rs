@@ -622,6 +622,72 @@ fn audience_restriction_conditions_without_restriction_returns_error() {
     );
 }
 
+// SAML Core §2.5.1.4 (errata E46): multiple AudienceRestriction elements form a
+// conjunction (AND) — the SP must be present in EVERY restriction. An assertion
+// whose first restriction matches the SP but whose second excludes it must be
+// rejected.
+#[test]
+fn audience_restriction_multiple_restrictions_second_excludes_sp_should_reject() {
+    let xml = r##"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
+  <saml:Conditions>
+<saml:AudienceRestriction>
+  <saml:Audience>https://vouch.example.com</saml:Audience>
+</saml:AudienceRestriction>
+<saml:AudienceRestriction>
+  <saml:Audience>https://other-sp.example.com</saml:Audience>
+</saml:AudienceRestriction>
+  </saml:Conditions>
+</saml:Assertion>"##;
+    let doc = roxmltree::Document::parse(xml).unwrap();
+    let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
+    let err = validate_audience_restriction(assertion, "https://vouch.example.com").unwrap_err();
+    assert!(
+        matches!(err, ResponseError::AudienceRestrictionViolation { .. }),
+        "Expected AudienceRestrictionViolation per AND semantics, got: {err}"
+    );
+}
+
+// SAML Core §2.5.1.4: when every restriction names the SP, the conjunction is
+// satisfied and the assertion is accepted.
+#[test]
+fn audience_restriction_multiple_restrictions_all_match_should_pass() {
+    let xml = r##"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
+  <saml:Conditions>
+<saml:AudienceRestriction>
+  <saml:Audience>https://vouch.example.com</saml:Audience>
+</saml:AudienceRestriction>
+<saml:AudienceRestriction>
+  <saml:Audience>https://vouch.example.com</saml:Audience>
+</saml:AudienceRestriction>
+  </saml:Conditions>
+</saml:Assertion>"##;
+    let doc = roxmltree::Document::parse(xml).unwrap();
+    let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
+    assert!(validate_audience_restriction(assertion, "https://vouch.example.com").is_ok());
+}
+
+// SAML Core §2.5.1.4: within a single restriction the <Audience> children remain a
+// disjunction (OR) — a non-matching audience alongside the SP in each of two
+// restrictions still satisfies the conjunction.
+#[test]
+fn audience_restriction_multiple_restrictions_or_within_each_preserved() {
+    let xml = r##"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
+  <saml:Conditions>
+<saml:AudienceRestriction>
+  <saml:Audience>https://other-sp.example.com</saml:Audience>
+  <saml:Audience>https://vouch.example.com</saml:Audience>
+</saml:AudienceRestriction>
+<saml:AudienceRestriction>
+  <saml:Audience>https://another-sp.example.com</saml:Audience>
+  <saml:Audience>https://vouch.example.com</saml:Audience>
+</saml:AudienceRestriction>
+  </saml:Conditions>
+</saml:Assertion>"##;
+    let doc = roxmltree::Document::parse(xml).unwrap();
+    let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
+    assert!(validate_audience_restriction(assertion, "https://vouch.example.com").is_ok());
+}
+
 // =========================================================================
 // SubjectConfirmation Method validation tests (SAML Core 2.4.1.2)
 // =========================================================================
@@ -1015,6 +1081,56 @@ pub(crate) fn build_signed_saml_response(
     subject_confirmation_in_response_to: Option<&str>,
     subject_confirmation_not_on_or_after: Option<&str>,
 ) -> String {
+    // Single AudienceRestriction whose sole audience is the SP entity ID — the
+    // common direct-IdP-to-SP SSO shape. Delegates to the multi-restriction
+    // helper so the signing pipeline lives in exactly one place.
+    let restrictions: [Vec<&str>; 1] = [vec![sp_entity_id]];
+    build_signed_saml_response_with_restrictions(
+        key_pair,
+        email,
+        response_id,
+        assertion_id,
+        in_response_to,
+        destination,
+        issuer,
+        &restrictions,
+        not_before,
+        not_on_or_after,
+        subject_confirmation_in_response_to,
+        subject_confirmation_not_on_or_after,
+    )
+}
+
+/// Construct a complete, fully-signed SAML Response XML string whose assertion
+/// carries an arbitrary set of `<saml:AudienceRestriction>` elements.
+///
+/// `restrictions` is a slice of restriction-groups: each inner slice holds the
+/// `<saml:Audience>` values placed inside one `<saml:AudienceRestriction>`
+/// (OR-within-one-restriction); the sequence of groups forms the
+/// AND-across-restrictions required by SAML Core §2.5.1.4. An empty slice
+/// produces a `<Conditions>` with no `<AudienceRestriction>` child.
+///
+/// Uses the same signing pipeline (exc-c14n, RSA-PKCS1-SHA256) and the same
+/// whitespace design as `build_signed_saml_response`, so the signed and
+/// canonicalized forms match for the single-restriction case.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "test helper builds SAML response with all signed-element parameters"
+)]
+pub(crate) fn build_signed_saml_response_with_restrictions(
+    key_pair: &aws_lc_rs::rsa::KeyPair,
+    email: &str,
+    response_id: &str,
+    assertion_id: &str,
+    in_response_to: &str,
+    destination: &str,
+    issuer: &str,
+    restrictions: &[Vec<&str>],
+    not_before: &str,
+    not_on_or_after: &str,
+    subject_confirmation_in_response_to: Option<&str>,
+    subject_confirmation_not_on_or_after: Option<&str>,
+) -> String {
     use aws_lc_rs::digest;
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD as B64;
@@ -1037,6 +1153,20 @@ pub(crate) fn build_signed_saml_response(
         None => String::new(),
     };
 
+    // Build the <saml:AudienceRestriction> children of <Conditions>. Each inner
+    // slice becomes one restriction; the OR-within / AND-across split mirrors
+    // SAML Core §2.5.1.4.
+    let conditions_inner: String = restrictions
+        .iter()
+        .map(|audiences| {
+            let audiences_xml: String = audiences
+                .iter()
+                .map(|aud| format!("  <saml:Audience>{aud}</saml:Audience>\n"))
+                .collect();
+            format!("<saml:AudienceRestriction>\n{audiences_xml}</saml:AudienceRestriction>\n")
+        })
+        .collect();
+
     // Step 1: Build the assertion XML *without* the Signature element.
     // The Signature will be inserted immediately after </saml:Issuer> without
     // adding any extra whitespace text nodes around it (see whitespace design note).
@@ -1050,10 +1180,7 @@ pub(crate) fn build_signed_saml_response(
 </saml:SubjectConfirmation>
   </saml:Subject>
   <saml:Conditions NotBefore="{not_before}" NotOnOrAfter="{not_on_or_after}">
-<saml:AudienceRestriction>
-  <saml:Audience>{sp_entity_id}</saml:Audience>
-</saml:AudienceRestriction>
-  </saml:Conditions>
+{conditions_inner}  </saml:Conditions>
   <saml:AuthnStatement AuthnInstant="{not_before}" SessionNotOnOrAfter="{not_on_or_after}">
 <saml:AuthnContext>
   <saml:AuthnContextClassRef>urn:oasis:names:tc:SAML:2.0:ac:classes:PasswordProtectedTransport</saml:AuthnContextClassRef>
@@ -2517,4 +2644,51 @@ fn validate_saml_response_with_scd_not_on_or_after_passes() {
     )
     .expect("Expected Ok for signed response with present, valid SCD.NotOnOrAfter");
     assert_eq!(assertion.email, "alice@example.com");
+}
+
+/// SAML Core §2.5.1.4 (errata E46): a fully-signed, time-valid,
+/// InResponseTo-bound assertion carrying TWO AudienceRestriction elements — the
+/// first naming this SP, the second excluding it — is rejected end-to-end by
+/// `validate_saml_response`. All upstream checks (signature, Destination,
+/// InResponseTo, Status, Issuer, time bounds, SubjectConfirmation) pass; only
+/// the AND-semantics over multiple AudienceRestriction elements fails.
+#[test]
+fn validate_saml_response_multi_audience_restriction_excluding_sp_rejected() {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as B64;
+
+    let (key_pair, cert_der) = generate_test_key_and_cert();
+    let provider = test_provider(cert_der);
+    let (not_before, not_on_or_after) = valid_time_window();
+
+    let xml = build_signed_saml_response_with_restrictions(
+        &key_pair,
+        "alice@example.com",
+        "_response_multi_ar",
+        "_assertion_multi_ar",
+        "_request_multi_ar",
+        "https://vouch.example.com/saml/acs",
+        "https://idp.example.com",
+        &[
+            vec!["https://vouch.example.com"],
+            vec!["https://other-sp.example.com"],
+        ],
+        &not_before,
+        &not_on_or_after,
+        Some("_request_multi_ar"),
+        Some(&not_on_or_after),
+    );
+
+    let base64_response = B64.encode(xml.as_bytes());
+    let err = validate_saml_response(
+        &base64_response,
+        "_request_multi_ar",
+        &provider,
+        test_arrival(),
+    )
+    .expect_err("Expected rejection for multi-restriction AND failure");
+    assert!(
+        matches!(err, ResponseError::AudienceRestrictionViolation { .. }),
+        "Expected AudienceRestrictionViolation per AND semantics, got: {err}"
+    );
 }

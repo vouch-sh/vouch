@@ -394,9 +394,14 @@ fn validate_issuer(
 
 /// Validate `<saml:AudienceRestriction>` includes the SP entity ID.
 ///
-/// SAML Core Section 2.5.1.4: If `<AudienceRestriction>` is present, the
-/// relying party MUST be a member of the specified audience(s). An assertion
-/// intended for a different SP at the same IdP must be rejected.
+/// SAML Core §2.5.1.4: If `<AudienceRestriction>` is present, the relying
+/// party MUST be a member of the specified audience(s). An assertion intended
+/// for a different SP at the same IdP must be rejected. Multiple
+/// `<AudienceRestriction>` elements are permitted in a single assertion and
+/// each MUST be evaluated independently: the `<Audience>` children within a
+/// single restriction form a disjunction (OR), while multiple restrictions
+/// form a conjunction (AND), so the SP entity ID must appear in **every**
+/// restriction.
 fn validate_audience_restriction(
     assertion: roxmltree::Node<'_, '_>,
     sp_entity_id: &str,
@@ -409,23 +414,33 @@ fn validate_audience_restriction(
             ResponseError::Other("missing Conditions element for audience check".to_string())
         })?;
 
-    // SAML Profiles 4.1.4.3: AudienceRestriction MUST be present and MUST
-    // include the SP entity ID. Reject assertions without AudienceRestriction.
-    let audience_restriction = conditions
+    // SAML Profiles §4.1.4.3: AudienceRestriction MUST be present and MUST
+    // include the SP entity ID. Enumerate every <AudienceRestriction> child
+    // of <Conditions>; at least one is required.
+    let restrictions = conditions
         .children()
-        .find(|n| n.has_tag_name((NS_SAML, "AudienceRestriction")))
-        .ok_or(ResponseError::AudienceRestrictionViolation {
-            sp_entity_id: sp_entity_id.to_string(),
-        })?;
+        .filter(|n| n.has_tag_name((NS_SAML, "AudienceRestriction")));
 
-    // Check if any <saml:Audience> element matches the SP entity ID
-    let has_match = audience_restriction
-        .children()
-        .filter(|n| n.has_tag_name((NS_SAML, "Audience")))
-        .filter_map(c14n::element_text)
-        .any(|text| text.trim() == sp_entity_id);
+    // SAML Core §2.5.1.4: multiple <AudienceRestriction> elements form a
+    // conjunction (AND) — the SP entity ID must appear in EVERY one of them.
+    // Within a single restriction the <Audience> children form a disjunction
+    // (OR): one matching audience suffices for that restriction.
+    let mut saw_restriction = false;
+    for restriction in restrictions {
+        saw_restriction = true;
+        let has_match = restriction
+            .children()
+            .filter(|n| n.has_tag_name((NS_SAML, "Audience")))
+            .filter_map(c14n::element_text)
+            .any(|text| text.trim() == sp_entity_id);
+        if !has_match {
+            return Err(ResponseError::AudienceRestrictionViolation {
+                sp_entity_id: sp_entity_id.to_string(),
+            });
+        }
+    }
 
-    if !has_match {
+    if !saw_restriction {
         return Err(ResponseError::AudienceRestrictionViolation {
             sp_entity_id: sp_entity_id.to_string(),
         });
