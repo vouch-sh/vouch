@@ -617,6 +617,149 @@ async fn jwks_orders_all_three_states_per_algorithm() {
 }
 
 // ============================================================================
+// Stale-org resolve race (issue #648): released orgs must not resurrect
+// rotation keys via a caller-supplied stale `org` snapshot.
+// ============================================================================
+
+/// A release that commits between the caller's org read and `resolve_org_keys`
+/// must not let the resolve resurrect the `Next` key the release just deleted.
+///
+/// The caller (exchange/JWKS) snapshots the org with `subdomain = Some`, a
+/// `release_subdomain` commits on another worker, and the caller then resumes
+/// with the stale org. A correct resolve re-checks the subdomain inside a
+/// transaction and returns `None`; the buggy version trusted the stale
+/// `org.subdomain = Some` and re-staged a `Next` row for the released org.
+#[tokio::test]
+async fn racing_resolve_after_release_does_not_resurrect_next_key() {
+    let (state, org) = setup_org().await;
+    bootstrap(&state, &org).await;
+
+    // Caller (exchange/JWKS) snapshots the org with subdomain = Some.
+    let stale_org = db::get_organization(&state.store, &org.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(stale_org.subdomain.is_some());
+
+    // Release commits between the caller's org read and the resolve's
+    // `list_org_signing_keys`; the admin handler invalidates the cache.
+    db::release_subdomain(&state.store, &org.id).await.unwrap();
+    state.org_keys_cache.invalidate(&org.id);
+
+    // The caller resumes with the stale org. A correct resolve re-checks the
+    // subdomain against the DB inside a transaction and returns `None`;
+    // instead it must not trust the stale `org.subdomain = Some` and bootstrap
+    // keys for a released org.
+    let resolved = resolve_org_keys(&state, Some(&stale_org)).await.unwrap();
+    assert!(
+        resolved.is_none(),
+        "a released org must resolve to no per-org keys"
+    );
+    for alg in [JwsAlgorithm::Es256, JwsAlgorithm::Rs256] {
+        assert!(
+            db::get_org_signing_key(&state.store, &org.id, alg, SigningKeyState::Next)
+                .await
+                .unwrap()
+                .is_none(),
+            "{alg:?} Next key must not be resurrected for a released org"
+        );
+    }
+    // The Current signer survives release — release keeps it for a same-org
+    // reclaim.
+    for alg in [JwsAlgorithm::Es256, JwsAlgorithm::Rs256] {
+        assert!(
+            db::get_org_signing_key(&state.store, &org.id, alg, SigningKeyState::Current)
+                .await
+                .unwrap()
+                .is_some(),
+            "{alg:?} Current key survives release"
+        );
+    }
+}
+
+/// The end-to-end impact of the resurrection fix: after a release that raced a
+/// stale-org resolve, a same-org reclaim re-stages a *fresh* `Next` (fresh
+/// 24h publish window) on first use, so an operator `rotate` is gated by the
+/// publish window — not bypassed by a stale `staged_at` pinned to the release
+/// boundary.
+#[tokio::test]
+async fn racing_resolve_after_release_does_not_defeat_rotate_warmup_gate() {
+    let (state, org) = setup_org().await;
+    bootstrap(&state, &org).await;
+
+    let stale_org = db::get_organization(&state.store, &org.id)
+        .await
+        .unwrap()
+        .unwrap();
+    db::release_subdomain(&state.store, &org.id).await.unwrap();
+    state.org_keys_cache.invalidate(&org.id);
+
+    // Racing resolve with the stale org: a correct resolve returns None and
+    // does NOT resurrect a Next key (verified by the test above). Here the
+    // key assertion is the precondition for the warm-up gate test below.
+    let resolved = resolve_org_keys(&state, Some(&stale_org)).await.unwrap();
+    assert!(resolved.is_none());
+
+    // Same-org reclaim re-enables the issuer host. claim_subdomain touches
+    // neither the signing keys nor the cache, so the first resolve after
+    // reclaim must re-stage a fresh Next with a fresh publish window instead
+    // of trusting a resurrected (stale) staged_at.
+    db::claim_subdomain(&state.store, &org.id, "acme-com")
+        .await
+        .unwrap();
+    let reclaimed_org = db::get_organization(&state.store, &org.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let snap = resolve_org_keys(&state, Some(&reclaimed_org))
+        .await
+        .unwrap()
+        .expect("a reclaimed org resolves to per-org keys");
+
+    // The freshly staged Next is young, so an operator rotate must be gated
+    // for the full 24h publish window. The bug let the resurrected stale
+    // `staged_at` (from the release boundary) defeat this gate and return
+    // `Rotated` — promoting a kid relying parties never saw during the dead
+    // period.
+    let fresh_next = db::get_org_signing_key(
+        &state.store,
+        &org.id,
+        JwsAlgorithm::Es256,
+        SigningKeyState::Next,
+    )
+    .await
+    .unwrap()
+    .expect("fresh next key must be restaged on reclaim's first use");
+    let age = Timestamp::now()
+        .since(fresh_next.data.staged_at.unwrap())
+        .unwrap();
+    assert!(
+        age.get_hours() < 1,
+        "restaged next key must have a fresh publish window"
+    );
+    let outcome = rotate_org_keys(&state, &org.id, ADMIN).await.unwrap();
+    assert!(
+        matches!(outcome, RotateOutcome::NextNotReady { .. }),
+        "expected a fresh publish window after reclaim, got {outcome:?}"
+    );
+    // The signer is unchanged: no rotate happened, so no kid was promoted.
+    assert_eq!(
+        snap.signers.es256.key_id(),
+        db::get_org_signing_key(
+            &state.store,
+            &org.id,
+            JwsAlgorithm::Es256,
+            SigningKeyState::Current,
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .data
+        .kid,
+    );
+}
+
+// ============================================================================
 // State-machine invariants (synchronous model)
 // ============================================================================
 

@@ -7,11 +7,14 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use jiff::Timestamp;
 
-use super::{OrgKeySetSnapshot, build_snapshot, ensure_key};
+use super::{KeyMaterial, OrgKeySetSnapshot, build_snapshot, generate_key_material};
 use crate::AppState;
 use crate::crypto::alg::JwsAlgorithm;
-use crate::db::documents::organization::SigningKeyState;
+use crate::db::documents::organization::{OrgSigningKeyDoc, OrganizationDoc, SigningKeyState};
+use crate::db::pool::{self, CasError};
+use crate::db::store::DocumentStore;
 use crate::db::{self, Organization};
 use crate::error::ServiceError;
 use crate::services::oidc::discovery::{JwksResponse, build_jwks};
@@ -86,7 +89,9 @@ pub async fn resolve_org_keys(
         // Self-heal: release cancels rotation keys in the DB, but the release
         // paths live in the db layer and cannot reach this cache. Purging on
         // the first resolve for a released org keeps a quick reclaim from
-        // resurrecting a pre-release snapshot.
+        // resurrecting a pre-release snapshot. Advisory only — the caller's
+        // `org` snapshot can be stale, so the transactional creation path
+        // below re-checks the subdomain against the DB authoritatively.
         state.org_keys_cache.invalidate(&org.id);
         return Ok(None);
     }
@@ -107,22 +112,41 @@ pub async fn resolve_org_keys(
         docs.iter()
             .any(|d| d.data.alg == alg && d.data.state == state)
     };
-    let mut created = false;
+
+    // Pre-generate material for every missing (alg, state) outside any
+    // transaction. RSA keygen is expensive and must not hold a DB transaction
+    // open while it runs — mirrors `rotate_org_keys`, which generates its
+    // fresh Next material once, before its retry loop, and reuses it on a
+    // retry instead of regenerating.
+    let mut pending: Vec<(JwsAlgorithm, SigningKeyState, KeyMaterial)> = Vec::new();
     for alg in [JwsAlgorithm::Es256, JwsAlgorithm::Rs256] {
         for state in [SigningKeyState::Current, SigningKeyState::Next] {
             if !has(alg, state) {
-                ensure_key(store, &org.id, alg, state).await?;
-                created = true;
+                pending.push((alg, state, generate_key_material(alg).await?));
             }
         }
     }
 
     // Re-read only when we just generated new keys; otherwise build from the
     // already-loaded list (saves the extra round-trip in the common case).
-    let docs = if created {
-        db::list_org_signing_keys(store, &org.id).await?
-    } else {
+    let docs = if pending.is_empty() {
         docs
+    } else {
+        // Guarded creation: re-check the org's subdomain inside a transaction
+        // anchored by a CAS on the org document, so a subdomain release that
+        // races the resolve (between the caller's org read and this point)
+        // cannot resurrect a Next key the release just deleted. Mirrors
+        // `guard_subdomain_claimed_in_tx` in `rotation.rs`.
+        if !ensure_keys_guarded(store, &org.id, &pending).await? {
+            // The org was released (or vanished) between the caller's org
+            // read and the transaction. Do not bootstrap keys for a released
+            // org; purge the cache and fall back to the common platform key,
+            // exactly as the `subdomain.is_none()` fast path does for a
+            // non-stale snapshot.
+            state.org_keys_cache.invalidate(&org.id);
+            return Ok(None);
+        }
+        db::list_org_signing_keys(store, &org.id).await?
     };
 
     let Some(snap) = build_snapshot(&docs)? else {
@@ -131,6 +155,77 @@ pub async fn resolve_org_keys(
     let snap = Arc::new(snap);
     state.org_keys_cache.insert(&org.id, Arc::clone(&snap));
     Ok(Some(snap))
+}
+
+/// Re-check the org's claimed subdomain inside a transaction and create any
+/// missing signing keys the pre-read found, anchoring the subdomain check
+/// with a CAS on the org document so a racing `release_subdomain` — which
+/// also CAS-writes the org doc in the same transaction that deletes the
+/// rotation keys — collides here instead of interleaving with the key
+/// inserts. Mirrors `guard_subdomain_claimed_in_tx` in `rotation.rs`.
+///
+/// Returns `true` when the org was still claimed and the missing keys were
+/// created (or already existed); `false` when the org was released (or
+/// vanished) so the caller skips key creation and falls back to the common
+/// platform key. OCC version conflicts on the org doc retry the whole
+/// transaction via `with_dsql_retry!`.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "stamps a newly created signing key's staged_at, like `ensure_key`"
+)]
+async fn ensure_keys_guarded(
+    store: &DocumentStore,
+    org_id: &str,
+    pending: &[(JwsAlgorithm, SigningKeyState, KeyMaterial)],
+) -> Result<bool, CasError> {
+    let result: Result<bool, CasError> = crate::with_dsql_retry!(async {
+        let mut tx = store.begin().await?;
+        let Some(org_doc) = tx.get::<OrganizationDoc>(org_id).await? else {
+            // The org vanished between the caller's read and this
+            // transaction; there is nothing to bootstrap.
+            return Ok(false);
+        };
+        if org_doc.data.subdomain.is_none() {
+            // A release committed between the caller's read and this
+            // transaction: the org no longer holds its subdomain, so its
+            // Next/Previous keys were deleted by `release_subdomain`. Do not
+            // resurrect them.
+            return Ok(false);
+        }
+        // Bump the org doc version so a concurrent release (which clears the
+        // subdomain and writes the org doc in the same transaction that
+        // deletes the rotation keys) collides with this transaction on every
+        // backend instead of interleaving with the key inserts below. The
+        // data is unchanged; only the version moves, exactly as
+        // `guard_subdomain_claimed_in_tx` does for `rotate_org_keys`.
+        if !tx
+            .compare_and_update(org_id, org_doc.version, &org_doc.data)
+            .await?
+        {
+            return Err(CasError::OccConflict);
+        }
+        for (alg, state, mat) in pending {
+            let id = db::deterministic_org_key_id(org_id, *alg, *state);
+            // A concurrent resolve (or a prior retry of this loop) may already
+            // have created this key; the deterministic id makes the insert
+            // idempotent, and the in-tx re-check skips the redundant write.
+            if tx.get::<OrgSigningKeyDoc>(&id).await?.is_some() {
+                continue;
+            }
+            let doc = OrgSigningKeyDoc {
+                staged_at: (*state == SigningKeyState::Next).then(Timestamp::now),
+                ..mat.doc(org_id, *alg, *state)
+            };
+            match tx.insert_with_id(&id, &doc).await {
+                Ok(_) => {}
+                Err(e) if pool::is_unique_violation(&e) => {}
+                Err(e) => return Err(CasError::Other(e)),
+            }
+        }
+        tx.commit().await?;
+        Ok(true)
+    });
+    result
 }
 
 /// Build the JWKS served on `org`'s issuer-subdomain host: the org's own keys,
