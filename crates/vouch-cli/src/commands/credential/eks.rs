@@ -54,14 +54,9 @@ pub(crate) async fn run(
     // the cache key ensures agent and non-agent invocations never share a
     // cached entry, which would otherwise hand the agent credentials minted
     // without ReadOnlyAccess / `vouch:AccessType=ai` tags (issue #426).
-    let agent_source = detect_agent_source();
-    let agent_suffix = agent_source
-        .as_deref()
-        .map_or(String::new(), |src| format!(":agent:{src}"));
-    let cache_key = format!("eks:{cluster_name}:{role_arn}{agent_suffix}");
-
-    let agent = agent_source;
-    let data = cache::get_or_fetch(&cache_key, "EKS token", || async {
+    let agent = detect_agent_source();
+    let key = cache_key(cluster_name, &region_name, &role_arn, agent.as_deref());
+    let data = cache::get_or_fetch(&key, "EKS token", || async {
         let token = generate_eks_token(
             server,
             cluster_name,
@@ -80,6 +75,13 @@ pub(crate) async fn run(
     // Machine-readable JSON output: stays English (consumed by kubectl/aws eks).
     println!("{json}");
     Ok(())
+}
+
+/// The token cache key. Cluster names are unique only within a region, and
+/// the token is presigned for one region's STS endpoint.
+fn cache_key(cluster_name: &str, region: &str, role_arn: &str, agent: Option<&str>) -> String {
+    let agent_suffix = agent.map_or(String::new(), |src| format!(":agent:{src}"));
+    format!("eks:{cluster_name}:{region}:{role_arn}{agent_suffix}")
 }
 
 /// Generate a `k8s-aws-v1.` bearer token for EKS.
@@ -198,34 +200,40 @@ mod tests {
         assert!(ts.parse::<jiff::Timestamp>().is_ok());
     }
 
-    /// Mirror the cache-key construction in `run()` so we can lock in the
-    /// invariant that agent and non-agent invocations land on different keys.
-    fn build_eks_cache_key(cluster_name: &str, role_arn: &str, agent: Option<&str>) -> String {
-        let agent_suffix = agent.map_or(String::new(), |src| format!(":agent:{src}"));
-        format!("eks:{cluster_name}:{role_arn}{agent_suffix}")
-    }
+    const ROLE: &str = "arn:aws:iam::123456789012:role/MyRole";
 
     #[test]
     fn test_eks_cache_key_format() {
-        let key = build_eks_cache_key("my-cluster", "arn:aws:iam::123456789012:role/MyRole", None);
-        assert_eq!(key, "eks:my-cluster:arn:aws:iam::123456789012:role/MyRole");
+        assert_eq!(
+            cache_key("my-cluster", "us-east-1", ROLE, None),
+            format!("eks:my-cluster:us-east-1:{ROLE}")
+        );
+    }
+
+    /// Same-named clusters in two regions must not share a token.
+    #[test]
+    fn test_eks_cache_key_differs_by_region() {
+        assert_ne!(
+            cache_key("my-cluster", "us-east-1", ROLE, None),
+            cache_key("my-cluster", "us-west-2", ROLE, None)
+        );
     }
 
     /// Agent and non-agent invocations must never share a cached entry —
     /// issue #426.
     #[test]
     fn test_eks_cache_key_differs_when_agent_detected() {
-        let role_arn = "arn:aws:iam::123456789012:role/MyRole";
-        let without = build_eks_cache_key("my-cluster", role_arn, None);
-        let with = build_eks_cache_key("my-cluster", role_arn, Some("claude-code"));
-        assert_ne!(without, with);
+        assert_ne!(
+            cache_key("my-cluster", "us-east-1", ROLE, None),
+            cache_key("my-cluster", "us-east-1", ROLE, Some("claude-code"))
+        );
     }
 
     #[test]
     fn test_eks_cache_key_differs_between_agents() {
-        let role_arn = "arn:aws:iam::123456789012:role/MyRole";
-        let claude = build_eks_cache_key("my-cluster", role_arn, Some("claude-code"));
-        let cursor = build_eks_cache_key("my-cluster", role_arn, Some("cursor"));
-        assert_ne!(claude, cursor);
+        assert_ne!(
+            cache_key("my-cluster", "us-east-1", ROLE, Some("claude-code")),
+            cache_key("my-cluster", "us-east-1", ROLE, Some("cursor"))
+        );
     }
 }

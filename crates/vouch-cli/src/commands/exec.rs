@@ -9,7 +9,6 @@ use vouch_cli::{tr, tr_args};
 use super::CredentialType;
 use super::credential::cache;
 use crate::client::VouchClient;
-use crate::integrations::aws;
 use crate::integrations::aws::codeartifact::CodeArtifactToken;
 use crate::integrations::aws::redshift::RedshiftCredentials;
 use crate::server_url::ServerUrl;
@@ -365,7 +364,7 @@ pub(super) async fn fetch_rds_with_opts(
     })
 }
 
-/// Resolve Redshift target, role, and region, then fetch credentials.
+/// Resolve the Redshift target, then fetch credentials through the cache.
 pub(super) async fn fetch_redshift_with_opts(
     server: &ServerUrl,
     role: Option<&str>,
@@ -376,17 +375,12 @@ pub(super) async fn fetch_redshift_with_opts(
         opts.workgroup,
         opts.duration,
     )?;
-
-    let (role_arn, region_name) = aws::resolve_role_and_region(role, opts.region, None)?;
-
-    let agent_source = super::credential::aws::detect_agent_source();
-    super::credential::redshift::fetch_redshift_credentials(
+    super::credential::redshift::fetch_cached_redshift_credentials(
         server,
         &target,
         opts.db_name,
-        &region_name,
-        &role_arn,
-        agent_source.as_deref(),
+        opts.region,
+        role,
     )
     .await
 }

@@ -27,6 +27,7 @@ use crate::integrations::aws::sigv4::{
     PresignedUrlParams, build_presigned_url, validate_sigv4_input,
 };
 use crate::server_url::ServerUrl;
+use vouch_common::aws::Partition;
 
 /// RDS auth tokens are valid for 15 minutes (900 seconds).
 const RDS_TOKEN_EXPIRES_SECONDS: u64 = 900;
@@ -76,14 +77,16 @@ pub(crate) async fn fetch_rds_token(
     // the cache key ensures agent and non-agent invocations never share a
     // cached entry, which would otherwise hand the agent credentials minted
     // without ReadOnlyAccess / `vouch:AccessType=ai` tags (issue #426).
-    let agent_source = detect_agent_source();
-    let agent_suffix = agent_source
-        .as_deref()
-        .map_or(String::new(), |src| format!(":agent:{src}"));
-    let cache_key = format!("rds:{hostname}:{port}:{username}:{role_arn}{agent_suffix}");
-
-    let agent = agent_source;
-    let data = cache::get_or_fetch(&cache_key, "RDS token", || async {
+    let agent = detect_agent_source();
+    let key = cache_key(
+        hostname,
+        port,
+        username,
+        &region_name,
+        &role_arn,
+        agent.as_deref(),
+    );
+    let data = cache::get_or_fetch(&key, "RDS token", || async {
         let token = generate_rds_token(
             server,
             hostname,
@@ -149,15 +152,47 @@ async fn generate_rds_token(
     Ok(token)
 }
 
-/// Extract the AWS region from an RDS hostname.
+/// Extract the AWS region from an RDS endpoint hostname, or `None` when the
+/// hostname is not an RDS endpoint (a custom DNS name, for example).
 ///
-/// RDS hostnames follow the pattern `{id}.{random}.{region}.rds.amazonaws.com`.
-/// Returns `None` if the hostname doesn't match.
+/// RDS endpoints end in `<region>.rds.<partition DNS suffix>`, except in the
+/// China partition, where they end in `rds.<region>.amazonaws.com.cn`. The
+/// candidate region must select the partition whose suffix ends the hostname.
 fn extract_region_from_rds_hostname(hostname: &str) -> Option<&str> {
-    let parts: Vec<&str> = hostname.split('.').collect();
-    let rds_idx = parts.iter().position(|&p| p == "rds")?;
-    let region_idx = rds_idx.checked_sub(1)?;
-    parts.get(region_idx).copied()
+    hostname.split('.').find(|label| {
+        is_region_shaped(label) && {
+            let partition = Partition::from_region(label);
+            let tail = if partition == Partition::AwsCn {
+                format!(".rds.{label}.{}", partition.dns_suffix())
+            } else {
+                format!(".{label}.rds.{}", partition.dns_suffix())
+            };
+            hostname.ends_with(&tail)
+        }
+    })
+}
+
+/// Whether `label` has the shape of an AWS region code (`us-east-1`).
+fn is_region_shaped(label: &str) -> bool {
+    label.contains('-')
+        && label.ends_with(|c: char| c.is_ascii_digit())
+        && label
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// The token cache key. Every input that changes the presigned token is part
+/// of it, so a request for a different region or role never reuses a token.
+fn cache_key(
+    hostname: &str,
+    port: u16,
+    username: &str,
+    region: &str,
+    role_arn: &str,
+    agent: Option<&str>,
+) -> String {
+    let agent_suffix = agent.map_or(String::new(), |src| format!(":agent:{src}"));
+    format!("rds:{hostname}:{port}:{username}:{region}:{role_arn}{agent_suffix}")
 }
 
 /// Compute cache expiry: 14 minutes from now (1 minute safety margin).
@@ -176,32 +211,23 @@ fn rds_cache_expiry() -> Result<String> {
 mod tests {
     use super::*;
 
-    /// Mirror the cache-key construction in `fetch_rds_token()` so we can lock
-    /// in the invariant that agent and non-agent invocations land on different
-    /// keys.
-    fn build_rds_cache_key(
-        hostname: &str,
-        port: u16,
-        username: &str,
-        role_arn: &str,
-        agent: Option<&str>,
-    ) -> String {
-        let agent_suffix = agent.map_or(String::new(), |src| format!(":agent:{src}"));
-        format!("rds:{hostname}:{port}:{username}:{role_arn}{agent_suffix}")
-    }
+    const ROLE: &str = "arn:aws:iam::123456789012:role/MyRole";
+    const HOST: &str = "mydb.abc123.us-east-1.rds.amazonaws.com";
 
     #[test]
     fn test_rds_cache_key_format() {
-        let key = build_rds_cache_key(
-            "mydb.us-east-1.rds.amazonaws.com",
-            5432,
-            "admin",
-            "arn:aws:iam::123456789012:role/MyRole",
-            None,
-        );
         assert_eq!(
-            key,
-            "rds:mydb.us-east-1.rds.amazonaws.com:5432:admin:arn:aws:iam::123456789012:role/MyRole"
+            cache_key(HOST, 5432, "admin", "us-east-1", ROLE, None),
+            format!("rds:{HOST}:5432:admin:us-east-1:{ROLE}")
+        );
+    }
+
+    /// A token presigned for one region must not be reused for another.
+    #[test]
+    fn test_rds_cache_key_differs_by_region() {
+        assert_ne!(
+            cache_key(HOST, 5432, "admin", "us-east-1", ROLE, None),
+            cache_key(HOST, 5432, "admin", "us-west-2", ROLE, None)
         );
     }
 
@@ -209,40 +235,18 @@ mod tests {
     /// issue #426.
     #[test]
     fn test_rds_cache_key_differs_when_agent_detected() {
-        let without = build_rds_cache_key(
-            "mydb.us-east-1.rds.amazonaws.com",
-            5432,
-            "admin",
-            "arn:aws:iam::123456789012:role/MyRole",
-            None,
+        assert_ne!(
+            cache_key(HOST, 5432, "admin", "us-east-1", ROLE, None),
+            cache_key(HOST, 5432, "admin", "us-east-1", ROLE, Some("claude-code"))
         );
-        let with = build_rds_cache_key(
-            "mydb.us-east-1.rds.amazonaws.com",
-            5432,
-            "admin",
-            "arn:aws:iam::123456789012:role/MyRole",
-            Some("claude-code"),
-        );
-        assert_ne!(without, with);
     }
 
     #[test]
     fn test_rds_cache_key_differs_between_agents() {
-        let claude = build_rds_cache_key(
-            "mydb.us-east-1.rds.amazonaws.com",
-            5432,
-            "admin",
-            "arn:aws:iam::123456789012:role/MyRole",
-            Some("claude-code"),
+        assert_ne!(
+            cache_key(HOST, 5432, "admin", "us-east-1", ROLE, Some("claude-code")),
+            cache_key(HOST, 5432, "admin", "us-east-1", ROLE, Some("cursor"))
         );
-        let cursor = build_rds_cache_key(
-            "mydb.us-east-1.rds.amazonaws.com",
-            5432,
-            "admin",
-            "arn:aws:iam::123456789012:role/MyRole",
-            Some("cursor"),
-        );
-        assert_ne!(claude, cursor);
     }
 
     #[test]
@@ -251,30 +255,64 @@ mod tests {
         assert!(expiry.parse::<jiff::Timestamp>().is_ok());
     }
 
+    /// Endpoint shapes from AWS documentation and the Public Suffix List
+    /// entries AWS registered for RDS (`*.<region>.rds.amazonaws.com`,
+    /// `*.rds.cn-north-1.amazonaws.com.cn`).
     #[test]
-    fn test_extract_region_from_standard_hostname() {
-        let hostname = "vouch-demo-rds.cjcxqsog7mxa.us-east-1.rds.amazonaws.com";
-        assert_eq!(
-            extract_region_from_rds_hostname(hostname),
-            Some("us-east-1")
-        );
+    fn test_extract_region_from_rds_endpoints() {
+        for (hostname, region) in [
+            (
+                "vouch-demo-rds.cjcxqsog7mxa.us-east-1.rds.amazonaws.com",
+                "us-east-1",
+            ),
+            (
+                "mycluster.cluster-ro-cjcxqsog7mxa.eu-west-1.rds.amazonaws.com",
+                "eu-west-1",
+            ),
+            (
+                "myproxy.proxy-cjcxqsog7mxa.ap-southeast-2.rds.amazonaws.com",
+                "ap-southeast-2",
+            ),
+            (
+                "mydb.cjcxqsog7mxa.us-gov-west-1.rds.amazonaws.com",
+                "us-gov-west-1",
+            ),
+            (
+                "btusi123.cmz7kenwo2ye.rds.cn-north-1.amazonaws.com.cn",
+                "cn-north-1",
+            ),
+            ("mydb.abc123.us-iso-east-1.rds.c2s.ic.gov", "us-iso-east-1"),
+            (
+                "mydb.abc123.us-isob-east-1.rds.sc2s.sgov.gov",
+                "us-isob-east-1",
+            ),
+        ] {
+            assert_eq!(
+                extract_region_from_rds_hostname(hostname),
+                Some(region),
+                "{hostname}"
+            );
+        }
     }
 
-    #[test]
-    fn test_extract_region_from_govcloud_hostname() {
-        let hostname = "mydb.abc123.us-gov-west-1.rds.us-gov.amazonaws.com";
-        assert_eq!(
-            extract_region_from_rds_hostname(hostname),
-            Some("us-gov-west-1")
-        );
-    }
-
+    /// A hostname that is not an RDS endpoint yields no region, so the
+    /// profile or environment region applies.
     #[test]
     fn test_extract_region_from_non_rds_hostname() {
-        assert_eq!(extract_region_from_rds_hostname("localhost"), None);
-        assert_eq!(
-            extract_region_from_rds_hostname("my-custom-proxy.example.com"),
-            None
-        );
+        for hostname in [
+            "localhost",
+            "my-custom-proxy.example.com",
+            "db.rds.internal.example.com",
+            "rds.prod.us-east-1.example.com",
+            "mydb.abc123.us-east-1.rds.amazonaws.com.evil.example",
+            "mydb.abc123.cn-north-1.rds.amazonaws.com.cn",
+            "mydb.abc123.rds.us-east-1.amazonaws.com",
+        ] {
+            assert_eq!(
+                extract_region_from_rds_hostname(hostname),
+                None,
+                "{hostname}"
+            );
+        }
     }
 }
