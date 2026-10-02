@@ -469,9 +469,11 @@ fn validate_pinned_role(role_arn: &str) -> Result<(), ServiceError> {
 /// `services::integrations::aws` module docs for the `CreateTokenWithIAM`
 /// note).
 ///
-/// When the DPoP proof includes a `source` custom claim (e.g., "claude-code"),
-/// the issued token includes AI-specific session tags (`vouch:AccessType=AI`,
-/// `vouch:Agent=<agent>`) for CloudTrail differentiation and IAM condition keys.
+/// The DPoP proof's `source` custom claim is NOT used for AI-agent session
+/// tags: the proof is signed by the client's own key, so the claim is
+/// attacker-controllable and cannot be trusted as a server-signed
+/// authorization attribute. `vouch:Agent`/`vouch:AccessType` tags are
+/// therefore never emitted from this endpoint (see `build_aws_session_tags`).
 pub(crate) async fn get_aws_token(
     State(state): State<Arc<AppState>>,
     Query(params): Query<AwsTokenParams>,
@@ -1432,23 +1434,27 @@ mod tests {
     }
 
     // ------------------------------------------------------------------------
-    // End-to-end GitHub token issuance with an AI-attributed DPoP proof.
+    // End-to-end GitHub token issuance with a DPoP proof carrying a `source`
+    // claim.
     //
     // The GitHub handler's success path is otherwise unreachable in a hermetic
     // test: `GitHubApp::get_installation_token` posts to a hardcoded
     // `https://api.github.com/app/installations/{id}/access_tokens`. This test
-    // intercepts that call with `GitHubMock`, so no real egress occurs. It is the direct regression
-    // catcher for the bug: the GitHub audit row's `agent` must carry the DPoP
-    // proof's `source` claim, mirroring the SSH and AWS siblings.
+    // intercepts that call with `GitHubMock`, so no real egress occurs. It is
+    // the direct regression catcher for the source-trust bug: the DPoP proof
+    // is signed by the *client's* own key, so its `source` claim is
+    // attacker-controllable and MUST NOT propagate into the audit row's
+    // `agent` (which previously mirrored `token.dpop_source` verbatim).
     // ------------------------------------------------------------------------
 
     /// End-to-end GitHub token issuance with a DPoP proof carrying
-    /// `source: "claude-code"` must record `agent: "claude-code"` on the
-    /// `github_credential` audit row. Direct regression catcher for the bug:
-    /// the GitHub handler used `..Default::default()` and left `agent` null
-    /// while its SSH and AWS siblings set `agent: token.dpop_source.clone()`.
+    /// `source: "claude-code"` must record `agent: null` on the
+    /// `github_credential` audit row. The DPoP proof is signed by the
+    /// client's own key, so the `source` claim is untrusted;
+    /// `validate_dpop_common` drops it, so `token.dpop_source` is `None`
+    /// and the audit `agent` field is null — not the attacker-chosen string.
     #[tokio::test]
-    async fn test_github_token_audit_agent_attributed_from_dpop_source() {
+    async fn test_github_token_audit_agent_not_propagated_from_dpop_source() {
         // 1. In-process TLS mock for the installation-token endpoint.
         let mock = GitHubMock::spawn(|_| async {
             (
@@ -1539,7 +1545,12 @@ mod tests {
             "DPoP-bound GitHub token request should succeed: {resp_body}"
         );
 
-        // 6. The github_credential audit row must carry the AI agent attribution.
+        // 6. The github_credential audit row must NOT carry the client-supplied
+        //    `source` value. The DPoP proof is signed by the client's own key,
+        //    so `source` is untrusted; `validate_dpop_common` drops it, leaving
+        //    `token.dpop_source` as `None` and the audit `agent` as null. This
+        //    is the security fix — asserting null catches any revert to
+        //    propagating the attacker-controllable claim.
         let events = state
             .audit
             .query_events(&AuditEventFilter {
@@ -1555,16 +1566,110 @@ mod tests {
         );
         let data: serde_json::Value =
             serde_json::from_str(&events[0].data).expect("parse event data");
-        assert_eq!(
-            data["agent"], "claude-code",
-            "GitHub credential audit row must carry the DPoP proof's source claim as agent"
+        assert!(
+            data["agent"].is_null(),
+            "GitHub audit `agent` must be null — the client-supplied DPoP `source` \
+             claim is untrusted and must not propagate: got {:?}",
+            data["agent"],
         );
-        // Sibling fields are unchanged: the fix touches only the audit row's
-        // `agent`, not the issued token or the rest of the audit payload.
+        // Sibling fields are unchanged: the security fix touches only the
+        // audit row's `agent`, not the issued token or the rest of the payload.
         assert_eq!(data["event_type"], "token_issued");
         assert_eq!(data["org_id"], org.id);
         assert_eq!(data["installation_id"], 7);
         assert_eq!(data["success"], true);
+    }
+
+    /// End-to-end AWS token issuance with a DPoP proof carrying a forged
+    /// `source: "breakglass"` claim. The proof is signed by the client's own
+    /// key, so `source` is attacker-controllable; `validate_dpop_common`
+    /// drops it, so the issued RS256 OIDC ID token must NOT contain
+    /// `vouch:Agent` or `vouch:AccessType` in its session tags. This hermetic
+    /// test drives the real handler/middleware/DPoP-validation/tag-emission
+    /// path and catches any revert to propagating `source` into a
+    /// server-signed authorization attribute. The downstream STS
+    /// `AssumeRoleWithWebIdentity` exchange surfaces the ID token's
+    /// `principal_tags` verbatim as `aws:PrincipalTag/*`, so a tag absent
+    /// here cannot grant the gated privilege on the assumed role.
+    #[tokio::test]
+    async fn test_aws_token_dpop_source_does_not_become_vouch_agent_tag() {
+        let state = test_app_state_with_rsa_key().await;
+        let config = state.config();
+        let app = router::build_app(state.clone(), &config).expect("build app");
+
+        let user = create_test_user(&state.store, "forge@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let (key, jwk) = generate_dpop_key_pair();
+        let jkt = JwkThumbprintKey::from_json(&jwk)
+            .expect("test JWK carries the required members")
+            .thumbprint();
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                binding: TestBinding::Dpop(&jkt),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let role_arn = "arn:aws:iam::111122223333:role/breakglass";
+        let path = format!(
+            "/v1/credentials/aws/token?role_arn={}",
+            urlencoding::encode(role_arn)
+        );
+        let resource_uri = format!("{}{}", config.base_url, path);
+        let proof = create_dpop_proof_with_source(
+            &key,
+            &jwk,
+            "GET",
+            &resource_uri,
+            None,
+            Some(&token),
+            Some("breakglass"),
+        );
+
+        let auth = format!("DPoP {token}");
+        let (status, resp_body) =
+            http_get(&app, &path, &[("Authorization", &auth), ("DPoP", &proof)]).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "DPoP-bound AWS token request should succeed: {resp_body}"
+        );
+
+        let resp: serde_json::Value = serde_json::from_str(&resp_body).expect("Valid JSON");
+        let id_token = resp["id_token"].as_str().expect("id_token string");
+        let claims = decode_jwt_payload(id_token);
+        let tags = &claims["https://aws.amazon.com/tags"];
+        assert!(tags.is_object(), "aws tags claim must be present");
+        let principal_tags = &tags["principal_tags"];
+
+        // vouch:Email is always present (unaffected by the fix).
+        assert_eq!(
+            principal_tags["vouch:Email"],
+            serde_json::json!(["forge@example.com"]),
+            "vouch:Email tag must be present and unaffected"
+        );
+
+        // The forged `source` value MUST NOT appear as vouch:Agent or
+        // vouch:AccessType. This is the security boundary: a client-controllable
+        // claim must not become a server-signed, IAM-trusted principal tag.
+        assert!(
+            principal_tags.get("vouch:Agent").is_none(),
+            "vouch:Agent must be absent — the client-supplied `source` claim is \
+             untrusted and must not propagate into a server-signed principal tag: \
+             got {:?}",
+            principal_tags.get("vouch:Agent"),
+        );
+        assert!(
+            principal_tags.get("vouch:AccessType").is_none(),
+            "vouch:AccessType must be absent — it is only emitted alongside a \
+             trusted vouch:Agent, never from a client `source`: got {:?}",
+            principal_tags.get("vouch:AccessType"),
+        );
     }
 
     /// Without an RSA key in AppState the handler fails closed with 501.

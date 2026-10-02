@@ -89,7 +89,10 @@ async fn extract_resource_token(
     client_cert: Option<&ClientCertificate>,
     arrival: ArrivalTime,
 ) -> Result<ValidatedResourceToken, ServiceError> {
-    // Track DPoP source claim (custom claim for MCP attribution)
+    // DPoP `source` claim (custom claim). `validate_dpop_common` drops the
+    // client value — the proof is signed by the client's own key, so the
+    // claim is untrusted. This stays `None` until a server-trusted channel
+    // supplies it; see `ValidatedDpopProof::source`.
     let mut dpop_source: Option<String> = None;
 
     // 1. Extract token from Authorization header or cookie

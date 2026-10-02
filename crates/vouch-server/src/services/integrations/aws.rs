@@ -154,9 +154,21 @@ impl std::fmt::Debug for AwsTokenResult {
 ///
 /// `vouch:Email` is always present (and transitive). `vouch:Domain` is added
 /// when the org domain (`hd`) is known. When an AI coding agent is detected
-/// (`source`, set by the CLI via env-var sniffing and carried tamperproof in
-/// the DPoP proof), `vouch:AccessType=ai` and `vouch:Agent=<source>` are added.
+/// (`source`), `vouch:AccessType=ai` and `vouch:Agent=<source>` are added.
 /// All tags are transitive so they propagate through role chains.
+///
+/// # Security: `source` is server-trusted only
+///
+/// `source` reaches this function via `ValidatedResourceToken::dpop_source`.
+/// The DPoP proof that originally carried the `source` claim is signed by the
+/// *client's* own key, so the proof signature proves only key ownership, not
+/// authorization to assert any particular agent identifier. `validate_dpop_common`
+/// therefore drops the client value; in production `dpop_source` is always
+/// `None`, so the `vouch:Agent`/`vouch:AccessType` branch below is not reached
+/// from a client-asserted claim. Re-enabling it requires a server-trusted
+/// channel (registered client metadata / a server-set session attribute) so
+/// that a server-signed authorization attribute is never sourced from an
+/// attacker-controllable JWT claim.
 fn build_aws_session_tags(
     user_email: &str,
     hd: Option<&str>,

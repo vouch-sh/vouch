@@ -148,9 +148,11 @@ impl<H: HttpClient> VouchClient<H> {
     /// Set the credential source identifier for DPoP proofs.
     ///
     /// When set, this value is included as a `source` custom claim in
-    /// DPoP proof JWTs (RFC 9449 §4.2 allows additional claims). The
-    /// server extracts this to determine credential attribution (e.g.,
-    /// adding AI session tags when an agent is detected).
+    /// DPoP proof JWTs (RFC 9449 §4.2 allows additional claims). Because the
+    /// proof is signed by the *client's* own key, the server does **not**
+    /// trust this claim for authorization attributes (e.g. the `vouch:Agent`
+    /// AWS session tag); it is sent for forward compatibility and currently
+    /// ignored by the server.
     pub(crate) fn set_dpop_source(&mut self, source: &str) {
         self.dpop_source = Some(source.to_string());
     }

@@ -107,8 +107,17 @@ pub struct DpopClaims {
     /// Access token hash (for protected resource requests).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ath: Option<String>,
-    /// Credential source identifier (custom claim, RFC 9449 §4.2 allows additional claims).
-    /// When present, the server adds AI-specific session tags to issued tokens.
+    /// Credential source identifier (custom claim; RFC 9449 §4.2 permits
+    /// additional claims in the proof body).
+    ///
+    /// This claim is signed by the **client's** own DPoP key, so the signature
+    /// only proves key ownership — not authorization to assert any particular
+    /// `source` value. It is parsed here for forward compatibility but is
+    /// **never** propagated into [`ValidatedDpopProof`] by
+    /// [`validate_dpop_common`]: a server-signed authorization attribute
+    /// (e.g. the `vouch:Agent` AWS session tag) must not be sourced from an
+    /// attacker-controllable JWT claim. See the `source` field on
+    /// [`ValidatedDpopProof`] for the security rationale.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
 }
@@ -331,10 +340,11 @@ impl std::error::Error for DpopError {}
 /// that won, and it is moved in here rather than dropped at the end of
 /// validation.
 ///
-/// The carried `jkt`/`jti`/`source` are the validation metadata downstream
-/// consumers need (e.g., binding the access token via `cnf.jkt`, recording
-/// `source` in audit logs). Reading those fields is fine; the sealing only
-/// prevents *fabrication* of a witness without going through validation.
+/// The carried `jkt`/`jti` are the validation metadata downstream
+/// consumers need (e.g., binding the access token via `cnf.jkt`). The
+/// `source` field is always `None` in production — see its doc comment.
+/// Reading those fields is fine; the sealing only prevents *fabrication*
+/// of a witness without going through validation.
 ///
 /// Intentionally not `Clone` — the witness represents a single one-shot
 /// validation. The `#[must_use]` ensures it is bound at the call site.
@@ -347,7 +357,22 @@ pub struct ValidatedDpopProof {
     pub(crate) jkt: String,
     /// Unique identifier from the proof.
     pub(crate) jti: String,
-    /// Credential source identifier from the DPoP proof (custom claim).
+    /// Credential source identifier (custom claim) — **always `None`** from
+    /// the production validation path.
+    ///
+    /// The `source` claim rides in the DPoP proof JWT body, which the
+    /// *client* signs with its own key. The signature therefore proves only
+    /// key ownership, never authorization to assert a particular `source`.
+    /// Propagating it verbatim would let any DPoP-bound user mint a
+    /// server-signed OIDC ID token asserting an arbitrary `vouch:Agent`
+    /// principal tag (CloudTrail misattribution, and conditional privilege
+    /// escalation where an IAM policy gates on `aws:PrincipalTag/vouch:Agent`).
+    ///
+    /// [`validate_dpop_common`] drops the client value here. The field is
+    /// retained (and the downstream `dpop_source` plumbing preserved) so a
+    /// future server-trusted channel — registered client metadata or a
+    /// server-set session attribute — can populate it without touching the
+    /// witness shape; until then it MUST stay `None`.
     pub(crate) source: Option<String>,
     /// The replay guarantee itself: the witness
     /// [`db::check_and_store_dpop_jti_at_second`]
@@ -799,7 +824,17 @@ async fn validate_dpop_common(
     Ok(ValidatedDpopProof {
         jkt,
         jti: claims.jti,
-        source: claims.source,
+        // Drop the client-supplied `source` claim. The DPoP proof is signed by
+        // the *client's* own key, so the signature proves only key ownership,
+        // not authorization to assert any particular source value. Every other
+        // DPoP claim consumed downstream is bound to server state (jti replay,
+        // htm/htu, nonce, ath, jkt); `source` alone was trusted on the client's
+        // say-so and flowed unmodified into a server-signed authorization
+        // attribute (the `vouch:Agent` AWS session tag). Do not propagate it
+        // until a server-trusted channel (registered client metadata / session
+        // attribute) supplies the value — see the field doc on
+        // [`ValidatedDpopProof::source`].
+        source: None,
         _jti_claim: jti_claim,
     })
 }
@@ -1950,13 +1985,16 @@ mod tests {
     /// Build and sign a DPoP proof JWT (RFC 9449 §4.2) for a resource
     /// request, binding `ath` to `access_token`. The `jti` is returned via
     /// the [`ValidatedDpopProof`] from `validate_dpop_at_resource`, so this
-    /// helper does not need to expose it.
+    /// helper does not need to expose it. When `source` is `Some`, the custom
+    /// `source` claim is included in the proof body (the value a malicious
+    /// client would assert).
     fn resource_test_dpop_proof(
         key: &aws_lc_rs::signature::EcdsaKeyPair,
         jwk: &serde_json::Value,
         method: &str,
         uri: &str,
         access_token: &str,
+        source: Option<&str>,
     ) -> String {
         use aws_lc_rs::digest::SHA256;
         use aws_lc_rs::rand::SystemRandom;
@@ -1969,13 +2007,18 @@ mod tests {
 
         let ath =
             URL_SAFE_NO_PAD.encode(aws_lc_rs::digest::digest(&SHA256, access_token.as_bytes()));
-        let claims = serde_json::json!({
+        let mut claims = serde_json::json!({
             "jti": uuid::Uuid::now_v7().to_string(),
             "htm": method,
             "htu": uri,
             "iat": jiff::Timestamp::now().as_second(),
             "ath": ath,
         });
+        if let Some(s) = source
+            && let Some(obj) = claims.as_object_mut()
+        {
+            obj.insert("source".to_string(), serde_json::json!(s));
+        }
         let claims_b64 =
             URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).expect("serialize claims"));
 
@@ -2020,7 +2063,7 @@ mod tests {
         let method = "GET";
         let uri = "https://example.com/api/v1/applications";
 
-        let proof = resource_test_dpop_proof(&key, &jwk, method, uri, access_token);
+        let proof = resource_test_dpop_proof(&key, &jwk, method, uri, access_token, None);
 
         let now_before = jiff::Timestamp::now().as_second();
         let mut headers = HeaderMap::new();
@@ -2097,6 +2140,106 @@ mod tests {
         assert!(
             matches!(replay, Err(DpopError::ReplayDetected)),
             "an immediate replay of the same DPoP proof must be rejected: got {replay:?}"
+        );
+    }
+
+    // ========================================================================
+    // Security regression: the client-supplied `source` claim must NOT
+    // propagate into `ValidatedDpopProof`.
+    //
+    // The DPoP proof is signed by the *client's* own key, so the signature
+    // proves only key ownership — not authorization to assert any particular
+    // `source` value. Every other DPoP claim consumed downstream is bound to
+    // server state (jti, htm/htu, nonce, ath, jkt); `source` alone was trusted
+    // on the client's say-so and flowed unmodified into a server-signed OIDC
+    // ID token as the `vouch:Agent` AWS session tag (an IAM-trusted
+    // `aws:PrincipalTag/*` condition key). This test exercises the real
+    // validation call site (`validate_dpop_at_resource` →
+    // `validate_dpop_common`) with a signed proof carrying an arbitrary
+    // `source: "breakglass"` and asserts the witness's `source` is `None`.
+    // It fails if `validate_dpop_common` ever reverts to `source:
+    // claims.source`, reopening the forgery.
+    // ========================================================================
+    #[tokio::test]
+    async fn test_dpop_source_claim_not_propagated_into_witness() {
+        const CONFIG_MAX_AGE: i64 = 300;
+
+        let store = resource_test_store().await;
+        let (key, jwk) = resource_test_key_pair();
+        let access_token = "dpop-bound-access-token";
+        let method = "GET";
+        let uri = "https://example.com/api/v1/applications";
+
+        // A proof carrying an arbitrary, attacker-chosen `source` value.
+        let proof =
+            resource_test_dpop_proof(&key, &jwk, method, uri, access_token, Some("breakglass"));
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            protocol::HEADER_DPOP,
+            proof.parse().expect("proof is a valid header value"),
+        );
+        let validated = validate_dpop_at_resource(
+            access_token,
+            &headers,
+            method,
+            uri,
+            &store,
+            CONFIG_MAX_AGE,
+            test_arrival(),
+        )
+        .await
+        .expect("a well-formed DPoP proof validates regardless of `source`");
+
+        // The witness must NOT carry the client-supplied `source` value.
+        // This is the security boundary: if the value propagated, a
+        // server-signed authorization attribute (`vouch:Agent`) would be
+        // sourced from an attacker-controllable JWT claim.
+        assert!(
+            validated.source.is_none(),
+            "client-supplied `source` claim must not propagate into \
+             ValidatedDpopProof (it is signed by the client's own key and is \
+             not a trusted authorization attribute); got: {:?}",
+            validated.source,
+        );
+    }
+
+    /// A proof that omits `source` entirely must also yield `source: None`
+    /// (the happy path — the claim is optional and absent for non-AI clients).
+    #[tokio::test]
+    async fn test_dpop_witness_source_none_when_claim_absent() {
+        const CONFIG_MAX_AGE: i64 = 300;
+
+        let store = resource_test_store().await;
+        let (key, jwk) = resource_test_key_pair();
+        let access_token = "dpop-bound-access-token";
+        let method = "GET";
+        let uri = "https://example.com/api/v1/applications";
+
+        let proof = resource_test_dpop_proof(&key, &jwk, method, uri, access_token, None);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            protocol::HEADER_DPOP,
+            proof.parse().expect("proof is a valid header value"),
+        );
+        let validated = validate_dpop_at_resource(
+            access_token,
+            &headers,
+            method,
+            uri,
+            &store,
+            CONFIG_MAX_AGE,
+            test_arrival(),
+        )
+        .await
+        .expect("a well-formed DPoP proof without `source` validates");
+
+        assert!(
+            validated.source.is_none(),
+            "witness `source` must be None when the proof omits the claim; \
+             got: {:?}",
+            validated.source,
         );
     }
 

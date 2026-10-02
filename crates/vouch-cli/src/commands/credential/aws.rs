@@ -393,8 +393,12 @@ async fn fetch_aws_oidc_token(
 ) -> Result<(reqwest::Client, SecretString, String)> {
     let mut client = VouchClient::new(server).await?;
 
-    // Set DPoP source claim for agent attribution (tamperproof via DPoP signature).
-    // Server extracts this to add AI-specific session tags to the JWT.
+    // Set the DPoP `source` custom claim for agent attribution. NOTE: the
+    // proof is signed by the *client's* own key, so the signature proves only
+    // key ownership, not authorization to assert `source`. The server does
+    // NOT trust this claim for session tags anymore (a client-controllable
+    // value must not become a server-signed `vouch:Agent` principal tag). It
+    // is still sent for forward compatibility; the server ignores it.
     if let Some(source) = agent_source {
         tracing::info!("AI agent detected ({source}), applying ReadOnlyAccess session policy");
         client.set_dpop_source(source);
