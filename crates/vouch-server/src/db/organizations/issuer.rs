@@ -160,11 +160,12 @@ pub async fn try_insert_org_signing_key(
 /// RS256 within the given transaction.
 ///
 /// Called by [`release_subdomain`] and [`release_ineligible_subdomain`] when a
-/// subdomain is released: after release the org keeps only its Current key.
-/// The Next key is deleted too — its publish window is void once the JWKS
-/// stops being served, so a same-org reclaim re-stages a fresh Next (with a
-/// fresh warm-up clock) on first use instead of trusting a key whose `kid`
-/// relying parties may have dropped while the host returned 404.
+/// subdomain is released, and by [`claim_subdomain`] when one is claimed:
+/// outside a claim the org keeps only its Current key. A Next key's publish
+/// window is void while the JWKS is not served, so the claim re-stages a fresh
+/// Next (with a fresh warm-up clock) on first use instead of trusting a key
+/// that was staged, or re-staged by a stale resolve or rotation heal, while
+/// the host returned 404.
 ///
 /// Deletion is best-effort per key: a missing row is silently skipped so the
 /// function is safe to call even when no rotation is in progress.
@@ -343,6 +344,10 @@ pub async fn claim_subdomain(
                 }
             }
         }
+
+        // A Next key staged while no JWKS was served for this org has a publish
+        // window that never ran; a claim re-stages a fresh one on first use.
+        cancel_org_rotation_in_tx(&mut tx, org_id).await?;
 
         data.subdomain = Some(label.clone());
         if !tx.compare_and_update(org_id, version, &data).await? {
@@ -1111,6 +1116,7 @@ mod tests {
         let org = create_organization(&store, "acme.com", None, None)
             .await
             .unwrap();
+        claim_subdomain(&store, &org.id, "acme-com").await.unwrap();
 
         // Simulate a staged rotation by inserting Next keys manually.
         for alg in [JwsAlgorithm::Es256, JwsAlgorithm::Rs256] {
@@ -1133,8 +1139,6 @@ mod tests {
                 .is_some()
         );
 
-        // Claim then release a subdomain — release must cancel the rotation.
-        claim_subdomain(&store, &org.id, "acme-com").await.unwrap();
         release_subdomain(&store, &org.id).await.unwrap();
 
         // Both Next keys must be gone.
@@ -1146,6 +1150,47 @@ mod tests {
                     .is_none(),
                 "{alg:?} next key must be deleted on release"
             );
+        }
+    }
+
+    /// A Next key staged while the subdomain is released (a stale resolve or
+    /// rotation heal) never had its JWKS served, so reclaiming drops it.
+    #[tokio::test]
+    async fn reclaim_drops_keys_staged_while_released() {
+        let store = fresh_store().await;
+        let org = create_organization(&store, "acme.com", None, None)
+            .await
+            .unwrap();
+        claim_subdomain(&store, &org.id, "acme-com").await.unwrap();
+        release_subdomain(&store, &org.id).await.unwrap();
+
+        for alg in [JwsAlgorithm::Es256, JwsAlgorithm::Rs256] {
+            for state in [SigningKeyState::Next, SigningKeyState::Previous] {
+                let doc = OrgSigningKeyDoc {
+                    org_id: org.id.clone(),
+                    alg,
+                    kid: format!("{state:?}-{alg}"),
+                    private_pkcs8_der_b64: "AAAA".to_string().into(),
+                    state,
+                    staged_at: Some(jiff::Timestamp::now()),
+                    demoted_at: None,
+                };
+                try_insert_org_signing_key(&store, &doc).await.unwrap();
+            }
+        }
+
+        claim_subdomain(&store, &org.id, "acme-com").await.unwrap();
+
+        for alg in [JwsAlgorithm::Es256, JwsAlgorithm::Rs256] {
+            for state in [SigningKeyState::Next, SigningKeyState::Previous] {
+                assert!(
+                    get_org_signing_key(&store, &org.id, alg, state)
+                        .await
+                        .unwrap()
+                        .is_none(),
+                    "{alg:?} {state:?} key staged while released must not survive the reclaim"
+                );
+            }
         }
     }
 
