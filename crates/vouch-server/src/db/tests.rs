@@ -165,21 +165,11 @@ fn test_org_doc(domain: &str) -> OrganizationDoc {
     }
 }
 
-/// Force `doc_id` to be returned **last** by SQLite when a query has no
-/// `ORDER BY`, by moving its `documents` row and every one of its
-/// `document_indexes` rows to the end of their tables' implicit rowid order
-/// (delete + re-insert verbatim, which hands SQLite fresh, higher rowids).
-///
-/// `find_by_indexes` issues its `SELECT` with no `ORDER BY`, so SQLite returns
-/// rows in whatever order the planner drives the join from — either the
-/// `documents` table or one of the `document_indexes` joins, each scanned in
-/// rowid order. Moving *every* row for this document to the end guarantees it
-/// comes back after every other row regardless of which table drives. Paired
-/// with bumping the smaller-`id` document, this makes `find_by_indexes`
-/// return a deliberately **reverse-`id`** order, so a test can exercise the
-/// indexed-`eq` pagination path against an unsorted DB result — exactly the
-/// case the in-app `sort_by id` (matching `find_paginated_with_count`'s
-/// `ORDER BY id ASC`) exists to tame.
+/// Move `doc_id`'s `documents` row and every `document_indexes` row to the end
+/// of SQLite's rowid order (delete and re-insert verbatim). Without an
+/// `ORDER BY`, SQLite returns rows in the rowid order of whichever table drives
+/// the join, so bumping the smaller id makes an unordered query return
+/// reverse-id order. Tests use it to prove `find_by_indexes` orders by id.
 async fn bump_document_to_end(store: &DocumentStore, doc_id: &str) {
     use crate::db::pool::Pool;
 

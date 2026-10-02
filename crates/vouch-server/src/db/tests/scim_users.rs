@@ -623,25 +623,21 @@ async fn test_update_scim_user_deactivates_non_admin_without_floor() {
 }
 
 // ============================================================================
-// Indexed `eq` pagination determinism — sort by `id` before slicing
+// Indexed `eq` pagination order
 // ============================================================================
 //
-// `find_by_indexes` issues its `SELECT` with no `ORDER BY`, so the row order is
-// unspecified. The indexed `eq` fast path slices that `Vec` with
-// `skip(offset).take(count)`; a sort by `id` (matching
-// `find_paginated_with_count`'s `ORDER BY id ASC`) makes pages stable,
-// non-overlapping, and complete. `userName` is globally unique so it can never
-// match N>1; only `externalId` (`uniqueness: "none"`) can, so these tests use
-// duplicate `externalId` values across distinct emails.
+// `find_by_indexes` orders by id, so the indexed `eq` fast path's
+// `skip(offset).take(count)` returns stable, non-overlapping pages.
+// `bump_document_to_end` makes SQLite's unordered row order reverse-id, so an
+// unordered query would fail these tests.
+// Only `externalId` (`uniqueness: "none"`) can match more than one user.
 
 #[tokio::test]
 async fn test_scim_user_indexed_external_id_eq_pagination_is_id_sorted_across_pages() {
     // Two users share an `externalId` but have distinct emails (RFC-permitted:
     // `externalId` has `uniqueness: none`). User ids are derived from the
     // email via SHA-256 (version-8 UUID), so their `id` order is independent of
-    // insertion order. We bump whichever user has the smaller `id` to the end
-    // so the raw DB result is reverse-`id`; the in-app sort must restore
-    // id-ascending pages.
+    // insertion order. Bumping the smaller id makes unordered rows reverse-id.
     let (store, _audit) = test_db().await;
     seed_test_org(&store).await;
 
@@ -672,7 +668,6 @@ async fn test_scim_user_indexed_external_id_eq_pagination_is_id_sorted_across_pa
     };
     bump_document_to_end(&store, &id_lo).await;
 
-    // Sanity: the raw, unsorted `find_by_indexes` now returns reverse-`id`.
     use crate::db::documents::user::UserDoc;
     let raw: Vec<String> = store
         .find_by_indexes::<UserDoc>(&[("external_id", "ext-dup"), ("org_id", TEST_ORG_ID)])
@@ -683,9 +678,8 @@ async fn test_scim_user_indexed_external_id_eq_pagination_is_id_sorted_across_pa
         .collect();
     assert_eq!(
         raw,
-        vec![id_hi.clone(), id_lo.clone()],
-        "sanity: SQLite must return reverse-id order after the rowid bump; \
-         otherwise this test does not exercise the defect"
+        vec![id_lo.clone(), id_hi.clone()],
+        "find_by_indexes must return id-ascending order"
     );
 
     let (page1, total) = list_scim_users(

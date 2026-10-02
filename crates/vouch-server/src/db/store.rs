@@ -1138,7 +1138,7 @@ impl DocumentStore {
             .transpose()
     }
 
-    /// Find all documents matching an indexed field.
+    /// Find all documents matching an indexed field, ordered by id.
     ///
     /// # Errors
     ///
@@ -1165,6 +1165,7 @@ impl DocumentStore {
             .and_where(Expr::col((Documents::Table, Documents::DocType)).eq(T::DOC_TYPE))
             .and_where(Expr::col((DocumentIndexes::Table, DocumentIndexes::IndexField)).eq(field))
             .and_where(index_cond)
+            .order_by((Documents::Table, Documents::Id), Order::Asc)
             .to_owned();
 
         let rows: Vec<RawDocumentRow> = crate::db_fetch_all!(&self.pool, stmt, RawDocumentRow)?;
@@ -1237,7 +1238,8 @@ impl DocumentStore {
     ///
     /// Each criterion is pushed into SQL as an INNER JOIN on `document_indexes`,
     /// one join per criterion. This avoids loading all candidates for the first
-    /// criterion into memory when many rows match.
+    /// criterion into memory when many rows match. Results are ordered by id so
+    /// callers that page through them see stable, non-overlapping pages.
     ///
     /// # Errors
     ///
@@ -1272,6 +1274,8 @@ impl DocumentStore {
                 join_cond,
             );
         }
+
+        query.order_by((Documents::Table, Documents::Id), Order::Asc);
 
         let stmt = query.to_owned();
         let rows: Vec<RawDocumentRow> = crate::db_fetch_all!(&self.pool, stmt, RawDocumentRow)?;

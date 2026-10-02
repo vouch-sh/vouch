@@ -842,24 +842,19 @@ async fn test_scim_group_display_name_index_is_lowercased() {
 }
 
 // ============================================================================
-// Indexed `eq` pagination determinism — sort by `id` before slicing
+// Indexed `eq` pagination order
 // ============================================================================
 //
-// `find_by_indexes` issues its `SELECT` with no `ORDER BY`, so the row order is
-// unspecified and may differ across executions (SQL standard). The indexed
-// `eq` fast path slices that `Vec` with `skip(offset).take(count)`; without a
-// sort it paginates an unspecified order, which can duplicate a resource across
-// pages and omit another. These tests force SQLite to return rows in a
-// deliberately non-`id` (reverse-`id`) order via `bump_document_to_end`, then
-// assert pagination is stable, `id`-ascending (matching `find_paginated_with_count`'s
-// `ORDER BY id ASC`), non-overlapping, and complete.
+// `find_by_indexes` orders by id, so the indexed `eq` fast path's
+// `skip(offset).take(count)` returns stable, non-overlapping pages.
+// `bump_document_to_end` makes SQLite's unordered row order reverse-id, so an
+// unordered query would fail these tests.
 
 #[tokio::test]
 async fn test_scim_group_indexed_display_name_eq_pagination_is_id_sorted_across_pages() {
     // Two groups share a `displayName` (`uniqueness: "none"`), so the indexed
-    // `eq` path matches N>1. We bump the smaller-`id` group to the end so the
-    // raw DB result is reverse-`id`; the in-app `sort_by id` must restore
-    // id-ascending pages.
+    // `eq` path matches N>1. Bumping the smaller id makes unordered rows
+    // reverse-id.
     let (store, _audit) = test_db().await;
     seed_test_org(&store).await;
 
@@ -876,9 +871,6 @@ async fn test_scim_group_indexed_display_name_eq_pagination_is_id_sorted_across_
     };
     bump_document_to_end(&store, &id_lo).await;
 
-    // Sanity: the raw, unsorted `find_by_indexes` now returns reverse-`id`
-    // order. This proves the test exercises an unsorted DB result — the
-    // precondition of the defect — instead of coincidentally-`id`-sorted rows.
     use crate::db::documents::scim::ScimGroupDoc;
     let raw: Vec<String> = store
         .find_by_indexes::<ScimGroupDoc>(&[
@@ -892,9 +884,8 @@ async fn test_scim_group_indexed_display_name_eq_pagination_is_id_sorted_across_
         .collect();
     assert_eq!(
         raw,
-        vec![id_hi.clone(), id_lo.clone()],
-        "sanity: SQLite must return reverse-id order after the rowid bump; \
-         otherwise this test does not exercise the defect"
+        vec![id_lo.clone(), id_hi.clone()],
+        "find_by_indexes must return id-ascending order"
     );
 
     let (page1, total) = list_scim_groups(
@@ -937,4 +928,50 @@ async fn test_scim_group_indexed_display_name_eq_pagination_is_id_sorted_across_
         page1[0].id < page2[0].id,
         "page 1 must precede page 2 in id order"
     );
+}
+
+// Groups created in the same second tie on `created_at`; `find_all` orders by
+// id, so the stable newest-first sort breaks the tie by id.
+#[tokio::test]
+async fn test_scim_group_non_indexed_filter_breaks_created_at_ties_by_id() {
+    let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
+
+    let g1 = create_scim_group(&store, TEST_ORG_ID, "team-alpha", None, &[])
+        .await
+        .expect("create g1");
+    let g2 = create_scim_group(&store, TEST_ORG_ID, "team-beta", None, &[])
+        .await
+        .expect("create g2");
+    let (id_lo, id_hi) = if g1.id < g2.id {
+        (g1.id.clone(), g2.id.clone())
+    } else {
+        (g2.id.clone(), g1.id.clone())
+    };
+    use crate::db::pool::Pool;
+    let Pool::Sqlite(pool) = store.pool() else {
+        panic!("in-memory test DB must be SQLite");
+    };
+    sqlx::query(
+        "UPDATE documents SET created_at = (SELECT created_at FROM documents WHERE id = ?) \
+         WHERE id = ?",
+    )
+    .bind(&id_lo)
+    .bind(&id_hi)
+    .execute(pool)
+    .await
+    .expect("tie created_at");
+    bump_document_to_end(&store, &id_lo).await;
+
+    let filter = group_filter(r#"displayName sw "team-""#);
+    let (page1, total) = list_scim_groups(&store, TEST_ORG_ID, Some(&filter), 1, 1)
+        .await
+        .expect("page 1");
+    let (page2, _) = list_scim_groups(&store, TEST_ORG_ID, Some(&filter), 2, 1)
+        .await
+        .expect("page 2");
+
+    assert_eq!(total, 2);
+    let got: Vec<String> = page1.iter().chain(&page2).map(|g| g.id.clone()).collect();
+    assert_eq!(got, vec![id_lo, id_hi], "tied groups page in id order");
 }
