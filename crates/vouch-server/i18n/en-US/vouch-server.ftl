@@ -66,6 +66,7 @@ apps-error-org-scope-required = Organization scope requires organization members
 apps-error-create-failed = Failed to create application.
 apps-error-app-not-found = Application not found.
 apps-error-load-application = Failed to load application.
+apps-error-load-secret = Failed to load secret.
 apps-error-update-failed = Failed to update application.
 apps-error-delete-failed = Failed to delete application.
 apps-error-no-client-secrets = This client does not use client secrets.

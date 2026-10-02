@@ -485,13 +485,27 @@ pub(crate) async fn delete_application_form(
 
     let user_id = auth.user_id.as_deref().unwrap_or_default();
 
-    // Verify ownership
+    // Verify ownership. The read is split into an exhaustive
+    // `Ok(Some(_)) | Ok(None) | Err(e)` match — not a `_ =>` catch-all — so a
+    // transient backend failure is logged and surfaced as the "failed to
+    // load" error page rather than mislabeled as "not found" with no
+    // diagnostics. Mirrors `detail_application_page` and the JSON-API
+    // `load_owned_client`; see commit ccc7a5ec for the catch-all this
+    // replaces.
     let client = match db::get_oauth_client_by_id(&state.store, &app_id).await {
         Ok(Some(c)) if c.user_id.as_deref() == Some(user_id) => c,
-        _ => {
+        Ok(Some(_)) | Ok(None) => {
             return error_page(
                 Tr::new("apps-error-title-not-found"),
                 Tr::new("apps-error-app-not-found"),
+                "/applications",
+            );
+        }
+        Err(e) => {
+            tracing::error!("Failed to get application: {e}");
+            return error_page(
+                Tr::new("apps-error-title-error"),
+                Tr::new("apps-error-load-application"),
                 "/applications",
             );
         }
@@ -579,12 +593,24 @@ pub(crate) async fn add_secret_form(
 
     let user_id = auth.user_id.as_deref().unwrap_or_default();
 
+    // Ownership read before minting. Exhaustive match (not `_ =>`) so a
+    // transient backend error is logged and rendered as the "failed to load"
+    // error page instead of being silently folded into "not found". Mirrors
+    // `detail_application_page` and the JSON-API `load_owned_client`.
     let client = match db::get_oauth_client_by_id(&state.store, &app_id).await {
         Ok(Some(c)) if c.user_id.as_deref() == Some(user_id) => c,
-        _ => {
+        Ok(Some(_)) | Ok(None) => {
             return error_page(
                 Tr::new("apps-error-title-not-found"),
                 Tr::new("apps-error-app-not-found"),
+                "/applications",
+            );
+        }
+        Err(e) => {
+            tracing::error!("Failed to get application: {e}");
+            return error_page(
+                Tr::new("apps-error-title-error"),
+                Tr::new("apps-error-load-application"),
                 "/applications",
             );
         }
@@ -680,23 +706,48 @@ pub(crate) async fn delete_secret_form(
 
     let user_id = auth.user_id.as_deref().unwrap_or_default();
 
+    // Ownership read before revoke. Exhaustive match (not `_ =>`) so a
+    // transient backend error on the client fetch is logged and rendered as
+    // the "failed to load" error page rather than silently folded into
+    // "not found". Mirrors `detail_application_page` and the JSON-API
+    // `load_owned_client`.
     let client = match db::get_oauth_client_by_id(&state.store, &app_id).await {
         Ok(Some(c)) if c.user_id.as_deref() == Some(user_id) => c,
-        _ => {
+        Ok(Some(_)) | Ok(None) => {
             return error_page(
                 Tr::new("apps-error-title-not-found"),
                 Tr::new("apps-error-app-not-found"),
                 "/applications",
             );
         }
+        Err(e) => {
+            tracing::error!("Failed to get application: {e}");
+            return error_page(
+                Tr::new("apps-error-title-error"),
+                Tr::new("apps-error-load-application"),
+                "/applications",
+            );
+        }
     };
 
+    // Secret fetch is also an exhaustive match (not `_ =>`): a transient
+    // backend error on this read is logged and rendered as the "failed to
+    // load" error page, not mislabeled as "secret not found". Mirrors the
+    // JSON-API `delete_secret_api`'s `Err` arm.
     let secret = match db::get_oauth_client_secret_by_id(&state.store, &secret_id).await {
         Ok(Some(s)) if s.oauth_client_id == app_id => s,
-        _ => {
+        Ok(Some(_)) | Ok(None) => {
             return error_page(
                 Tr::new("apps-error-title-not-found"),
                 Tr::new("apps-error-secret-not-found"),
+                format!("/applications/{app_id}"),
+            );
+        }
+        Err(e) => {
+            tracing::error!("Failed to get secret: {e}");
+            return error_page(
+                Tr::new("apps-error-title-error"),
+                Tr::new("apps-error-load-secret"),
                 format!("/applications/{app_id}"),
             );
         }
@@ -796,7 +847,9 @@ mod tests {
     use axum::http::StatusCode;
 
     use crate::db::documents::session::SessionDoc;
-    use crate::db::store::GetUserByIdTestHook;
+    use crate::db::store::{
+        GetOAuthClientByIdTestHook, GetOAuthClientSecretByIdTestHook, GetUserByIdTestHook,
+    };
     use crate::db::{
         self, AccessScope, AuditEventFilter, FapiProfile, OAuthClientType, TokenEndpointAuthMethod,
     };
@@ -2826,5 +2879,518 @@ mod tests {
         ] {
             assert_audit_rows_record_transport(&state, event_type, ua).await;
         }
+    }
+
+    // ========================================================================
+    // Ownership-read error handling: when the pre-mutation
+    // `get_oauth_client_by_id` / `get_oauth_client_secret_by_id` read returns a
+    // transient `Err`, the `delete_application_form`, `add_secret_form`, and
+    // `delete_secret_form` handlers must `tracing::error!` the cause and render
+    // the distinct "failed to load" error page — not silently fold the error
+    // into the "not found" page with no log. Regression for the `_ =>` catch-
+    // all introduced in ccc7a5ec; the intended pattern is `detail_application_
+    // page`'s exhaustive `Ok(Some(_)) | Ok(None) | Err(e)` match.
+    // ========================================================================
+
+    /// `io::Write` adapter mirroring `infra::kms_arn`'s test capture: appends
+    /// to a shared buffer so a thread-local `tracing` subscriber can record a
+    /// handler's `error!` event for assertion.
+    struct LogBuf(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogBuf {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let mut guard = self
+                .0
+                .lock()
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            guard.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// `MakeWriter` handing out [`LogBuf`]s sharing one buffer.
+    struct MakeLogBuf(Arc<Mutex<Vec<u8>>>);
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for MakeLogBuf {
+        type Writer = LogBuf;
+        fn make_writer(&'a self) -> Self::Writer {
+            LogBuf(self.0.clone())
+        }
+    }
+
+    fn snapshot_logs(buf: &Arc<Mutex<Vec<u8>>>) -> String {
+        let mut guard = buf.lock().expect("log buffer mutex poisoned");
+        let bytes = std::mem::take(&mut *guard);
+        String::from_utf8(bytes).expect("captured log output is valid UTF-8")
+    }
+
+    /// Install a thread-local `tracing` subscriber capturing WARN+ events
+    /// into `buf`. The guard must outlive the code under test. Paired with
+    /// `#[tokio::test(flavor = "current_thread")]` so the handler runs on the
+    /// same thread the guard is installed on (mirrors `infra::kms_arn`'s
+    /// capture, which is synchronous — `current_thread` extends it to the
+    /// async handler path).
+    fn install_log_capture(buf: Arc<Mutex<Vec<u8>>>) -> tracing::dispatcher::DefaultGuard {
+        use tracing_subscriber::EnvFilter;
+        use tracing_subscriber::layer::SubscriberExt;
+        let subscriber = tracing_subscriber::registry()
+            .with(EnvFilter::new("warn"))
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(MakeLogBuf(buf))
+                    .with_ansi(false)
+                    .without_time(),
+            );
+        tracing::subscriber::set_default(subscriber)
+    }
+
+    /// Install a one-shot fault on `get_oauth_client_by_id`: while `target`
+    /// is `None` the hook is inert (so setup reads run for real), and once
+    /// activated to `Some(id)` the *first* read of that id returns `Err`
+    /// (simulating a transient `DocumentStore::get` failure). Every later read
+    /// of the same id is inert, so the test's follow-up verification reads
+    /// succeed even though the hook stays installed. Returns a counter of
+    /// target-id consultations so the test can assert the handler reached the
+    /// ownership read.
+    fn install_client_read_fault(
+        target: Arc<Mutex<Option<String>>>,
+    ) -> (Arc<AtomicU32>, GetOAuthClientByIdTestHook) {
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_for_hook = calls.clone();
+        let hook: GetOAuthClientByIdTestHook = Arc::new(move |id: &str| {
+            let guard = match target.lock() {
+                Ok(g) => g,
+                Err(_) => return false,
+            };
+            let Some(target_id) = guard.as_deref() else {
+                return false;
+            };
+            if id != target_id {
+                return false;
+            }
+            drop(guard);
+            let n = calls_for_hook.fetch_add(1, Ordering::SeqCst);
+            n == 0
+        });
+        (calls, hook)
+    }
+
+    /// Install a one-shot fault on `get_oauth_client_secret_by_id`; see
+    /// [`install_client_read_fault`].
+    fn install_secret_read_fault(
+        target: Arc<Mutex<Option<String>>>,
+    ) -> (Arc<AtomicU32>, GetOAuthClientSecretByIdTestHook) {
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_for_hook = calls.clone();
+        let hook: GetOAuthClientSecretByIdTestHook = Arc::new(move |id: &str| {
+            let guard = match target.lock() {
+                Ok(g) => g,
+                Err(_) => return false,
+            };
+            let Some(target_id) = guard.as_deref() else {
+                return false;
+            };
+            if id != target_id {
+                return false;
+            }
+            drop(guard);
+            let n = calls_for_hook.fetch_add(1, Ordering::SeqCst);
+            n == 0
+        });
+        (calls, hook)
+    }
+
+    /// `delete_application_form` must log and render the "failed to load
+    /// application" error page when the ownership read returns a transient
+    /// `Err`, and the delete must not execute. Before the fix the `Err` was
+    /// folded into the "not found" page by a `_ =>` catch-all with no log.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_web_delete_application_load_failed_on_client_read_error() {
+        let target: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let target_for_hook = target.clone();
+        let (calls, hook) = install_client_read_fault(target_for_hook);
+        let (app, state) = test_app_with_modify_hook(|store| {
+            store.set_get_oauth_client_by_id_test_hook(hook);
+        })
+        .await;
+
+        let user = create_test_user(&state.store, "web-delete-read-err@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let cookie = format!("__Host-vouch_session={token}");
+        let client = create_test_oauth_client(&state.store, &user.id).await;
+
+        *target.lock().expect("activate fault") = Some(client.app_id.clone());
+        let log_buf = Arc::new(Mutex::new(Vec::new()));
+        let _guard = install_log_capture(log_buf.clone());
+
+        let (status, body) = http_post_form(
+            &app,
+            &format!("/applications/{}/delete", client.app_id),
+            "",
+            &[("Origin", "https://test.example.com"), ("Cookie", &cookie)],
+        )
+        .await;
+
+        assert!(
+            !status.is_redirection(),
+            "a failed ownership read must not redirect, got {status}: {body}"
+        );
+        assert!(
+            body.contains("Failed to load application."),
+            "the load-failed message must be rendered, got: {body}"
+        );
+        assert!(
+            !body.contains("Application not found."),
+            "an Err must not be mislabeled as not-found, got: {body}"
+        );
+        let logs = snapshot_logs(&log_buf);
+        assert!(
+            logs.contains("Failed to get application"),
+            "the handler must log the read error: {logs:?}"
+        );
+        assert!(
+            calls.load(Ordering::SeqCst) >= 1,
+            "the handler must reach the ownership read"
+        );
+
+        // Fail-safe no-op: the delete never executed; the client survives.
+        drop(_guard);
+        let still = db::get_oauth_client_by_id(&state.store, &client.app_id)
+            .await
+            .expect("db query ok")
+            .expect("the client must survive a failed ownership read");
+        assert_eq!(still.id, client.app_id);
+    }
+
+    /// `add_secret_form` must log and render the "failed to load application"
+    /// error page when the ownership read returns a transient `Err`, and no
+    /// secret may be minted. Before the fix the `Err` was folded into the
+    /// "not found" page with no log.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_web_add_secret_load_failed_on_client_read_error() {
+        let target: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let target_for_hook = target.clone();
+        let (calls, hook) = install_client_read_fault(target_for_hook);
+        let (app, state) = test_app_with_modify_hook(|store| {
+            store.set_get_oauth_client_by_id_test_hook(hook);
+        })
+        .await;
+
+        let user = create_test_user(&state.store, "web-add-secret-read-err@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let cookie = format!("__Host-vouch_session={token}");
+        let client = create_test_oauth_client(&state.store, &user.id).await;
+        let before = db::get_oauth_client_secrets(&state.store, &client.app_id)
+            .await
+            .expect("db query ok");
+
+        *target.lock().expect("activate fault") = Some(client.app_id.clone());
+        let log_buf = Arc::new(Mutex::new(Vec::new()));
+        let _guard = install_log_capture(log_buf.clone());
+
+        let (status, body) = http_post_form(
+            &app,
+            &format!("/applications/{}/secrets", client.app_id),
+            "",
+            &[("Origin", "https://test.example.com"), ("Cookie", &cookie)],
+        )
+        .await;
+
+        assert!(
+            !status.is_redirection(),
+            "a failed ownership read must not redirect, got {status}: {body}"
+        );
+        assert!(
+            body.contains("Failed to load application."),
+            "the load-failed message must be rendered, got: {body}"
+        );
+        assert!(
+            !body.contains("Application not found."),
+            "an Err must not be mislabeled as not-found, got: {body}"
+        );
+        assert!(
+            !body.contains("vouch_"),
+            "no secret may be minted on a failed ownership read: {body}"
+        );
+        let logs = snapshot_logs(&log_buf);
+        assert!(
+            logs.contains("Failed to get application"),
+            "the handler must log the read error: {logs:?}"
+        );
+        assert!(
+            calls.load(Ordering::SeqCst) >= 1,
+            "the handler must reach the ownership read"
+        );
+
+        // Fail-safe no-op: no new secret row was persisted.
+        let after = db::get_oauth_client_secrets(&state.store, &client.app_id)
+            .await
+            .expect("db query ok");
+        assert_eq!(
+            after.len(),
+            before.len(),
+            "a failed ownership read must not mint a secret: before={before:?} after={after:?}"
+        );
+    }
+
+    /// `delete_secret_form` must log and render the "failed to load
+    /// application" error page when the *client* ownership read returns a
+    /// transient `Err`, and the secret must not be revoked.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_web_delete_secret_load_failed_on_client_read_error() {
+        let target: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let target_for_hook = target.clone();
+        let (calls, hook) = install_client_read_fault(target_for_hook);
+        let (app, state) = test_app_with_modify_hook(|store| {
+            store.set_get_oauth_client_by_id_test_hook(hook);
+        })
+        .await;
+
+        let user = create_test_user(&state.store, "web-del-secret-client-err@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let cookie = format!("__Host-vouch_session={token}");
+        let client = create_test_oauth_client(&state.store, &user.id).await;
+        // Seed a second active secret so revoke is otherwise lawful.
+        db::create_oauth_client_secret(
+            &state.store,
+            &client.app_id,
+            &super::hash_token("second-secret-err"),
+            Some("second"),
+            None,
+        )
+        .await
+        .expect("mint second secret");
+        let secret_id = db::get_oauth_client_secrets(&state.store, &client.app_id)
+            .await
+            .expect("db query ok")
+            .first()
+            .expect("seeded secret")
+            .id
+            .clone();
+
+        *target.lock().expect("activate fault") = Some(client.app_id.clone());
+        let log_buf = Arc::new(Mutex::new(Vec::new()));
+        let _guard = install_log_capture(log_buf.clone());
+
+        let (status, body) = http_post_form(
+            &app,
+            &format!("/applications/{}/secrets/{secret_id}/delete", client.app_id),
+            "",
+            &[("Origin", "https://test.example.com"), ("Cookie", &cookie)],
+        )
+        .await;
+
+        assert!(
+            !status.is_redirection(),
+            "a failed ownership read must not redirect, got {status}: {body}"
+        );
+        assert!(
+            body.contains("Failed to load application."),
+            "the load-failed message must be rendered, got: {body}"
+        );
+        assert!(
+            !body.contains("Application not found.") && !body.contains("Secret not found."),
+            "an Err must not be mislabeled as not-found, got: {body}"
+        );
+        let logs = snapshot_logs(&log_buf);
+        assert!(
+            logs.contains("Failed to get application"),
+            "the handler must log the client-read error: {logs:?}"
+        );
+        assert!(
+            calls.load(Ordering::SeqCst) >= 1,
+            "the handler must reach the ownership read"
+        );
+
+        // Fail-safe no-op: the target secret was not revoked.
+        let after = db::get_oauth_client_secrets(&state.store, &client.app_id)
+            .await
+            .expect("db query ok");
+        let target_row = after
+            .iter()
+            .find(|s| s.id == secret_id)
+            .expect("secret row survives a failed ownership read");
+        assert!(
+            target_row.revoked_at.is_none(),
+            "a failed ownership read must not revoke the secret: {target_row:?}"
+        );
+    }
+
+    /// `delete_secret_form` must log and render the "failed to load secret"
+    /// error page when the *secret* ownership read returns a transient `Err`
+    /// (the second read, after the client read succeeds), and the secret must
+    /// not be revoked.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_web_delete_secret_load_failed_on_secret_read_error() {
+        let target: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let target_for_hook = target.clone();
+        let (calls, hook) = install_secret_read_fault(target_for_hook);
+        let (app, state) = test_app_with_modify_hook(|store| {
+            store.set_get_oauth_client_secret_by_id_test_hook(hook);
+        })
+        .await;
+
+        let user = create_test_user(&state.store, "web-del-secret-secret-err@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let cookie = format!("__Host-vouch_session={token}");
+        let client = create_test_oauth_client(&state.store, &user.id).await;
+        db::create_oauth_client_secret(
+            &state.store,
+            &client.app_id,
+            &super::hash_token("second-secret-err-2"),
+            Some("second"),
+            None,
+        )
+        .await
+        .expect("mint second secret");
+        let secret_id = db::get_oauth_client_secrets(&state.store, &client.app_id)
+            .await
+            .expect("db query ok")
+            .first()
+            .expect("seeded secret")
+            .id
+            .clone();
+
+        *target.lock().expect("activate fault") = Some(secret_id.clone());
+        let log_buf = Arc::new(Mutex::new(Vec::new()));
+        let _guard = install_log_capture(log_buf.clone());
+
+        let (status, body) = http_post_form(
+            &app,
+            &format!("/applications/{}/secrets/{secret_id}/delete", client.app_id),
+            "",
+            &[("Origin", "https://test.example.com"), ("Cookie", &cookie)],
+        )
+        .await;
+
+        assert!(
+            !status.is_redirection(),
+            "a failed secret read must not redirect, got {status}: {body}"
+        );
+        assert!(
+            body.contains("Failed to load secret."),
+            "the secret load-failed message must be rendered, got: {body}"
+        );
+        assert!(
+            !body.contains("Secret not found.") && !body.contains("Application not found."),
+            "an Err must not be mislabeled as not-found, got: {body}"
+        );
+        let logs = snapshot_logs(&log_buf);
+        assert!(
+            logs.contains("Failed to get secret"),
+            "the handler must log the secret-read error: {logs:?}"
+        );
+        assert!(
+            calls.load(Ordering::SeqCst) >= 1,
+            "the handler must reach the secret ownership read"
+        );
+
+        // Fail-safe no-op: the target secret was not revoked.
+        let after = db::get_oauth_client_secrets(&state.store, &client.app_id)
+            .await
+            .expect("db query ok");
+        let target_row = after
+            .iter()
+            .find(|s| s.id == secret_id)
+            .expect("secret row survives a failed secret read");
+        assert!(
+            target_row.revoked_at.is_none(),
+            "a failed secret read must not revoke the secret: {target_row:?}"
+        );
+    }
+
+    /// No regression on the `Ok(None)` path: a genuinely-absent application must
+    /// render the "not found" page and must NOT emit a "Failed to get" error
+    /// log. Guards against the fix accidentally logging or repurposing the
+    /// not-found arm.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_web_delete_application_not_found_path_does_not_log_load_error() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "web-delete-notfound@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let cookie = format!("__Host-vouch_session={token}");
+
+        let log_buf = Arc::new(Mutex::new(Vec::new()));
+        let _guard = install_log_capture(log_buf.clone());
+        let (status, body) = http_post_form(
+            &app,
+            "/applications/deadbeef-0000-0000-0000-000000000000/delete",
+            "",
+            &[("Origin", "https://test.example.com"), ("Cookie", &cookie)],
+        )
+        .await;
+
+        assert!(
+            !status.is_redirection(),
+            "a not-found delete must not redirect, got {status}: {body}"
+        );
+        assert!(
+            body.contains("Application not found."),
+            "the not-found message must be rendered, got: {body}"
+        );
+        assert!(
+            !body.contains("Failed to load application."),
+            "the load-failed page is for Err, not Ok(None): {body}"
+        );
+        let logs = snapshot_logs(&log_buf);
+        assert!(
+            !logs.contains("Failed to get application"),
+            "the not-found path must not log a load error: {logs:?}"
+        );
+
+        let _ = state;
     }
 }

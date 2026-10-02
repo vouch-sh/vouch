@@ -376,6 +376,13 @@ pub struct DocumentStore {
     /// See [`GetUserByIdTestHook`]. Compiled out of non-test builds.
     #[cfg(test)]
     get_user_by_id_test_hook: Option<GetUserByIdTestHook>,
+    /// See [`GetOAuthClientByIdTestHook`]. Compiled out of non-test builds.
+    #[cfg(test)]
+    get_oauth_client_by_id_test_hook: Option<GetOAuthClientByIdTestHook>,
+    /// See [`GetOAuthClientSecretByIdTestHook`]. Compiled out of non-test
+    /// builds.
+    #[cfg(test)]
+    get_oauth_client_secret_by_id_test_hook: Option<GetOAuthClientSecretByIdTestHook>,
     /// Test-only fault-injection budget for [`DocumentStore::delete`]: the
     /// next `n` `delete` calls succeed (each consuming one unit), after which
     /// every subsequent `delete` returns a non-retryable `Err` before opening
@@ -530,6 +537,44 @@ pub(crate) type PostSecretRevokeTestHook = Arc<dyn Fn(&str) -> DeleteHookFuture 
 #[cfg(test)]
 pub(crate) type GetUserByIdTestHook = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
+/// Test-only seam for [`get_oauth_client_by_id`](crate::db::get_oauth_client_by_id):
+/// a synchronous predicate that, when it returns `true` for the requested
+/// client `id`, short-circuits that read to a non-retryable `Err`.
+///
+/// The application-management web handlers
+/// (`delete_application_form`, `add_secret_form`, `delete_secret_form`) gate
+/// every mutation on an ownership read via `get_oauth_client_by_id`. A
+/// transient `DocumentStore::get` failure on that read used to be folded into
+/// the "not found" branch by a `_ =>` catch-all with no logging — an
+/// observability gap (the failed delete/rotate/revoke attempt left no trace).
+/// This hook lets a handler test deterministically drive that `Err` through
+/// the full router and assert the fix (a `tracing::error!` log line and a
+/// distinct "failed to load" error page) without a real DB outage. The
+/// underlying `DocumentStore::get` does not log on its own and the handlers
+/// return `Response` (not `Result`), so without this seam the `Err` path is
+/// otherwise unreachable from tests. Compiled out of non-test builds, so
+/// production pays nothing. See
+/// [`Self::set_get_oauth_client_by_id_test_hook`].
+#[cfg(test)]
+pub(crate) type GetOAuthClientByIdTestHook = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
+/// Test-only seam for
+/// [`get_oauth_client_secret_by_id`](crate::db::get_oauth_client_secret_by_id):
+/// a synchronous predicate that, when it returns `true` for the requested
+/// secret `id`, short-circuits that read to a non-retryable `Err`.
+///
+/// `delete_secret_form` performs a second ownership read
+/// (`get_oauth_client_secret_by_id`) after the client fetch, before any
+/// revoke is permitted. A transient `Err` here used to be folded into the
+/// "secret not found" branch by a `_ =>` catch-all with no logging. This hook
+/// lets a handler test drive that `Err` through the full router and assert
+/// the fix (a `tracing::error!` log line and a distinct "failed to load"
+/// error page). Mirrors [`GetOAuthClientByIdTestHook`] for the secret read.
+/// Compiled out of non-test builds, so production pays nothing. See
+/// [`Self::set_get_oauth_client_secret_by_id_test_hook`].
+#[cfg(test)]
+pub(crate) type GetOAuthClientSecretByIdTestHook = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
 impl DocumentStore {
     /// Create a new document store.
     #[must_use]
@@ -549,6 +594,10 @@ impl DocumentStore {
             post_secret_revoke_test_hook: None,
             #[cfg(test)]
             get_user_by_id_test_hook: None,
+            #[cfg(test)]
+            get_oauth_client_by_id_test_hook: None,
+            #[cfg(test)]
+            get_oauth_client_secret_by_id_test_hook: None,
             #[cfg(test)]
             delete_remaining_successes: None,
             #[cfg(test)]
@@ -652,6 +701,57 @@ impl DocumentStore {
         self.get_user_by_id_test_hook
             .as_ref()
             .is_some_and(|hook| hook(user_id))
+    }
+
+    /// Install the [`GetOAuthClientByIdTestHook`] seam for
+    /// [`get_oauth_client_by_id`](crate::db::get_oauth_client_by_id). Lets
+    /// handler tests deterministically drive a transient backend `Err` on
+    /// the ownership read that gates every mutating web handler
+    /// (`delete_application_form`, `add_secret_form`, `delete_secret_form`)
+    /// through the full router — the only way to reach the handler's `Err`
+    /// arm, since `DocumentStore::get` propagates without logging and the
+    /// handler returns `Response` (not `Result`).
+    #[cfg(test)]
+    pub(crate) fn set_get_oauth_client_by_id_test_hook(
+        &mut self,
+        hook: GetOAuthClientByIdTestHook,
+    ) {
+        self.get_oauth_client_by_id_test_hook = Some(hook);
+    }
+
+    /// Run the installed `get_oauth_client_by_id_test_hook` for `id`,
+    /// returning `true` when the read should short-circuit to `Err`
+    /// (simulating a transient `DocumentStore::get` failure). No-op (`false`)
+    /// in non-test builds and when no hook is installed.
+    #[cfg(test)]
+    pub(crate) fn run_get_oauth_client_by_id_test_hook(&self, id: &str) -> bool {
+        self.get_oauth_client_by_id_test_hook
+            .as_ref()
+            .is_some_and(|hook| hook(id))
+    }
+
+    /// Install the [`GetOAuthClientSecretByIdTestHook`] seam for
+    /// [`get_oauth_client_secret_by_id`](crate::db::get_oauth_client_secret_by_id).
+    /// Lets handler tests deterministically drive a transient backend `Err`
+    /// on the secret ownership read that gates `delete_secret_form` (the
+    /// second read after `get_oauth_client_by_id`).
+    #[cfg(test)]
+    pub(crate) fn set_get_oauth_client_secret_by_id_test_hook(
+        &mut self,
+        hook: GetOAuthClientSecretByIdTestHook,
+    ) {
+        self.get_oauth_client_secret_by_id_test_hook = Some(hook);
+    }
+
+    /// Run the installed `get_oauth_client_secret_by_id_test_hook` for `id`,
+    /// returning `true` when the read should short-circuit to `Err`
+    /// (simulating a transient `DocumentStore::get` failure). No-op (`false`)
+    /// in non-test builds and when no hook is installed.
+    #[cfg(test)]
+    pub(crate) fn run_get_oauth_client_secret_by_id_test_hook(&self, id: &str) -> bool {
+        self.get_oauth_client_secret_by_id_test_hook
+            .as_ref()
+            .is_some_and(|hook| hook(id))
     }
 
     /// Install a hook that runs inside
