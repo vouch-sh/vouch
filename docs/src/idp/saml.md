@@ -142,3 +142,7 @@ VOUCH_ALLOWED_DOMAINS=example.com
 **Email not extracted from assertion**
 - Check the SAML assertion attributes using debug logging (`RUST_LOG=vouch_server=debug`)
 - Set `VOUCH_IDP_<SLUG>_EMAIL_ATTRIBUTE` to the exact attribute name used by your IdP
+
+**"assertion condition not accepted"**
+- Vouch accepts only `<AudienceRestriction>` and a single `<OneTimeUse>` inside `<Conditions>`. Every `<AudienceRestriction>` must list the SP entity ID.
+- Remove `<ProxyRestriction>` and custom `<Condition>` elements from the IdP's assertion configuration. SAML Core §2.5.1.1 requires a relying party to reject an assertion with a condition it does not understand.

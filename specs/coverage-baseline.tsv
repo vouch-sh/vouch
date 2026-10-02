@@ -2849,16 +2849,7 @@ saml-core-2.0-os#2.3.4#e7e235f5	SHOULD	The value of the Recipient attribute SHOU
 saml-core-2.0-os#2.4.1.3#6e83c682	SHOULD	This complex type, or a type derived from it, SHOULD be used by any confirmation method that defines its confirmation data in terms of the <ds:KeyInfo> element.
 saml-core-2.0-os#2.4.1.3#a265e7da	MUST	Page 20 of 86 Note that in accordance with [XMLSig], each <ds:KeyInfo> element MUST identify a single cryptographic key.
 saml-core-2.0-os#2.4.1.3#ebf86f48	MUST	The particular confirmation method MUST define the exact mechanism by which the confirmation data can be used.
-saml-core-2.0-os#2.5.1.1#8a65224f	MUST	Page 22 of 86 An assertion that is determined to be Invalid or Indeterminate MUST be rejected by a relying party (within whatever context or profile it was bein
 saml-core-2.0-os#2.5.1.2#8f5bb8f3	MUST	If both attributes are present, the value for NotBefore MUST be less than (earlier than) the value for NotOnOrAfter.
-saml-core-2.0-os#2.5.1.5#6d90bc6d	MUST NOT	The <OneTimeUse> element indicates that the assertion SHOULD be used immediately by the relying party and MUST NOT be retained for future use.
-saml-core-2.0-os#2.5.1.5#a318f159	MUST	However, implementations that choose to retain assertions for future use MUST observe the <OneTimeUse> element.
-saml-core-2.0-os#2.5.1.5#c48bdc25	MUST NOT	A SAML authority MUST NOT include more than one <OneTimeUse> element within a <Conditions> element of an assertion.
-saml-core-2.0-os#2.5.1.6#28e81dae	MUST NOT	A SAML authority MUST NOT include more than one <ProxyRestriction> element within a <Conditions> element of an assertion.
-saml-core-2.0-os#2.5.1.6#86124d1a	MUST	Otherwise, any assertions so issued MUST themselves contain an <AudienceRestriction> element with at least one of the <Audience> elements present in the previou
-saml-core-2.0-os#2.5.1.6#96b3f10f	MUST	If greater than zero, any assertions so issued MUST themselves contain a <ProxyRestriction> element with a Count value of at most one less than this value.
-saml-core-2.0-os#2.5.1.6#e6760a39	MUST NOT	A relying party acting as an asserting party MUST NOT issue an assertion that itself violates the restrictions specified in this condition on the basis of an as
-saml-core-2.0-os#2.5.1.6#fd8143f8	MUST NOT	A Count value of zero indicates that a relying party MUST NOT issue an assertion to another relying party on the basis of this assertion.
 saml-core-2.0-os#2.7.2#0c05b86d	SHOULD	The SAML authority SHOULD choose the range of values such that the cardinality of any one integer will be sufficiently high to prevent a particular principal's 
 saml-core-2.0-os#2.7.2#504af020	SHOULD	The SAML authority SHOULD choose values for SessionIndex randomly from within this range (except when required to ensure unique values for subsequent statements
 saml-core-2.0-os#2.7.2#51f942bc	MUST	SessionNotOnOrAfter [Optional] Specifies a time instant at which the session between the principal identified by the subject and the SAML authority issuing this
