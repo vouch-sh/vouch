@@ -112,6 +112,10 @@ pub(crate) enum ResponseError {
     /// `NotBefore` / `NotOnOrAfter` time window validation failed.
     #[error("assertion time validation failed: {0}")]
     TimeValidation(String),
+    /// A `<Conditions>` child is not one this SP evaluates or accepts, so the
+    /// assertion is Indeterminate or Invalid (SAML Core Section 2.5.1.1).
+    #[error("assertion condition not accepted: {0}")]
+    ConditionNotAccepted(String),
     /// More than one `<saml:Assertion>` was found (XSW protection).
     #[error("multiple assertions found (potential XSW attack)")]
     MultipleAssertions,
@@ -448,7 +452,19 @@ fn validate_audience_restriction(
     Ok(())
 }
 
-/// Validate `<saml:Conditions>` `NotBefore` and `NotOnOrAfter` with clock skew tolerance.
+/// Validate `<saml:Conditions>`: its children, then `NotBefore` and
+/// `NotOnOrAfter` with clock skew tolerance.
+///
+/// SAML Core §2.5.1.1: "if an element is encountered that is not understood,
+/// then the validity of the assertion cannot be determined and is considered
+/// to be Indeterminate", and "An assertion that is determined to be Invalid or
+/// Indeterminate MUST be rejected by a relying party". `<AudienceRestriction>`
+/// is evaluated by [`validate_audience_restriction`]. `<OneTimeUse>` "is
+/// considered to always be valid" (§2.5.1.5); assertions are not retained.
+/// `<ProxyRestriction>` limits assertions issued "on the basis of" this one
+/// (§2.5.1.6), which Vouch's tokens are and cannot carry, so it is refused, as
+/// is any extension `<Condition>`. §2.5.1: "there MUST be at most one
+/// instance" of `<OneTimeUse>`.
 fn validate_conditions(
     assertion: roxmltree::Node<'_, '_>,
     now: Timestamp,
@@ -463,6 +479,25 @@ fn validate_conditions(
                 "missing Conditions element (required for Web Browser SSO)".to_string(),
             )
         })?;
+
+    let mut one_time_use = 0_usize;
+    for child in conditions.children().filter(roxmltree::Node::is_element) {
+        let name = child.tag_name();
+        match (name.namespace(), name.name()) {
+            (Some(NS_SAML), "AudienceRestriction") => {}
+            (Some(NS_SAML), "OneTimeUse") => {
+                one_time_use = one_time_use.saturating_add(1);
+                if one_time_use > 1 {
+                    return Err(ResponseError::ConditionNotAccepted(
+                        "more than one OneTimeUse".to_string(),
+                    ));
+                }
+            }
+            (_, local) => {
+                return Err(ResponseError::ConditionNotAccepted(local.to_string()));
+            }
+        }
+    }
 
     if let Some(not_before_str) = conditions.attribute("NotBefore") {
         let not_before = parse_saml_timestamp(not_before_str)?;

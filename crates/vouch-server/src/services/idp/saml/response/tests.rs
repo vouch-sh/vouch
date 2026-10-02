@@ -2692,3 +2692,71 @@ fn validate_saml_response_multi_audience_restriction_excluding_sp_rejected() {
         "Expected AudienceRestrictionViolation per AND semantics, got: {err}"
     );
 }
+
+// =========================================================================
+// Conditions children (SAML Core 2.5.1.1)
+// =========================================================================
+
+fn conditions_verdict(children: &str) -> &'static str {
+    let xml = format!(
+        r#"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <saml:Conditions>
+<saml:AudienceRestriction><saml:Audience>https://vouch.example.com</saml:Audience></saml:AudienceRestriction>
+{children}
+  </saml:Conditions>
+</saml:Assertion>"#
+    );
+    let doc = roxmltree::Document::parse(&xml).unwrap();
+    let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
+    match validate_conditions(assertion, test_arrival().timestamp()) {
+        Ok(()) => "accepted",
+        Err(ResponseError::ConditionNotAccepted(_)) => "not accepted",
+        Err(_) => "other error",
+    }
+}
+
+// SAML Core §2.5.1.5: "For the purposes of determining the validity of the
+// <Conditions> element, the <OneTimeUse> is considered to always be valid."
+#[test]
+fn conditions_accept_one_time_use() {
+    assert_eq!(conditions_verdict("<saml:OneTimeUse/>"), "accepted");
+}
+
+// SAML Core §2.5.1: "there MUST be at most one instance of this element."
+#[test]
+fn conditions_reject_repeated_one_time_use() {
+    assert_eq!(
+        conditions_verdict("<saml:OneTimeUse/><saml:OneTimeUse/>"),
+        "not accepted"
+    );
+}
+
+// SAML Core §2.5.1.1: an element "that is not understood" makes the assertion
+// Indeterminate, and "An assertion that is determined to be Invalid or
+// Indeterminate MUST be rejected by a relying party".
+#[test]
+fn conditions_reject_extension_condition() {
+    assert_eq!(
+        conditions_verdict(r#"<saml:Condition xsi:type="ext:Custom" xmlns:ext="urn:example"/>"#),
+        "not accepted"
+    );
+}
+
+// SAML Core §2.5.1.6: a ProxyRestriction limits assertions issued "on the
+// basis of" this one; Vouch's tokens are, and cannot carry the limit.
+#[test]
+fn conditions_reject_proxy_restriction() {
+    assert_eq!(
+        conditions_verdict(r#"<saml:ProxyRestriction Count="0"/>"#),
+        "not accepted"
+    );
+}
+
+// SAML Core §2.5.1.1: an element from another namespace is not understood.
+#[test]
+fn conditions_reject_foreign_element() {
+    assert_eq!(
+        conditions_verdict(r#"<x:Extra xmlns:x="urn:example"/>"#),
+        "not accepted"
+    );
+}
