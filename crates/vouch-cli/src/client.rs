@@ -11,7 +11,6 @@ use crate::session::{self, ResolvedSession};
 use anyhow::{Context, Result};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Serialize, de::DeserializeOwned};
-use vouch_cli::fapi::httpsig::ClientKeySigner;
 use vouch_cli::fapi::{ClientKey, DpopProofBuilder, key_store};
 use vouch_cli::http::{
     HttpClient, HttpResponse, ReqwestClient, format_http_error, parse_www_authenticate,
@@ -242,8 +241,6 @@ impl<H: HttpClient> VouchClient<H> {
     /// optionally Content-Digest). Returns an empty vec if signing fails
     /// (non-fatal, similar to DPoP fallback).
     fn sign_request_headers(params: &SignRequestParams<'_>) -> Vec<(String, String)> {
-        let signer = ClientKeySigner::new(params.key);
-
         // Build a temporary http::Request to sign
         let mut builder = http::Request::builder()
             .method(params.method)
@@ -304,7 +301,7 @@ impl<H: HttpClient> VouchClient<H> {
             sig_builder = sig_builder.nonce(n);
         }
 
-        if let Err(e) = sig_builder.sign_request(&mut req, &signer) {
+        if let Err(e) = sig_builder.sign_request(&mut req, params.key) {
             tracing::warn!("HTTP message signing failed: {e}");
             crate::tr_eprintln!("httpsig-warn-create-failed", error = e.to_string());
             return Vec::new();

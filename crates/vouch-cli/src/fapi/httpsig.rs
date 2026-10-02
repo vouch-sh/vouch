@@ -1,51 +1,28 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-//! Adapter bridging the FAPI `ClientKey` to RFC 9421 HTTP message signatures.
+//! RFC 9421 HTTP message signing with the FAPI `ClientKey`.
 //!
 //! The `ClientKey` holds the P-256 key pair used for `private_key_jwt` and
-//! DPoP. This adapter lets the same key sign `/v1/*` API requests. RFC 9421
+//! DPoP, and the same key signs `/v1/*` API requests. RFC 9421
 //! `ecdsa-p256-sha256` (Section 3.3.4) and JWS ES256 share one signature
-//! encoding, the 64-octet `r || s` array, so the adapter signs through
+//! encoding, the 64-octet `r || s` array, so signing goes through
 //! [`ClientKey::sign_raw`].
 
 use vouch_httpsig::HttpSigError;
-use vouch_httpsig::algorithm::SigningAlgorithm;
+use vouch_httpsig::algorithm::{SignatureAlgorithm, SigningAlgorithm};
 
 use super::key::ClientKey;
-use vouch_httpsig::algorithm::SignatureAlgorithm;
 
-/// Adapter that wraps a `ClientKey` as an RFC 9421 `ecdsa-p256-sha256` signer.
-pub struct ClientKeySigner<'a> {
-    key: &'a ClientKey,
-}
-
-impl std::fmt::Debug for ClientKeySigner<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ClientKeySigner")
-            .field("key_id", &self.key.kid())
-            .finish()
-    }
-}
-
-impl<'a> ClientKeySigner<'a> {
-    /// Create a signer adapter from a `ClientKey`.
-    #[must_use]
-    pub fn new(key: &'a ClientKey) -> Self {
-        Self { key }
-    }
-}
-
-impl SigningAlgorithm for ClientKeySigner<'_> {
+impl SigningAlgorithm for ClientKey {
     fn algorithm(&self) -> SignatureAlgorithm {
         SignatureAlgorithm::EcdsaP256Sha256
     }
 
     fn key_id(&self) -> &str {
-        self.key.kid()
+        self.kid()
     }
 
     fn sign(&self, base: &[u8]) -> Result<Vec<u8>, HttpSigError> {
-        self.key
-            .sign_raw(base)
+        self.sign_raw(base)
             .map_err(|e| HttpSigError::SigningFailed(format!("ECDSA sign: {e}")))
     }
 }
@@ -69,10 +46,9 @@ mod tests {
     #[test]
     fn test_signature_is_r_s_and_verifies() {
         let key = ClientKey::generate().unwrap();
-        let signer = ClientKeySigner::new(&key);
 
         let base = b"signature base";
-        let sig = signer.sign(base).unwrap();
+        let sig = SigningAlgorithm::sign(&key, base).unwrap();
         assert_eq!(sig.len(), 64);
 
         let jwk = key.public_jwk().unwrap();
@@ -86,6 +62,6 @@ mod tests {
     #[test]
     fn test_key_id_is_client_kid() {
         let key = ClientKey::generate().unwrap();
-        assert_eq!(ClientKeySigner::new(&key).key_id(), key.kid());
+        assert_eq!(SigningAlgorithm::key_id(&key), key.kid());
     }
 }
