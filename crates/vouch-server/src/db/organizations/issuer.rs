@@ -245,11 +245,19 @@ pub async fn claim_subdomain(
         let mut data = org_doc.data;
 
         if let Some(existing) = &data.subdomain {
-            if *existing == label {
-                tx.commit().await?;
-                return Ok(label.clone());
+            if *existing != label {
+                return Err(SubdomainClaimError::AlreadyClaimed(existing.clone()));
             }
-            return Err(SubdomainClaimError::AlreadyClaimed(existing.clone()));
+            // Anchor the idempotent re-claim on an OCC write so a concurrent
+            // `release_subdomain`/`release_ineligible_subdomain` wins the
+            // version CAS and `with_dsql_retry!` re-runs against the fresh
+            // state. A read-only commit cannot detect such a release and would
+            // return `Ok(label)` for a label that is, at that moment, released.
+            if !tx.compare_and_update(org_id, version, &data).await? {
+                return Err(SubdomainClaimError::OccConflict);
+            }
+            tx.commit().await?;
+            return Ok(label.clone());
         }
 
         // All verified apexes of this org that derive `label` (primary
@@ -1192,5 +1200,315 @@ mod tests {
 
         release_subdomain(&store, &org.id).await.unwrap();
         assert!(!any_subdomain_claimed(&store).await.unwrap());
+    }
+
+    /// Re-claiming the org's own current label must perform an OCC write that
+    /// bumps the org-doc version, not a read-only no-op. The read-only commit
+    /// the fix replaced could not detect a concurrent
+    /// `release_subdomain`/`release_ineligible_subdomain` that bumped the
+    /// version in between, so a same-label re-claim left the version unchanged
+    /// — this assertion fails if the idempotent short-circuit is ever restored.
+    #[tokio::test]
+    async fn claim_subdomain_idempotent_reclaim_anchors_on_occ_write() {
+        let store = fresh_store().await;
+        let org = create_organization(&store, "acme.com", None, None)
+            .await
+            .unwrap();
+        claim_subdomain(&store, &org.id, "acme-com").await.unwrap();
+
+        let before = store
+            .get::<OrganizationDoc>(&org.id)
+            .await
+            .unwrap()
+            .unwrap();
+        // Same-label re-claim: hits the idempotent branch.
+        let again = claim_subdomain(&store, &org.id, "acme-com").await.unwrap();
+        assert_eq!(again, "acme-com");
+
+        let after = store
+            .get::<OrganizationDoc>(&org.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(
+            before.version, after.version,
+            "idempotent re-claim must write through compare_and_update (bumping \
+             the version) so a concurrent release wins the CAS; a read-only \
+             short-circuit leaves the version unchanged"
+        );
+        assert_eq!(
+            after.data.subdomain.as_deref(),
+            Some("acme-com"),
+            "label must still be held after the idempotent re-claim"
+        );
+
+        // A stale-version CAS against the pre-reclaim snapshot must now lose,
+        // proving the bumped version is the OCC guard a concurrent release
+        // races against.
+        let mut tx = store.begin().await.unwrap();
+        let stale = OrganizationDoc {
+            subdomain: Some("acme-com".to_string()),
+            ..before.data.clone()
+        };
+        let won = tx
+            .compare_and_update(&org.id, before.version, &stale)
+            .await
+            .unwrap();
+        assert!(
+            !won,
+            "a CAS carrying the pre-reclaim version must lose to the \
+             idempotent re-claim's version bump"
+        );
+    }
+
+    /// The idempotent re-claim must not return `Ok` over a concurrently
+    /// released state: anchoring on `compare_and_update` makes the claim lose
+    /// the version race against a concurrent `release_subdomain`, and
+    /// `with_dsql_retry!` re-runs it against the fresh state where the
+    /// real claim path re-establishes the label.
+    ///
+    /// The race window (read sees `Some`, then the release commits, then the
+    /// branch commits) has no `await` the public API alone can interleave on,
+    /// so this deterministically injects the release with the transactional
+    /// `compare_and_update` test seam: the hook fires a hookless
+    /// `release_subdomain` between the idempotent read and its OCC write.
+    /// File-based WAL SQLite is the production backend where a read-only
+    /// commit does not validate the read set (in-memory SQLite's rollback
+    /// journaling serializes reader/writer and would deadlock the hook), so
+    /// the test runs there.
+    #[tokio::test]
+    async fn claim_subdomain_idempotent_reclaim_loses_race_with_concurrent_release() {
+        use crate::crypto::document_crypto::{DocumentCrypto, PlaintextDocumentCrypto};
+        use crate::db::pool::{self, PoolConfig};
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let url = format!("sqlite:{}?mode=rwc", tmp.path().join("race.db").display());
+        let p = pool::Pool::connect(&url, &PoolConfig::default())
+            .await
+            .unwrap();
+        // `sqlite:` URLs always select the Sqlite pool; the Postgres arm is
+        // unreachable but listed for exhaustiveness without `panic!`.
+        match &p {
+            pool::Pool::Sqlite(sqlite_pool) => {
+                sqlx::migrate!("./migrations/sqlite")
+                    .run(sqlite_pool)
+                    .await
+                    .unwrap();
+            }
+            pool::Pool::Postgres(_) => {}
+        }
+        let crypto: std::sync::Arc<dyn DocumentCrypto> =
+            std::sync::Arc::new(PlaintextDocumentCrypto);
+        let mut store = DocumentStore::new(p.clone(), crypto.clone());
+        let hookless = store.clone();
+
+        let org = create_organization(&store, "acme.com", None, None)
+            .await
+            .unwrap();
+        claim_subdomain(&store, &org.id, "acme-com").await.unwrap();
+        let org_id = org.id.clone();
+        let fired = std::sync::Arc::new(AtomicBool::new(false));
+        let hook_fired = fired.clone();
+        let hook_org_id = org_id.clone();
+        store.set_compare_and_update_test_hook(std::sync::Arc::new(move |doc_id: &str| {
+            let hookless = hookless.clone();
+            let hook_org_id = hook_org_id.clone();
+            let hook_fired = hook_fired.clone();
+            let doc_id = doc_id.to_string();
+            Box::pin(async move {
+                // Fire exactly once, and only on the org-doc CAS the idempotent
+                // branch performs (the slot CAS the retry's real-claim path
+                // issues uses a different id). The hookless clone has no hook,
+                // so the release's own CAS calls do not recurse.
+                if doc_id != hook_org_id {
+                    return;
+                }
+                if hook_fired
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+                    .is_err()
+                {
+                    return;
+                }
+                release_subdomain(&hookless, &hook_org_id).await.unwrap();
+            })
+        }));
+
+        // Same-label re-claim enters the idempotent branch; the hook fires the
+        // concurrent release, the OCC write loses, and `with_dsql_retry!`
+        // re-runs the claim from a fresh read. The domain is still verified, so
+        // the real claim path re-establishes the label.
+        let result = claim_subdomain(&store, &org_id, "acme-com").await;
+        assert!(
+            result.is_ok(),
+            "retry must converge to a real re-claim; got {result:?}"
+        );
+        assert_eq!(result.unwrap(), "acme-com");
+        assert!(
+            fired.load(Ordering::Acquire),
+            "the release must have been injected into the idempotent CAS window"
+        );
+
+        // Contract: `Ok` ⟹ the org still holds the label. A spurious `Ok` over
+        // a released state (the bug) would leave the mirror `None` and the host
+        // unresolvable here.
+        let fresh = store
+            .get::<OrganizationDoc>(&org_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            fresh.data.subdomain.as_deref(),
+            Some("acme-com"),
+            "after the re-claim the org must actually hold the label"
+        );
+        assert!(
+            find_org_by_subdomain(&store, "acme-com")
+                .await
+                .unwrap()
+                .is_some(),
+            "the subdomain index must resolve the re-claimed label"
+        );
+        let slot = store
+            .get::<SubdomainClaimDoc>(&deterministic_subdomain_claim_id("acme-com"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            slot.data.released_at.is_none(),
+            "the re-claim must have reactivated the claim slot"
+        );
+    }
+
+    /// Postgres port of the deterministic hook test on file-based WAL SQLite:
+    /// the idempotent re-claim's OCC write must lose to a concurrent
+    /// `release_subdomain` on Postgres READ COMMITTED too, and retry into a
+    /// real re-claim. Confirms the fix on a second production backend.
+    /// Env-guarded: skips when `VOUCH_TEST_POSTGRES_URL` is unset.
+    #[tokio::test]
+    async fn claim_subdomain_idempotent_reclaim_loses_race_with_concurrent_release_postgres() {
+        use crate::crypto::document_crypto::{DocumentCrypto, PlaintextDocumentCrypto};
+        use crate::db::pool::{self, PoolConfig};
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let url = match std::env::var("VOUCH_TEST_POSTGRES_URL") {
+            Ok(u) => u,
+            Err(_) => {
+                tracing::warn!(
+                    "POSTGRES_TEST_SKIPPED: VOUCH_TEST_POSTGRES_URL not set (no Postgres backend configured)"
+                );
+                return;
+            }
+        };
+        let p = pool::Pool::connect(&url, &PoolConfig::default())
+            .await
+            .unwrap();
+        let pg = match &p {
+            pool::Pool::Postgres(pg) => pg,
+            pool::Pool::Sqlite(_) => {
+                tracing::warn!(
+                    "POSTGRES_TEST_SKIPPED: VOUCH_TEST_POSTGRES_URL did not resolve to a postgres pool"
+                );
+                return;
+            }
+        };
+        // The bundled `migrations/postgres` use `CREATE INDEX ASYNC`,
+        // an Aurora DSQL-specific clause vanilla Postgres rejects. The
+        // `postgres:` backend in this repo is Aurora DSQL-targeted, so
+        // to exercise the fix against a vanilla Postgres READ COMMITTED
+        // backend we apply the schema with the non-standard `ASYNC`
+        // clause stripped (it is purely a DSQL background-index hint;
+        // the index semantics are identical without it).
+        use std::io::Read;
+        // Drop any tables left by a prior run so the schema applies
+        // cleanly (the test owns its database).
+        sqlx::query(sqlx::AssertSqlSafe(
+            "DROP TABLE IF EXISTS document_indexes, documents, audit_events, _sqlx_migrations",
+        ))
+        .execute(pg)
+        .await
+        .unwrap();
+        let mut dir_entries = std::fs::read_dir("./migrations/postgres")
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        dir_entries.sort_by_key(|e| e.file_name());
+        for entry in dir_entries {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("sql") {
+                continue;
+            }
+            let mut sql = String::new();
+            std::fs::File::open(&path)
+                .unwrap()
+                .read_to_string(&mut sql)
+                .unwrap();
+            let stripped = sqlx::AssertSqlSafe(sql.replace("CREATE INDEX ASYNC", "CREATE INDEX"));
+            sqlx::query(stripped).execute(pg).await.unwrap();
+        }
+        let crypto: std::sync::Arc<dyn DocumentCrypto> =
+            std::sync::Arc::new(PlaintextDocumentCrypto);
+        let mut store = DocumentStore::new(p.clone(), crypto.clone());
+        let hookless = store.clone();
+
+        let org = create_organization(&store, "acme.com", None, None)
+            .await
+            .unwrap();
+        claim_subdomain(&store, &org.id, "acme-com").await.unwrap();
+        let org_id = org.id.clone();
+        let fired = std::sync::Arc::new(AtomicBool::new(false));
+        let hook_fired = fired.clone();
+        let hook_org_id = org_id.clone();
+        store.set_compare_and_update_test_hook(std::sync::Arc::new(move |doc_id: &str| {
+            let hookless = hookless.clone();
+            let hook_org_id = hook_org_id.clone();
+            let hook_fired = hook_fired.clone();
+            let doc_id = doc_id.to_string();
+            Box::pin(async move {
+                if doc_id != hook_org_id {
+                    return;
+                }
+                if hook_fired
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+                    .is_err()
+                {
+                    return;
+                }
+                release_subdomain(&hookless, &hook_org_id).await.unwrap();
+            })
+        }));
+
+        let result = claim_subdomain(&store, &org_id, "acme-com").await;
+        assert!(
+            result.is_ok(),
+            "retry must converge to a real re-claim; got {result:?}"
+        );
+        assert_eq!(result.unwrap(), "acme-com");
+        assert!(
+            fired.load(Ordering::Acquire),
+            "release injected into idempotent CAS window"
+        );
+
+        let fresh = store
+            .get::<OrganizationDoc>(&org_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(fresh.data.subdomain.as_deref(), Some("acme-com"));
+        assert!(
+            find_org_by_subdomain(&store, "acme-com")
+                .await
+                .unwrap()
+                .is_some()
+        );
+        let slot = store
+            .get::<SubdomainClaimDoc>(&deterministic_subdomain_claim_id("acme-com"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            slot.data.released_at.is_none(),
+            "re-claim reactivated the slot"
+        );
     }
 }

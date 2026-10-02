@@ -824,3 +824,233 @@ async fn token_exchange_id_token_uses_org_issuer_and_key() {
         "exchanged token's kid must be in the org JWKS: {org_kids:?}"
     );
 }
+
+// ============================================================================
+// Handler-level audit-integrity and concurrent-release consistency
+// ============================================================================
+
+/// Count `org_subdomain_claimed` audit rows for `admin_id`.
+async fn count_org_subdomain_claimed(harness: &TestHarness, admin_id: &str) -> usize {
+    harness
+        .state
+        .audit
+        .query_events(&db::AuditEventFilter {
+            event_types: Some(vec![
+                db::AuditEventKind::OrgSubdomainClaimed.as_str().to_string(),
+            ]),
+            user_id: Some(admin_id.to_string()),
+            ..db::AuditEventFilter::default()
+        })
+        .await
+        .unwrap()
+        .len()
+}
+
+/// An idempotent same-label re-claim through the admin handler emits a
+/// truthful `OrgSubdomainClaimed` audit row each time, and the org-doc
+/// `subdomain` mirror stays `Some(label)` throughout. The fix anchors the
+/// idempotent branch on an OCC write, so `Ok` from the handler always
+/// corresponds to a label the org actually holds (no spurious audit row).
+#[tokio::test]
+async fn admin_idempotent_reclaim_emits_truthful_audit_and_keeps_label() {
+    let harness = TestHarness::from_state(test_app_state_encrypted().await);
+    let (admin, _org, _auth_id, token) = harness
+        .create_authenticated_org_admin("admin@acme.com", "acme.com")
+        .await
+        .unwrap();
+    let cookie = cookie_header(&token);
+
+    // Initial claim → one audit row, success flash.
+    let resp = http_post_form_full(
+        &harness.router,
+        "/admin/subdomain",
+        "label=acme-com",
+        &[("Cookie", &cookie), ("Origin", BASE_URL)],
+    )
+    .await;
+    assert!(resp.status.is_redirection(), "got {}", resp.status);
+    assert!(
+        find_set_cookie(&resp, "vouch_flash_ok").is_some(),
+        "initial claim should flash success"
+    );
+    assert_eq!(
+        count_org_subdomain_claimed(&harness, &admin.id).await,
+        1,
+        "exactly one OrgSubdomainClaimed audit row after the initial claim"
+    );
+
+    // Pre-fix contract check: the org-doc mirror is Some(label).
+    let org_doc = harness
+        .state
+        .store
+        .get::<db::documents::organization::OrganizationDoc>(&admin.org_id.clone().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(org_doc.data.subdomain.as_deref(), Some("acme-com"));
+
+    // Idempotent same-label re-claim → handler returns Ok → a second,
+    // truthful `OrgSubdomainClaimed` audit row + success flash. The fix's
+    // OCC write guarantees the org still holds the label at the moment of
+    // Ok (a concurrent release would have made the CAS lose and retry into a
+    // real re-claim or a terminal error, never a spurious Ok).
+    let resp = http_post_form_full(
+        &harness.router,
+        "/admin/subdomain",
+        "label=acme-com",
+        &[("Cookie", &cookie), ("Origin", BASE_URL)],
+    )
+    .await;
+    assert!(resp.status.is_redirection(), "got {}", resp.status);
+    assert!(
+        find_set_cookie(&resp, "vouch_flash_ok").is_some(),
+        "idempotent re-claim should flash success"
+    );
+    assert_eq!(
+        count_org_subdomain_claimed(&harness, &admin.id).await,
+        2,
+        "exactly one additional OrgSubdomainClaimed audit row after the idempotent re-claim"
+    );
+
+    // Post-Ok contract: the org actually holds the label and the host resolves.
+    let org_doc = harness
+        .state
+        .store
+        .get::<db::documents::organization::OrganizationDoc>(&admin.org_id.clone().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        org_doc.data.subdomain.as_deref(),
+        Some("acme-com"),
+        "after an Ok claim the org-doc mirror must hold the label"
+    );
+    let resp = http_get_full(
+        &harness.router,
+        DISCOVERY_PATH,
+        &[("Host", "acme-com.test.example.com")],
+    )
+    .await;
+    assert_eq!(
+        resp.status,
+        StatusCode::OK,
+        "the org host must resolve after the re-claim"
+    );
+}
+
+/// Concurrent admin claim + release for the same org via `tokio::join!`
+/// against the encrypted test router. Regardless of interleaving, the org must
+/// end in a consistent state: the org-doc `subdomain` mirror, the
+/// `find_org_by_subdomain` index lookup, and the org-host discovery response
+/// all agree. The fix's OCC anchoring of the idempotent branch ensures the
+/// claim cannot return `Ok` over a state a concurrent release had *already*
+/// committed (the bug); on this backend a valid ordering "claim commits, then
+/// release commits" yields `None` with a (truthful) claim success flash, which
+/// is not the bug — the invariant tested is end-state consistency.
+#[tokio::test]
+async fn admin_concurrent_claim_and_release_keeps_consistent_state() {
+    let harness = TestHarness::from_state(test_app_state_encrypted().await);
+    let (admin, _org, _auth_id, token) = harness
+        .create_authenticated_org_admin("admin@acme.com", "acme.com")
+        .await
+        .unwrap();
+    let cookie = cookie_header(&token);
+
+    // Establish the claim first.
+    let resp = http_post_form_full(
+        &harness.router,
+        "/admin/subdomain",
+        "label=acme-com",
+        &[("Cookie", &cookie), ("Origin", BASE_URL)],
+    )
+    .await;
+    assert!(resp.status.is_redirection());
+    assert!(find_set_cookie(&resp, "vouch_flash_ok").is_some());
+
+    // Concurrently fire an idempotent same-label re-claim and a release.
+    let router_a = harness.router.clone();
+    let cookie_a = cookie.clone();
+    let (claim_res, release_res) = tokio::join!(
+        async move {
+            http_post_form_full(
+                &router_a,
+                "/admin/subdomain",
+                "label=acme-com",
+                &[("Cookie", &cookie_a), ("Origin", BASE_URL)],
+            )
+            .await
+        },
+        async {
+            http_post_form_full(
+                &harness.router,
+                "/admin/subdomain/release",
+                "",
+                &[("Cookie", &cookie), ("Origin", BASE_URL)],
+            )
+            .await
+        },
+    );
+
+    // Both must redirect (no 500); one or both flash success depending on
+    // interleaving. The guard is purely the end-state consistency below.
+    assert!(
+        claim_res.status.is_redirection(),
+        "claim: {}",
+        claim_res.status
+    );
+    assert!(
+        release_res.status.is_redirection(),
+        "release: {}",
+        release_res.status
+    );
+
+    let org_doc = harness
+        .state
+        .store
+        .get::<db::documents::organization::OrganizationDoc>(&admin.org_id.clone().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    let discovery = http_get_full(
+        &harness.router,
+        DISCOVERY_PATH,
+        &[("Host", "acme-com.test.example.com")],
+    )
+    .await;
+    let lookup = db::find_org_by_subdomain(&harness.state.store, "acme-com")
+        .await
+        .unwrap();
+
+    // End-state consistency: the mirror, the index, and discovery all agree.
+    // This is the invariant the bug violated (claim Ok while the index/mirror
+    // were cleared by a release that had already committed). Post-fix it holds
+    // for every valid interleaving.
+    match org_doc.data.subdomain.as_deref() {
+        Some(s) => {
+            assert_eq!(
+                s, "acme-com",
+                "the only label this test claims is acme-com; got {s:?}"
+            );
+            assert!(
+                lookup.is_some(),
+                "subdomain == Some but find_org_by_subdomain is None — mirror/index inconsistency"
+            );
+            assert_eq!(
+                discovery.status,
+                StatusCode::OK,
+                "subdomain == Some but host 404s — mirror/index inconsistency"
+            );
+        }
+        None => {
+            assert!(
+                lookup.is_none(),
+                "subdomain == None but find_org_by_subdomain resolves — mirror/index inconsistency"
+            );
+            assert_eq!(
+                discovery.status,
+                StatusCode::NOT_FOUND,
+                "subdomain == None but host resolves — mirror/index inconsistency"
+            );
+        }
+    }
+}

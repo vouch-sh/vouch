@@ -924,6 +924,8 @@ impl DocumentStore {
             update_by_index_stale_once: self.update_by_index_stale_once.clone(),
             #[cfg(test)]
             delete_vanished_once: self.delete_vanished_once.clone(),
+            #[cfg(test)]
+            compare_and_update_test_hook: self.compare_and_update_test_hook.clone(),
         })
     }
 
@@ -1907,6 +1909,14 @@ pub struct StoreTransaction<'a> {
     /// non-test builds.
     #[cfg(test)]
     delete_vanished_once: Option<Arc<std::sync::Mutex<Vec<String>>>>,
+    /// See [`DocumentStore::set_compare_and_update_test_hook`]. Propagated from
+    /// the parent [`DocumentStore`] by [`DocumentStore::begin`] so the same
+    /// seam the single-shot [`DocumentStore::compare_and_update`] exposes is
+    /// available inside a caller's open transaction — fired right before the
+    /// guarded `UPDATE` in [`Self::compare_and_update`]. Compiled out of
+    /// non-test builds.
+    #[cfg(test)]
+    compare_and_update_test_hook: Option<CompareAndUpdateTestHook>,
 }
 
 impl StoreTransaction<'_> {
@@ -2568,6 +2578,18 @@ impl StoreTransaction<'_> {
         let encapped: Option<&str> = encrypted.encapped_key.as_deref();
         let expires_str = expires.map(|ts| ts.to_string());
         let expires_ref: Option<&str> = expires_str.as_deref();
+
+        // Test seam: let a hookless concurrent writer bump this row's version
+        // (or otherwise mutate it) before the guarded UPDATE runs, so the CAS
+        // observes a version mismatch and surfaces `Ok(false)` (or a retryable
+        // snapshot-conflict error on WAL SQLite). Mirrors the non-transactional
+        // `DocumentStore::compare_and_update` seam for callers — like
+        // `claim_subdomain` — that drive the CAS inside their own `tx`. No-op in
+        // non-test builds and when no hook is installed.
+        #[cfg(test)]
+        if let Some(hook) = &self.compare_and_update_test_hook {
+            hook(id).await;
+        }
 
         let update_stmt = {
             let mut q = Query::update();
