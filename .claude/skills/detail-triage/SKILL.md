@@ -426,7 +426,10 @@ gh api repos/vouch-sh/vouch/pulls/<n>/commits \
 
 Rebuild such a branch with signed commits rather than rewriting Detail's.
 
-A queued PR's branch rejects pushes ("protected branch hook declined"). To
+A queued PR's branch rejects pushes ("protected branch hook declined").
+A push that lands while auto-merge is armed but before the PR enters the
+queue succeeds and quietly drops it (`RemovedFromMergeQueueEvent`,
+`invalid_merge_commit`); re-arm `gh pr merge <n> --auto` after every push. To
 change one, dequeue it first with the GraphQL `dequeuePullRequest` mutation,
 push, then run `gh pr merge <n> --auto` with no strategy flag: it enters the
 queue when its checks pass, so nothing has to watch CI. If a green PR with

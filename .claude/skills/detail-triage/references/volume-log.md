@@ -37,6 +37,7 @@ judgement columns come from the batch's record in `.local/`.
 | 2026-09-28 | 5 | 5 | 0 | 0 | 5 | 5 of 5 | #1593 amended (shared caps builder, docs, overlay parser); #1594 superseded by #1598 (one select-and-build JWK rule); #1597/#1592 closed wontfix (empty env is a config error, 19 numeric siblings); #1595 amended (one shared test TLS acceptor; no new private-key copies); #1596 closed (per-route timeout, class left open) | 0 (09-25–27 records not local) | 0 (type-level guardrail; deadline lint pending) |
 | 2026-09-29 | 1 | 1 | 1 | 1 | 1 | 1 of 1 | #1603–#1605 (Doc Drift, blamed on #1584/#1585/#1586) and #1606 (Dead Code, non-persisted agent struct) merged as-is; #1609 superseded by #1610: per-connection exemption by peer provenance replaces a second per-IP map | 1 of 1 (09-28 port-80 residue) | 0 (type-level guardrail: `Peer::Tcp`/`Peer::Header`) |
 | 2026-10-01 | 5 | 5 | 0 | 0 | 5 | 5 of 5 | #1686 closed (empty JWKS is valid, fails closed); #1689 superseded by #1690 (per-fork gate audience); #1688 superseded by #1691 (typed inactive-account refusal, translated); #1685 amended (FIDO2 grant success row after issuance, shared fixtures); #1687 superseded by the DPoP challenge class fix | 0 | 0 (type-level: `DpopChallenge`, `ServiceError::InactiveAccount`) |
+| 2026-10-02 | 25 | 25 | 0 | 4 | 3 | 22 of 25 | 3 merged as-is (#1729, #1735, #1746); 11 amended (#1721, #1722, #1724, #1725, #1726, #1732, #1737, #1742, #1743, #1744, #1745); 8 superseded by class fixes #1747–#1752; 3 closed (#1720, #1730, #1741) | 0 exact; #1733/#1734 in the 10-01 DPoP residue's class | 5 requested (`rcr_3ee858dd…`, `rcr_47c80cbd…`, `rcr_b099c70a…`, `rcr_0a472081…`, `rcr_1145b9ef…`), not synced |
 
 Batches before 2026-08-20 have no record, so only their counted columns exist:
 run the script. `escape-unaware-delimiter-normalization` exists on Detail's side
@@ -878,3 +879,28 @@ JWK Set. The user chose the class fix for DPoP challenges (one `DpopChallenge`, 
   merging: two load-bearing pattern matches on `ServiceError::Api` 401 surfaced in this batch.
 - Read the comments a Detail diff deletes. #1689 deleted the one sentence that named the
   constraint it broke.
+
+## 2026-10-02
+
+25 issues, 25 fix PRs. Mostly backlog: blame ran from February to September,
+PR≤3d 3 (#1733/#1734 on #1692, #1706 on #1656), Detail PR 4. October so far:
+n 30, median age 88d, `<30d` 10.
+
+Classes fixed with a type or single-site guardrail: untranslated browser text
+(`Tr<'static>` template fields, `FlashText`), DPoP-scheme refusals (one
+`DpopChallenge` path, token-first everywhere), unordered store finders
+(`ORDER BY id` in `find_by_indexes`/`find_all`), credential cache keys (one
+production key builder per type, region in every key), PAR Request Object
+parameters (one source per branch), post-revocation write failures (every
+member action records `persist_error`), reclaimed-subdomain keys (cleared in
+the claim transaction). Three findings closed against recorded decisions or
+as not defects.
+
+### Process
+
+- Keep spec citations when trimming narrative. The user caught one dropped on
+  #1721, and restoring it surfaced an RFC 7521 §4.2.1 MUST the code violated.
+- A server change to a challenge the shipped CLI parses goes client-first: the
+  step-up challenge stays Bearer until a CLI that accepts DPoP has shipped.
+- Pushing to a queued Detail branch drops it from the merge queue; re-enqueue
+  after its checks pass.
