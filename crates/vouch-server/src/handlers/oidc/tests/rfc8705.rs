@@ -707,10 +707,10 @@ async fn test_rfc8705_token_mtls_plus_private_key_jwt_invalid_client_when_jwt_ba
 }
 
 /// RFC 8705 §3 + RFC 9449 §7.1: When a token is cert-bound (`cnf.x5t#S256`)
-/// but the caller uses the `Authorization: DPoP <token>` scheme without
-/// supplying a `DPoP` proof header, the userinfo endpoint rejects with a
-/// `401 invalid_dpop_proof` challenge: the proof check runs before the
-/// binding check.
+/// but the caller uses the `Authorization: DPoP <token>` scheme, the userinfo
+/// endpoint rejects with a DPoP `invalid_token` challenge: the token is checked
+/// before any proof, as on `/v1/*`, and it is not DPoP-bound (RFC 9449
+/// Figure 16 answers a binding failure with `invalid_token`).
 #[tokio::test]
 async fn test_rfc8705_userinfo_mtls_bound_token_with_dpop_scheme_rejected() {
     let (app, state) = test_app().await;
@@ -742,10 +742,10 @@ async fn test_rfc8705_userinfo_mtls_bound_token_with_dpop_scheme_rejected() {
 
     assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
     let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
-    assert_eq!(json["error"], "invalid_dpop_proof");
+    assert_eq!(json["error"], "invalid_token");
     assert_eq!(
         json["error_description"],
-        PossessionError::MissingDpopProof.as_str(),
+        PossessionError::NotDpopBound.as_str(),
         "{body}"
     );
 }

@@ -236,6 +236,18 @@ impl DpopChallenge {
         }
     }
 
+    /// A token presented under the DPoP scheme that the resource refuses
+    /// before any proof check: undecodable, expired, revoked, or not for this
+    /// resource. RFC 9449 Figure 16 answers such a token with
+    /// `WWW-Authenticate: DPoP error="invalid_token"`.
+    pub(crate) fn token(description: &str) -> Self {
+        Self {
+            error: OAuthErrorCode::InvalidToken,
+            description: description.to_string(),
+            nonce: None,
+        }
+    }
+
     /// The `WWW-Authenticate` challenge and, for a nonce demand, the
     /// `DPoP-Nonce` header.
     fn headers(&self) -> Vec<(HeaderName, HeaderValue)> {
