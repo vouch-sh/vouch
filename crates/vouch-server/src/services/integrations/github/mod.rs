@@ -118,31 +118,6 @@ pub(crate) enum GitHubError {
     Internal(String),
 }
 
-impl GitHubError {
-    /// Get a user-friendly error title for display.
-    #[must_use]
-    pub(crate) fn title(&self) -> &'static str {
-        match self {
-            Self::NotConfigured => "Not Available",
-            Self::OAuthNotConfigured => "Not Available",
-            Self::WebhookSecretNotConfigured => "Configuration Error",
-            Self::InvalidSignature => "Unauthorized",
-            Self::InvalidStateToken => "Invalid State",
-            Self::WrongFlowType => "Invalid Flow",
-            Self::SessionRequired => "Sign In Required",
-            Self::SessionMismatch => "Session Mismatch",
-            Self::OrganizationRequired => "Organization Required",
-            Self::NotOrgAdmin => "Admin Required",
-            Self::GitHubAccountNotLinked => "GitHub Account Required",
-            Self::InstallationAccessDenied => "Access Denied",
-            Self::InstallationAlreadyConnected => "Already Connected",
-            Self::Database(_) => "Error",
-            Self::GitHubApi(_) => "GitHub Error",
-            Self::Internal(_) => "Error",
-        }
-    }
-}
-
 /// Result type for GitHub service operations.
 pub(crate) type GitHubResult<T> = Result<T, GitHubError>;
 
@@ -349,20 +324,5 @@ mod tests {
             state.github_app.as_ref(),
         );
         assert_eq!(service.app_name().expect("app name"), "acme");
-    }
-
-    #[test]
-    fn github_error_titles_are_stable() {
-        // Smoke-test a couple of branches so the title() match arms get exercised.
-        assert_eq!(GitHubError::NotConfigured.title(), "Not Available");
-        assert_eq!(GitHubError::NotOrgAdmin.title(), "Admin Required");
-        assert_eq!(
-            GitHubError::InstallationAccessDenied.title(),
-            "Access Denied"
-        );
-        assert_eq!(
-            GitHubError::InstallationAlreadyConnected.title(),
-            "Already Connected"
-        );
     }
 }

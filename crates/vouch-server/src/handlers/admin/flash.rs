@@ -12,6 +12,8 @@
 //! one area is never read — or one-shot-cleared — on an unrelated page.
 
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
+
+use crate::infra::i18n::Tr;
 use time::Duration;
 
 const FLASH_OK: &str = "vouch_flash_ok";
@@ -49,13 +51,36 @@ pub(crate) fn clear(jar: CookieJar) -> CookieJar {
     clear_at(jar, ADMIN_PATH)
 }
 
+/// Flash text rendered from catalog entries in the request locale. It has no
+/// constructor from a string, so a page never shows a raw literal.
+pub(crate) struct FlashText(String);
+
+impl FlashText {
+    /// Append another translated sentence.
+    pub(crate) fn followed_by(self, next: &Tr<'_>) -> Self {
+        Self(format!("{} {next}", self.0))
+    }
+}
+
+impl From<Tr<'_>> for FlashText {
+    fn from(tr: Tr<'_>) -> Self {
+        Self(tr.to_string())
+    }
+}
+
+impl From<&Tr<'_>> for FlashText {
+    fn from(tr: &Tr<'_>) -> Self {
+        Self(tr.to_string())
+    }
+}
+
 /// Set an admin-scoped success flash for the next render.
-pub(crate) fn set_ok(jar: CookieJar, msg: impl Into<String>) -> CookieJar {
+pub(crate) fn set_ok(jar: CookieJar, msg: impl Into<FlashText>) -> CookieJar {
     set_ok_at(jar, msg, ADMIN_PATH)
 }
 
 /// Set an admin-scoped error flash for the next render.
-pub(crate) fn set_err(jar: CookieJar, msg: impl Into<String>) -> CookieJar {
+pub(crate) fn set_err(jar: CookieJar, msg: impl Into<FlashText>) -> CookieJar {
     set_err_at(jar, msg, ADMIN_PATH)
 }
 
@@ -65,13 +90,21 @@ pub(crate) fn clear_at(jar: CookieJar, path: &'static str) -> CookieJar {
 }
 
 /// Set a success flash scoped to `path`.
-pub(crate) fn set_ok_at(jar: CookieJar, msg: impl Into<String>, path: &'static str) -> CookieJar {
-    jar.add(build(FLASH_OK, msg.into(), path))
+pub(crate) fn set_ok_at(
+    jar: CookieJar,
+    msg: impl Into<FlashText>,
+    path: &'static str,
+) -> CookieJar {
+    jar.add(build(FLASH_OK, msg.into().0, path))
 }
 
 /// Set an error flash scoped to `path`.
-pub(crate) fn set_err_at(jar: CookieJar, msg: impl Into<String>, path: &'static str) -> CookieJar {
-    jar.add(build(FLASH_ERR, msg.into(), path))
+pub(crate) fn set_err_at(
+    jar: CookieJar,
+    msg: impl Into<FlashText>,
+    path: &'static str,
+) -> CookieJar {
+    jar.add(build(FLASH_ERR, msg.into().0, path))
 }
 
 fn build(name: &'static str, value: String, path: &'static str) -> Cookie<'static> {

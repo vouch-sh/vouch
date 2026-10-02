@@ -17,6 +17,7 @@ use crate::error::ServiceError;
 use crate::handlers::session::{
     AuthContext, AuthenticatedToken, extract_session_from_cookie, get_auth_context,
 };
+use crate::infra::i18n::Tr;
 use crate::services::integrations::github::{
     GitHubError, GitHubService, InstallationLinkFlow, LinkAccountParams, LinkInstallationParams,
     installations::validate_org_admin, webhooks::WebhookEvent,
@@ -85,8 +86,83 @@ impl_template_response!(GitHubSuccessTemplate);
 #[derive(Template)]
 #[template(path = "github/error.html")]
 pub(crate) struct GitHubErrorTemplate {
-    pub title: String,
-    pub message: String,
+    /// `Tr` rather than `String`, so every construction names a catalog key.
+    pub title: Tr<'static>,
+    pub message: Tr<'static>,
+}
+
+impl GitHubErrorTemplate {
+    /// The page for `error`. Storage, GitHub API, and internal failures carry
+    /// detail meant for operators, so it goes to the log and the page shows a
+    /// generic message.
+    fn for_error(error: &GitHubError) -> Self {
+        let (title, message) = match error {
+            GitHubError::NotConfigured => (
+                Tr::new("github-error-not-available-title"),
+                Tr::new("github-error-not-configured"),
+            ),
+            GitHubError::OAuthNotConfigured => (
+                Tr::new("github-error-not-available-title"),
+                Tr::new("github-error-oauth-not-configured"),
+            ),
+            GitHubError::WebhookSecretNotConfigured => (
+                Tr::new("github-error-configuration-title"),
+                Tr::new("github-error-webhook-secret-not-configured"),
+            ),
+            GitHubError::InvalidSignature => (
+                Tr::new("github-error-unauthorized-title"),
+                Tr::new("github-error-invalid-signature"),
+            ),
+            GitHubError::InvalidStateToken => (
+                Tr::new("github-error-invalid-state-title"),
+                Tr::new("github-error-invalid-state"),
+            ),
+            GitHubError::WrongFlowType => (
+                Tr::new("github-error-invalid-flow-title"),
+                Tr::new("github-error-wrong-flow"),
+            ),
+            GitHubError::SessionRequired => (
+                Tr::new("github-error-sign-in-title"),
+                Tr::new("github-error-session-required"),
+            ),
+            GitHubError::SessionMismatch => (
+                Tr::new("github-error-session-mismatch-title"),
+                Tr::new("github-error-session-mismatch"),
+            ),
+            GitHubError::OrganizationRequired => (
+                Tr::new("github-error-organization-title"),
+                Tr::new("github-error-organization-required"),
+            ),
+            GitHubError::NotOrgAdmin => (
+                Tr::new("github-error-admin-title"),
+                Tr::new("github-error-not-org-admin"),
+            ),
+            GitHubError::GitHubAccountNotLinked => (
+                Tr::new("github-error-account-title"),
+                Tr::new("github-error-account-not-linked"),
+            ),
+            GitHubError::InstallationAccessDenied => (
+                Tr::new("github-error-access-denied-title"),
+                Tr::new("github-error-installation-access-denied"),
+            ),
+            GitHubError::InstallationAlreadyConnected => (
+                Tr::new("github-error-already-connected-title"),
+                Tr::new("github-error-installation-already-connected"),
+            ),
+            GitHubError::GitHubApi(_) => {
+                tracing::warn!("GitHub integration failed: {error}");
+                (
+                    Tr::new("github-error-api-title"),
+                    Tr::new("github-error-api"),
+                )
+            }
+            GitHubError::Database(_) | GitHubError::Internal(_) => {
+                tracing::error!("GitHub integration failed: {error}");
+                (Tr::new("error-heading"), Tr::new("github-error-internal"))
+            }
+        };
+        Self { title, message }
+    }
 }
 
 impl_template_response!(GitHubErrorTemplate);
@@ -256,11 +332,7 @@ pub(crate) struct GitHubReconnectForm {
 /// caller from a non-HTTP context (e.g. a background job) would silently fall
 /// back to `en-US`.
 fn error_response(error: GitHubError) -> Response {
-    GitHubErrorTemplate {
-        title: error.title().to_string(),
-        message: error.to_string(),
-    }
-    .into_response()
+    GitHubErrorTemplate::for_error(&error).into_response()
 }
 
 /// Create a GitHubService from AppState components.
@@ -1000,12 +1072,14 @@ mod tests {
     #[tokio::test]
     async fn test_callback_missing_installation_id_and_code() {
         let (app, _state) = test_app().await;
-        // No code and no installation_id → missing installation ID error page
+        // No code and no installation_id: an internal error, shown with the
+        // generic message rather than its operator-facing detail.
         let (status, body) = http_get(&app, "/github/callback", &[]).await;
         assert_eq!(status, StatusCode::OK, "Error page should return 200");
         assert!(
-            body.contains("Missing installation ID") || body.contains("missing"),
-            "Expected error about missing installation ID, got: {body}"
+            body.contains(&Tr::new("github-error-internal").to_string())
+                && !body.contains("Missing installation ID"),
+            "Expected the generic GitHub error message, got: {body}"
         );
     }
 

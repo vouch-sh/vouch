@@ -81,9 +81,11 @@ state-token expiries); and background tasks, which serve no request.
 **Which strings must be translated.** Anything rendered into an HTML page a
 person reads in a browser. Server-side, the enforcement is the type: template
 fields holding free text are `Tr<'static>`, not `String`
-(`AuthorizeDeniedTemplate.error_message`, `ApplicationErrorTemplate.title` /
-`.message`), so a bare literal fails to compile and every construction has to
-name a catalog key. Give new free-text template fields the same type.
+(`AuthorizeDeniedTemplate.error_message`, `ApplicationErrorTemplate`,
+`ErrorTemplate`, and `GitHubErrorTemplate` `.title` / `.message`), and flash
+messages go through `admin::flash::FlashText`, which is built only from `Tr`.
+A bare literal fails to compile and every construction has to name a catalog
+key. Give new free-text template fields the same type.
 
 Exempt, and why:
 

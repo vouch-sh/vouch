@@ -110,8 +110,9 @@ pub(crate) struct SuccessTemplate;
 #[derive(Template)]
 #[template(path = "error.html")]
 pub(crate) struct ErrorTemplate {
-    pub title: String,
-    pub message: String,
+    /// `Tr` rather than `String`, so every construction names a catalog key.
+    pub title: Tr<'static>,
+    pub message: Tr<'static>,
     pub back_url: Option<String>,
 }
 
@@ -120,8 +121,8 @@ impl ErrorTemplate {
     /// 503 and no `Set-Cookie`, so the browser keeps the cookie and can retry.
     pub(crate) fn logout_failed() -> Self {
         Self {
-            title: Tr::new("logout-error-title").to_string(),
-            message: Tr::new("logout-error-message").to_string(),
+            title: Tr::new("logout-error-title"),
+            message: Tr::new("logout-error-message"),
             back_url: Some("/".to_string()),
         }
     }
@@ -453,10 +454,8 @@ pub(crate) async fn device_verify_submit(
             Some(idp) => idp,
             None => {
                 return ErrorTemplate {
-                    title: Tr::new("enroll-error-unknown-provider-title").to_string(),
-                    message: Tr::new("enroll-error-unknown-provider")
-                        .arg("slug", slug)
-                        .to_string(),
+                    title: Tr::new("enroll-error-unknown-provider-title"),
+                    message: Tr::new("enroll-error-unknown-provider").arg("slug", slug.to_string()),
                     back_url: Some("/device".to_string()),
                 }
                 .into_response();
@@ -476,8 +475,8 @@ pub(crate) async fn device_verify_submit(
                 Some(idp) => idp,
                 None => {
                     return ErrorTemplate {
-                        title: Tr::new("enroll-error-not-configured-title").to_string(),
-                        message: Tr::new("enroll-error-idp-not-configured").to_string(),
+                        title: Tr::new("enroll-error-not-configured-title"),
+                        message: Tr::new("enroll-error-idp-not-configured"),
                         back_url: Some("/".to_string()),
                     }
                     .into_response();
@@ -494,8 +493,8 @@ pub(crate) async fn device_verify_submit(
         Err(e) => {
             tracing::error!("Failed to initiate auth: {e:#}");
             return ErrorTemplate {
-                title: Tr::new("error-heading").to_string(),
-                message: Tr::new("enroll-error-auth-start-failed").to_string(),
+                title: Tr::new("error-heading"),
+                message: Tr::new("enroll-error-auth-start-failed"),
                 back_url: None,
             }
             .into_response();
@@ -517,8 +516,8 @@ pub(crate) async fn device_verify_submit(
     {
         tracing::error!("Failed to create auth state: {}", e);
         return ErrorTemplate {
-            title: Tr::new("error-heading").to_string(),
-            message: Tr::new("enroll-error-state-create-failed").to_string(),
+            title: Tr::new("error-heading"),
+            message: Tr::new("enroll-error-state-create-failed"),
             back_url: None,
         }
         .into_response();
@@ -555,12 +554,17 @@ pub(crate) async fn oidc_callback(
 ) -> Response {
     // Check for error response
     if let Some(error) = params.error {
-        let desc = params
-            .error_description
-            .unwrap_or_else(|| "Unknown error".to_string());
+        // The IdP's `error` and `error_description` are protocol strings, so
+        // they appear verbatim inside a translated sentence.
+        let message = match params.error_description {
+            Some(detail) => Tr::new("enroll-error-idp-returned-detail")
+                .arg("error", error)
+                .arg("detail", detail),
+            None => Tr::new("enroll-error-idp-returned").arg("error", error),
+        };
         return ErrorTemplate {
-            title: error,
-            message: desc,
+            title: Tr::new("error-heading"),
+            message,
             back_url: None,
         }
         .into_response();
@@ -569,8 +573,8 @@ pub(crate) async fn oidc_callback(
     // Get authorization code and state
     let Some(code) = params.code else {
         return ErrorTemplate {
-            title: Tr::new("error-heading").to_string(),
-            message: Tr::new("enroll-error-missing-code").to_string(),
+            title: Tr::new("error-heading"),
+            message: Tr::new("enroll-error-missing-code"),
             back_url: None,
         }
         .into_response();
@@ -578,8 +582,8 @@ pub(crate) async fn oidc_callback(
 
     let Some(oidc_state) = params.state else {
         return ErrorTemplate {
-            title: Tr::new("error-heading").to_string(),
-            message: Tr::new("enroll-error-missing-state").to_string(),
+            title: Tr::new("error-heading"),
+            message: Tr::new("enroll-error-missing-state"),
             back_url: None,
         }
         .into_response();
@@ -589,8 +593,8 @@ pub(crate) async fn oidc_callback(
     // OIDC state is base64url-encoded 32 random bytes (43 chars).
     if oidc_state.len() > 128 {
         return ErrorTemplate {
-            title: Tr::new("error-heading").to_string(),
-            message: Tr::new("enroll-error-invalid-state").to_string(),
+            title: Tr::new("error-heading"),
+            message: Tr::new("enroll-error-invalid-state"),
             back_url: None,
         }
         .into_response();
@@ -606,8 +610,8 @@ pub(crate) async fn oidc_callback(
             Ok(pair) => pair,
             Err(db::ClaimError::AlreadyConsumed) => {
                 return ErrorTemplate {
-                    title: Tr::new("error-heading").to_string(),
-                    message: Tr::new("enroll-error-state-expired").to_string(),
+                    title: Tr::new("error-heading"),
+                    message: Tr::new("enroll-error-state-expired"),
                     back_url: None,
                 }
                 .into_response();
@@ -615,8 +619,8 @@ pub(crate) async fn oidc_callback(
             Err(e) => {
                 tracing::error!("Failed to consume OIDC state: {e:#}");
                 return ErrorTemplate {
-                    title: Tr::new("error-heading").to_string(),
-                    message: Tr::new("enroll-error-state-verify-failed").to_string(),
+                    title: Tr::new("error-heading"),
+                    message: Tr::new("enroll-error-state-verify-failed"),
                     back_url: None,
                 }
                 .into_response();
@@ -642,8 +646,8 @@ pub(crate) async fn oidc_callback(
     };
     let Some(oidc_provider) = oidc_provider else {
         return ErrorTemplate {
-            title: Tr::new("error-heading").to_string(),
-            message: Tr::new("enroll-error-oidc-not-configured").to_string(),
+            title: Tr::new("error-heading"),
+            message: Tr::new("enroll-error-oidc-not-configured"),
             back_url: None,
         }
         .into_response();
@@ -679,8 +683,8 @@ pub(crate) async fn oidc_callback(
         Err(e) => {
             tracing::error!("Failed to exchange code: {}", e);
             return ErrorTemplate {
-                title: Tr::new("error-heading").to_string(),
-                message: Tr::new("enroll-error-auth-complete-failed").to_string(),
+                title: Tr::new("error-heading"),
+                message: Tr::new("enroll-error-auth-complete-failed"),
                 back_url: None,
             }
             .into_response();
@@ -691,8 +695,8 @@ pub(crate) async fn oidc_callback(
         let error_text = egress::read_error_body(token_response).await;
         tracing::error!("Token exchange failed: {}", error_text);
         return ErrorTemplate {
-            title: Tr::new("error-heading").to_string(),
-            message: Tr::new("enroll-error-auth-complete-failed").to_string(),
+            title: Tr::new("error-heading"),
+            message: Tr::new("enroll-error-auth-complete-failed"),
             back_url: None,
         }
         .into_response();
@@ -704,8 +708,8 @@ pub(crate) async fn oidc_callback(
             Err(e) => {
                 tracing::error!("Failed to read token response: {}", e);
                 return ErrorTemplate {
-                    title: Tr::new("error-heading").to_string(),
-                    message: Tr::new("enroll-error-auth-complete-failed").to_string(),
+                    title: Tr::new("error-heading"),
+                    message: Tr::new("enroll-error-auth-complete-failed"),
                     back_url: None,
                 }
                 .into_response();
@@ -727,8 +731,8 @@ pub(crate) async fn oidc_callback(
         Err(e) => {
             tracing::error!("ID token verification failed: {e:#}");
             return ErrorTemplate {
-                title: Tr::new("error-heading").to_string(),
-                message: Tr::new("enroll-error-token-verify-failed").to_string(),
+                title: Tr::new("error-heading"),
+                message: Tr::new("enroll-error-token-verify-failed"),
                 back_url: None,
             }
             .into_response();
@@ -770,8 +774,8 @@ pub(crate) async fn complete_enrollment_after_identity(
             "rejected IdP enrollment: upstream email is not a valid address"
         );
         return ErrorTemplate {
-            title: Tr::new("error-heading").to_string(),
-            message: Tr::new("enroll-error-invalid-email").to_string(),
+            title: Tr::new("error-heading"),
+            message: Tr::new("enroll-error-invalid-email"),
             back_url: None,
         }
         .into_response();
@@ -799,8 +803,8 @@ pub(crate) async fn complete_enrollment_after_identity(
             "rejected IdP enrollment: upstream email has an invalid domain"
         );
         return ErrorTemplate {
-            title: Tr::new("error-heading").to_string(),
-            message: Tr::new("enroll-error-invalid-email").to_string(),
+            title: Tr::new("error-heading"),
+            message: Tr::new("enroll-error-invalid-email"),
             back_url: None,
         }
         .into_response();
@@ -819,11 +823,10 @@ pub(crate) async fn complete_enrollment_after_identity(
         if !domains.iter().any(|d| d.eq_ignore_ascii_case(email_domain)) {
             let allowed_list = domains.join(", ");
             return ErrorTemplate {
-                title: Tr::new("enroll-error-domain-not-allowed-title").to_string(),
+                title: Tr::new("enroll-error-domain-not-allowed-title"),
                 message: Tr::new("enroll-error-domain-not-allowed")
-                    .arg("domains", allowed_list.as_str())
-                    .arg("email", identity.email.as_str())
-                    .to_string(),
+                    .arg("domains", allowed_list)
+                    .arg("email", identity.email.clone()),
                 back_url: None,
             }
             .into_response();
@@ -878,8 +881,8 @@ pub(crate) async fn complete_enrollment_after_identity(
             };
             db::record_auth_event(&state.audit, event, Some(identity.email.clone())).await;
             return ErrorTemplate {
-                title: Tr::new("enroll-error-identity-conflict-title").to_string(),
-                message: Tr::new("enroll-error-identity-conflict").to_string(),
+                title: Tr::new("enroll-error-identity-conflict-title"),
+                message: Tr::new("enroll-error-identity-conflict"),
                 back_url: None,
             }
             .into_response();
@@ -908,8 +911,8 @@ pub(crate) async fn complete_enrollment_after_identity(
             };
             db::record_auth_event(&state.audit, event, Some(email)).await;
             return ErrorTemplate {
-                title: Tr::new("enroll-error-account-deactivated-title").to_string(),
-                message: Tr::new("enroll-error-account-deactivated").to_string(),
+                title: Tr::new("enroll-error-account-deactivated-title"),
+                message: Tr::new("enroll-error-account-deactivated"),
                 back_url: None,
             }
             .into_response();
@@ -917,8 +920,8 @@ pub(crate) async fn complete_enrollment_after_identity(
         Err(e) => {
             tracing::error!("Failed to enroll user: {}", e);
             return ErrorTemplate {
-                title: Tr::new("error-heading").to_string(),
-                message: Tr::new("enroll-error-user-create-failed").to_string(),
+                title: Tr::new("error-heading"),
+                message: Tr::new("enroll-error-user-create-failed"),
                 back_url: None,
             }
             .into_response();
@@ -967,8 +970,8 @@ pub(crate) async fn complete_enrollment_after_identity(
         Err(e) => {
             tracing::error!("Failed to calculate session expiration: {}", e);
             return ErrorTemplate {
-                title: Tr::new("error-heading").to_string(),
-                message: Tr::new("enroll-error-session-failed").to_string(),
+                title: Tr::new("error-heading"),
+                message: Tr::new("enroll-error-session-failed"),
                 back_url: None,
             }
             .into_response();
@@ -990,8 +993,8 @@ pub(crate) async fn complete_enrollment_after_identity(
         Err(e) => {
             tracing::error!("Failed to read authenticators for session claims: {e}");
             return ErrorTemplate {
-                title: Tr::new("error-heading").to_string(),
-                message: Tr::new("enroll-error-session-failed").to_string(),
+                title: Tr::new("error-heading"),
+                message: Tr::new("enroll-error-session-failed"),
                 back_url: None,
             }
             .into_response();
@@ -1017,8 +1020,8 @@ pub(crate) async fn complete_enrollment_after_identity(
             Err(e) => {
                 tracing::error!("Failed to snapshot org domain: {}", e);
                 return ErrorTemplate {
-                    title: Tr::new("error-heading").to_string(),
-                    message: Tr::new("enroll-error-session-failed").to_string(),
+                    title: Tr::new("error-heading"),
+                    message: Tr::new("enroll-error-session-failed"),
                     back_url: None,
                 }
                 .into_response();
@@ -1073,8 +1076,8 @@ pub(crate) async fn complete_enrollment_after_identity(
         Err(e) => {
             tracing::error!("Failed to create session: {}", e);
             return ErrorTemplate {
-                title: Tr::new("error-heading").to_string(),
-                message: Tr::new("enroll-error-session-failed").to_string(),
+                title: Tr::new("error-heading"),
+                message: Tr::new("enroll-error-session-failed"),
                 back_url: None,
             }
             .into_response();
@@ -1103,8 +1106,8 @@ pub(crate) async fn complete_enrollment_after_identity(
         if !pending {
             tracing::error!("Device auth '{device_auth_id}' is missing or already settled");
             return ErrorTemplate {
-                title: Tr::new("error-heading").to_string(),
-                message: Tr::new("enroll-error-device-auth-approve-failed").to_string(),
+                title: Tr::new("error-heading"),
+                message: Tr::new("enroll-error-device-auth-approve-failed"),
                 back_url: None,
             }
             .into_response();
@@ -1128,8 +1131,8 @@ pub(crate) async fn complete_enrollment_after_identity(
             // ceremony that could never release the waiting CLI.
             tracing::error!("Failed to create enrollment session for CLI: {}", e);
             return ErrorTemplate {
-                title: Tr::new("error-heading").to_string(),
-                message: Tr::new("enroll-error-session-create-failed").to_string(),
+                title: Tr::new("error-heading"),
+                message: Tr::new("enroll-error-session-create-failed"),
                 back_url: None,
             }
             .into_response();
@@ -1932,10 +1935,8 @@ pub(crate) async fn direct_enroll_start(
             Some(i) => Some(i),
             None => {
                 return ErrorTemplate {
-                    title: Tr::new("enroll-error-unknown-provider-title").to_string(),
-                    message: Tr::new("enroll-error-unknown-provider")
-                        .arg("slug", slug)
-                        .to_string(),
+                    title: Tr::new("enroll-error-unknown-provider-title"),
+                    message: Tr::new("enroll-error-unknown-provider").arg("slug", slug.to_string()),
                     back_url: Some("/".to_string()),
                 }
                 .into_response();
@@ -1946,8 +1947,8 @@ pub(crate) async fn direct_enroll_start(
 
     let Some(idp) = chosen_idp else {
         return ErrorTemplate {
-            title: Tr::new("enroll-error-not-configured-title").to_string(),
-            message: Tr::new("enroll-error-idp-not-configured").to_string(),
+            title: Tr::new("enroll-error-not-configured-title"),
+            message: Tr::new("enroll-error-idp-not-configured"),
             back_url: Some("/".to_string()),
         }
         .into_response();
@@ -1963,8 +1964,8 @@ pub(crate) async fn direct_enroll_start(
                 provider_id
             );
             return ErrorTemplate {
-                title: Tr::new("error-heading").to_string(),
-                message: Tr::new("enroll-error-enrollment-start-failed").to_string(),
+                title: Tr::new("error-heading"),
+                message: Tr::new("enroll-error-enrollment-start-failed"),
                 back_url: Some("/".to_string()),
             }
             .into_response();
@@ -1990,8 +1991,8 @@ pub(crate) async fn direct_enroll_start(
     {
         tracing::error!("Failed to create auth state: {}", e);
         return ErrorTemplate {
-            title: Tr::new("error-heading").to_string(),
-            message: Tr::new("enroll-error-enrollment-start-failed").to_string(),
+            title: Tr::new("error-heading"),
+            message: Tr::new("enroll-error-enrollment-start-failed"),
             back_url: Some("/".to_string()),
         }
         .into_response();

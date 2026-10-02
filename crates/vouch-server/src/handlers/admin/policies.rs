@@ -8,6 +8,7 @@ use crate::db::{self, MAX_CUSTOM_POLICIES};
 use crate::error::ServiceError;
 use crate::handlers::admin::flash;
 use crate::impl_template_response;
+use crate::infra::i18n::Tr;
 use crate::services::policy as posture;
 use askama::Template;
 use aws_lc_rs::digest::{self, SHA256};
@@ -25,7 +26,7 @@ use crate::handlers::session::{AuthContext, extract_org_admin};
 
 const REDIRECT_BASE: &str = "/admin/policies";
 
-fn redirect_error(jar: CookieJar, msg: impl Into<String>) -> Response {
+fn redirect_error(jar: CookieJar, msg: impl Into<flash::FlashText>) -> Response {
     (flash::set_err(jar, msg), Redirect::to(REDIRECT_BASE)).into_response()
 }
 
@@ -235,10 +236,7 @@ pub(crate) async fn toggle_preconfigured_policy(
         if total_active >= posture::MAX_ACTIVE_POLICIES {
             return Ok(redirect_error(
                 jar,
-                format!(
-                    "Maximum of {} active policies allowed",
-                    posture::MAX_ACTIVE_POLICIES
-                ),
+                Tr::new("admin-policies-error-max-active").arg("max", posture::MAX_ACTIVE_POLICIES),
             ));
         }
         active_slugs.push(slug.clone());
@@ -375,7 +373,7 @@ pub(crate) async fn create_custom_policy(
     let Ok(name) = ResourceLabel::parse(&form.name) else {
         return Ok(redirect_error(
             jar,
-            "Name must be between 1 and 100 characters",
+            Tr::new("admin-policies-error-name-length"),
         ));
     };
 
@@ -384,10 +382,8 @@ pub(crate) async fn create_custom_policy(
     {
         return Ok(redirect_error(
             jar,
-            format!(
-                "Policy text must be between 1 and {} characters",
-                posture::catalog::MAX_POLICY_TEXT_LEN
-            ),
+            Tr::new("admin-policies-error-text-length")
+                .arg("max", posture::catalog::MAX_POLICY_TEXT_LEN),
         ));
     }
 
@@ -396,7 +392,8 @@ pub(crate) async fn create_custom_policy(
     {
         return Ok(redirect_error(
             jar,
-            "Description must be 500 characters or less",
+            Tr::new("admin-policies-error-description-length")
+                .arg("max", MAX_POLICY_DESCRIPTION_CHARS),
         ));
     }
 
@@ -414,7 +411,10 @@ pub(crate) async fn create_custom_policy(
     .await?;
 
     if let Err(e) = posture::validate_policy_text(&form.policy_text) {
-        return Ok(redirect_error(jar, format!("Invalid policy: {e}")));
+        return Ok(redirect_error(
+            jar,
+            Tr::new("admin-policies-error-invalid").arg("detail", e.to_string()),
+        ));
     }
 
     let description = form.description.clone().filter(|d| !d.is_empty());
@@ -435,7 +435,7 @@ pub(crate) async fn create_custom_policy(
         Err(db::CreateCustomPolicyError::LimitReached) => {
             return Ok(redirect_error(
                 jar,
-                format!("Maximum of {MAX_CUSTOM_POLICIES} custom policies allowed"),
+                Tr::new("admin-policies-error-max-custom").arg("max", MAX_CUSTOM_POLICIES),
             ));
         }
         Err(db::CreateCustomPolicyError::Other(e)) => return Err(e),
@@ -487,7 +487,7 @@ pub(crate) async fn update_custom_policy(
     let Ok(name) = ResourceLabel::parse(&form.name) else {
         return Ok(redirect_error(
             jar,
-            "Name must be between 1 and 100 characters",
+            Tr::new("admin-policies-error-name-length"),
         ));
     };
 
@@ -496,10 +496,8 @@ pub(crate) async fn update_custom_policy(
     {
         return Ok(redirect_error(
             jar,
-            format!(
-                "Policy text must be between 1 and {} characters",
-                posture::catalog::MAX_POLICY_TEXT_LEN
-            ),
+            Tr::new("admin-policies-error-text-length")
+                .arg("max", posture::catalog::MAX_POLICY_TEXT_LEN),
         ));
     }
 
@@ -508,7 +506,8 @@ pub(crate) async fn update_custom_policy(
     {
         return Ok(redirect_error(
             jar,
-            "Description must be 500 characters or less",
+            Tr::new("admin-policies-error-description-length")
+                .arg("max", MAX_POLICY_DESCRIPTION_CHARS),
         ));
     }
 
@@ -524,7 +523,10 @@ pub(crate) async fn update_custom_policy(
     .await?;
 
     if let Err(e) = posture::validate_policy_text(&form.policy_text) {
-        return Ok(redirect_error(jar, format!("Invalid policy: {e}")));
+        return Ok(redirect_error(
+            jar,
+            Tr::new("admin-policies-error-invalid").arg("detail", e.to_string()),
+        ));
     }
 
     let description = form.description.clone().filter(|d| !d.is_empty());
@@ -675,10 +677,7 @@ pub(crate) async fn toggle_custom_policy(
         if other_active >= posture::MAX_ACTIVE_POLICIES {
             return Ok(redirect_error(
                 jar,
-                format!(
-                    "Maximum of {} active policies allowed",
-                    posture::MAX_ACTIVE_POLICIES
-                ),
+                Tr::new("admin-policies-error-max-active").arg("max", posture::MAX_ACTIVE_POLICIES),
             ));
         }
     }

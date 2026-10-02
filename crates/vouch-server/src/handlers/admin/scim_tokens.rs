@@ -9,6 +9,7 @@ use crate::db::documents::audit::ScimTokenAdminData;
 use crate::error::ServiceError;
 use crate::handlers::admin::flash;
 use crate::impl_template_response;
+use crate::infra::i18n::Tr;
 use askama::Template;
 use axum::extract::{OriginalUri, State};
 use axum::http::{HeaderMap, Method, StatusCode};
@@ -94,7 +95,7 @@ pub(crate) struct CreateScimTokenForm {
 
 const REDIRECT_BASE: &str = "/admin/scim-tokens";
 
-fn redirect_error(jar: CookieJar, msg: impl Into<String>) -> Response {
+fn redirect_error(jar: CookieJar, msg: impl Into<flash::FlashText>) -> Response {
     (flash::set_err(jar, msg), Redirect::to(REDIRECT_BASE)).into_response()
 }
 
@@ -174,14 +175,15 @@ pub(crate) async fn admin_create_scim_token(
     {
         return Ok(redirect_error(
             jar,
-            "Description must be 256 characters or less",
+            Tr::new("admin-scim-tokens-error-description-length")
+                .arg("max", MAX_SCIM_TOKEN_DESCRIPTION_CHARS),
         ));
     }
 
     if form.expires_in_days < 1 || form.expires_in_days > 365 {
         return Ok(redirect_error(
             jar,
-            "Expiration must be between 1 and 365 days",
+            Tr::new("admin-scim-tokens-error-expiration"),
         ));
     }
 
@@ -223,8 +225,11 @@ pub(crate) async fn admin_create_scim_token(
         Ok(id) => id,
         // Hitting the cap is ordinary form input, not a server fault — keep the
         // flash-message redirect rather than rendering an API error page.
-        Err(ServiceError::Api { code, message, .. }) if code == "token_limit_reached" => {
-            return Ok(redirect_error(jar, &message));
+        Err(ServiceError::Api { code, .. }) if code == "token_limit_reached" => {
+            return Ok(redirect_error(
+                jar,
+                Tr::new("admin-scim-tokens-error-limit").arg("max", db::MAX_SCIM_TOKENS),
+            ));
         }
         Err(e) => return Err(e),
     };
@@ -298,7 +303,10 @@ pub(crate) async fn admin_revoke_scim_token(
     let deleted = db::delete_scim_token(&state.store, &token_id, &org_id).await?;
 
     if !deleted {
-        return Ok(redirect_error(jar, "SCIM token not found"));
+        return Ok(redirect_error(
+            jar,
+            Tr::new("admin-scim-tokens-error-not-found"),
+        ));
     }
 
     let data = ScimTokenAdminData {
