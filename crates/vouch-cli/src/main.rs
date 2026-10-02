@@ -1035,6 +1035,45 @@ mod tests {
         assert_eq!(parsed, Some(true));
     }
 
+    // `credential aws --idc-application` is read only on the Identity Center
+    // path, so a parse that would route to STS must fail instead of dropping it.
+    #[test]
+    fn test_credential_aws_idc_application_requires_identity_center_path() {
+        let idc = "arn:aws:sso::123456789012:application/ssoins-abc/apl-xyz";
+        let kind = |args: &[&str]| Cli::try_parse_from(args).err().map(|e| e.kind());
+
+        assert_eq!(
+            kind(&[
+                "vouch",
+                "credential",
+                "aws",
+                "--role",
+                "arn:aws:iam::1:role/r",
+                "--idc-application",
+                idc
+            ]),
+            Some(clap::error::ErrorKind::ArgumentConflict)
+        );
+        assert_eq!(
+            kind(&["vouch", "credential", "aws", "--idc-application", idc]),
+            Some(clap::error::ErrorKind::MissingRequiredArgument)
+        );
+        assert_eq!(
+            kind(&[
+                "vouch",
+                "credential",
+                "aws",
+                "--account",
+                "123456789012",
+                "--permission-set",
+                "Admin",
+                "--idc-application",
+                idc,
+            ]),
+            None
+        );
+    }
+
     // -- uses_server --
 
     /// Regression for #548: logout contacts /oauth/revoke and must be subject

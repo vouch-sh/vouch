@@ -77,9 +77,12 @@ pub(crate) enum CredentialCommands {
 
         /// Identity Center application ARN to use when multiple IdC instances
         /// are configured (Identity Center path only).
+        // `--role` conflicts explicitly because clap drops `requires` when the
+        // required argument conflicts with one that is present.
         #[arg(
             long,
-            conflicts_with = "via",
+            conflicts_with_all = ["role", "via"],
+            requires = "account",
             help = tr!("arg-credential-aws-idc-application-help"),
         )]
         idc_application: Option<String>,

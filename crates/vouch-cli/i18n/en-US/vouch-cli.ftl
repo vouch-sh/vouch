@@ -249,7 +249,7 @@ arg-credential-aws-role-help = AWS IAM role ARN to assume (STS role path).
 arg-credential-aws-account-help = AWS account ID (Identity Center path).
 arg-credential-aws-permission-set-help = IAM Identity Center permission-set name.
 arg-credential-aws-via-help = Management role ARN to chain through when multiple organizations are configured (STS paths only; not valid with --account/--permission-set).
-arg-credential-aws-idc-application-help = Identity Center application ARN to use when multiple IdC instances are configured (Identity Center path only; omit for single-instance setups).
+arg-credential-aws-idc-application-help = Identity Center application ARN to use when multiple IdC instances are configured (Identity Center path only; requires --account; omit for single-instance setups).
 
 cmd-credential-ssh-about = Obtain an SSH certificate
 arg-credential-ssh-key-help = Path to SSH private key (default: ~/.ssh/id_ed25519_vouch).
@@ -736,6 +736,11 @@ diag-err-fixture-save = Failed to save fixture: { $reason }
 cmd-aws-console-about = Open the AWS Management Console in your browser
 
 arg-aws-console-role-help = AWS IAM role ARN to assume (auto-detected from ~/.aws/config if not specified).
+arg-aws-console-profile-help = AWS profile in ~/.aws/config to take the role from.
+arg-aws-console-account-help = AWS account ID (Identity Center path).
+arg-aws-console-permission-set-help = IAM Identity Center permission-set name.
+arg-aws-console-via-help = Management role ARN to chain through when multiple organizations are configured (STS role path only; not valid with --account/--permission-set).
+arg-aws-console-idc-application-help = Identity Center application ARN to use when multiple IdC instances are configured (Identity Center path only; requires --account).
 
 aws-err-agent-idc-unsupported =
     AI-agent credential issuance is not supported on the Identity Center path
