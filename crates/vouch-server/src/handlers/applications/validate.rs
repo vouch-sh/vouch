@@ -722,22 +722,35 @@ fn validate_update_fapi(
     // key by that algorithm's key type. A submitted JWKS holding no such key
     // shuts both doors at the authorization endpoint: the signed path fails
     // key resolution, and `require_signed_request_object` refuses the plain
-    // one. The pin is not editable here, so the submitted key material is the
-    // only thing this update can change — and the only thing checked. Key
-    // material the client already had is left alone; a metadata-only edit
+    // one.
+    //
+    // The submitted keys are judged against the pin the client will have
+    // *after* the write, not the stored pin as-is: a FAPI upgrade rewrites
+    // that pin via `OAuthClientDoc::set_fapi_profile` → `FapiProfile::signing_alg`
+    // (RS256 → ES256) in the same write this validation approves, so a fresh
+    // ES256-only JWKS that would strand the client under the old RS256 pin
+    // matches the post-write ES256 pin and must be accepted. `effective_fapi_profile`
+    // derives that post-write profile — the same helper
+    // `compute_fapi_update_fields` persists — and `signing_alg` is the identity
+    // under `FapiProfile::None`, so a standard-profile update keeps judging the
+    // stored pin unchanged.
+    //
+    // Key material the client already had is left alone; a metadata-only edit
     // isn't what stranded it, and blocking one would just stop the client
     // being repaired.
     //
     // Above the FAPI early return because the pin is not FAPI-specific: a
     // `client_secret_basic` client can register one.
-    if let Some(alg) = client.request_object_signing_alg
+    if let Some(stored_alg) = client.request_object_signing_alg
         && let Some(jwks) = validated.keys.as_ref().and_then(ClientKeys::inline)
-        && !jwks.has_key_for(alg)
     {
-        return Err(AppValidationError::RequestObjectJwksNoKeyForAlg {
-            alg,
-            kty: KeyType::for_alg(alg),
-        });
+        let alg = effective_fapi_profile(validated, client).signing_alg(stored_alg);
+        if !jwks.has_key_for(alg) {
+            return Err(AppValidationError::RequestObjectJwksNoKeyForAlg {
+                alg,
+                kty: KeyType::for_alg(alg),
+            });
+        }
     }
 
     // Above the FAPI early return because the client-assertion signer is
@@ -2194,6 +2207,221 @@ mod tests {
 
         validate_update_fapi(&validated, &client)
             .expect("RS256 must remain unrestricted for a non-FAPI client's JWKS-only update");
+    }
+
+    // ========================================================================
+    // `request_object_signing_alg` pin vs. a FAPI upgrade's RS256→ES256
+    // rewrite (#1656 follow-up). A non-FAPI RFC 7591 client may pin a
+    // `request_object_signing_alg` of RS256 with an inline RSA JWKS — a state
+    // only DCR (not the console create path) can produce. Upgrading it to FAPI
+    // 2.0 rewrites that pin to ES256 in the same write (`set_fapi_profile`), so
+    // the submitted inline JWKS must be judged against the post-rewrite ES256
+    // pin, not the stored RS256 one. Judging against the stored pin falsely
+    // rejected a fresh ES256-only JWKS (the most direct inline-only upgrade).
+    // ========================================================================
+
+    /// A non-FAPI web client pinned to RS256 Request Objects with an inline
+    /// RSA JWKS — the shape RFC 7591 dynamic registration produces for
+    /// `request_object_signing_alg=RS256` + `jwks` + `client_secret_basic` and
+    /// no FAPI profile. Only DCR yields this; the console create path never
+    /// sets a `request_object_signing_alg` (see `build_create_params`).
+    async fn rs256_request_object_client(state: &crate::AppState, email: &str) -> OAuthClient {
+        let user = create_test_user(&state.store, email).await;
+        let created = create_test_client(
+            &state.store,
+            &user.id,
+            TestClientSpec {
+                token_endpoint_auth_method: Some(TokenEndpointAuthMethod::ClientSecretBasic),
+                jwks: TestJwks::Custom(serde_json::json!({
+                    "keys": [{"kty": "RSA", "alg": "RS256", "use": "sig",
+                               "n": TEST_JWK_RSA_N, "e": "AQAB", "kid": "rsa-1"}]
+                })),
+                fapi_profile: None,
+                request_object_signing_alg: Some(JwsAlgorithm::Rs256),
+                ..Default::default()
+            },
+        )
+        .await;
+        let client = db::get_oauth_client_by_id(&state.store, &created.app_id)
+            .await
+            .expect("db lookup")
+            .expect("client exists");
+        assert_eq!(
+            client.request_object_signing_alg,
+            Some(JwsAlgorithm::Rs256),
+            "setup: client must be pinned to RS256 Request Objects"
+        );
+        assert!(!client.is_fapi(), "setup: client must start non-FAPI");
+        client
+    }
+
+    // Regression for the `validate_update_fapi` request_object_signing_alg
+    // bug: a non-FAPI client pinned to RS256 Request Objects upgrades to FAPI
+    // 2.0 by submitting a fresh ES256-only inline JWKS. The upgrade rewrites
+    // the pin RS256→ES256 (`set_fapi_profile`), so the submitted ES256 key
+    // matches the post-write pin and must be accepted — judging it against the
+    // stored (pre-rewrite) RS256 pin falsely rejected it.
+    #[tokio::test]
+    async fn fapi_upgrade_accepts_es256_jwks_when_request_object_pin_rewrites_rs256_to_es256() {
+        let state = test_app_state().await;
+        let client = rs256_request_object_client(&state, "reqobj-pin-fapi-upg@example.com").await;
+
+        let jwks = fapi_jwks_json();
+        let validated = validate_update_format(UpdateAppInput {
+            name: None,
+            description: None,
+            redirect_uris: None,
+            resource_uris: None,
+            post_logout_redirect_uris: None,
+            access_scope: None,
+            fapi_profile: Some("fapi2_security"),
+            jwks: Some(&jwks),
+            jwks_uri: None,
+        })
+        .expect("valid update input");
+
+        validate_update_fapi(&validated, &client)
+            .expect("an ES256-only JWKS satisfies the post-rewrite ES256 request-object pin");
+
+        // The merge the persist step consumes must agree the post-update
+        // profile is FAPI 2.0 — whose `set_fapi_profile` rewrite is what flips
+        // the pin — and accept the submitted ES256 keys.
+        let update = validated
+            .apply_to(&client, None)
+            .expect("apply_to must build the FAPI upgrade update");
+        assert_eq!(update.fapi_profile, FapiProfile::Fapi2Security);
+        assert!(
+            update.keys.is_some_and(|k| k.inline().is_some()),
+            "the submitted ES256 inline JWKS must be carried into the update"
+        );
+    }
+
+    // The fix must not loosen the standard-profile path: an update that leaves
+    // the client non-FAPI keeps the stored RS256 pin (`signing_alg` is the
+    // identity under `FapiProfile::None`), so an ES256-only JWKS with no RS256
+    // key is still rejected against that unchanged pin.
+    #[tokio::test]
+    async fn non_fapi_update_rejects_es256_jwks_for_rs256_request_object_pin() {
+        let state = test_app_state().await;
+        let client = rs256_request_object_client(&state, "reqobj-pin-std@example.com").await;
+
+        let jwks = fapi_jwks_json();
+        let validated = validate_update_format(UpdateAppInput {
+            name: None,
+            description: None,
+            redirect_uris: None,
+            resource_uris: None,
+            post_logout_redirect_uris: None,
+            access_scope: None,
+            fapi_profile: None,
+            jwks: Some(&jwks),
+            jwks_uri: None,
+        })
+        .expect("valid update input");
+
+        let err = validate_update_fapi(&validated, &client)
+            .expect_err("an ES256-only JWKS must not satisfy the unchanged RS256 pin");
+        assert_eq!(err.code(), "request_object_jwks_algorithm_unsupported");
+        assert!(matches!(
+            err,
+            AppValidationError::RequestObjectJwksNoKeyForAlg { alg, .. }
+                if alg == JwsAlgorithm::Rs256
+        ));
+    }
+
+    // The rewrite cuts both ways: a FAPI upgrade of an RS256-pinned client
+    // that submits an RS256-only JWKS is rejected for lacking a key usable
+    // with the post-rewrite ES256 pin — caught by the request-object guard
+    // (which names the actual post-write ES256 pin), not deferred to the FAPI
+    // client-assertion guard. No false acceptance.
+    #[tokio::test]
+    async fn fapi_upgrade_rejects_rs256_only_jwks_against_rewritten_es256_pin() {
+        let state = test_app_state().await;
+        let client = rs256_request_object_client(&state, "reqobj-pin-rs256-only@example.com").await;
+
+        let jwks = rs256_only_jwks_json();
+        let validated = validate_update_format(UpdateAppInput {
+            name: None,
+            description: None,
+            redirect_uris: None,
+            resource_uris: None,
+            post_logout_redirect_uris: None,
+            access_scope: None,
+            fapi_profile: Some("fapi2_security"),
+            jwks: Some(&jwks),
+            jwks_uri: None,
+        })
+        .expect("valid update input");
+
+        let err = validate_update_fapi(&validated, &client)
+            .expect_err("an RS256-only JWKS has no ES256 key for the post-rewrite pin");
+        assert_eq!(err.code(), "request_object_jwks_algorithm_unsupported");
+        assert!(matches!(
+            err,
+            AppValidationError::RequestObjectJwksNoKeyForAlg { alg, .. }
+                if alg == JwsAlgorithm::Es256
+        ));
+    }
+
+    // The `jwks_uri` workaround (bug report workaround #1) still bypasses
+    // the inline request-object check on a FAPI upgrade: a URI cannot be
+    // inspected synchronously, so the pin is verified at runtime against the
+    // fetched keys rather than rejected up front.
+    #[tokio::test]
+    async fn fapi_upgrade_accepts_jwks_uri_when_request_object_pin_is_rs256() {
+        let state = test_app_state().await;
+        let client = rs256_request_object_client(&state, "reqobj-pin-jwksuri@example.com").await;
+
+        let validated = validate_update_format(UpdateAppInput {
+            name: None,
+            description: None,
+            redirect_uris: None,
+            resource_uris: None,
+            post_logout_redirect_uris: None,
+            access_scope: None,
+            fapi_profile: Some("fapi2_security"),
+            jwks: None,
+            jwks_uri: Some("https://client.example/jwks.json"),
+        })
+        .expect("valid update input");
+
+        validate_update_fapi(&validated, &client)
+            .expect("a jwks_uri upgrade short-circuits the inline request-object check");
+    }
+
+    // The combined RSA+ES256 inline JWKS workaround (bug report workaround
+    // #2) still passes a FAPI upgrade of an RS256-pinned client: the ES256
+    // key satisfies the post-rewrite ES256 pin, and the dead RSA key is
+    // harmless after the write. An ES256-only JWKS now passes too (the fix).
+    #[tokio::test]
+    async fn fapi_upgrade_accepts_combined_rsa_es256_jwks_when_pin_is_rs256() {
+        let state = test_app_state().await;
+        let client = rs256_request_object_client(&state, "reqobj-pin-combined@example.com").await;
+
+        let jwks = serde_json::json!({
+            "keys": [
+                {"kty": "RSA", "alg": "RS256", "use": "sig",
+                 "n": TEST_JWK_RSA_N, "e": "AQAB", "kid": "rsa-1"},
+                {"kty": "EC", "crv": "P-256", "alg": "ES256", "use": "sig",
+                 "x": TEST_JWK_EC_X, "y": TEST_JWK_EC_Y, "kid": "ec-1"}
+            ]
+        })
+        .to_string();
+        let validated = validate_update_format(UpdateAppInput {
+            name: None,
+            description: None,
+            redirect_uris: None,
+            resource_uris: None,
+            post_logout_redirect_uris: None,
+            access_scope: None,
+            fapi_profile: Some("fapi2_security"),
+            jwks: Some(&jwks),
+            jwks_uri: None,
+        })
+        .expect("valid update input");
+
+        validate_update_fapi(&validated, &client)
+            .expect("a combined RSA+ES256 JWKS satisfies the post-rewrite ES256 pin");
     }
 
     #[test]
