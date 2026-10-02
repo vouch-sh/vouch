@@ -92,20 +92,30 @@ async fn check_docker_credential_invocation(argv0: &str) -> Result<bool> {
     Ok(false)
 }
 
-/// Check if invoked as git-remote-codecommit and handle accordingly.
-/// Returns `Ok(true)` if this was a git remote helper invocation (handled),
-/// `Ok(false)` if not, or an error if the remote helper failed.
+/// Whether this invocation should be treated as a `git-remote-codecommit`
+/// remote helper.
 ///
-/// Git invokes remote helpers as: `git-remote-codecommit <remote-name> <url>`
+/// Git invokes remote helpers as: `git-remote-codecommit <remote-name> <url>`.
 ///
 /// Detection works via:
 /// - **Unix**: argv\[0\] ends with `git-remote-codecommit` (symlink)
 /// - **Windows**: `VOUCH_GIT_REMOTE_CODECOMMIT=1` env var (set by batch wrapper)
-async fn check_git_remote_codecommit_invocation(argv0: &str) -> Result<bool> {
-    let is_remote_helper = is_git_remote_codecommit_argv0(argv0)
-        || std::env::var("VOUCH_GIT_REMOTE_CODECOMMIT").is_ok_and(|v| v == "1");
+///
+/// The env-var arm is gated to Windows: it only exists because the batch
+/// wrapper cannot be identified via `argv[0]`. Honoring it on non-Windows
+/// hijacks every normal `vouch` subcommand into the remote-helper dispatch
+/// path.
+fn is_git_remote_codecommit_invocation(argv0: &str) -> bool {
+    is_git_remote_codecommit_argv0(argv0)
+        || (cfg!(target_os = "windows")
+            && std::env::var("VOUCH_GIT_REMOTE_CODECOMMIT").is_ok_and(|v| v == "1"))
+}
 
-    if is_remote_helper {
+/// Check if invoked as git-remote-codecommit and handle accordingly.
+/// Returns `Ok(true)` if this was a git remote helper invocation (handled),
+/// `Ok(false)` if not, or an error if the remote helper failed.
+async fn check_git_remote_codecommit_invocation(argv0: &str) -> Result<bool> {
+    if is_git_remote_codecommit_invocation(argv0) {
         let remote_name = std::env::args().nth(1).unwrap_or_default();
         let url = std::env::args().nth(2).unwrap_or_default();
 
@@ -1107,6 +1117,150 @@ mod tests {
         assert!(!is_git_remote_codecommit_argv0("vouch"));
         assert!(!is_git_remote_codecommit_argv0("codecommit"));
         assert!(!is_git_remote_codecommit_argv0(""));
+    }
+
+    #[test]
+    fn test_git_remote_codecommit_argv0_exe_suffix() {
+        assert!(is_git_remote_codecommit_argv0(
+            "/home/user/.local/bin/git-remote-codecommit.exe"
+        ));
+        assert!(is_git_remote_codecommit_argv0(
+            r"C:\Users\user\.local\bin\git-remote-codecommit.exe"
+        ));
+    }
+
+    /// The helper-argv0 arm of `is_git_remote_codecommit_invocation` fires
+    /// regardless of platform or the env var: a symlinked argv0 is the
+    /// primary, always-on detection signal.
+    #[test]
+    fn test_is_git_remote_codecommit_invocation_helper_argv0() {
+        assert!(is_git_remote_codecommit_invocation(
+            "/home/user/.local/bin/git-remote-codecommit"
+        ));
+        assert!(is_git_remote_codecommit_invocation("git-remote-codecommit"));
+        assert!(is_git_remote_codecommit_invocation(
+            r"C:\tools\git-remote-codecommit.exe"
+        ));
+    }
+
+    /// On non-Windows a normal `vouch` argv0 is never a remote-helper
+    /// invocation, no matter what `VOUCH_GIT_REMOTE_CODECOMMIT` holds: the
+    /// env-var arm is dead code off-Windows. Regression for the cross-platform
+    /// dispatch bug from b2838ba8, which honored the env var everywhere.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn test_is_git_remote_codecommit_invocation_normal_argv0_unix() {
+        assert!(
+            !is_git_remote_codecommit_invocation("vouch"),
+            "a normal vouch argv0 must not be detected as a remote helper on non-Windows"
+        );
+        assert!(
+            !is_git_remote_codecommit_invocation("/usr/local/bin/vouch"),
+            "a normal vouch argv0 must not be detected as a remote helper on non-Windows"
+        );
+    }
+
+    /// Regression for b2838ba8: with the env-var fallback gated to Windows, no
+    /// value of `VOUCH_GIT_REMOTE_CODECOMMIT` may hijack a normal `vouch`
+    /// invocation into the CodeCommit remote-helper dispatch path on
+    /// non-Windows. Before the fix, `=1` drove `vouch status`, `vouch --help`,
+    /// etc. into a remote-helper usage/URL error.
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    #[expect(
+        unsafe_code,
+        reason = "env mutation under ENV_LOCK; the prior value is restored before asserting"
+    )]
+    async fn test_env_var_does_not_hijack_normal_invocation_on_unix() {
+        let _guard = ENV_LOCK.lock().await;
+        let prior = std::env::var_os("VOUCH_GIT_REMOTE_CODECOMMIT");
+
+        let mut hijacked = false;
+        for value in ["1", "0", "true", "false", "yes", ""] {
+            // SAFETY: ENV_LOCK serialises env mutation in this test binary.
+            unsafe {
+                std::env::set_var("VOUCH_GIT_REMOTE_CODECOMMIT", value);
+            }
+            // `unwrap_or(true)` turns the pre-fix usage/network error into a
+            // failing assertion, so only `Ok(false)` clears the check.
+            let handled = check_git_remote_codecommit_invocation("vouch")
+                .await
+                .unwrap_or(true);
+            hijacked = hijacked || handled;
+        }
+        // SAFETY: as above; restore the prior value before asserting.
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var("VOUCH_GIT_REMOTE_CODECOMMIT", value),
+                None => std::env::remove_var("VOUCH_GIT_REMOTE_CODECOMMIT"),
+            }
+        }
+
+        assert!(
+            !hijacked,
+            "VOUCH_GIT_REMOTE_CODECOMMIT must not dispatch the CodeCommit remote helper on non-Windows"
+        );
+    }
+
+    /// On Windows the env-var arm is intentionally kept so the batch wrapper
+    /// (which cannot be detected via argv0) can signal a helper invocation.
+    /// Only the exact value `1` triggers dispatch; other values are ignored.
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    #[expect(
+        unsafe_code,
+        reason = "env mutation under ENV_LOCK; the prior value is restored before asserting"
+    )]
+    async fn test_env_var_value_one_honored_on_windows() {
+        let _guard = ENV_LOCK.lock().await;
+        let prior = std::env::var_os("VOUCH_GIT_REMOTE_CODECOMMIT");
+        // SAFETY: ENV_LOCK serialises env mutation in this test binary.
+        unsafe {
+            std::env::set_var("VOUCH_GIT_REMOTE_CODECOMMIT", "1");
+        }
+        let detected = is_git_remote_codecommit_invocation("vouch");
+        // SAFETY: as above; restore the prior value before asserting.
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var("VOUCH_GIT_REMOTE_CODECOMMIT", value),
+                None => std::env::remove_var("VOUCH_GIT_REMOTE_CODECOMMIT"),
+            }
+        }
+        assert!(
+            detected,
+            "on Windows the batch wrapper's VOUCH_GIT_REMOTE_CODECOMMIT=1 must be honored"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    #[expect(
+        unsafe_code,
+        reason = "env mutation under ENV_LOCK; the prior value is restored before asserting"
+    )]
+    async fn test_env_var_non_one_values_ignored_on_windows() {
+        let _guard = ENV_LOCK.lock().await;
+        let prior = std::env::var_os("VOUCH_GIT_REMOTE_CODECOMMIT");
+
+        let mut detected = false;
+        for value in ["0", "true", "false", "yes", ""] {
+            // SAFETY: ENV_LOCK serialises env mutation in this test binary.
+            unsafe {
+                std::env::set_var("VOUCH_GIT_REMOTE_CODECOMMIT", value);
+            }
+            detected = detected || is_git_remote_codecommit_invocation("vouch");
+        }
+        // SAFETY: as above; restore the prior value before asserting.
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var("VOUCH_GIT_REMOTE_CODECOMMIT", value),
+                None => std::env::remove_var("VOUCH_GIT_REMOTE_CODECOMMIT"),
+            }
+        }
+        assert!(
+            !detected,
+            "only '1' may trigger remote-helper dispatch on Windows; other values must be ignored"
+        );
     }
 
     // -- keyring --
