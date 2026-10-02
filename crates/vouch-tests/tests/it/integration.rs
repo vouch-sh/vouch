@@ -3126,4 +3126,154 @@ mod httpsig {
 
         assert_eq!(response.status, 401, "wrong key should be rejected");
     }
+
+    /// Build RFC 9421 signature headers for a POST request carrying a body,
+    /// including the signed `content-type` and `content-digest` (RFC 9530)
+    /// components the CLI signs. Returns the headers and the body so the caller
+    /// can replay the request with a stripped (empty) body.
+    fn sign_post_request_with_body(
+        url: &str,
+        auth_header: &str,
+        body: &[u8],
+        key: &ClientKey,
+    ) -> (Vec<(String, String)>, Vec<u8>) {
+        use vouch_httpsig::digest::{self, DigestAlgorithm};
+
+        let signer = ClientKeySigner::from_client_key(key).unwrap();
+
+        let mut req: http::Request<Vec<u8>> = http::Request::builder()
+            .method("POST")
+            .uri(url)
+            .header("authorization", auth_header)
+            .header("content-type", "application/json")
+            .body(body.to_vec())
+            .unwrap();
+
+        // Add Content-Digest for the body (RFC 9530), matching the CLI path.
+        digest::set_content_digest(req.headers_mut(), body, DigestAlgorithm::Sha256).unwrap();
+
+        SignatureBuilder::new("sig1")
+            .method()
+            .authority()
+            .path()
+            .query()
+            .field("authorization")
+            .field("content-type")
+            .field("content-digest")
+            .created_now()
+            .sign_request(&mut req, &signer)
+            .unwrap();
+
+        let mut headers: Vec<(String, String)> = Vec::new();
+        for name in [
+            "Signature-Input",
+            "Signature",
+            "Content-Digest",
+            "Content-Type",
+        ] {
+            if let Some(v) = req.headers().get(name)
+                && let Ok(s) = v.to_str()
+            {
+                headers.push((name.to_string(), s.to_string()));
+            }
+        }
+        (headers, body.to_vec())
+    }
+
+    // RFC 9530 body-strip attack, end-to-end through the middleware: an
+    // on-path attacker signs a POST with a non-empty body, then replays with
+    // `Content-Length: 0` (empty body) while leaving the signed Content-Digest
+    // bound to the original body in place. Because the signing paths do not
+    // cover Content-Length, the signature base is unchanged and the signature
+    // still verifies — but enforce_body_digest must catch the digest/body
+    // mismatch and reject with 401 before any handler runs.
+    #[tokio::test]
+    async fn test_httpsig_body_strip_attack_rejected() {
+        let harness = TestHarness::new().await;
+        let key = ClientKey::generate().unwrap();
+        let token = setup_user_with_httpsig_key(&harness, &key).await;
+
+        let url = harness.url("/v1/keys");
+        let auth_header = format!("Bearer {token}");
+
+        // Sign a POST with a non-empty body + signed Content-Digest.
+        let original_body = br#"{"label":"test"}"#.to_vec();
+        let (sig_headers, _original_body) =
+            sign_post_request_with_body(&url, &auth_header, &original_body, &key);
+
+        // Replay with the body stripped to empty but ALL signed headers
+        // (Signature-Input, Signature, Content-Digest bound to the original
+        // body, Content-Type) left intact. This is the forged message an
+        // on-path attacker would deliver.
+        let extra_refs: Vec<(&str, &str)> = sig_headers
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+
+        let response = TestHttpClient::new(harness.router.clone())
+            .request(
+                "POST",
+                &url,
+                Some(b""),
+                None,
+                Some(&auth_header),
+                Some(&extra_refs),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status,
+            401,
+            "body-strip attack (empty body, signed Content-Digest of the original non-empty body) \
+             must be rejected with 401; got {} body={}",
+            response.status,
+            String::from_utf8_lossy(&response.body)
+        );
+    }
+
+    // Regression guard: a signed POST with a non-empty body and a matching
+    // covered Content-Digest is accepted end-to-end (no body, no digest, no
+    // signature-path regression introduced by the fix).
+    #[tokio::test]
+    async fn test_httpsig_signed_post_with_body_succeeds() {
+        let harness = TestHarness::new().await;
+        let key = ClientKey::generate().unwrap();
+        let token = setup_user_with_httpsig_key(&harness, &key).await;
+
+        let url = harness.url("/v1/credentials/ssh");
+        let auth_header = format!("Bearer {token}");
+
+        let body = br#"{"ssh_key":"test"}"#.to_vec();
+        let (sig_headers, _) = sign_post_request_with_body(&url, &auth_header, &body, &key);
+
+        let extra_refs: Vec<(&str, &str)> = sig_headers
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+
+        let response = TestHttpClient::new(harness.router.clone())
+            .request(
+                "POST",
+                &url,
+                Some(&body),
+                None,
+                Some(&auth_header),
+                Some(&extra_refs),
+            )
+            .await
+            .unwrap();
+
+        // 401 would mean signature/digest verification failed; a 4xx from the
+        // handler (e.g. 400/422 for an invalid SSH key payload) is acceptable
+        // and proves the middleware accepted the signature and body. The body-
+        // strip sibling test asserts the 401 path; here we assert it is NOT 401.
+        assert_ne!(
+            response.status,
+            401,
+            "signed POST with matching Content-Digest must pass signature verification \
+             (handler may still reject the payload with another status); got 401 body={}",
+            String::from_utf8_lossy(&response.body)
+        );
+    }
 }
