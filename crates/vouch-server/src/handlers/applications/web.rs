@@ -485,13 +485,7 @@ pub(crate) async fn delete_application_form(
 
     let user_id = auth.user_id.as_deref().unwrap_or_default();
 
-    // Verify ownership. The read is split into an exhaustive
-    // `Ok(Some(_)) | Ok(None) | Err(e)` match — not a `_ =>` catch-all — so a
-    // transient backend failure is logged and surfaced as the "failed to
-    // load" error page rather than mislabeled as "not found" with no
-    // diagnostics. Mirrors `detail_application_page` and the JSON-API
-    // `load_owned_client`; see commit ccc7a5ec for the catch-all this
-    // replaces.
+    // A read failure is logged and shown as "failed to load", not "not found".
     let client = match db::get_oauth_client_by_id(&state.store, &app_id).await {
         Ok(Some(c)) if c.user_id.as_deref() == Some(user_id) => c,
         Ok(Some(_)) | Ok(None) => {
@@ -593,10 +587,7 @@ pub(crate) async fn add_secret_form(
 
     let user_id = auth.user_id.as_deref().unwrap_or_default();
 
-    // Ownership read before minting. Exhaustive match (not `_ =>`) so a
-    // transient backend error is logged and rendered as the "failed to load"
-    // error page instead of being silently folded into "not found". Mirrors
-    // `detail_application_page` and the JSON-API `load_owned_client`.
+    // A read failure is logged and shown as "failed to load", not "not found".
     let client = match db::get_oauth_client_by_id(&state.store, &app_id).await {
         Ok(Some(c)) if c.user_id.as_deref() == Some(user_id) => c,
         Ok(Some(_)) | Ok(None) => {
@@ -706,11 +697,7 @@ pub(crate) async fn delete_secret_form(
 
     let user_id = auth.user_id.as_deref().unwrap_or_default();
 
-    // Ownership read before revoke. Exhaustive match (not `_ =>`) so a
-    // transient backend error on the client fetch is logged and rendered as
-    // the "failed to load" error page rather than silently folded into
-    // "not found". Mirrors `detail_application_page` and the JSON-API
-    // `load_owned_client`.
+    // A read failure is logged and shown as "failed to load", not "not found".
     let client = match db::get_oauth_client_by_id(&state.store, &app_id).await {
         Ok(Some(c)) if c.user_id.as_deref() == Some(user_id) => c,
         Ok(Some(_)) | Ok(None) => {
@@ -730,10 +717,7 @@ pub(crate) async fn delete_secret_form(
         }
     };
 
-    // Secret fetch is also an exhaustive match (not `_ =>`): a transient
-    // backend error on this read is logged and rendered as the "failed to
-    // load" error page, not mislabeled as "secret not found". Mirrors the
-    // JSON-API `delete_secret_api`'s `Err` arm.
+    // Same for the secret read.
     let secret = match db::get_oauth_client_secret_by_id(&state.store, &secret_id).await {
         Ok(Some(s)) if s.oauth_client_id == app_id => s,
         Ok(Some(_)) | Ok(None) => {
@@ -847,9 +831,7 @@ mod tests {
     use axum::http::StatusCode;
 
     use crate::db::documents::session::SessionDoc;
-    use crate::db::store::{
-        GetOAuthClientByIdTestHook, GetOAuthClientSecretByIdTestHook, GetUserByIdTestHook,
-    };
+    use crate::db::store::{GetFaultTestHook, GetUserByIdTestHook};
     use crate::db::{
         self, AccessScope, AuditEventFilter, FapiProfile, OAuthClientType, TokenEndpointAuthMethod,
     };
@@ -2882,14 +2864,8 @@ mod tests {
     }
 
     // ========================================================================
-    // Ownership-read error handling: when the pre-mutation
-    // `get_oauth_client_by_id` / `get_oauth_client_secret_by_id` read returns a
-    // transient `Err`, the `delete_application_form`, `add_secret_form`, and
-    // `delete_secret_form` handlers must `tracing::error!` the cause and render
-    // the distinct "failed to load" error page — not silently fold the error
-    // into the "not found" page with no log. Regression for the `_ =>` catch-
-    // all introduced in ccc7a5ec; the intended pattern is `detail_application_
-    // page`'s exhaustive `Ok(Some(_)) | Ok(None) | Err(e)` match.
+    // Ownership-read failures: the mutating handlers log the cause and render
+    // "failed to load", and the mutation does not run.
     // ========================================================================
 
     /// `io::Write` adapter mirroring `infra::kms_arn`'s test capture: appends
@@ -2947,45 +2923,15 @@ mod tests {
         tracing::subscriber::set_default(subscriber)
     }
 
-    /// Install a one-shot fault on `get_oauth_client_by_id`: while `target`
-    /// is `None` the hook is inert (so setup reads run for real), and once
-    /// activated to `Some(id)` the *first* read of that id returns `Err`
-    /// (simulating a transient `DocumentStore::get` failure). Every later read
-    /// of the same id is inert, so the test's follow-up verification reads
-    /// succeed even though the hook stays installed. Returns a counter of
-    /// target-id consultations so the test can assert the handler reached the
-    /// ownership read.
-    fn install_client_read_fault(
+    /// A one-shot [`GetFaultTestHook`]: inert while `target` is `None`, then
+    /// fails only the first read of the target id. Returns the number of reads
+    /// of that id, so a test can assert the handler reached it.
+    fn install_read_fault(
         target: Arc<Mutex<Option<String>>>,
-    ) -> (Arc<AtomicU32>, GetOAuthClientByIdTestHook) {
+    ) -> (Arc<AtomicU32>, GetFaultTestHook) {
         let calls = Arc::new(AtomicU32::new(0));
         let calls_for_hook = calls.clone();
-        let hook: GetOAuthClientByIdTestHook = Arc::new(move |id: &str| {
-            let guard = match target.lock() {
-                Ok(g) => g,
-                Err(_) => return false,
-            };
-            let Some(target_id) = guard.as_deref() else {
-                return false;
-            };
-            if id != target_id {
-                return false;
-            }
-            drop(guard);
-            let n = calls_for_hook.fetch_add(1, Ordering::SeqCst);
-            n == 0
-        });
-        (calls, hook)
-    }
-
-    /// Install a one-shot fault on `get_oauth_client_secret_by_id`; see
-    /// [`install_client_read_fault`].
-    fn install_secret_read_fault(
-        target: Arc<Mutex<Option<String>>>,
-    ) -> (Arc<AtomicU32>, GetOAuthClientSecretByIdTestHook) {
-        let calls = Arc::new(AtomicU32::new(0));
-        let calls_for_hook = calls.clone();
-        let hook: GetOAuthClientSecretByIdTestHook = Arc::new(move |id: &str| {
+        let hook: GetFaultTestHook = Arc::new(move |id: &str| {
             let guard = match target.lock() {
                 Ok(g) => g,
                 Err(_) => return false,
@@ -3005,15 +2951,14 @@ mod tests {
 
     /// `delete_application_form` must log and render the "failed to load
     /// application" error page when the ownership read returns a transient
-    /// `Err`, and the delete must not execute. Before the fix the `Err` was
-    /// folded into the "not found" page by a `_ =>` catch-all with no log.
+    /// `Err`, and the delete must not execute.
     #[tokio::test(flavor = "current_thread")]
     async fn test_web_delete_application_load_failed_on_client_read_error() {
         let target: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let target_for_hook = target.clone();
-        let (calls, hook) = install_client_read_fault(target_for_hook);
+        let (calls, hook) = install_read_fault(target_for_hook);
         let (app, state) = test_app_with_modify_hook(|store| {
-            store.set_get_oauth_client_by_id_test_hook(hook);
+            store.set_get_fault_test_hook(hook);
         })
         .await;
 
@@ -3077,15 +3022,14 @@ mod tests {
 
     /// `add_secret_form` must log and render the "failed to load application"
     /// error page when the ownership read returns a transient `Err`, and no
-    /// secret may be minted. Before the fix the `Err` was folded into the
-    /// "not found" page with no log.
+    /// secret may be minted.
     #[tokio::test(flavor = "current_thread")]
     async fn test_web_add_secret_load_failed_on_client_read_error() {
         let target: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let target_for_hook = target.clone();
-        let (calls, hook) = install_client_read_fault(target_for_hook);
+        let (calls, hook) = install_read_fault(target_for_hook);
         let (app, state) = test_app_with_modify_hook(|store| {
-            store.set_get_oauth_client_by_id_test_hook(hook);
+            store.set_get_fault_test_hook(hook);
         })
         .await;
 
@@ -3163,9 +3107,9 @@ mod tests {
     async fn test_web_delete_secret_load_failed_on_client_read_error() {
         let target: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let target_for_hook = target.clone();
-        let (calls, hook) = install_client_read_fault(target_for_hook);
+        let (calls, hook) = install_read_fault(target_for_hook);
         let (app, state) = test_app_with_modify_hook(|store| {
-            store.set_get_oauth_client_by_id_test_hook(hook);
+            store.set_get_fault_test_hook(hook);
         })
         .await;
 
@@ -3257,9 +3201,9 @@ mod tests {
     async fn test_web_delete_secret_load_failed_on_secret_read_error() {
         let target: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let target_for_hook = target.clone();
-        let (calls, hook) = install_secret_read_fault(target_for_hook);
+        let (calls, hook) = install_read_fault(target_for_hook);
         let (app, state) = test_app_with_modify_hook(|store| {
-            store.set_get_oauth_client_secret_by_id_test_hook(hook);
+            store.set_get_fault_test_hook(hook);
         })
         .await;
 
@@ -3342,10 +3286,7 @@ mod tests {
         );
     }
 
-    /// No regression on the `Ok(None)` path: a genuinely-absent application must
-    /// render the "not found" page and must NOT emit a "Failed to get" error
-    /// log. Guards against the fix accidentally logging or repurposing the
-    /// not-found arm.
+    /// An absent application renders "not found" and logs nothing.
     #[tokio::test(flavor = "current_thread")]
     async fn test_web_delete_application_not_found_path_does_not_log_load_error() {
         let (app, state) = test_app().await;
@@ -3390,7 +3331,5 @@ mod tests {
             !logs.contains("Failed to get application"),
             "the not-found path must not log a load error: {logs:?}"
         );
-
-        let _ = state;
     }
 }
