@@ -271,6 +271,19 @@ pub struct RegistrationResponse {
     // --- Echoed metadata ---
     #[serde(skip_serializing_if = "Option::is_none")]
     pub redirect_uris: Option<Vec<String>>,
+    /// OIDC Registration Section 2: `"native"` or `"web"`, echoed verbatim.
+    ///
+    /// `application_type` drives PKCE enforcement
+    /// (`OAuthClientType::requires_pkce`) independent of confidentiality, so a
+    /// native client provisioned with a per-instance secret (RFC 8252 §8.4) is
+    /// still required to PKCE — and the only way for the client to learn that
+    /// from the registration response is to echo it here (RFC 7591 §3.2.1:
+    /// "the authorization server MUST return all registered metadata about this
+    /// client"). `Spa` and `Service` are server-inferred types a client cannot
+    /// declare (`parse_declared_client_type` rejects them) and are not valid
+    /// OIDC `application_type` values, so the field is omitted for them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub application_type: Option<String>,
     pub token_endpoint_auth_method: String,
     pub grant_types: Vec<String>,
     pub response_types: Vec<String>,
@@ -354,6 +367,7 @@ impl std::fmt::Debug for RegistrationResponse {
             .field("registration_access_token", &"[REDACTED]")
             .field("registration_client_uri", &self.registration_client_uri)
             .field("redirect_uris", &self.redirect_uris)
+            .field("application_type", &self.application_type)
             .field(
                 "token_endpoint_auth_method",
                 &self.token_endpoint_auth_method,
@@ -678,6 +692,8 @@ pub async fn register_client(
         } else {
             Some(redirect_uris)
         },
+        application_type: matches!(app_type, OAuthClientType::Native | OAuthClientType::Web)
+            .then(|| app_type.as_str().to_string()),
         token_endpoint_auth_method: jwks_auth.auth_method.as_str().to_string(),
         grant_types: validated.grant_types,
         response_types: validated.response_types,
@@ -2292,6 +2308,11 @@ fn build_client_response(client: OAuthClient, base_url: &str) -> RegistrationRes
         registration_access_token: None,
         registration_client_uri: Some(registration_client_uri),
         redirect_uris,
+        application_type: matches!(
+            client.application_type,
+            OAuthClientType::Native | OAuthClientType::Web
+        )
+        .then(|| client.application_type.as_str().to_string()),
         token_endpoint_auth_method: client.token_endpoint_auth_method.as_str().to_string(),
         grant_types,
         response_types,

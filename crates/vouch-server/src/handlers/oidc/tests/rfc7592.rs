@@ -1057,6 +1057,78 @@ async fn test_rfc7592_get_response_echoes_tls_certificate_bound_flag() {
     }
 }
 
+/// RFC 7592 §3 (GET) uses the same response format as RFC 7591 §3.2.1, so the
+/// registered `application_type` must be readable back via GET. A native client
+/// provisioned with a per-instance secret (RFC 8252 §8.4) is confidential yet
+/// PKCE-mandatory, and the GET response is the source of truth a client
+/// operates from across its lifecycle — so `application_type` must be echoed
+/// here too. `register_fully_specified_client` declares no `application_type`
+/// and uses the default confidential auth, so it is inferred `Web`.
+#[tokio::test]
+async fn test_rfc7592_get_response_echoes_application_type() {
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_fully_specified_client(&app).await;
+
+    let stored = get_client_config(&app, &client_id, &token).await;
+    // The inferred Web type is a valid OIDC application_type, so it is echoed.
+    assert_eq!(
+        stored["application_type"].as_str(),
+        Some("web"),
+        "GET must echo the inferred web application_type: {stored}"
+    );
+
+    // The bug scenario: a declared native client with a per-instance secret.
+    // Its GET response must surface application_type: native so a client (or
+    // an SDK that stored only the registration response) can recover the
+    // PKCE requirement from the standard endpoint.
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "Native With Secret (GET echo)",
+        "application_type": "native",
+        "token_endpoint_auth_method": "client_secret_basic"
+    });
+    let (status, resp) = http_post_json(&app, "/oauth/register", &body.to_string(), &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "native + client_secret_basic must register: {resp}"
+    );
+    let reg: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+    assert_eq!(
+        reg["application_type"].as_str(),
+        Some("native"),
+        "POST must echo the declared native application_type: {reg}"
+    );
+    // The secret is returned once at registration, confirming the bug
+    // scenario: a native client that is also confidential by auth method.
+    assert!(
+        reg.get("client_secret").is_some(),
+        "a secret must be issued for client_secret_basic at registration: {reg}"
+    );
+    let native_id = reg["client_id"].as_str().expect("client_id").to_string();
+    let native_token = reg["registration_access_token"]
+        .as_str()
+        .expect("registration_access_token")
+        .to_string();
+
+    let stored = get_client_config(&app, &native_id, &native_token).await;
+    assert_eq!(
+        stored["application_type"].as_str(),
+        Some("native"),
+        "GET must echo the registered native application_type, the discoverable \
+         signal that PKCE is mandatory: {stored}"
+    );
+    // The confidential auth method is echoed too — confirming this is the bug
+    // scenario (confidential + native) and the field is genuinely needed. The
+    // client_secret itself is returned once at registration (RFC 7591 §3.2.1)
+    // and is not restated on GET, so its absence here is by design.
+    assert_eq!(
+        stored["token_endpoint_auth_method"].as_str(),
+        Some("client_secret_basic"),
+        "token_endpoint_auth_method must echo the secret method: {stored}"
+    );
+}
+
 /// RFC 7592 §3 marks `registration_access_token` as REQUIRED in every Client
 /// Information Response, and §2.1 states the GET response uses "a payload as
 /// described in Section 3" (`specs/rfc/rfc7592.txt:315-318`). The GET response
@@ -1187,6 +1259,68 @@ async fn test_rfc7592_put_response_echoes_rfc8705_identity() {
         stored["tls_client_auth_subject_dn"].as_str(),
         Some("CN=original.example.com"),
         "GET must reflect the restated subject DN: {stored}"
+    );
+}
+
+/// RFC 7592 §2.2 (PUT) uses the same response format as RFC 7591 §3.2.1.
+/// `application_type` is immutable after registration
+/// (`reject_immutable_changes`), so a PUT that omits it leaves the stored
+/// value alone — and the PUT response, plus the subsequent GET, must both
+/// echo it. Restating the registered value must also succeed and echo.
+#[tokio::test]
+async fn test_rfc7592_put_response_echoes_application_type() {
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_fully_specified_client(&app).await;
+
+    // A PUT that omits the immutable application_type must keep the stored
+    // Web value and echo it in the response.
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"]
+    });
+    let (status, body) = put_client_config(&app, &client_id, &token, &update_body).await;
+    assert_eq!(status, StatusCode::OK, "PUT failed: {body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        json["application_type"].as_str(),
+        Some("web"),
+        "PUT response must echo the stored application_type when omitted: {json}"
+    );
+
+    // The first PUT rotates the registration access token; the rotated token is
+    // the one valid for the subsequent GET and the second PUT below.
+    let token_after_first_put = rotated_token(&json);
+    let stored = get_client_config(&app, &client_id, &token_after_first_put).await;
+    assert_eq!(
+        stored["application_type"].as_str(),
+        Some("web"),
+        "GET must reflect the unchanged application_type after PUT: {stored}"
+    );
+
+    // Restating the registered value is the RFC 7592 §2.2 "MUST include all
+    // client metadata fields as returned" path — it must succeed and echo.
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "application_type": "web"
+    });
+    let (status, body) =
+        put_client_config(&app, &client_id, &token_after_first_put, &update_body).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "restating the registered application_type must succeed: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        json["application_type"].as_str(),
+        Some("web"),
+        "PUT response must echo the restated application_type: {json}"
+    );
+
+    let stored = get_client_config(&app, &client_id, &rotated_token(&json)).await;
+    assert_eq!(
+        stored["application_type"].as_str(),
+        Some("web"),
+        "GET must reflect the restated application_type: {stored}"
     );
 }
 
