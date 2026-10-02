@@ -346,7 +346,7 @@ cmd-credential-openai-long-about =
     token to stdout — designed to be invoked by the OpenAI Codex CLI as a
     `[model_providers.<id>.auth]` command with `refresh_interval_ms`.
 
-cmd-credential-token-about = Print the current session token for use with curl or other tools
+cmd-credential-token-about = Print the current session's access token for inspecting its claims (DPoP-bound; cannot be sent as Bearer)
 
 cmd-credential-codeartifact-about = Obtain a CodeArtifact authorization token
 arg-credential-codeartifact-domain-help = CodeArtifact domain name (or use --domain-profile / saved default).

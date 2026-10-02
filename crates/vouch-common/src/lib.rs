@@ -4,7 +4,6 @@
 pub mod aaguid;
 pub(crate) mod api;
 pub mod aws;
-pub(crate) mod cookie;
 pub mod dns;
 pub mod encoding;
 pub mod env;
@@ -48,7 +47,6 @@ pub use api::{
     SessionStatus, SshCaPublicKeyResponse, SshCertificateRequest, SshCertificateResponse,
     serialize_opt_secret_string, serialize_secret_string,
 };
-pub use cookie::{SessionCookie, clear_cookie, cookie_path, write_cookie};
 pub use error::ApiError;
 pub use resource_label::{ResourceLabel, ResourceLabelError};
 pub use ssh_cert::{ssh_cert_issued_to, ssh_cert_key_id};

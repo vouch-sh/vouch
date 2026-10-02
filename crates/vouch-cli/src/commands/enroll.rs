@@ -113,14 +113,13 @@ pub(crate) async fn run(server: &ServerUrl) -> Result<()> {
     let expires_at = compute_session_expires_at(token_response.expires_in);
     let expires_at_str = expires_at.to_string();
 
-    // Step 7: Store session, cookie, and auto-provision SSH.
+    // Step 7: Store session and auto-provision SSH.
     // Enrollment uses device authorization grant (no FAPI key / no DPoP).
     let agent_stored = session::store_and_finalize(
         server,
         token_response.access_token.expose_secret(),
         &token_response.email,
         &expires_at_str,
-        Some(expires_at),
         None,
     )
     .await?;

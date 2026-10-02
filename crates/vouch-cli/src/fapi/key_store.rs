@@ -18,6 +18,9 @@ use crate::tr;
 use vouch_common::paths;
 
 /// Keyring service name for vouch credentials.
+///
+/// Stable format: terraform-provider-vouch (`cli_login`) and the Playwright test harness read the
+/// CLI's session from outside this repo using these two names; a test pins them.
 const SERVICE: &str = "vouch";
 /// Keyring account name for the FAPI client key.
 const ACCOUNT: &str = "client_key";
@@ -201,4 +204,14 @@ pub fn load_or_create_client_key() -> anyhow::Result<ClientKey> {
     tracing::debug!("Saved new client key to disk");
 
     Ok(key)
+}
+
+#[cfg(test)]
+mod tests {
+    /// External readers look the key up under these names.
+    #[test]
+    fn test_keychain_item_names_are_stable() {
+        assert_eq!(super::SERVICE, "vouch");
+        assert_eq!(super::ACCOUNT, "client_key");
+    }
 }

@@ -178,12 +178,6 @@ pub fn config_file() -> Option<PathBuf> {
     config_dir().map(|d| d.join("config.json"))
 }
 
-/// Path to the session cookie file (`<state>/vouch/cookie.txt`).
-#[must_use]
-pub fn cookie_file() -> Option<PathBuf> {
-    state_dir().map(|d| d.join("cookie.txt"))
-}
-
 /// Path to the audit log (`<state>/vouch/audit.log`).
 #[must_use]
 pub fn audit_log_file() -> Option<PathBuf> {
@@ -374,9 +368,6 @@ fn migrate_legacy_vouch_dir() {
     if let Some(p) = config_file() {
         dests.push(("config.json", p));
     }
-    if let Some(p) = cookie_file() {
-        dests.push(("cookie.txt", p));
-    }
     dests.push(("audit.log", state.join("audit.log")));
     dests.push(("audit.log.1", state.join("audit.log.1")));
     if let Some(p) = client_key_file() {
@@ -481,7 +472,7 @@ mod tests {
         let legacy = tmp.path().join(".vouch");
         std::fs::create_dir_all(&legacy)?;
         std::fs::write(legacy.join("config.json"), b"{}")?;
-        std::fs::write(legacy.join("cookie.txt"), b"cookie")?;
+        std::fs::write(legacy.join("audit.log"), b"log")?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -492,15 +483,15 @@ mod tests {
         }
 
         let config_dest = tmp.path().join(".config/vouch/config.json");
-        let cookie_dest = tmp.path().join(".local/state/vouch/cookie.txt");
+        let log_dest = tmp.path().join(".local/state/vouch/audit.log");
         let dests = vec![
             ("config.json", config_dest.clone()),
-            ("cookie.txt", cookie_dest.clone()),
+            ("audit.log", log_dest.clone()),
         ];
 
         assert!(migrate_layout(&legacy, &dests));
         assert!(config_dest.exists());
-        assert!(cookie_dest.exists());
+        assert!(log_dest.exists());
         assert!(!legacy.join("config.json").exists());
 
         #[cfg(unix)]

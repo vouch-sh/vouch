@@ -95,6 +95,9 @@ pub struct ClientKeyFile {
     /// Key ID (JWK thumbprint per RFC 7638).
     pub kid: String,
     /// Base64url-encoded PKCS#8 DER private key bytes.
+    ///
+    /// Stable format: terraform-provider-vouch (`cli_login`) and the Playwright test harness read the
+    /// CLI's session from outside this repo using this field name and encoding; a test pins it.
     pub pkcs8: String,
 }
 
@@ -429,5 +432,35 @@ mod tests {
         let t1 = compute_thumbprint(&jwk.x, &jwk.y);
         let t2 = compute_thumbprint(&jwk.x, &jwk.y);
         assert_eq!(t1, t2);
+    }
+
+    /// External readers (terraform-provider-vouch, the Playwright harness)
+    /// load the key from `<data>/vouch/client_key.json` or the keychain item
+    /// as JSON with a base64url PKCS#8 `pkcs8` field.
+    #[test]
+    fn test_client_key_storage_format_is_stable() {
+        use base64::Engine;
+        use vouch_common::paths;
+        let key = ClientKey::generate().expect("should generate key");
+        let json = serde_json::to_value(key.to_key_file().expect("key file")).expect("json");
+        let pkcs8 = json
+            .get("pkcs8")
+            .and_then(serde_json::Value::as_str)
+            .expect("pkcs8 is a string");
+        let der = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(pkcs8)
+            .expect("pkcs8 is base64url");
+        aws_lc_rs::signature::EcdsaKeyPair::from_pkcs8(
+            &aws_lc_rs::signature::ECDSA_P256_SHA256_FIXED_SIGNING,
+            &der,
+        )
+        .expect("pkcs8 is a P-256 PKCS#8 document");
+        if let Some(path) = paths::client_key_file() {
+            assert!(
+                path.ends_with("vouch/client_key.json"),
+                "{}",
+                path.display()
+            );
+        }
     }
 }

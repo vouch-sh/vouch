@@ -11,7 +11,7 @@ use vouch_cli::http::ReqwestClient;
 
 use crate::config::Config;
 use vouch_cli::tr_println;
-use vouch_common::{clear_cookie, protocol};
+use vouch_common::protocol;
 
 /// Run the logout command.
 pub(crate) async fn run(server: &ServerUrl) -> Result<()> {
@@ -38,16 +38,7 @@ pub(crate) async fn run(server: &ServerUrl) -> Result<()> {
         config.save()?;
     }
 
-    // Clear cookie file
-    let cookie_cleared = match clear_cookie() {
-        Ok(()) => true,
-        Err(e) => {
-            tracing::debug!("Failed to clear cookie: {e}");
-            false
-        }
-    };
-
-    if had_token || agent_cleared || cookie_cleared {
+    if had_token || agent_cleared {
         tr_println!("logout-success");
     } else {
         tr_println!("logout-not-logged-in");

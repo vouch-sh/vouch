@@ -4,7 +4,10 @@ Vouch supports SCIM 2.0 (RFC 7643/7644) for user provisioning and de-provisionin
 
 ## Setup
 
-The admin API endpoints (`/api/v1/org/*`) require an authenticated Vouch session from a user with org admin privileges. The server accepts the access token via `Authorization: Bearer <token>`, `Authorization: DPoP <token>`, or the `vouch_session` cookie.
+SCIM tokens are managed from the admin UI by a user with org admin privileges. The admin API
+(`/api/v1/org/*`) behind it accepts a browser session cookie, or an access token presented the way
+it was issued. The token `vouch login` stores is DPoP-bound, so the API refuses it as
+`Authorization: Bearer` or as a cookie, and it cannot be used from `curl`.
 
 **Prerequisites:**
 - You must belong to an organization and be an org administrator.
@@ -16,19 +19,10 @@ administrator. Every administrator after that is promoted from the admin UI. See
 
 ### 1. Create a SCIM token
 
-The simplest way is the admin UI: go to **`/admin/scim-tokens`**, create a token, and copy it.
-Choose an expiry between 1 and 365 days.
+In the admin UI, open **API Tokens** (`/admin/scim-tokens`), create a token, and copy it. Choose
+an expiry between 1 and 365 days.
 
-To script it instead, call the API with an access token from an admin session:
-
-```bash
-curl -X POST https://auth.example.com/api/v1/org/scim-tokens \
-  -H "Authorization: Bearer $(vouch credential token)" \
-  -H "Content-Type: application/json" \
-  -d '{"description": "SCIM integration", "expires_in_days": 90}'
-```
-
-Either way the token is prefixed `vouch_scim_` and is **shown once**. It is stored only as a
+The token is prefixed `vouch_scim_` and is **shown once**. It is stored only as a
 SHA-256 hash, so it cannot be recovered — if you lose it, revoke it and create another.
 
 ### 2. Configure your IdP
@@ -56,17 +50,7 @@ one domain, verify each one first at `/admin/domains` before pushing users on it
 
 ### 3. Manage tokens
 
-List and revoke tokens at `/admin/scim-tokens`, or through the API:
-
-```bash
-# List active SCIM tokens
-curl -H "Authorization: Bearer $(vouch credential token)" \
-  https://auth.example.com/api/v1/org/scim-tokens
-
-# Revoke a SCIM token
-curl -X DELETE -H "Authorization: Bearer $(vouch credential token)" \
-  https://auth.example.com/api/v1/org/scim-tokens/<token-id>
-```
+List and revoke tokens on the **API Tokens** page (`/admin/scim-tokens`).
 
 Revocation takes effect immediately — tokens are checked against the database on every request.
 Expired tokens are removed by the background cleanup task.

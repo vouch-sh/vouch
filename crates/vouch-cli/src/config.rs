@@ -279,6 +279,9 @@ struct ServerConfigFile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     server_url: Option<String>,
     /// Session token, persisted to `config.json` by design (0600 perms).
+    ///
+    /// Stable format: terraform-provider-vouch (`cli_login`) and the Playwright test harness read the
+    /// CLI's session from outside this repo as `servers.<hostname>.token`; a test pins it.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
