@@ -528,6 +528,65 @@ fn test_extract_device_posture_no_posture_entry() {
     assert!(extract_device_posture(Some(&value)).is_err());
 }
 
+/// The validate API handler passes the caller's `test_posture` straight into
+/// `test_policy_text` without `DevicePosture::normalize()`, while the
+/// production enforcement path (`extract_device_posture`) always normalizes.
+/// This test drives the real `extract_device_posture` (not the `evaluate_one`
+/// test fixture) to prove production returns `pass=true` for a mixed-case
+/// posture that the playground path reports as `pass=false`.
+#[test]
+fn test_playground_diverges_from_production_normalization() {
+    let policy = requirement("context.device.os_distribution == \"ubuntu\"");
+
+    // Mixed-case posture as the CLI collects it: linux.rs reads os_distribution
+    // verbatim from /etc/os-release (e.g. "Ubuntu" on Ubuntu).
+    let raw = serde_json::json!([{
+        "type": POSTURE_TYPE,
+        "os": "linux",
+        "os_distribution": "Ubuntu",
+        "posture_version": 1,
+    }]);
+
+    // Production enforcement path — extract_device_posture calls normalize().
+    let prod_posture = extract_device_posture(Some(&raw)).expect("posture extracts");
+    assert_eq!(
+        prod_posture.os_distribution.as_deref(),
+        Some("ubuntu"),
+        "production normalizes os_distribution to lowercase"
+    );
+    let prod_pass = evaluate_one(&policy, &prod_posture);
+    assert!(prod_pass, "production allows the mixed-case posture");
+
+    // Playground path — the handler passes the raw posture without normalizing.
+    let playground_posture: DevicePosture =
+        serde_json::from_value(raw[0].clone()).expect("deserialize raw posture");
+    assert_eq!(
+        playground_posture.os_distribution.as_deref(),
+        Some("Ubuntu"),
+        "playground posture is not normalized"
+    );
+    let playground = test_policy_text(
+        &policy,
+        &playground_posture,
+        catalog::DecisionPoint::IssueToken,
+    )
+    .expect("policy text is valid");
+    assert!(
+        !playground.pass,
+        "playground must disagree with production: got pass=true but expected pass=false"
+    );
+
+    // After normalizing (the proposed fix), the playground agrees with production.
+    let mut fixed = playground_posture.clone();
+    fixed.normalize();
+    let fixed_result = test_policy_text(&policy, &fixed, catalog::DecisionPoint::IssueToken)
+        .expect("policy text is valid");
+    assert!(
+        fixed_result.pass,
+        "after normalize() the playground agrees with production"
+    );
+}
+
 // ============================================================
 // Field parity (catalog ↔ posture_fields ↔ schema ↔ generator)
 // ============================================================

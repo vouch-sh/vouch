@@ -101,9 +101,15 @@ pub(crate) async fn validate_policy_api(
         return Ok(invalid(Some(policy_text), format!("{e}")));
     }
 
-    let test_posture = req
+    // Normalize the caller-supplied posture to match the production
+    // enforcement path: extract_device_posture calls normalize() before
+    // evaluation, so the preview must apply the same transformation or it
+    // can disagree with production for mixed-case CLI-collected values
+    // (e.g. os_distribution: "Ubuntu" vs the documented lowercase "ubuntu").
+    let mut test_posture = req
         .test_posture
         .unwrap_or_else(posture::catalog::sample_posture);
+    test_posture.normalize();
     let test_result = match posture::test_policy_text(&policy_text, &test_posture, decision) {
         Ok(result) => Some(TestResult {
             pass: result.pass,
@@ -239,6 +245,53 @@ mod tests {
         assert_eq!(
             json["test_result"]["pass"], false,
             "test_result.pass must be false when posture does not match"
+        );
+    }
+
+    /// The handler must normalize a caller-supplied `test_posture` before
+    /// evaluating it, mirroring the production enforcement path
+    /// (`extract_device_posture` calls `normalize()`). The CLI collects
+    /// mixed-case string values (e.g. `os_distribution: "Ubuntu"` from
+    /// `/etc/os-release`), while documented example policies use lowercase
+    /// literals (e.g. `context.device.os_distribution == "ubuntu"`). Without
+    /// normalization the playground returns `pass=false` for a posture that
+    /// production allows (`pass=true`).
+    #[tokio::test]
+    async fn test_policy_validate_normalizes_test_posture() {
+        let (app, state) = test_app().await;
+        let (_admin, token) = create_test_org_admin(&state).await;
+        let auth = format!("Bearer {token}");
+
+        // Policy uses the documented lowercase literal; the CLI-collected
+        // posture carries the mixed-case form straight from /etc/os-release.
+        let body = serde_json::json!({
+            "policy_text": "forbid (principal, action == Vouch::Action::\"IssueToken\", resource) unless { context.device.os_distribution == \"ubuntu\" };",
+            "test_posture": {
+                "type": "device_posture",
+                "posture_version": 1,
+                "os": "linux",
+                "os_distribution": "Ubuntu"
+            }
+        });
+        let (status, resp) = http_post_json(
+            &app,
+            "/api/v1/org/policies/validate",
+            &body.to_string(),
+            &[("Authorization", &auth)],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "valid policy with matching posture should return 200: {resp}"
+        );
+        let json: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        assert_eq!(json["valid"], true, "the policy text itself is valid");
+        assert_eq!(
+            json["test_result"]["pass"], true,
+            "playground must agree with production: normalized os_distribution \
+             \"Ubuntu\" -> \"ubuntu\" matches the lowercase policy literal"
         );
     }
 
