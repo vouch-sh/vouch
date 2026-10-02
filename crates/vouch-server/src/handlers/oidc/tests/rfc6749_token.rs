@@ -371,14 +371,9 @@ async fn test_rfc6749_token_client_secret_post_succeeds() {
 }
 
 /// RFC 6749 §2.3: "The client MUST NOT use more than one authentication
-/// method in each request." A `POST /oauth/token` that simultaneously sends
-/// an `Authorization: Basic <id:secret>` header AND `client_id`+
-/// `client_secret` in the form body uses two delivery mechanisms
-/// (`client_secret_basic` and `client_secret_post`) and MUST be rejected as
-/// `invalid_request` (RFC 6749 §5.2: "utilizes more than one mechanism for
-/// authenticating the client"). Before the fix the server accepted the
-/// non-conformant request and returned `200 OK` with an `access_token`,
-/// silently dropping the body secret in favor of the Basic credential.
+/// method in each request." §5.2 answers a request that "utilizes more than
+/// one mechanism for authenticating the client" with `invalid_request`, so a
+/// Basic header plus a body `client_secret` is refused at the token endpoint.
 #[tokio::test]
 async fn test_rfc6749_basic_and_body_secret_combined_rejected_e2e() {
     let (app, state) = test_app().await;
