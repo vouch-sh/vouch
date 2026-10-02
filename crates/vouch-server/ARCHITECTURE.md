@@ -180,9 +180,11 @@ route template against `PUBLIC_V1_PATHS`. 5 templates pass unsigned, and every o
 `/v1` path must be signed. Paths outside `/v1` are out of scope. With no matched
 template it falls back to the concrete URI and applies the same rule, so the failure
 mode is over-enforcement, never passthrough. A signature must cover `@method` and
-`@path`. A request with a non-empty body must also cover RFC 9530 `Content-Digest`.
-Bodies up to 1 MiB are buffered to check it, and signatures older than 300 s are
-rejected.
+`@path`. A request with a non-empty body, or one carrying an RFC 9530
+`Content-Digest` header, must also cover `Content-Digest` and present a digest
+matching the body; only requests with an empty body and no `Content-Digest`
+header are exempt. Bodies up to 1 MiB are buffered to check it, and signatures
+older than 300 s are rejected.
 
 `maybe_rate_limit!` replaces all three limiters with a no-op when
 `VOUCH_CERTIFICATION_TEST_TOKEN` is set. That variable changes three things: it disables
