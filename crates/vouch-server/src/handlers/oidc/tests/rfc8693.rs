@@ -2794,6 +2794,67 @@ async fn test_rfc8693_resource_uris_rejects_unregistered_audience_id_token() {
 }
 
 #[tokio::test]
+async fn test_rfc8693_resource_uris_rejects_id_token_no_audience() {
+    // Regression: a client restricted to `resource_uris: ["https://api.example.com"]`
+    // must NOT mint an ID token whose `aud` is the issuer URL by simply
+    // omitting both `audience` and `resource`. The ID-token fork's
+    // `aud = issuer` fallback (the AWS Workload Identity Federation
+    // convention) must be resolved *before* the `resource_uris` allowlist so
+    // the same `aud` the fork mints is checked against the client's
+    // registered audiences. Before the fix, `resolve_exchange_audience`
+    // returned `None` for this case (skipping the allowlist) and
+    // `issue_id_token` minted `aud = issuer` afterward — bypassing the very
+    // allowlist #1220 introduced for the ID-token fork.
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "rur-id-noaud@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let client = make_restricted_client(&state, &user.id).await;
+    let auth_header = client.basic_auth_header();
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &requested_token_type={ID_TOKEN_TYPE}"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "restricted client must not mint an ID token by omitting `audience` \
+         (the aud=issuer fallback must be allowlisted): {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        error["error"], "invalid_target",
+        "no-audience ID token whose aud falls back to the issuer must report \
+         invalid_target when the issuer is not in the client's resource_uris: {body}"
+    );
+    assert!(
+        error["error_description"]
+            .as_str()
+            .is_some_and(|d| d.contains("not registered for this client")),
+        "description must name the allowlist violation: {body}"
+    );
+}
+
+#[tokio::test]
 async fn test_rfc8693_resource_uris_rejects_unregistered_resource() {
     // The `resource` parameter (RFC 8707) is an alternate spelling of the
     // audience; it must be gated by the same allowlist.
@@ -3042,6 +3103,141 @@ async fn test_rfc8693_resource_uris_permissive_client_allows_arbitrary_audience(
     assert_eq!(
         claims["aud"], "https://arbitrary.example.com",
         "permissive client's token aud must be the requested arbitrary audience"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc8693_id_token_no_audience_policy_gate_sees_resolved_issuer() {
+    // End-to-end proof that the Cedar ExchangeToken policy gate sees the
+    // audience the ID-token fork grants (the issuer URL), not the empty
+    // string, for a no-`audience` request — the second half of the bypass
+    // fix. Before the fix, `exchange_token` passed `None` to the gate for a
+    // no-audience ID-token request, so `decision_event` recorded
+    // `input.audience == ""` (via `unwrap_or_default()`) while `issue_id_token`
+    // minted `aud = issuer` afterward; an audience-based custom Cedar policy
+    // had no value to key on.
+    //
+    // The fix resolves the issuer fallback before the gate, so a custom
+    // policy `forbid … when { context.input.audience == "<issuer>" }` now
+    // matches the no-audience ID-token request. This test activates such a
+    // policy for an org, issues a no-audience ID-token exchange against an
+    // org user (whose issuer is the base_url), and asserts the policy denies.
+    let (app, state) = test_app().await;
+    let org = create_test_org(&state.store, "id-audience-gate.example").await;
+    let user =
+        create_test_user_in_org(&state.store, "id-audience-gate@example.com", &org.id, false).await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    // Permissive client (empty `resource_uris`): the allowlist passes the
+    // issuer fallback; only the custom policy denies.
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let auth_header = client.basic_auth_header();
+
+    // Store then activate a non-temporal custom Cedar policy that denies the
+    // exchange when the granted audience is the issuer (the no-audience
+    // ID-token fallback). `create_custom_policy` inserts with `active:
+    // false`; the separate `update_custom_policy` call flips it on.
+    let issuer = "https://test.example.com";
+    let policy_text = format!(
+        "forbid (principal, action == Vouch::Action::\"ExchangeToken\", resource) \
+         when {{ context.input.audience == \"{issuer}\" }};"
+    );
+    let created = db::create_custom_policy(
+        &state.store,
+        db::CreateCustomPolicyParams {
+            name: "Deny issuer-audience exchange",
+            description: None,
+            policy_text: &policy_text,
+            org_id: &org.id,
+            builder_spec: None,
+        },
+    )
+    .await
+    .expect("create custom policy");
+    db::update_custom_policy(
+        &state.store,
+        &created.id,
+        &org.id,
+        db::UpdateCustomPolicyParams {
+            name: None,
+            description: db::FieldUpdate::Keep,
+            policy_text: None,
+            active: Some(true),
+            builder_spec: db::FieldUpdate::Keep,
+        },
+    )
+    .await
+    .expect("activate custom policy")
+    .expect("activated policy returned");
+
+    // No-`audience` ID-token exchange: the fork resolves `aud = issuer` and
+    // the gate must see it, so the custom policy denies. RFC 8693 §2.2.2
+    // remaps the policy's `access_denied` to `invalid_request`.
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &requested_token_type={ID_TOKEN_TYPE}"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "the gate must deny the no-audience ID-token exchange because the \
+         resolved audience (the issuer) matches the custom policy: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        error["error"], "invalid_request",
+        "a policy denial on the exchange path is remapped to invalid_request \
+         (RFC 8693 §2.2.2): {body}"
+    );
+
+    // Contrast: the same client minting an ID token for an explicit, non-issuer
+    // audience is NOT denied by the issuer-only policy — proving the gate
+    // distinguishes the resolved no-audience issuer from a different audience
+    // (i.e. the policy matches the audience, not just any ID-token request).
+    let (status2, body2) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &requested_token_type={ID_TOKEN_TYPE}\
+             &audience=https://other.example"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(
+        status2,
+        StatusCode::OK,
+        "the issuer-only policy must not deny an ID token for a different \
+         (explicit) audience: {body2}"
+    );
+    let response: serde_json::Value = serde_json::from_str(&body2).expect("Valid JSON");
+    let id_token = response["access_token"]
+        .as_str()
+        .expect("access_token present");
+    let claims = decode_jwt_payload(id_token);
+    assert_eq!(
+        claims["aud"], "https://other.example",
+        "the explicit audience must be granted, not the issuer: {body2}"
     );
 }
 

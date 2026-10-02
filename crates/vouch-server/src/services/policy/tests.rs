@@ -2585,3 +2585,57 @@ fn test_malformed_audit_payload_cannot_satisfy_correlation() {
         "a login whose IP cannot be read must not satisfy the pin"
     );
 }
+
+/// The `ExchangeToken` decision event's `input.audience` field carries the
+/// audience the fork grants, so a custom Cedar policy that forbids on a
+/// specific audience can match it.
+///
+/// For an ID-token exchange that omits `audience`/`resource`, the fork mints
+/// `aud = issuer`; before the fix, `exchange_token` passed `None` to the
+/// gate, so `decision_event` recorded `input.audience == ""` (via
+/// `unwrap_or_default()`) while the JWT carried `aud = issuer` — an
+/// audience-based deny policy had no value to key on. The fix resolves the
+/// issuer fallback before the gate, so the gate sees `Some(issuer)`. This
+/// test pins the event shaping: `Some(issuer)` reaches the field the cedar
+/// predicate reads.
+#[test]
+fn test_exchange_decision_event_audience_field_carries_resolved_audience() {
+    // The bug shape — `None` is recorded as the empty string, so an
+    // audience-based custom policy cannot match the issuer the fork mints.
+    let none_event = decision_event(
+        &DecisionKind::ExchangeToken {
+            ip: None,
+            client_id: "cli",
+            audience: None,
+        },
+        "user-a",
+        "org-1",
+        0,
+    );
+    assert_eq!(
+        none_event.field("input", "audience"),
+        Some(&dogwood_language::Value::String(String::new())),
+        "the no-audience event records \"\" — an audience predicate cannot match the issuer here"
+    );
+
+    // The fixed shape — `Some(issuer)` is recorded as the issuer string, so
+    // a custom policy `forbid … when { context.input.audience == "<issuer>" }`
+    // can match the value the minted token's `aud` claim carries.
+    let issuer = "https://test.example.com";
+    let some_event = decision_event(
+        &DecisionKind::ExchangeToken {
+            ip: None,
+            client_id: "cli",
+            audience: Some(issuer),
+        },
+        "user-a",
+        "org-1",
+        0,
+    );
+    assert_eq!(
+        some_event.field("input", "audience"),
+        Some(&dogwood_language::Value::String(issuer.to_string())),
+        "the resolved-audience event must carry the issuer the fork mints, so a \
+         Cedar audience predicate sees the value the JWT's `aud` claim carries"
+    );
+}

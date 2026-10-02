@@ -393,13 +393,56 @@ pub(crate) async fn exchange_token(
     // The audience the chosen fork grants. The policy gate judges this value
     // because it is what that fork's audit row records, and history replays
     // the row as `input.audience`. The ID-token fork federates with external
-    // relying parties and grants the requested audience as is. The
-    // access-token fork keeps a narrowed subject narrowed, as a bound one
-    // keeps its binding, so exchange cannot widen it back to a token Vouch
-    // accepts.
+    // relying parties and grants the requested audience as is, defaulting to
+    // the issuer when none is supplied. The access-token fork keeps a narrowed
+    // subject narrowed, as a bound one keeps its binding, so exchange cannot
+    // widen it back to a token Vouch accepts.
+    //
+    // The ID-token fork's `aud = issuer` default is resolved *here*, before
+    // the policy gate and the `resource_uris` allowlist judge it. The
+    // handler's `resolve_exchange_audience` chokepoint returns `None` — and
+    // skips the allowlist — when the request omits both `audience` and
+    // `resource`; `issue_id_token` would then mint `aud = issuer` after both
+    // enforcement layers ran on an absent audience. Resolving the issuer
+    // fallback against the same org snapshot the fork mints from, and
+    // enforcing the allowlist on it here, closes the bypass where a client
+    // restricted to a single RP minted an ID token for `aud = issuer` (the
+    // AWS Workload Identity Federation convention) by omitting `audience`.
     let DecodedToken::AccessToken(ref subject_claims) = subject_decoded;
+    // Load the subject's org once for the ID-token fork, so the issuer the
+    // fallback mints as `aud`, the `iss` claim, and the org signing key all
+    // derive from a single org read. `None` for the access-token fork, which
+    // never reaches `issue_id_token`.
+    let id_token_org = if params.requested_token_type == Some(RequestedTokenType::IdToken) {
+        match subject_user.org_id.as_ref() {
+            Some(org_id) => db::get_organization(&state.store, org_id)
+                .await
+                .map_err(|e| ServiceError::Internal(format!("load org for token exchange: {e}")))?,
+            None => None,
+        }
+    } else {
+        None
+    };
+    // Backing storage for the resolved issuer fallback, kept in the
+    // enclosing scope so the `audience` borrow and the ID-token fork's `aud`
+    // resolve from one value the gate and allowlist already judged.
+    let mut resolved_id_token_issuer = String::new();
     let audience = if params.requested_token_type == Some(RequestedTokenType::IdToken) {
-        params.audience
+        match params.audience {
+            // Explicit audience: already allowlisted by resolve_exchange_audience.
+            Some(aud) => Some(aud),
+            None => {
+                let issuer = super::org_keys::org_issuer_or_base(&config, id_token_org.as_ref())?;
+                if !params.client.is_valid_resource_uri(&issuer) {
+                    return Err(ServiceError::oauth(
+                        OAuthErrorCode::InvalidTarget,
+                        "The requested audience is not registered for this client",
+                    ));
+                }
+                resolved_id_token_issuer = issuer;
+                Some(resolved_id_token_issuer.as_str())
+            }
+        }
     } else {
         subject_claims.exchanged_audience(
             params.audience,
@@ -650,12 +693,18 @@ pub(crate) async fn exchange_token(
                 user_id: &subject_session.user_id,
                 email: subject_email,
                 subject_token_hash: &subject_token_hash,
-                audience,
+                // The resolved audience the fork grants: the explicitly
+                // requested audience (already allowlisted by the handler) or
+                // the issuer the no-audience fallback mints (allowlisted
+                // above). `issue_id_token` consumes this as is and does not
+                // fall back to the issuer itself.
+                audience: params.audience.unwrap_or(&resolved_id_token_issuer),
                 expires_in,
                 hardware_aaguid: subject_session.hardware_aaguid.as_deref(),
                 org_domain: subject_session.org_domain.as_deref(),
                 client_id: &params.client.client_id,
                 client_info: params.client_info,
+                org: id_token_org,
             },
             arrival,
         )
@@ -808,8 +857,14 @@ struct IdTokenContext<'a> {
     email: &'a str,
     /// Hash of the subject token, for the audit record.
     subject_token_hash: &'a str,
-    /// Requested audience (`aud` claim); falls back to the issuer URL.
-    audience: Option<&'a str>,
+    /// The resolved `aud` claim. For an ID-token exchange this is always the
+    /// audience the fork grants: the explicitly requested audience (already
+    /// allowlisted by `resolve_exchange_audience`) or the issuer URL the
+    /// fork mints when none was requested (allowlisted in `exchange_token`
+    /// before the gate). `issue_id_token` consumes this as is and does not
+    /// fall back to the issuer itself — that fallback would mint an `aud` the
+    /// allowlist and policy gate never saw, which is the bypass this closes.
+    audience: &'a str,
     /// Lifetime ceiling in seconds, already capped by subject TTL and policy.
     expires_in: u64,
     /// AAGUID snapshot from the subject session (`hardware_aaguid` claim).
@@ -820,6 +875,11 @@ struct IdTokenContext<'a> {
     client_id: &'a str,
     /// The request's transport metadata, for the audit event.
     client_info: &'a db::ClientInfo,
+    /// The subject's org snapshot, loaded once in `exchange_token`. Resolves
+    /// the org-specific `iss` claim and the org signing key, so the `aud` the
+    /// allowlist checked, the `iss` the token claims, and the key that signs
+    /// it all derive from a single org read.
+    org: Option<db::Organization>,
 }
 
 /// Mint a clean OIDC ID token (ES256) for an RFC 8693 exchange where the
@@ -844,21 +904,17 @@ async fn issue_id_token(
 ) -> ServiceResult<TokenExchangeResult> {
     let config = state.config();
 
-    // Resolve the caller's org so the exchanged token uses the org's issuer and
-    // its own signing key when a subdomain is claimed — giving every OIDC
-    // federation consumer (GCP/Azure workload identity, Kubernetes, Vault, any
-    // RP) the same per-tenant isolation as the AWS path.
-    let user = db::get_user_by_id(&state.store, ctx.user_id)
-        .await
-        .map_err(|e| ServiceError::Internal(format!("load user for token exchange: {e}")))?;
-    let org = match user.and_then(|u| u.org_id) {
-        Some(org_id) => db::get_organization(&state.store, &org_id)
-            .await
-            .map_err(|e| ServiceError::Internal(format!("load org for token exchange: {e}")))?,
-        None => None,
-    };
-    let issuer = super::org_keys::org_issuer_or_base(&config, org.as_ref())?;
-    let audience = ctx.audience.unwrap_or(&issuer);
+    // The caller's org snapshot is loaded once in `exchange_token`, so the
+    // exchanged token uses the org's issuer and its own signing key when a
+    // subdomain is claimed — giving every OIDC federation consumer (GCP/Azure
+    // workload identity, Kubernetes, Vault, any RP) the same per-tenant
+    // isolation as the AWS path. The `aud` is already resolved by the caller
+    // (the requested audience, or the issuer the fork mints when none was
+    // requested and allowlisted beforehand), so the `iss` claim, the signing
+    // key, and the `aud` the allowlist and gate judged all derive from this
+    // one org snapshot.
+    let issuer = super::org_keys::org_issuer_or_base(&config, ctx.org.as_ref())?;
+    let audience = ctx.audience;
     let expires_in = ctx.expires_in.min(DEFAULT_ID_TOKEN_EXPIRES_SECS);
 
     // Stamp the arrival instant once and use it for every temporal claim of
@@ -879,7 +935,7 @@ async fn issue_id_token(
         .build()
         .map_err(|e| ServiceError::Internal(format!("Failed to build ID token claims: {e}")))?;
 
-    let org_keys = super::org_keys::resolve_org_keys(state, org.as_ref())
+    let org_keys = super::org_keys::resolve_org_keys(state, ctx.org.as_ref())
         .await
         .map_err(|e| ServiceError::Internal(format!("Failed to resolve org signing key: {e}")))?;
     let signing_key = org_keys
@@ -916,7 +972,7 @@ async fn issue_id_token(
             // rejected before this path is reached.
             actor_user_id: None,
             issued_token_hash: &issued_token_hash,
-            requested_audience: ctx.audience,
+            requested_audience: Some(ctx.audience),
             // ID tokens do not carry OAuth scope
             granted_scope: None,
             expires_at,
@@ -936,7 +992,7 @@ async fn issue_id_token(
             },
             &db::TokenExchangeDetails {
                 client_id: ctx.client_id.to_string(),
-                audience: ctx.audience.map(String::from),
+                audience: Some(ctx.audience.to_string()),
                 scope: None,
                 issued_token_type: TokenType::IdToken.as_urn().to_string(),
                 token_expires_at: Some(expires_at.to_string()),
@@ -1425,6 +1481,10 @@ mod tests {
         let expires_in = 60;
         let arrival_seconds: i64 = 1_700_000_000;
         let arrival = ArrivalTime::for_test_second(arrival_seconds);
+        // A no-org user's issuer is the base_url. `issue_id_token` now takes
+        // the `aud` as already-resolved (`aud = issuer` is the no-audience
+        // fallback the caller allowlisted); pass the issuer directly.
+        let config = state.config();
 
         let result = issue_id_token(
             &state,
@@ -1432,12 +1492,13 @@ mod tests {
                 user_id: &user.id,
                 email: &user.email,
                 subject_token_hash: "subject-token-hash-test",
-                audience: None,
+                audience: config.base_url.as_str(),
                 expires_in,
                 hardware_aaguid: None,
                 org_domain: None,
                 client_id: "token-exchange-client-id",
                 client_info: &ClientInfo::default(),
+                org: None,
             },
             arrival,
         )
