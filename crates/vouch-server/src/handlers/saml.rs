@@ -20,6 +20,7 @@ use serde::Deserialize;
 use crate::AppState;
 use crate::db::{self, ClientInfo, UpstreamLogin};
 use crate::handlers::enroll::{ErrorTemplate, complete_enrollment_after_identity};
+use crate::infra::i18n::Tr;
 use crate::services::idp::saml::{metadata, response};
 use crate::services::idp::{ConfiguredIdp, IdentityResult};
 
@@ -83,8 +84,8 @@ pub(crate) async fn acs(
         Some(rs) if !rs.is_empty() => rs,
         _ => {
             return ErrorTemplate {
-                title: "Error".to_string(),
-                message: "Missing RelayState parameter".to_string(),
+                title: Tr::new("error-heading").to_string(),
+                message: Tr::new("saml-error-missing-relaystate").to_string(),
                 back_url: None,
             }
             .into_response();
@@ -94,8 +95,8 @@ pub(crate) async fn acs(
     // Step 2: Validate RelayState length before DB lookup.
     if relay_state.len() > 128 {
         return ErrorTemplate {
-            title: "Error".to_string(),
-            message: "Invalid RelayState parameter".to_string(),
+            title: Tr::new("error-heading").to_string(),
+            message: Tr::new("saml-error-invalid-relaystate").to_string(),
             back_url: None,
         }
         .into_response();
@@ -111,8 +112,8 @@ pub(crate) async fn acs(
             Ok(pair) => pair,
             Err(db::ClaimError::AlreadyConsumed) => {
                 return ErrorTemplate {
-                    title: "Error".to_string(),
-                    message: "Invalid or expired state".to_string(),
+                    title: Tr::new("error-heading").to_string(),
+                    message: Tr::new("enroll-error-state-expired").to_string(),
                     back_url: None,
                 }
                 .into_response();
@@ -120,8 +121,8 @@ pub(crate) async fn acs(
             Err(e) => {
                 tracing::error!("Failed to consume SAML state: {e:#}");
                 return ErrorTemplate {
-                    title: "Error".to_string(),
-                    message: "Failed to verify state".to_string(),
+                    title: Tr::new("error-heading").to_string(),
+                    message: Tr::new("enroll-error-state-verify-failed").to_string(),
                     back_url: None,
                 }
                 .into_response();
@@ -144,10 +145,8 @@ pub(crate) async fn acs(
     };
     let Some(saml_provider) = saml_provider else {
         return ErrorTemplate {
-            title: "Error".to_string(),
-            message: "SAML IdP not configured for this state. If using OIDC, \
-                      responses go to /oauth/callback."
-                .to_string(),
+            title: Tr::new("error-heading").to_string(),
+            message: Tr::new("saml-error-not-configured").to_string(),
             back_url: None,
         }
         .into_response();
@@ -164,8 +163,8 @@ pub(crate) async fn acs(
         Err(e) => {
             tracing::warn!("SAML response validation failed: {e:#}");
             return ErrorTemplate {
-                title: "Authentication Failed".to_string(),
-                message: "Failed to verify SAML response. Please try again.".to_string(),
+                title: Tr::new("saml-error-auth-failed-title").to_string(),
+                message: Tr::new("saml-error-verify-failed").to_string(),
                 back_url: None,
             }
             .into_response();
@@ -312,6 +311,45 @@ mod tests {
             body.contains("Invalid") || body.contains("Error") || body.contains("expired"),
             "Expected error content in response: {body}"
         );
+    }
+
+    // ========================================================================
+    // i18n convention: ACS error pages must localize like the OIDC callback
+    // ========================================================================
+
+    /// Regression guard for the SAML ACS i18n bypass: every `ErrorTemplate`
+    /// built by this handler must route its `title`/`message` through the
+    /// `Tr` i18n layer, mirroring `handlers/enroll.rs`. SAML has no
+    /// IdP-error-passthrough branch (unlike the OIDC callback, which echoes
+    /// the upstream IdP's own `error`/`error_description` verbatim), so this
+    /// invariant admits no exceptions here. Only the production code above
+    /// the `#[cfg(test)]` boundary is scanned, so the check cannot observe
+    /// its own source.
+    #[test]
+    fn error_templates_route_title_and_message_through_i18n() {
+        let src = include_str!("saml.rs");
+        let prod = src.split("\n#[cfg(test)]").next().unwrap_or(src);
+        assert!(
+            prod.contains("use crate::infra::i18n::Tr;"),
+            "saml.rs must import Tr to localize ACS error pages"
+        );
+        let blocks: Vec<&str> = prod.split("ErrorTemplate {").skip(1).collect();
+        assert!(
+            !blocks.is_empty(),
+            "no ErrorTemplate constructions found; the self-scan is misconfigured"
+        );
+        for block in &blocks {
+            for field in ["title:", "message:"] {
+                let Some((_, rest)) = block.split_once(field) else {
+                    continue;
+                };
+                let value = rest.split(',').next().unwrap_or("").trim();
+                assert!(
+                    value.contains("Tr::new("),
+                    "saml.rs ErrorTemplate `{field}` must be a Tr::new(...) call, got: {value:?}"
+                );
+            }
+        }
     }
 
     // ========================================================================

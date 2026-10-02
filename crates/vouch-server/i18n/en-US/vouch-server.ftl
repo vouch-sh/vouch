@@ -315,6 +315,19 @@ enroll-error-invalid-state = Invalid state parameter
 enroll-error-state-expired = Invalid or expired state
 enroll-error-state-verify-failed = Failed to verify state
 
+## SAML ACS failures (error.html, rendered from handlers/saml.rs)
+##
+## `enroll-error-state-expired` and `enroll-error-state-verify-failed` above
+## are reused for the SAML state-expired and state-verify branches verbatim.
+## The five keys below cover the SAML-specific conditions; their en-US values
+## equal the prior hardcoded literals word for word, so the shipped English
+## page is unchanged — only translatability is added.
+saml-error-missing-relaystate = Missing RelayState parameter
+saml-error-invalid-relaystate = Invalid RelayState parameter
+saml-error-not-configured = SAML IdP not configured for this state. If using OIDC, responses go to /oauth/callback.
+saml-error-auth-failed-title = Authentication Failed
+saml-error-verify-failed = Failed to verify SAML response. Please try again.
+
 ## Browser key management and WebAuthn errors.
 ##
 ## These reach the browser as the `message` field of a JSON error body, which

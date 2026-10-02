@@ -1103,4 +1103,75 @@ mod tests {
              kind (remove them or register the kind in db/audit.rs): {orphans:?}"
         );
     }
+
+    // ------------------------------------------------------------------
+    // SAML ACS error-key localization (the latent defect this bug fixed).
+    // ------------------------------------------------------------------
+
+    /// Test-only second catalog embedded from `i18n-test/zz-ZZ/`. It lives
+    /// outside the production `i18n/` folder, so `rust-embed` never embeds it
+    /// in a release build — only the `#[derive(RustEmbed)]` struct below
+    /// references it, and that struct exists solely inside this test module.
+    #[derive(rust_embed::RustEmbed)]
+    #[folder = "i18n-test/"]
+    struct TestLocalizations;
+
+    /// Build a `zz-ZZ` `I18nContext` (the only language the fixture ships).
+    /// Mirrors `vouch_i18n`'s own `test-i18n/` harness.
+    fn zz_context() -> I18nContext {
+        let loader = vouch_i18n::build_loader("vouch-server", langid!("zz-ZZ"), &TestLocalizations);
+        I18nContext {
+            loader: std::sync::Arc::new(loader),
+            lang: "zz-ZZ".to_string(),
+        }
+    }
+
+    /// The SAML ACS error keys (the five SAML-specific keys added by this
+    /// fix, the `error-heading` title key, and the two reused enroll keys)
+    /// must resolve to a non-`en-US` value when a non-`en-US` context is
+    /// active. This is the exact code path `handlers::saml::acs` uses:
+    /// `Tr::new("<key>").to_string()` reads the request-scoped
+    /// [`REQUEST_I18N`] task-local. Before the fix the handler bypassed
+    /// `Tr` entirely with hardcoded English; this test pins the localized
+    /// resolution so a regression that re-introduces an English-only path
+    /// would be caught once a second locale ships.
+    #[test]
+    fn saml_acs_error_keys_localize_under_non_en_context() {
+        let ctx = zz_context();
+        // (key, en-US literal it must NOT match under the zz-ZZ context)
+        let cases: &[(&str, &str)] = &[
+            ("error-heading", "Error"),
+            (
+                "saml-error-missing-relaystate",
+                "Missing RelayState parameter",
+            ),
+            (
+                "saml-error-invalid-relaystate",
+                "Invalid RelayState parameter",
+            ),
+            (
+                "saml-error-not-configured",
+                "SAML IdP not configured for this state. If using OIDC, \
+                 responses go to /oauth/callback.",
+            ),
+            ("saml-error-auth-failed-title", "Authentication Failed"),
+            (
+                "saml-error-verify-failed",
+                "Failed to verify SAML response. Please try again.",
+            ),
+            ("enroll-error-state-expired", "Invalid or expired state"),
+            ("enroll-error-state-verify-failed", "Failed to verify state"),
+        ];
+        for (key, en_us) in cases {
+            let rendered = sync_scope_locale(ctx.clone(), || Tr::new(key).to_string());
+            assert_ne!(
+                rendered, *en_us,
+                "{key:?}: should localize under zz-ZZ, but matched the en-US literal"
+            );
+            assert!(
+                rendered.starts_with("[ZZ]"),
+                "{key:?}: expected the [ZZ] fixture translation, got {rendered:?}"
+            );
+        }
+    }
 }
