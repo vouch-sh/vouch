@@ -274,7 +274,20 @@ is worse than no rule: it tells the next reviewer the defect is the model.
 as the pattern to follow hours after #1475 fixed it.
 
 The remedy is a fresh `detail rules create` whose description names the stale
-rule and spells out what it got wrong. Hand-editing the pulled file is
+rule and spells out what it got wrong. Quote the merged code in that
+description; never cite a rejected commit or PR as the wrong pattern. On
+2026-10-02 a request that named the rejected commit came back presenting that
+commit's code as correct, twice.
+
+Detail has no way to delete or disable a rule, so a stale rule keeps scanning
+after its replacement lands. Record it in the table below. When a finding cites
+one, check it against the replacement before treating it as a defect.
+
+| stale rule | replaced by | what it gets wrong |
+|---|---|---|
+| `rule_cac14e59` no-raw-strings-in-html-pages | `enforce-i18n-catalog-lookups-for-html-page-text` | says ErrorTemplate/GitHubErrorTemplate hold `String`; allows a raw OIDC error passthrough |
+| `rule_6a00bc79`, `rule_76e70d4e` dpop-www-authenticate-single-challenge | `dpop-token-first-single-challenge` | shows the `/v1` proof check before the binding check as correct |
+| `rule_26d9c554` jar-parameter-exclusivity | `jar-parameters-from-request-object-only` | shows a gated duplicate form `dpop_jkt` check as the fix | Hand-editing the pulled file is
 forbidden (step 0) and the next sync would overwrite it, and the CLI has
 `create`, `pull`, `show`, `list` and `propose` — no refine verb.
 
