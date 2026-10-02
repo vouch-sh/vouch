@@ -2861,7 +2861,7 @@ mod httpsig {
 
     /// Build RFC 9421 signature headers for a GET request.
     fn sign_get_request(url: &str, auth_header: &str, key: &ClientKey) -> Vec<(String, String)> {
-        let signer = ClientKeySigner::from_client_key(key).unwrap();
+        let signer = ClientKeySigner::new(key);
 
         let mut req: http::Request<Vec<u8>> = http::Request::builder()
             .method("GET")
@@ -3139,7 +3139,7 @@ mod httpsig {
     ) -> (Vec<(String, String)>, Vec<u8>) {
         use vouch_httpsig::digest::{self, DigestAlgorithm};
 
-        let signer = ClientKeySigner::from_client_key(key).unwrap();
+        let signer = ClientKeySigner::new(key);
 
         let mut req: http::Request<Vec<u8>> = http::Request::builder()
             .method("POST")

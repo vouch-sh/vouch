@@ -242,14 +242,7 @@ impl<H: HttpClient> VouchClient<H> {
     /// optionally Content-Digest). Returns an empty vec if signing fails
     /// (non-fatal, similar to DPoP fallback).
     fn sign_request_headers(params: &SignRequestParams<'_>) -> Vec<(String, String)> {
-        let signer = match ClientKeySigner::from_client_key(params.key) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!("HTTP signature signer creation failed: {e}");
-                crate::tr_eprintln!("httpsig-warn-create-failed", error = e.to_string());
-                return Vec::new();
-            }
-        };
+        let signer = ClientKeySigner::new(params.key);
 
         // Build a temporary http::Request to sign
         let mut builder = http::Request::builder()

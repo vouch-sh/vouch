@@ -272,22 +272,7 @@ fn test_b24_verify_ecdsa_signature() {
     let sig_b64 =
         "wNmSUAhwb5LxtOtOpNa6W5xj067m5hFrj0XQ4fvpaCLx0NKocgPquLgyahnzDnDAUy5eCdlYUEkLIj+32oiasw==";
     let sig_bytes = STANDARD.decode(sig_b64).unwrap();
-
-    // ECDSA P-256 in RFC 9421 uses DER. The example signature is 64 bytes (R||S).
-    // aws-lc-rs ECDSA_P256_SHA256_ASN1 verifier expects DER. The RFC example
-    // signature is actually in the raw R||S format (64 bytes), which means
-    // we need to use the FIXED verifier for the RFC's specific test vector,
-    // or convert to DER. Let's check the length:
-    if sig_bytes.len() == 64 {
-        // RFC example uses raw R||S format for the example output.
-        // Our implementation uses DER (ASN.1) per RFC 9421 Section 3.3.3.
-        // We verify the signature base is correct, and our sign+verify roundtrip
-        // works with DER. The RFC test vector just uses a different serialization
-        // in the example. We can still verify base construction is correct.
-        //
-        // Verify base construction matches by checking a known HMAC vector instead.
-        return;
-    }
+    assert_eq!(sig_bytes.len(), 64, "the published signature is r || s");
 
     VerifyingAlgorithm::verify(&verifier, &base, &sig_bytes).unwrap();
 }

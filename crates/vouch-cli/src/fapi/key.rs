@@ -243,12 +243,6 @@ impl ClientKey {
         &self.kid
     }
 
-    /// Get a reference to the PKCS#8 DER-encoded private key bytes.
-    #[must_use]
-    pub fn pkcs8_der(&self) -> &[u8] {
-        &self.der_bytes
-    }
-
     /// Get the public key as a [`PublicEcJwk`].
     ///
     /// # Errors

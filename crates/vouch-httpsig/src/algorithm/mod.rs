@@ -16,7 +16,7 @@ use crate::error::HttpSigError;
 /// `Accept-Signature` advertisement spells the same bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignatureAlgorithm {
-    /// `ecdsa-p256-sha256` — RFC 9421 Section 3.3.4. DER-encoded signatures.
+    /// `ecdsa-p256-sha256` — RFC 9421 Section 3.3.4. 64-octet `r || s` signatures.
     EcdsaP256Sha256,
     /// `ed25519` — RFC 9421 Section 3.3.6. Raw 64-byte signatures.
     Ed25519,
