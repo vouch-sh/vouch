@@ -194,14 +194,42 @@ fn missing_token_response() -> Response {
 /// `DPoP-Nonce` that `into_oauth_response`'s tuple return type cannot convey.
 /// Those headers are extracted before the error is consumed and reattached to
 /// the built response so the client can retry with a fresh nonce.
+///
+/// Post-`f6485dd0`, every DPoP refusal at a resource routes through
+/// `DpopChallenge` whose `headers()` already emits the RFC 9449 §7.1
+/// `WWW-Authenticate: DPoP …` value into `ApiWithHeaders.headers`. Synthesizing
+/// the RFC 6750 `Bearer` challenge on top of it and then `HeaderMap::append`-ing
+/// the carried headers would yield **two** `WWW-Authenticate` field values (a
+/// wrong-scheme `Bearer` value carrying a DPoP-extension error code, plus the
+/// correct `DPoP` challenge). To keep `/oauth/register` consistent with
+/// `/v1/*` and `/oauth/userinfo` — which append the carried headers without
+/// synthesizing a competing `Bearer` challenge — the `Bearer` challenge is
+/// only synthesized when the carried headers do not already include a
+/// `WWW-Authenticate` value. This is observably a no-op for conformant callers
+/// (RFC 9110 §11.6.1): a client facing the single `DPoP` challenge selects it
+/// and retries exactly as it would have selected it from a two-value response.
 fn into_registration_response(err: ServiceError) -> Response {
     let extra_headers = match &err {
         ServiceError::ApiWithHeaders { headers, .. } => Some(headers.clone()),
         _ => None,
     };
 
+    // A DPoP refusal routed through `DpopChallenge` already carries the
+    // RFC 9449 §7.1 `WWW-Authenticate: DPoP …` value. Synthesizing a `Bearer`
+    // challenge on top of it (and then appending the carried headers) would
+    // produce a second `WWW-Authenticate` field value — a wrong-scheme `Bearer`
+    // challenge carrying a DPoP-extension error code — which `/v1/*` and
+    // `/oauth/userinfo` do not emit. Skip the synthesis whenever the carried
+    // headers already answer the 401, so the register endpoint renders one
+    // challenge for a DPoP refusal like the other two surfaces.
+    let has_www_auth = extra_headers
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .any(|(name, _)| *name == axum::http::header::WWW_AUTHENTICATE);
+
     let (status, json) = err.into_oauth_response();
-    let mut response = if status == StatusCode::UNAUTHORIZED {
+    let mut response = if status == StatusCode::UNAUTHORIZED && !has_www_auth {
         let description = json
             .error_description
             .clone()
@@ -238,6 +266,7 @@ fn into_registration_response(err: ServiceError) -> Response {
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
+    clippy::expect_used,
     clippy::indexing_slicing,
     reason = "test code: panic on assertion failure is acceptable"
 )]
@@ -339,9 +368,17 @@ mod tests {
     /// header (RFC 6750 §3.1), AND the `DPoP-Nonce` header so the client can
     /// retry with a fresh nonce. Before the fix, `ApiWithHeaders` fell through
     /// `into_oauth_response`'s catch-all and became a 500 `server_error`.
+    ///
+    /// This variant carries only `DPoP-Nonce` (the pre-`f6485dd0` `UseNonce`
+    /// shape, where no `WWW-Authenticate` value is carried), so the helper still
+    /// synthesizes the RFC 6750 `Bearer` challenge — exactly one
+    /// `WWW-Authenticate` value. The post-`f6485dd0` `DpopChallenge` shape (which
+    /// carries `WWW-Authenticate: DPoP …`) is covered by
+    /// [`into_registration_response_emits_single_dpop_challenge_for_dpop_refusal`].
     #[tokio::test]
     async fn into_registration_response_preserves_api_with_headers_on_401() {
         use axum::body::to_bytes;
+        use axum::http::header;
 
         let err = ServiceError::api_with_header(
             StatusCode::UNAUTHORIZED,
@@ -366,15 +403,27 @@ mod tests {
             .unwrap();
         assert_eq!(nonce, "fresh-nonce-value");
 
-        // WWW-Authenticate header present (RFC 6750 §3.1).
-        let www_auth = response
+        // Exactly ONE `WWW-Authenticate` value — read via `get_all` so a
+        // second, appended value cannot hide behind `HeaderMap::get`'s
+        // first-value-only semantics.
+        let challenges: Vec<&str> = response
             .headers()
-            .get("www-authenticate")
-            .and_then(|v| v.to_str().ok())
-            .unwrap();
+            .get_all(header::WWW_AUTHENTICATE)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .collect();
+        assert_eq!(
+            challenges.len(),
+            1,
+            "DPoP-Nonce-only shape must render a single WWW-Authenticate value: {challenges:?}"
+        );
         assert!(
-            www_auth.contains("error=\"use_dpop_nonce\""),
-            "WWW-Authenticate must carry error=\"use_dpop_nonce\": {www_auth}"
+            challenges[0].starts_with("Bearer "),
+            "DPoP-Nonce-only shape synthesizes the Bearer challenge: {challenges:?}"
+        );
+        assert!(
+            challenges[0].contains(r#"error="use_dpop_nonce""#),
+            "WWW-Authenticate must carry error=\"use_dpop_nonce\": {challenges:?}"
         );
 
         // Body carries the OAuth error code, not server_error.
@@ -383,6 +432,150 @@ mod tests {
         assert_eq!(
             json["error"], "use_dpop_nonce",
             "error code must be use_dpop_nonce, not server_error"
+        );
+    }
+
+    /// RFC 9449 §7.1: post-`f6485dd0`, a DPoP refusal at a resource routes
+    /// through `DpopChallenge`, whose `headers()` emits a
+    /// `WWW-Authenticate: DPoP …` value (plus `DPoP-Nonce` for `use_dpop_nonce`)
+    /// into `ServiceError::ApiWithHeaders`. `into_registration_response` MUST
+    /// NOT synthesize a competing `Bearer` challenge on top of it — the
+    /// response must carry exactly one `WWW-Authenticate` value, and its scheme
+    /// must be `DPoP` (not `Bearer`), to match `/v1/*` and `/oauth/userinfo`.
+    /// Before the fix the helper synthesized `Bearer error="use_dpop_nonce"`
+    /// and then `HeaderMap::append`-ed the carried `DPoP` value, yielding two
+    /// `WWW-Authenticate` field values.
+    #[tokio::test]
+    async fn into_registration_response_emits_single_dpop_challenge_for_dpop_refusal() {
+        use axum::body::to_bytes;
+        use axum::http::header;
+
+        // Mirror `DpopChallenge::headers()` for the `use_dpop_nonce` arm: a
+        // `WWW-Authenticate: DPoP …` value plus a `DPoP-Nonce` header.
+        let challenge = http::dpop_challenge(&[
+            ("error", "use_dpop_nonce"),
+            (
+                "error_description",
+                "Resource server requires nonce in DPoP proof",
+            ),
+            ("algs", "ES256 PS256 EdDSA"),
+        ]);
+        let err = ServiceError::ApiWithHeaders {
+            status: StatusCode::UNAUTHORIZED,
+            code: "use_dpop_nonce".to_string(),
+            message: "Resource server requires nonce in DPoP proof".to_string(),
+            headers: vec![
+                (
+                    header::WWW_AUTHENTICATE,
+                    axum::http::HeaderValue::from_str(&challenge).unwrap(),
+                ),
+                (
+                    axum::http::HeaderName::from_static(protocol::HEADER_DPOP_NONCE),
+                    axum::http::HeaderValue::from_str("fresh-nonce-value").unwrap(),
+                ),
+            ],
+        };
+        let response = into_registration_response(err);
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        // Exactly ONE `WWW-Authenticate` field value — not two.
+        let challenges: Vec<&str> = response
+            .headers()
+            .get_all(header::WWW_AUTHENTICATE)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .collect();
+        assert_eq!(
+            challenges.len(),
+            1,
+            "DPoP refusal must render a single WWW-Authenticate value, got {challenges:?}"
+        );
+        // ...and it is the DPoP challenge (not a synthesized Bearer one).
+        assert!(
+            challenges[0].starts_with("DPoP "),
+            "challenge scheme must be DPoP, got {challenges:?}"
+        );
+        assert!(
+            challenges[0].contains(r#"error="use_dpop_nonce""#),
+            "challenge must carry the use_dpop_nonce error: {challenges:?}"
+        );
+        assert!(
+            challenges[0].contains(r#"algs="ES256 PS256 EdDSA""#),
+            "challenge must carry the algs parameter: {challenges:?}"
+        );
+        assert!(
+            !challenges[0].starts_with("Bearer"),
+            "no wrong-scheme Bearer challenge must be synthesized: {challenges:?}"
+        );
+
+        // The `DPoP-Nonce` header the client needs for retry is preserved.
+        let nonce = response
+            .headers()
+            .get("dpop-nonce")
+            .and_then(|v| v.to_str().ok())
+            .expect("DPoP-Nonce header must be preserved");
+        assert_eq!(nonce, "fresh-nonce-value");
+
+        // Body carries the OAuth error code.
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "use_dpop_nonce");
+    }
+
+    /// RFC 9449 §7.1: a non-`UseNonce` DPoP refusal (here `invalid_dpop_proof`
+    /// for an `htu` mismatch) routed through `DpopChallenge` carries a
+    /// `WWW-Authenticate: DPoP error="invalid_dpop_proof" …` value and NO
+    /// `DPoP-Nonce`. `into_registration_response` must render exactly that one
+    /// challenge, with no synthesized `Bearer error="invalid_dpop_proof"` value
+    /// — matching `/v1/*` and `/oauth/userinfo`.
+    #[tokio::test]
+    async fn into_registration_response_emits_single_dpop_challenge_for_invalid_dpop_proof() {
+        use axum::http::header;
+
+        let challenge = http::dpop_challenge(&[
+            ("error", "invalid_dpop_proof"),
+            ("error_description", "DPoP htu claim mismatch"),
+            ("algs", "ES256 PS256 EdDSA"),
+        ]);
+        let err = ServiceError::ApiWithHeaders {
+            status: StatusCode::UNAUTHORIZED,
+            code: "invalid_dpop_proof".to_string(),
+            message: "DPoP htu claim mismatch".to_string(),
+            headers: vec![(
+                header::WWW_AUTHENTICATE,
+                axum::http::HeaderValue::from_str(&challenge).unwrap(),
+            )],
+        };
+        let response = into_registration_response(err);
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let challenges: Vec<&str> = response
+            .headers()
+            .get_all(header::WWW_AUTHENTICATE)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .collect();
+        assert_eq!(
+            challenges.len(),
+            1,
+            "invalid_dpop_proof must render a single WWW-Authenticate value, got {challenges:?}"
+        );
+        assert!(
+            challenges[0].starts_with(r#"DPoP error="invalid_dpop_proof""#),
+            "challenge must be the DPoP invalid_dpop_proof value: {challenges:?}"
+        );
+        assert!(
+            challenges[0].contains(r#"algs="ES256 PS256 EdDSA""#),
+            "challenge must carry the algs parameter: {challenges:?}"
+        );
+        assert!(
+            !challenges[0].starts_with("Bearer"),
+            "no wrong-scheme Bearer challenge must be synthesized: {challenges:?}"
+        );
+        // A non-`UseNonce` arm must not carry a `DPoP-Nonce` header.
+        assert!(
+            response.headers().get("dpop-nonce").is_none(),
+            "invalid_dpop_proof must not carry a DPoP-Nonce header"
         );
     }
 }

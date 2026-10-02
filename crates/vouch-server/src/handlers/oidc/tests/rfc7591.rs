@@ -2917,3 +2917,234 @@ async fn test_rfc7591_registered_auth_method_is_stored_and_enforced_as_requested
         "expected most combinations to register, got {registered}"
     );
 }
+
+// ========================================================================
+// Regression: /oauth/register must answer DPoP refusals with ONE
+// `WWW-Authenticate: DPoP …` challenge (no synthesized wrong-scheme `Bearer`).
+//
+// Post-`f6485dd0`, every DPoP refusal at a resource routes through
+// `DpopChallenge`, whose `headers()` emits `WWW-Authenticate: DPoP …` into
+// `ServiceError::ApiWithHeaders.headers`. `into_registration_response` in
+// `register.rs` unconditionally synthesized a `WWW-Authenticate: Bearer error=…`
+// for any 401 and then `HeaderMap::append`-ed the carried headers, yielding
+// TWO `WWW-Authenticate` field values: a wrong-scheme `Bearer` challenge
+// (carrying a DPoP-extension error code) plus the correct `DPoP` challenge.
+// `/v1/*` and `/oauth/userinfo` never had the duplicate; only the register
+// helper did.
+//
+// These end-to-end tests read `WWW-Authenticate` via `get_all` (not `get`,
+// which returns only the first value and masked the duplicate from the prior
+// suite), and assert exactly one value whose scheme is `DPoP` for both the
+// `use_dpop_nonce` (consumed-nonce) and `invalid_dpop_proof` (htu-mismatch)
+// arms — the two DpopChallenge shapes that reach `into_registration_response`.
+// ========================================================================
+
+/// Regression: a DPoP-bound token that replays a consumed nonce at
+/// `POST /oauth/register` MUST be answered with exactly one
+/// `WWW-Authenticate: DPoP error="use_dpop_nonce" …` value (plus the
+/// `DPoP-Nonce` retry header) — no synthesized `Bearer error="use_dpop_nonce"`
+/// value. Before the fix the response carried two `WWW-Authenticate` values.
+#[tokio::test]
+async fn test_rfc7591_dpop_use_nonce_registers_single_dpop_challenge() {
+    use axum::http::header;
+
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "rfc7591-dpop-single-use-nonce@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (key, jwk) = generate_dpop_key_pair();
+    let jkt = dpop_jkt(&jwk);
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Dpop(&jkt),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // Present a nonce the server no longer holds → `use_dpop_nonce` with a
+    // fresh `DPoP-Nonce` and a `WWW-Authenticate: DPoP …` challenge.
+    let nonce = db::generate_dpop_nonce(&state.store, 300)
+        .await
+        .expect("generate nonce");
+    db::delete_dpop_nonce(&state.store, &nonce)
+        .await
+        .expect("delete nonce");
+
+    let register_uri = format!("{}/oauth/register", state.config().base_url);
+    let proof = create_dpop_proof(
+        &key,
+        &jwk,
+        "POST",
+        &register_uri,
+        Some(&nonce),
+        Some(&token),
+    );
+    let auth = format!("DPoP {token}");
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "DPoP single challenge"
+    });
+    let response = http_request_full(
+        &app,
+        "POST",
+        "/oauth/register",
+        Some(body.to_string()),
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", &auth),
+            ("DPoP", &proof),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::UNAUTHORIZED,
+        "replayed nonce must be rejected: {}",
+        response.body
+    );
+
+    // Read via `get_all`: exactly ONE WWW-Authenticate value, not two.
+    let challenges: Vec<String> = response
+        .headers
+        .get_all(header::WWW_AUTHENTICATE)
+        .iter()
+        .filter_map(|v| v.to_str().ok().map(String::from))
+        .collect();
+    assert_eq!(
+        challenges.len(),
+        1,
+        "use_dpop_nonce at /oauth/register must render a single WWW-Authenticate value: {challenges:?}"
+    );
+    assert!(
+        challenges[0].starts_with(r#"DPoP error="use_dpop_nonce""#),
+        "the single challenge must be the DPoP use_dpop_nonce value: {challenges:?}"
+    );
+    assert!(
+        challenges[0].contains(r#"algs="ES256 PS256 EdDSA""#),
+        "the DPoP challenge must carry the algs parameter: {challenges:?}"
+    );
+    assert!(
+        !challenges[0].starts_with("Bearer"),
+        "no wrong-scheme Bearer challenge must be synthesized: {challenges:?}"
+    );
+
+    // The fresh `DPoP-Nonce` header is still present for client retry.
+    let fresh_nonce = response
+        .headers
+        .get("dpop-nonce")
+        .and_then(|v| v.to_str().ok())
+        .expect("DPoP-Nonce header must be present on use_dpop_nonce");
+    assert!(!fresh_nonce.is_empty());
+    assert_ne!(fresh_nonce, nonce);
+
+    // Body carries the OAuth error code.
+    let json: serde_json::Value = serde_json::from_str(&response.body).expect("Valid JSON");
+    assert_eq!(json["error"], "use_dpop_nonce");
+}
+
+/// Regression: a DPoP-bound token whose proof targets the wrong `htu` at
+/// `POST /oauth/register` MUST be answered with exactly one
+/// `WWW-Authenticate: DPoP error="invalid_dpop_proof" …` value (and NO
+/// `DPoP-Nonce`) — no synthesized `Bearer error="invalid_dpop_proof"` value.
+/// Before the fix the response carried two `WWW-Authenticate` values.
+#[tokio::test]
+async fn test_rfc7591_dpop_invalid_proof_registers_single_dpop_challenge() {
+    use axum::http::header;
+
+    let (app, state) = test_app().await;
+    let user = create_test_user(
+        &state.store,
+        "rfc7591-dpop-single-invalid-proof@example.com",
+    )
+    .await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (key, jwk) = generate_dpop_key_pair();
+    let jkt = dpop_jkt(&jwk);
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Dpop(&jkt),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // A valid, fresh nonce so the request reaches the `htu` check rather than
+    // being refused as a consumed/unknown nonce.
+    let nonce = db::generate_dpop_nonce(&state.store, 300)
+        .await
+        .expect("generate nonce");
+
+    // Proof targets `/v1/session` while the request hits `/oauth/register` →
+    // RFC 9449 §4.3 `htu` mismatch → `DpopError::UriMismatch` →
+    // `OAuthErrorCode::InvalidDpopProof` (no `DPoP-Nonce`).
+    let wrong_uri = format!("{}/v1/session", state.config().base_url);
+    let proof = create_dpop_proof(&key, &jwk, "POST", &wrong_uri, Some(&nonce), Some(&token));
+    let auth = format!("DPoP {token}");
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "DPoP single challenge invalid proof"
+    });
+    let response = http_request_full(
+        &app,
+        "POST",
+        "/oauth/register",
+        Some(body.to_string()),
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", &auth),
+            ("DPoP", &proof),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::UNAUTHORIZED,
+        "htu mismatch must be rejected: {}",
+        response.body
+    );
+
+    // Read via `get_all`: exactly ONE WWW-Authenticate value, not two.
+    let challenges: Vec<String> = response
+        .headers
+        .get_all(header::WWW_AUTHENTICATE)
+        .iter()
+        .filter_map(|v| v.to_str().ok().map(String::from))
+        .collect();
+    assert_eq!(
+        challenges.len(),
+        1,
+        "invalid_dpop_proof at /oauth/register must render a single WWW-Authenticate value: {challenges:?}"
+    );
+    assert!(
+        challenges[0].starts_with(r#"DPoP error="invalid_dpop_proof""#),
+        "the single challenge must be the DPoP invalid_dpop_proof value: {challenges:?}"
+    );
+    assert!(
+        challenges[0].contains(r#"algs="ES256 PS256 EdDSA""#),
+        "the DPoP challenge must carry the algs parameter: {challenges:?}"
+    );
+    assert!(
+        !challenges[0].starts_with("Bearer"),
+        "no wrong-scheme Bearer challenge must be synthesized: {challenges:?}"
+    );
+
+    // A non-`UseNonce` arm must not carry a `DPoP-Nonce` header.
+    assert!(
+        response.headers.get("dpop-nonce").is_none(),
+        "invalid_dpop_proof must not carry a DPoP-Nonce header"
+    );
+
+    // Body carries the OAuth error code.
+    let json: serde_json::Value = serde_json::from_str(&response.body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_dpop_proof");
+}
