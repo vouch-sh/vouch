@@ -320,8 +320,9 @@ pub async fn require_signature<R: KeyResolver>(
     // POST/PUT/PATCH are conventionally body-bearing; also probe Content-Length /
     // Transfer-Encoding so HTTP/2 clients that omit Content-Length receive an
     // accurate Accept-Signature hint and avoid the advertise<enforce inversion.
-    // Over-advertising content-digest for an empty POST is harmless because
-    // enforce_body_digest short-circuits on empty bodies.
+    // Over-advertising content-digest for an empty POST is harmless: a
+    // conformant client following the hint sets a matching Content-Digest of
+    // the empty body, which enforce_body_digest verifies and accepts.
     let has_body = matches!(
         req.method(),
         &http::Method::POST | &http::Method::PUT | &http::Method::PATCH
