@@ -1094,6 +1094,7 @@ install-path-hint-nix =
 
 setup-aws-err-role-required = Either --role or --discover is required
 setup-aws-err-region-required = --region is required when --identity-center-application is specified
+setup-aws-err-invalid-idc-arn = --identity-center-application is not a valid Identity Center application ARN (expected arn:PARTITION:sso::ACCOUNT:application/...). An SSO instance ARN (arn:PARTITION:sso:::instance/...) is not accepted.
 
 # Interactive first-run wizard (bare `vouch setup aws`).
 setup-aws-wizard-intro = Let's set up AWS access with { -product }.
