@@ -1037,8 +1037,11 @@ mod tests {
 
     // `credential aws --idc-application` is read only on the Identity Center
     // path, so a parse that would route to STS must fail instead of dropping it.
-    #[test]
-    fn test_credential_aws_idc_application_requires_identity_center_path() {
+    /// Holds `ENV_LOCK`: `Cli` reads `VOUCH_ALLOW_INSECURE`, which another
+    /// test sets to an invalid value, so an unlocked parse can fail on it.
+    #[tokio::test]
+    async fn test_credential_aws_idc_application_requires_identity_center_path() {
+        let _guard = ENV_LOCK.lock().await;
         let idc = "arn:aws:sso::123456789012:application/ssoins-abc/apl-xyz";
         let kind = |args: &[&str]| Cli::try_parse_from(args).err().map(|e| e.kind());
 
