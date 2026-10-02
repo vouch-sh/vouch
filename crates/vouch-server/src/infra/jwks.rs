@@ -69,8 +69,25 @@ async fn fetch_jwks(
     allow_loopback: bool,
     http_client: &reqwest::Client,
 ) -> ServiceResult<String> {
-    // HTTPS-only
-    if !uri.starts_with("https://") {
+    // HTTPS-only. Scheme is case-insensitive per RFC 3986 Section 3.1 ("Although
+    // schemes are case-insensitive, the canonical form is lowercase"), and
+    // `url::Url::parse` normalizes the scheme to lowercase, so a `jwks_uri`
+    // like `HTTPS://example.com/jwks` parses with `scheme() == "https"`. The
+    // admission-side validators (`services::oidc::registration::validate_jwks_shape`
+    // and `handlers::applications::validate::validate_jwks_uri`) admit such
+    // URIs via that same `Url::parse(...).scheme() == "https"` check. The
+    // runtime fetch MUST use the same primitive or a URI the validators
+    // accepted would be rejected here at authentication time — a freshly
+    // registered client could never authenticate. A byte-level
+    // `starts_with("https://")` is case-sensitive and diverges from the
+    // validators, so it is replaced with the `url`-crate check. Parse failures
+    // (e.g. the empty string) map to the same `"JWKS URI must use HTTPS"`
+    // message the pre-fix code returned for every non-`https://` prefix, so
+    // no existing rejection test changes.
+    let parsed = url::Url::parse(uri).map_err(|_| {
+        ServiceError::oauth(OAuthErrorCode::InvalidClient, "JWKS URI must use HTTPS")
+    })?;
+    if parsed.scheme() != "https" {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClient,
             "JWKS URI must use HTTPS",
@@ -363,6 +380,46 @@ mod tests {
             !matches!(&err, ServiceError::OAuth { description, .. } if description == "JWKS URI must use HTTPS"),
             "expected SSRF rejection, got: {err}"
         );
+    }
+
+    /// Regression: the scheme check must be case-insensitive. The
+    /// admission-side validators admit an uppercase-scheme `jwks_uri` such as
+    /// `HTTPS://example.com/jwks` because `url::Url::parse(...).scheme() ==
+    /// "https"` (the scheme is normalized to lowercase, per RFC 3986 Section 3.1).
+    /// `fetch_jwks` previously used `str::starts_with("https://")`, a
+    /// byte-level test that rejected such URIs before any network I/O — so a
+    /// URI the validators had accepted into the database was refused at
+    /// authentication time and a freshly registered client could never
+    /// authenticate. This pins the fix: an upper-case `HTTPS://` URI must pass
+    /// the scheme check and reach the SSRF guard (which rejects the loopback
+    /// address here, proving the HTTPS check did not fire). Before the fix
+    /// this asserted against the `"JWKS URI must use HTTPS"` error and failed.
+    #[tokio::test]
+    async fn fetch_jwks_accepts_uppercase_scheme_https_uri() {
+        let client = reqwest::Client::new();
+        let err = fetch_jwks("HTTPS://127.0.0.1/jwks.json", false, &client)
+            .await
+            .expect_err("loopback must still be rejected without allow_loopback");
+        // The rejection must come from the SSRF guard, NOT the scheme check —
+        // proving the upper-case scheme passed the (now case-insensitive)
+        // HTTPS check. Before the fix this was the scheme-check error.
+        assert!(
+            !matches!(&err, ServiceError::OAuth { description, .. } if description == "JWKS URI must use HTTPS"),
+            "upper-case HTTPS:// must not be rejected by the scheme check; got: {err}"
+        );
+    }
+
+    /// Companion guard: the case-insensitive scheme check must not over-relax.
+    /// An upper-case *non-https* scheme (e.g. `HTTP://`) normalizes to
+    /// `scheme() == "http"` and must still be rejected as non-HTTPS, exactly
+    /// as it was before the fix.
+    #[tokio::test]
+    async fn fetch_jwks_still_rejects_uppercase_non_https_scheme() {
+        let client = reqwest::Client::new();
+        let err = fetch_jwks("HTTP://example.com/jwks", false, &client)
+            .await
+            .expect_err("an http scheme (any case) must be rejected as non-https");
+        assert_rejected_as_non_https(&err);
     }
 
     /// Assert the error is an `invalid_client` OAuth error with `expected_desc`.
