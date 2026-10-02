@@ -1033,6 +1033,19 @@ pub async fn get_oauth_client_by_id(
     store: &DocumentStore,
     id: &str,
 ) -> Result<Option<OAuthClient>> {
+    // Test-only seam: deterministically inject a transient `Err` on the
+    // ownership read that gates the mutating web handlers
+    // (`delete_application_form`, `add_secret_form`, `delete_secret_form`).
+    // `DocumentStore::get` propagates its `Err` via `?` without logging and
+    // the handlers return `Response` (not `Result`), so without this seam the
+    // `Err` arm of those handlers' exhaustive match is unreachable from
+    // tests. No-op in non-test builds and when no hook is installed.
+    #[cfg(test)]
+    if store.run_get_oauth_client_by_id_test_hook(id) {
+        return Err(anyhow::anyhow!(
+            "injected get_oauth_client_by_id fault: test hook forced Err"
+        ));
+    }
     let doc = store.get::<OAuthClientDoc>(id).await?;
     Ok(doc.map(OAuthClient::from))
 }
@@ -1501,6 +1514,16 @@ pub async fn get_oauth_client_secret_by_id(
     store: &DocumentStore,
     id: &str,
 ) -> Result<Option<OAuthClientSecret>> {
+    // Test-only seam: deterministically inject a transient `Err` on the
+    // secret ownership read that gates `delete_secret_form` (the second read
+    // after `get_oauth_client_by_id`). Mirrors the client-read seam. No-op in
+    // non-test builds and when no hook is installed.
+    #[cfg(test)]
+    if store.run_get_oauth_client_secret_by_id_test_hook(id) {
+        return Err(anyhow::anyhow!(
+            "injected get_oauth_client_secret_by_id fault: test hook forced Err"
+        ));
+    }
     let doc = store.get::<OAuthClientSecretDoc>(id).await?;
     Ok(doc.map(OAuthClientSecret::from))
 }
