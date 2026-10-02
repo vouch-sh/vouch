@@ -445,8 +445,14 @@ pub(crate) async fn list_scim_users(
     // Try indexed AND-lookup first (single query combining email/externalId
     // with org_id at the DB level — no per-row scope check).
     if let Some(f) = filter
-        && let Some(result) = try_indexed_user_lookup(store, org_id, f).await?
+        && let Some(mut result) = try_indexed_user_lookup(store, org_id, f).await?
     {
+        // `find_by_indexes` issues its SELECT without an ORDER BY, so the row
+        // order is unspecified and may vary across executions (SQL standard).
+        // Sort by `id` (UUIDv7, unique — matching `find_paginated_with_count`'s
+        // ORDER BY id ASC) before slicing so paginated pages are stable and
+        // non-overlapping for an `eq` filter matching more than one resource.
+        result.sort_by(|a, b| a.id.cmp(&b.id));
         let total = result.len();
         let page = result.into_iter().skip(offset).take(count).collect();
         return Ok((page, total));
@@ -1179,8 +1185,14 @@ pub(crate) async fn list_scim_groups(
     let offset = start_index.saturating_sub(1); // SCIM 1-indexed
 
     if let Some(f) = filter
-        && let Some(result) = try_indexed_group_lookup(store, org_id, f).await?
+        && let Some(mut result) = try_indexed_group_lookup(store, org_id, f).await?
     {
+        // `find_by_indexes` issues its SELECT without an ORDER BY, so the row
+        // order is unspecified and may vary across executions (SQL standard).
+        // Sort by `id` (UUIDv7, unique — matching `find_paginated_with_count`'s
+        // ORDER BY id ASC) before slicing so paginated pages are stable and
+        // non-overlapping for an `eq` filter matching more than one resource.
+        result.sort_by(|a, b| a.id.cmp(&b.id));
         let total = result.len();
         let page = result.into_iter().skip(offset).take(count).collect();
         return Ok((page, total));

@@ -840,3 +840,101 @@ async fn test_scim_group_display_name_index_is_lowercased() {
         .expect("group exists");
     assert_eq!(fetched.display_name, "Engineering", "body preserves casing");
 }
+
+// ============================================================================
+// Indexed `eq` pagination determinism — sort by `id` before slicing
+// ============================================================================
+//
+// `find_by_indexes` issues its `SELECT` with no `ORDER BY`, so the row order is
+// unspecified and may differ across executions (SQL standard). The indexed
+// `eq` fast path slices that `Vec` with `skip(offset).take(count)`; without a
+// sort it paginates an unspecified order, which can duplicate a resource across
+// pages and omit another. These tests force SQLite to return rows in a
+// deliberately non-`id` (reverse-`id`) order via `bump_document_to_end`, then
+// assert pagination is stable, `id`-ascending (matching `find_paginated_with_count`'s
+// `ORDER BY id ASC`), non-overlapping, and complete.
+
+#[tokio::test]
+async fn test_scim_group_indexed_display_name_eq_pagination_is_id_sorted_across_pages() {
+    // Two groups share a `displayName` (`uniqueness: "none"`), so the indexed
+    // `eq` path matches N>1. We bump the smaller-`id` group to the end so the
+    // raw DB result is reverse-`id`; the in-app `sort_by id` must restore
+    // id-ascending pages.
+    let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
+
+    let g1 = create_scim_group(&store, TEST_ORG_ID, "Engineering", None, &[])
+        .await
+        .expect("create g1");
+    let g2 = create_scim_group(&store, TEST_ORG_ID, "Engineering", None, &[])
+        .await
+        .expect("create g2");
+    let (id_lo, id_hi) = if g1.id < g2.id {
+        (g1.id.clone(), g2.id.clone())
+    } else {
+        (g2.id.clone(), g1.id.clone())
+    };
+    bump_document_to_end(&store, &id_lo).await;
+
+    // Sanity: the raw, unsorted `find_by_indexes` now returns reverse-`id`
+    // order. This proves the test exercises an unsorted DB result — the
+    // precondition of the defect — instead of coincidentally-`id`-sorted rows.
+    use crate::db::documents::scim::ScimGroupDoc;
+    let raw: Vec<String> = store
+        .find_by_indexes::<ScimGroupDoc>(&[
+            ("display_name", "engineering"),
+            ("org_id", TEST_ORG_ID),
+        ])
+        .await
+        .expect("raw find_by_indexes")
+        .into_iter()
+        .map(|d| d.id)
+        .collect();
+    assert_eq!(
+        raw,
+        vec![id_hi.clone(), id_lo.clone()],
+        "sanity: SQLite must return reverse-id order after the rowid bump; \
+         otherwise this test does not exercise the defect"
+    );
+
+    let (page1, total) = list_scim_groups(
+        &store,
+        TEST_ORG_ID,
+        Some(&group_filter(r#"displayName eq "engineering""#)),
+        1,
+        1,
+    )
+    .await
+    .expect("list page 1");
+    assert_eq!(
+        total, 2,
+        "totalResults is the full match count, not page size"
+    );
+    assert_eq!(page1.len(), 1);
+    let (page2, _) = list_scim_groups(
+        &store,
+        TEST_ORG_ID,
+        Some(&group_filter(r#"displayName eq "engineering""#)),
+        2,
+        1,
+    )
+    .await
+    .expect("list page 2");
+    assert_eq!(page2.len(), 1);
+
+    let got: Vec<String> = page1
+        .iter()
+        .chain(page2.iter())
+        .map(|g| g.id.clone())
+        .collect();
+    assert_eq!(
+        got,
+        vec![id_lo.clone(), id_hi.clone()],
+        "paginated ids must be id-ascending and partition all matches; an \
+         unsorted slice over the raw reverse-id order would return [id_hi, id_lo]"
+    );
+    assert!(
+        page1[0].id < page2[0].id,
+        "page 1 must precede page 2 in id order"
+    );
+}
