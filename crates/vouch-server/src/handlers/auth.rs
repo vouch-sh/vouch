@@ -827,4 +827,73 @@ mod tests {
 
         assert_eq!(status_json(status, &body)["authenticated"], false, "{body}");
     }
+
+    // `/v1/auth/status` propagates `use_dpop_nonce` 401s (and their fresh
+    // `DPoP-Nonce`) instead of masking them. After the proof-first fix, an
+    // mTLS-bound token under `DPoP` with a stale nonce now reaches
+    // `validate_dpop_at_resource` and yields `use_dpop_nonce` (previously it
+    // short-circuited to `invalid_token` before the proof check), so the
+    // handler must propagate the nonce demand — a recovery path that was
+    // previously unavailable to `auth::status` clients for this input class.
+    #[tokio::test]
+    async fn test_auth_status_propagates_use_dpop_nonce_for_mtls_bound_token() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "status-mtls-dpop-stale@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let thumbprint = compute_cert_thumbprint(b"status-mtls-dpop-stale");
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                binding: TestBinding::Mtls(&thumbprint),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        // Issue then delete a nonce so the proof presents one the server no
+        // longer holds → `use_dpop_nonce`.
+        let stale_nonce = db::generate_dpop_nonce(&state.store, 300)
+            .await
+            .expect("generate nonce");
+        db::delete_dpop_nonce(&state.store, &stale_nonce)
+            .await
+            .expect("delete nonce");
+
+        let (key, jwk) = generate_dpop_key_pair();
+        let uri = format!("{}/v1/auth/status", state.config().base_url);
+        let proof = create_dpop_proof(&key, &jwk, "GET", &uri, Some(&stale_nonce), Some(&token));
+        let response = http_get_full(
+            &app,
+            "/v1/auth/status",
+            &[
+                ("Authorization", &format!("DPoP {token}")),
+                ("DPoP", &proof),
+            ],
+        )
+        .await;
+
+        assert_eq!(
+            response.status,
+            StatusCode::UNAUTHORIZED,
+            "{}",
+            response.body
+        );
+        assert!(
+            response.headers.contains_key("dpop-nonce"),
+            "use_dpop_nonce must carry a fresh DPoP-Nonce: {}",
+            response.body
+        );
+        let challenge = response
+            .headers
+            .get("www-authenticate")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        assert!(
+            challenge.starts_with(r#"DPoP error="use_dpop_nonce""#),
+            "{challenge}"
+        );
+    }
 }

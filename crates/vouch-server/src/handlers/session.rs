@@ -138,10 +138,13 @@ async fn extract_resource_token(
         .session;
 
     // 4. The scheme the token arrived under must fit what the token is. A
-    //    cookie holds only a browser session. The DPoP scheme is for a
-    //    DPoP-bound token, whose proof RFC 9449 §7.1 requires; the RFC is
-    //    silent on an unbound token under it, and it is refused here as at
-    //    `/oauth/userinfo`. The Bearer scheme refuses a DPoP-bound token.
+    //    cookie holds only a browser session. The DPoP scheme validates the
+    //    proof first (RFC 9449 §4.3 / §7.1): a proof failure yields
+    //    `invalid_dpop_proof` or `use_dpop_nonce` + a fresh `DPoP-Nonce`,
+    //    and only a passed proof with a failed key binding or an unbound
+    //    token yields `invalid_token` — mirroring `/oauth/userinfo`, which
+    //    renders the same `DpopChallenge` for each refusal. The Bearer
+    //    scheme refuses a DPoP-bound token.
     let dpop_cnf = access_claims.cnf.as_ref().filter(|cnf| cnf.jkt.is_some());
     match (auth_scheme, dpop_cnf) {
         (AuthScheme::Cookie, _) => {
@@ -153,11 +156,7 @@ async fn extract_resource_token(
                 ));
             }
         }
-        (AuthScheme::DPoP, None) => {
-            return Err(DpopChallenge::binding(PossessionError::NotDpopBound).into());
-        }
-        (AuthScheme::DPoP, Some(cnf)) => {
-            // Validate DPoP proof header against cnf.jkt
+        (AuthScheme::DPoP, _) => {
             let full_uri = format!("{}{}", config.base_url, uri);
             let validated = dpop::validate_dpop_at_resource(
                 &token,
@@ -170,10 +169,17 @@ async fn extract_resource_token(
             )
             .await
             .map_err(DpopError::at_resource)?;
-            if !cnf.confirms_dpop(&validated) {
-                return Err(DpopChallenge::binding(PossessionError::DpopKeyMismatch).into());
+            match dpop_cnf {
+                Some(cnf) if cnf.confirms_dpop(&validated) => {
+                    dpop_source = validated.source;
+                }
+                Some(_) => {
+                    return Err(DpopChallenge::binding(PossessionError::DpopKeyMismatch).into());
+                }
+                None => {
+                    return Err(DpopChallenge::binding(PossessionError::NotDpopBound).into());
+                }
             }
-            dpop_source = validated.source;
         }
         (AuthScheme::Bearer, Some(_)) => {
             // RFC 9449 §7.2: a DPoP-bound token sent as Bearer is refused.

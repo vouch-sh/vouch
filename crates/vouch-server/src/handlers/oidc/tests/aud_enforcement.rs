@@ -623,12 +623,16 @@ async fn test_authorize_session_check_refuses_non_browser_session_tokens() {
 }
 
 // ========================================================================
-// The DPoP scheme at /v1 requires a DPoP-bound token
+// The DPoP scheme at /v1 requires a checked proof, then a DPoP binding
 // ========================================================================
 //
 // RFC 9449 §7.1 states the checks for a DPoP-bound token and is silent on an
-// unbound token presented with the DPoP scheme. `/oauth/userinfo` refuses
-// it, and `/v1/*` does the same, so the scheme always means a checked proof.
+// unbound token presented with the DPoP scheme. The proof (§4.3) is checked
+// first: a missing or invalid proof yields `invalid_dpop_proof` regardless of
+// the token's binding, and only a passed proof with a non-DPoP-bound token
+// yields `invalid_token` (NotDpopBound). `/oauth/userinfo` follows the same
+// ordering, and `/v1/*` matches it, so both surfaces render one
+// `DpopChallenge` for every DPoP refusal.
 
 #[tokio::test]
 async fn test_v1_dpop_scheme_refuses_unbound_token() {
@@ -647,14 +651,64 @@ async fn test_v1_dpop_scheme_refuses_unbound_token() {
     .await;
     let dpop_auth = format!("DPoP {token}");
 
-    for headers in [
-        vec![("Authorization", dpop_auth.as_str()), ("DPoP", "not-a-jwt")],
-        vec![("Authorization", dpop_auth.as_str())],
-    ] {
-        let (status, body) = http_get(&app, "/v1/keys", &headers).await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
-        assert!(body.contains("not DPoP-bound"), "{body}");
-    }
+    // A malformed proof fails the §4.3 checks before the binding gate, so
+    // the refusal is `invalid_dpop_proof`, not `invalid_token`/NotDpopBound.
+    let (status, body) = http_get(
+        &app,
+        "/v1/keys",
+        &[("Authorization", dpop_auth.as_str()), ("DPoP", "not-a-jwt")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+    assert_eq!(
+        json.get("code").and_then(|v| v.as_str()),
+        Some("invalid_dpop_proof"),
+        "{body}"
+    );
+
+    // No proof at all also fails the §4.3 checks, so the refusal is again
+    // `invalid_dpop_proof`.
+    let (status, body) = http_get(&app, "/v1/keys", &[("Authorization", dpop_auth.as_str())]).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+    assert_eq!(
+        json.get("code").and_then(|v| v.as_str()),
+        Some("invalid_dpop_proof"),
+        "{body}"
+    );
+
+    // Once a valid proof is presented, the binding gate fires and an unbound
+    // token yields `invalid_token` (NotDpopBound) — the binding check runs
+    // only after a passed proof.
+    let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
+    let proof = create_dpop_proof(
+        &dpop_key,
+        &dpop_jwk,
+        "GET",
+        &format!("{}/v1/keys", state.config().base_url),
+        None,
+        Some(&token),
+    );
+    let (status, body) = http_get(
+        &app,
+        "/v1/keys",
+        &[("Authorization", dpop_auth.as_str()), ("DPoP", &proof)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+    assert_eq!(
+        json.get("code").and_then(|v| v.as_str()),
+        Some("invalid_token"),
+        "{body}"
+    );
+    assert!(
+        json.get("message")
+            .and_then(|v| v.as_str())
+            .is_some_and(|m| m.contains("not DPoP-bound")),
+        "{body}"
+    );
 
     let bearer = format!("Bearer {token}");
     let (status, body) = http_get(&app, "/v1/keys", &[("Authorization", &bearer)]).await;

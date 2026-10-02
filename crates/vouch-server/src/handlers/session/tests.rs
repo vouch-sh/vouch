@@ -12,6 +12,7 @@ use axum::http::StatusCode;
 use crate::db;
 use crate::error::ServiceError;
 use crate::handlers::session;
+use crate::services::oidc::claims::PossessionError;
 use crate::services::oidc::mtls;
 use crate::test_utils::*;
 
@@ -530,6 +531,334 @@ async fn test_dpop_non_use_nonce_error_omits_nonce_header() {
     assert!(
         challenge.starts_with(r#"DPoP error="invalid_dpop_proof""#),
         "{challenge}"
+    );
+}
+
+// ========================================================================
+// RFC 9449 §7.1 + RFC 8705 §3 — proof-first ordering on `/v1/*`
+//
+// `extract_resource_token` is the shared OAuth access-token extraction path
+// every `/v1/*` handler takes. For a token whose `cnf.jkt` is `None`
+// (mTLS-bound via `cnf.x5t#S256`, or fully unbound) presented under the
+// `DPoP` scheme, the proof (RFC 9449 §4.3) MUST be validated before the
+// `cnf.jkt` binding gate, mirroring `/oauth/userinfo`, so the two surfaces
+// render one `DpopChallenge` for every DPoP refusal: `invalid_dpop_proof`
+// for a missing/bad proof, `use_dpop_nonce` + a fresh `DPoP-Nonce` for a
+// stale nonce, and `invalid_token` (NotDpopBound) only once the proof has
+// passed and the binding is then found missing. Before the fix the
+// `(AuthScheme::DPoP, None)` arm returned `invalid_token` without ever
+// calling `validate_dpop_at_resource`, so `/v1/*` returned `invalid_token`
+// where `/oauth/userinfo` returned `invalid_dpop_proof` for the same request.
+// ========================================================================
+
+/// The `WWW-Authenticate` header value, or empty when absent, for cross-arm
+/// comparison of the `DpopChallenge` both surfaces render.
+fn www_authenticate(response: &HttpResponse) -> &str {
+    response
+        .headers
+        .get("www-authenticate")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+}
+
+/// The `/api/v1/applications` resource URI the request must target for the
+/// DPoP `htu` comparison and the audience-coverage check to pass.
+fn applications_uri(state: &crate::AppState) -> String {
+    format!("{}/api/v1/applications", state.config().base_url)
+}
+
+/// RFC 8705 §3 + RFC 9449 §7.1: an mTLS-bound token (`cnf.x5t#S256`,
+/// `cnf.jkt == None`) presented under the `DPoP` scheme with NO proof must
+/// yield `401 invalid_dpop_proof` on `/v1/*` — the proof check runs before
+/// the binding check, mirroring
+/// `test_rfc8705_userinfo_mtls_bound_token_with_dpop_scheme_rejected` on
+/// `/oauth/userinfo`. Before the fix `/v1/*` returned `invalid_token`
+/// without validating the proof.
+#[tokio::test]
+async fn test_v1_mtls_bound_token_under_dpop_without_proof_returns_invalid_dpop_proof() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "v1-mtls-dpop-noproof@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let thumbprint = mtls::compute_cert_thumbprint(b"v1-mtls-dpop-noproof");
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Mtls(&thumbprint),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // No client certificate is presented: the mTLS binding check (which runs
+    // AFTER the DPoP proof check) is never reached, so its absence cannot
+    // mask the proof-check failure.
+    let response = http_get_full(
+        &app,
+        "/api/v1/applications",
+        &[("Authorization", &format!("DPoP {token}"))],
+    )
+    .await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::UNAUTHORIZED,
+        "{}",
+        response.body
+    );
+    let body: serde_json::Value =
+        serde_json::from_str(&response.body).expect("valid JSON error body");
+    assert_eq!(
+        body.get("code").and_then(|v| v.as_str()),
+        Some("invalid_dpop_proof"),
+        "{body}"
+    );
+    assert_eq!(
+        body.get("message").and_then(|v| v.as_str()),
+        Some(PossessionError::MissingDpopProof.as_str()),
+        "{body}"
+    );
+    let challenge = www_authenticate(&response);
+    assert!(
+        challenge.starts_with(r#"DPoP error="invalid_dpop_proof""#),
+        "{challenge}"
+    );
+    // A missing proof never yields a nonce demand, so no `DPoP-Nonce`.
+    assert!(
+        response.headers.get("dpop-nonce").is_none(),
+        "missing-proof rejection must not carry a DPoP-Nonce header"
+    );
+}
+
+/// RFC 9449 §9: an mTLS-bound token presented under the `DPoP` scheme with a
+/// proof whose nonce the server does not hold must yield `401 use_dpop_nonce`
+/// and a fresh `DPoP-Nonce` header on `/v1/*` — the proof check (which issues
+/// the nonce) runs before the binding check. Before the fix `/v1/*` returned
+/// `invalid_token` with no `DPoP-Nonce`, diverging from `/oauth/userinfo`.
+#[tokio::test]
+async fn test_v1_mtls_bound_token_under_dpop_with_stale_nonce_returns_use_dpop_nonce() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "v1-mtls-dpop-stale@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let thumbprint = mtls::compute_cert_thumbprint(b"v1-mtls-dpop-stale");
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Mtls(&thumbprint),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // Generate a nonce, then delete it so the proof presents one the server
+    // does not hold — `validate_dpop_at_resource` answers with `use_dpop_nonce`.
+    // NB: the nonce must actually be issued so `delete_dpop_nonce` has a row.
+    let stale_nonce = db::generate_dpop_nonce(&state.store, 300)
+        .await
+        .expect("generate nonce");
+    db::delete_dpop_nonce(&state.store, &stale_nonce)
+        .await
+        .expect("delete nonce");
+
+    let (key, jwk) = generate_dpop_key_pair();
+    let proof = create_dpop_proof(
+        &key,
+        &jwk,
+        "GET",
+        &applications_uri(&state),
+        Some(&stale_nonce),
+        Some(&token),
+    );
+    let response = http_get_full(
+        &app,
+        "/api/v1/applications",
+        &[
+            ("Authorization", &format!("DPoP {token}")),
+            ("DPoP", &proof),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::UNAUTHORIZED,
+        "{}",
+        response.body
+    );
+    let fresh_nonce = response
+        .headers
+        .get("dpop-nonce")
+        .and_then(|v| v.to_str().ok())
+        .expect("use_dpop_nonce must carry a fresh DPoP-Nonce header");
+    assert!(!fresh_nonce.is_empty(), "fresh nonce must not be empty");
+    assert_ne!(
+        fresh_nonce, &stale_nonce,
+        "fresh nonce must differ from the stale one"
+    );
+    let body: serde_json::Value =
+        serde_json::from_str(&response.body).expect("valid JSON error body");
+    assert_eq!(
+        body.get("code").and_then(|v| v.as_str()),
+        Some("use_dpop_nonce"),
+        "{body}"
+    );
+    assert!(
+        www_authenticate(&response).starts_with(r#"DPoP error="use_dpop_nonce""#),
+        "{}",
+        www_authenticate(&response)
+    );
+}
+
+/// RFC 8705 §3 + RFC 9449 §7.1: an mTLS-bound token whose DPoP proof
+/// validates is still not DPoP-bound, so it yields `401 invalid_token`
+/// (NotDpopBound) — the mTLS binding check is never reached because the
+/// DPoP binding gate returns first. Mirrors the `Some(_) | None =>
+/// NotDpopBound` arm in `userinfo.rs`, and pins the second half of the
+/// proof-first ordering: an unbound token whose proof passes still
+/// terminates at `invalid_token`, and the mTLS certificate check
+/// (`extract_resource_token` step 4b) stays gated below the DPoP binding
+/// gate (step 4).
+#[tokio::test]
+async fn test_v1_mtls_bound_token_under_dpop_with_valid_proof_returns_invalid_token() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "v1-mtls-dpop-valid@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let thumbprint = mtls::compute_cert_thumbprint(b"v1-mtls-dpop-valid");
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Mtls(&thumbprint),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let (key, jwk) = generate_dpop_key_pair();
+    let proof = create_dpop_proof(
+        &key,
+        &jwk,
+        "GET",
+        &applications_uri(&state),
+        None,
+        Some(&token),
+    );
+    // No client certificate is presented: were the mTLS binding check
+    // (`extract_resource_token` step 4b) reached, a missing cert would yield
+    // `MissingClientCertificate`; reaching `NotDpopBound` here proves the
+    // DPoP binding gate (step 4) returned first.
+    let response = http_get_full(
+        &app,
+        "/api/v1/applications",
+        &[
+            ("Authorization", &format!("DPoP {token}")),
+            ("DPoP", &proof),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::UNAUTHORIZED,
+        "{}",
+        response.body
+    );
+    let body: serde_json::Value =
+        serde_json::from_str(&response.body).expect("valid JSON error body");
+    assert_eq!(
+        body.get("code").and_then(|v| v.as_str()),
+        Some("invalid_token"),
+        "{body}"
+    );
+    assert_eq!(
+        body.get("message").and_then(|v| v.as_str()),
+        Some(PossessionError::NotDpopBound.as_str()),
+        "{body}"
+    );
+}
+
+/// Cross-surface parity (the unification commit f6485dd0 set out to make):
+/// the SAME `Authorization: DPoP <mTLS-bound token>` request (no proof)
+/// must render one `DpopChallenge` on both `/api/v1/applications` and
+/// `/oauth/userinfo` — same status, same `WWW-Authenticate` challenge, and
+/// each surface's own body shape carrying the same error code and
+/// description. Before the fix `/v1/*` returned `invalid_token` while
+/// `/oauth/userinfo` returned `invalid_dpop_proof`.
+#[tokio::test]
+async fn test_v1_and_userinfo_render_one_dpop_challenge_for_mtls_bound_token_under_dpop() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "v1-parity@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let thumbprint = mtls::compute_cert_thumbprint(b"v1-parity");
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Mtls(&thumbprint),
+            ..Default::default()
+        },
+    )
+    .await;
+    let auth = format!("DPoP {token}");
+
+    let v1 = http_get_full(&app, "/api/v1/applications", &[("Authorization", &auth)]).await;
+    let userinfo = http_get_full(&app, "/oauth/userinfo", &[("Authorization", &auth)]).await;
+
+    // Both surfaces refuse with 401.
+    assert_eq!(v1.status, StatusCode::UNAUTHORIZED, "v1: {}", v1.body);
+    assert_eq!(
+        userinfo.status,
+        StatusCode::UNAUTHORIZED,
+        "userinfo: {}",
+        userinfo.body
+    );
+
+    // Same `DpopChallenge` on the wire: identical `WWW-Authenticate`.
+    assert_eq!(
+        www_authenticate(&v1),
+        www_authenticate(&userinfo),
+        "both surfaces must render the same DPoP challenge"
+    );
+    assert!(
+        www_authenticate(&v1).starts_with(r#"DPoP error="invalid_dpop_proof""#),
+        "{}",
+        www_authenticate(&v1)
+    );
+
+    // Each surface's body uses its own shape but carries the same code and
+    // description: `/v1/*` -> `{"code", "message"}`, userinfo ->
+    // `{"error", "error_description"}`.
+    let v1_body: serde_json::Value = serde_json::from_str(&v1.body).expect("v1 body is JSON");
+    let ui_body: serde_json::Value =
+        serde_json::from_str(&userinfo.body).expect("userinfo body is JSON");
+    assert_eq!(
+        v1_body.get("code").and_then(|v| v.as_str()),
+        Some("invalid_dpop_proof"),
+        "v1 code: {v1_body}"
+    );
+    assert_eq!(
+        ui_body.get("error").and_then(|v| v.as_str()),
+        Some("invalid_dpop_proof"),
+        "userinfo error: {ui_body}"
+    );
+    assert_eq!(
+        v1_body.get("message").and_then(|v| v.as_str()),
+        ui_body.get("error_description").and_then(|v| v.as_str()),
+        "both surfaces must carry the same error_description"
+    );
+    assert_eq!(
+        v1_body.get("message").and_then(|v| v.as_str()),
+        Some(PossessionError::MissingDpopProof.as_str()),
+        "v1 message: {v1_body}"
     );
 }
 
