@@ -145,26 +145,21 @@ fn publish_ready_at(staged_at: Timestamp) -> Result<Timestamp> {
         .context("publish window overflow")
 }
 
-/// Upper bound on the revoke gate. A `session_hours` misconfiguration must
-/// fail toward a longer gate, but an unbounded value would overflow the span
-/// arithmetic — one year is beyond any real session lifetime.
-const REVOKE_GATE_CAP_HOURS: i64 = 24 * 365;
-
 /// The instant a key demoted at `demoted_at` may be revoked: the token-drain
 /// gate `max(session_hours, RETIREMENT_FLOOR_HOURS) + RETIREMENT_MARGIN_HOURS`
 /// (the floor keeps a `session_hours` reduction from shortening the gate under
-/// what already-issued tokens need), capped at [`REVOKE_GATE_CAP_HOURS`].
+/// what already-issued tokens need). A `session_hours` too large for the span
+/// arithmetic is an error, so the key is kept: deleting a key early breaks live
+/// sessions; waiting longer breaks nothing.
 fn revoke_ready_at(demoted_at: Timestamp, session_hours: u64) -> Result<Timestamp> {
-    // An unrepresentable session_hours clamps LONG (to the cap), never short:
-    // deleting a key early breaks live sessions; waiting longer breaks nothing.
-    let session_h = i64::try_from(session_hours).unwrap_or(REVOKE_GATE_CAP_HOURS);
+    let session_h = i64::try_from(session_hours).context("session_hours out of range")?;
     let drain = session_h
         .max(RETIREMENT_FLOOR_HOURS)
-        .saturating_add(RETIREMENT_MARGIN_HOURS)
-        .min(REVOKE_GATE_CAP_HOURS);
-    demoted_at
-        .checked_add(Span::new().hours(drain))
-        .context("revoke gate overflow")
+        .saturating_add(RETIREMENT_MARGIN_HOURS);
+    let span = Span::new()
+        .try_hours(drain)
+        .context("revoke gate span overflow")?;
+    demoted_at.checked_add(span).context("revoke gate overflow")
 }
 
 // ---------------------------------------------------------------------------
@@ -911,19 +906,14 @@ mod tests {
         );
     }
 
-    /// A session_hours value too large for the gate math clamps to the cap —
-    /// the failure direction is always a LONGER gate, never a shorter one
-    /// (an early revoke breaks live sessions; a late one breaks nothing).
+    /// A `session_hours` too large for the gate math is an error (the key is
+    /// kept), never a shorter gate. Zero clamps to the floor like any short
+    /// lifetime.
     #[test]
-    fn revoke_gate_clamps_absurd_session_hours_long() {
+    fn revoke_gate_refuses_absurd_session_hours() {
         let demoted_at = Timestamp::from_second(1_700_000_000).unwrap();
-        let capped = demoted_at
-            .checked_add(Span::new().hours(super::REVOKE_GATE_CAP_HOURS))
-            .unwrap();
-        assert_eq!(
-            super::revoke_ready_at(demoted_at, u64::MAX).unwrap(),
-            capped
-        );
+        assert!(super::revoke_ready_at(demoted_at, u64::MAX).is_err());
+        assert!(super::revoke_ready_at(demoted_at, u64::try_from(i64::MAX).unwrap()).is_err());
         // Zero clamps to the floor, like any other short lifetime.
         let floor = demoted_at
             .checked_add(
@@ -935,6 +925,122 @@ mod tests {
             )
             .unwrap();
         assert_eq!(super::revoke_ready_at(demoted_at, 0).unwrap(), floor);
+    }
+
+    /// The gate opens no earlier than the last token's `exp`
+    /// (`demoted_at + session_hours`) for every lifetime, including those
+    /// longer than a year.
+    #[test]
+    fn revoke_gate_never_opens_before_token_expiry() {
+        let demoted_at = Timestamp::from_second(1_700_000_000).unwrap();
+
+        // The gate must be >= the longest-lived token's `exp`
+        // (`demoted_at + session_hours`) for every representable value.
+        for session_hours in [0u64, 4, 8, 12, 8758, 8759, 8760, 8761, 8762, 9000] {
+            let expiry = demoted_at
+                .checked_add(Span::new().hours(i64::try_from(session_hours).unwrap_or(0)))
+                .unwrap();
+            let gate = super::revoke_ready_at(demoted_at, session_hours).unwrap();
+            assert!(
+                gate >= expiry,
+                "session_hours={session_hours}: gate {gate} opens before token expiry {expiry}"
+            );
+        }
+
+        // A 8761h session drains 8761 + RETIREMENT_MARGIN_HOURS hours.
+        let token_expiry = demoted_at.checked_add(Span::new().hours(8761)).unwrap();
+        let gate = super::revoke_ready_at(demoted_at, 8761).unwrap();
+        assert_eq!(
+            gate,
+            demoted_at.checked_add(Span::new().hours(8763)).unwrap(),
+            "8761h session: drain must be 8761 + {} = 8763h",
+            super::RETIREMENT_MARGIN_HOURS
+        );
+        assert!(gate >= token_expiry);
+    }
+
+    /// Rotate then revoke through `revoke_org_previous_keys` with a one-year
+    /// `session_hours`: the gate opens at `demoted_at + 8762h`, after the last
+    /// token expires.
+    #[tokio::test]
+    async fn revoke_boundary_end_to_end_with_year_long_session() {
+        let (state, org_id, org) = setup().await;
+
+        let mut cfg = (**state.config()).clone();
+        cfg.session_hours = 8760;
+        state.config.store(std::sync::Arc::new(cfg));
+
+        resolve_org_keys(&state, Some(&org)).await.unwrap();
+        // Publish window for the Next keys.
+        backdate(
+            &state,
+            &org_id,
+            JwsAlgorithm::Es256,
+            SigningKeyState::Next,
+            25,
+        )
+        .await;
+        backdate(
+            &state,
+            &org_id,
+            JwsAlgorithm::Rs256,
+            SigningKeyState::Next,
+            25,
+        )
+        .await;
+        rotate_org_keys(&state, &org_id, NO_OPERATOR).await.unwrap();
+
+        // Gate = demoted_at + max(8760, 8) + 2 = demoted_at + 8762h.
+        // Backdate demoted_at to 8761h ago: a 8760h token is still live for 1h,
+        // and the gate opens 1h in the future → NotReady.
+        backdate(
+            &state,
+            &org_id,
+            JwsAlgorithm::Es256,
+            SigningKeyState::Previous,
+            8761,
+        )
+        .await;
+        backdate(
+            &state,
+            &org_id,
+            JwsAlgorithm::Rs256,
+            SigningKeyState::Previous,
+            8761,
+        )
+        .await;
+        let outcome = revoke_org_previous_keys(&state, &org_id, NO_OPERATOR)
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcome, RevokeOutcome::NotReady { .. }),
+            "8761h after demote (gate at +8762h): expected NotReady, got {outcome:?}"
+        );
+
+        // Backdate to 8762h ago: the gate has just opened → Revoked.
+        backdate(
+            &state,
+            &org_id,
+            JwsAlgorithm::Es256,
+            SigningKeyState::Previous,
+            8762,
+        )
+        .await;
+        backdate(
+            &state,
+            &org_id,
+            JwsAlgorithm::Rs256,
+            SigningKeyState::Previous,
+            8762,
+        )
+        .await;
+        let outcome = revoke_org_previous_keys(&state, &org_id, NO_OPERATOR)
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcome, RevokeOutcome::Revoked { .. }),
+            "8762h after demote (gate at +8762h, exactly open): expected Revoked, got {outcome:?}"
+        );
     }
 
     #[tokio::test]
