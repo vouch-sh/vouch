@@ -1371,3 +1371,33 @@ fn saved_config_holding_a_registration_token_is_owner_only() {
         "a config file holding a registration access token must be owner-only, got {mode:o}"
     );
 }
+
+// -----------------------------------------------------------------
+// External readers: terraform-provider-vouch and the Playwright harness
+// read `servers.<hostname>.token` from `<config>/vouch/config.json`.
+// -----------------------------------------------------------------
+
+#[test]
+fn test_session_token_storage_format_is_stable() {
+    use vouch_common::paths;
+    let mut config = Config::default();
+    config.set_server_url("https://auth.example.com");
+    config.set_token("session-token");
+    let json = serde_json::to_value(ConfigFile::from(&config)).unwrap();
+    assert_eq!(
+        json["servers"]["auth.example.com"]["token"],
+        "session-token"
+    );
+
+    let read_back: ConfigFile = serde_json::from_value(serde_json::json!({
+        "current_server": "auth.example.com",
+        "servers": { "auth.example.com": { "token": "session-token" } }
+    }))
+    .unwrap();
+    let config = Config::from(read_back);
+    assert_eq!(config.token().unwrap().expose_secret(), "session-token");
+
+    if let Some(path) = paths::config_file() {
+        assert!(path.ends_with("vouch/config.json"), "{}", path.display());
+    }
+}

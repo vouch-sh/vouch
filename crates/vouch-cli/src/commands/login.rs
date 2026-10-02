@@ -355,8 +355,7 @@ async fn run_fapi_login(
         .context(tr!("err-failed-parse-token-response"))?;
 
     // Derive expiry: prefer server-provided `expires_at`, else compute from `expires_in`.
-    let (expires_at_str, expires_at_ts) =
-        resolve_expiry(fapi_token.expires_at.as_deref(), fapi_token.expires_in);
+    let expires_at_str = resolve_expiry(fapi_token.expires_at.as_deref(), fapi_token.expires_in);
 
     let email = fapi_token.email;
 
@@ -372,7 +371,6 @@ async fn run_fapi_login(
         fapi_token.access_token.expose_secret(),
         &email,
         &expires_at_str,
-        Some(expires_at_ts),
         owned_key,
     )
     .await?;
@@ -442,8 +440,7 @@ async fn run_fapi_login_with_nonce(
         .await
         .context(tr!("err-failed-parse-token-response"))?;
 
-    let (expires_at_str, expires_at_ts) =
-        resolve_expiry(fapi_token.expires_at.as_deref(), fapi_token.expires_in);
+    let expires_at_str = resolve_expiry(fapi_token.expires_at.as_deref(), fapi_token.expires_in);
 
     let email = fapi_token.email;
 
@@ -458,7 +455,6 @@ async fn run_fapi_login_with_nonce(
         fapi_token.access_token.expose_secret(),
         &email,
         &expires_at_str,
-        Some(expires_at_ts),
         owned_key,
     )
     .await?;
@@ -610,11 +606,11 @@ fn recently_verified(verified_at: Option<&str>) -> bool {
 ///
 /// Uses the server-provided `expires_at` string when available; otherwise
 /// computes it from `expires_in` seconds.
-fn resolve_expiry(expires_at: Option<&str>, expires_in: u64) -> (String, jiff::Timestamp) {
+fn resolve_expiry(expires_at: Option<&str>, expires_in: u64) -> String {
     if let Some(s) = expires_at
-        && let Ok(ts) = s.parse::<jiff::Timestamp>()
+        && s.parse::<jiff::Timestamp>().is_ok()
     {
-        return (s.to_string(), ts);
+        return s.to_string();
     }
 
     let ts = jiff::Timestamp::now()
@@ -623,7 +619,7 @@ fn resolve_expiry(expires_at: Option<&str>, expires_in: u64) -> (String, jiff::T
         )))
         .unwrap_or_else(|_| jiff::Timestamp::now());
 
-    (ts.to_string(), ts)
+    ts.to_string()
 }
 
 /// Print the post-login success message.
@@ -716,16 +712,12 @@ mod tests {
             .checked_add(jiff::SignedDuration::from_hours(1))
             .unwrap();
         let s = future.to_string();
-        let (str_result, ts_result) = resolve_expiry(Some(&s), 3600);
-        assert_eq!(str_result, s);
-        // Timestamps should be close (within 1 second due to string round-trip)
-        let diff = ts_result.duration_since(future).as_secs().unsigned_abs();
-        assert!(diff <= 1, "timestamp round-trip should be within 1s");
+        assert_eq!(resolve_expiry(Some(&s), 3600), s);
     }
 
     #[test]
     fn test_resolve_expiry_falls_back_to_expires_in() {
-        let (str_result, ts_result) = resolve_expiry(None, 3600);
+        let str_result = resolve_expiry(None, 3600);
         // Should be a valid timestamp close to now + 3600 - 30 = 3570 s
         let ts: jiff::Timestamp = str_result.parse().unwrap();
         let diff = ts.duration_since(jiff::Timestamp::now()).as_secs();
@@ -734,13 +726,11 @@ mod tests {
             diff > 3500 && diff <= 3570,
             "expected ~3570s in future, got {diff}"
         );
-        let diff2 = ts_result.duration_since(jiff::Timestamp::now()).as_secs();
-        assert!(diff2 > 3500 && diff2 <= 3570);
     }
 
     #[test]
     fn test_resolve_expiry_invalid_expires_at_falls_back() {
-        let (str_result, _) = resolve_expiry(Some("not-a-timestamp"), 3600);
+        let str_result = resolve_expiry(Some("not-a-timestamp"), 3600);
         // Should fall back and produce a valid timestamp string
         let ts: jiff::Timestamp = str_result
             .parse()
@@ -751,17 +741,12 @@ mod tests {
 
     #[test]
     fn test_resolve_expiry_short_ttl_does_not_set_past_expiry() {
-        let (str_result, ts_result) = resolve_expiry(None, 0);
+        let str_result = resolve_expiry(None, 0);
         let ts: jiff::Timestamp = str_result.parse().unwrap();
         let diff = ts.duration_since(jiff::Timestamp::now()).as_secs();
         assert!(
             (-2..=1).contains(&diff),
             "expected near-now expiry, got {diff}"
-        );
-        let diff2 = ts_result.duration_since(jiff::Timestamp::now()).as_secs();
-        assert!(
-            (-2..=1).contains(&diff2),
-            "expected near-now expiry, got {diff2}"
         );
     }
 }

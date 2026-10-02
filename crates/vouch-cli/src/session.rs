@@ -20,7 +20,6 @@ use vouch_cli::fapi::ClientKey;
 use vouch_cli::tr;
 #[cfg(unix)]
 use vouch_common::SessionStatus;
-use vouch_common::{SessionCookie, write_cookie};
 
 /// A resolved session: server URL and authentication token.
 pub(crate) struct ResolvedSession {
@@ -301,32 +300,11 @@ pub(crate) async fn store_session_in_agent(
     }
 }
 
-/// Write a Netscape cookie file for `curl -b ~/.local/state/vouch/cookie.txt`.
-///
-/// Best-effort: logs and swallows errors (cookie file is a convenience,
-/// never blocks the login flow).
-fn write_session_cookie_file(server: &str, token: &str, expires_at_ts: Option<jiff::Timestamp>) {
-    let domain = match url::Url::parse(server) {
-        Ok(u) => u.host_str().unwrap_or("localhost").to_string(),
-        Err(_) => "localhost".to_string(),
-    };
-
-    let expires = expires_at_ts.map_or_else(
-        || jiff::Timestamp::now().as_second().saturating_add(28_800),
-        |ts| ts.as_second(),
-    );
-
-    let cookie = SessionCookie::new(&domain, token, expires);
-    if let Err(e) = write_cookie(&cookie) {
-        tracing::debug!("Failed to write cookie file: {e}");
-    }
-}
-
 /// Store session credentials and finalize the post-authentication ceremony.
 ///
 /// This is the shared logic between `login` and `enroll` commands. It:
 /// 1. Saves the server URL and token to the config file
-/// 2. Stores the session in the agent and writes cookie file concurrently
+/// 2. Stores the session in the agent
 /// 3. Auto-provisions an SSH certificate
 ///
 /// When `fapi_key` is provided (login flow), it is passed to auto-provision
@@ -338,7 +316,6 @@ pub(crate) async fn store_and_finalize(
     token: &str,
     email: &str,
     expires_at_str: &str,
-    expires_at_ts: Option<jiff::Timestamp>,
     fapi_key: Option<ClientKey>,
 ) -> Result<bool> {
     // 1. Config save — fast local I/O, do first
@@ -347,8 +324,8 @@ pub(crate) async fn store_and_finalize(
     config.set_token(token);
     config.save()?;
 
-    // 2. Agent IPC + cookie write run concurrently
-    let agent_future = async {
+    // 2. Agent IPC
+    let agent_stored = {
         #[cfg(unix)]
         {
             store_session_in_agent(
@@ -365,12 +342,6 @@ pub(crate) async fn store_and_finalize(
             false
         }
     };
-
-    let cookie_future = async {
-        write_session_cookie_file(server.as_str(), token, expires_at_ts);
-    };
-
-    let (agent_stored, ()) = tokio::join!(agent_future, cookie_future);
 
     // 3. Auto-provision SSH certificate + refresh CodeArtifact in parallel
     let (_, ()) = tokio::join!(
