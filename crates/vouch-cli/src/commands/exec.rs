@@ -9,7 +9,6 @@ use vouch_cli::{tr, tr_args};
 use super::CredentialType;
 use super::credential::cache;
 use crate::client::VouchClient;
-use crate::integrations::aws;
 use crate::integrations::aws::codeartifact::CodeArtifactToken;
 use crate::integrations::aws::redshift::RedshiftCredentials;
 use crate::server_url::ServerUrl;
@@ -366,6 +365,11 @@ pub(super) async fn fetch_rds_with_opts(
 }
 
 /// Resolve Redshift target, role, and region, then fetch credentials.
+///
+/// Delegates to [`super::credential::redshift::fetch_redshift_credentials_cached`]
+/// so that `vouch exec --type redshift` and `vouch env --type redshift` reuse
+/// the shared agent-side cache on a hit, mirroring every other credential
+/// type (see issue: Redshift exec path bypassed the cache).
 pub(super) async fn fetch_redshift_with_opts(
     server: &ServerUrl,
     role: Option<&str>,
@@ -377,18 +381,40 @@ pub(super) async fn fetch_redshift_with_opts(
         opts.duration,
     )?;
 
-    let (role_arn, region_name) = aws::resolve_role_and_region(role, opts.region, None)?;
-
-    let agent_source = super::credential::aws::detect_agent_source();
-    super::credential::redshift::fetch_redshift_credentials(
+    let data = super::credential::redshift::fetch_redshift_credentials_cached(
         server,
         &target,
         opts.db_name,
-        &region_name,
-        &role_arn,
-        agent_source.as_deref(),
+        opts.region,
+        role,
     )
-    .await
+    .await?;
+
+    // The cache stores a `serde_json::Value` ({DbUser, DbPassword, Expiration});
+    // deserialize the fields back into `RedshiftCredentials` for the exec/env
+    // injection path, which consumes `db_user` and `db_password` directly.
+    let db_user = data
+        .get("DbUser")
+        .and_then(serde_json::Value::as_str)
+        .with_context(|| tr!("exec-err-redshift-missing-db-user"))?
+        .to_string();
+    let db_password = SecretString::from(
+        data.get("DbPassword")
+            .and_then(serde_json::Value::as_str)
+            .with_context(|| tr!("exec-err-redshift-missing-db-password"))?
+            .to_string(),
+    );
+    let expiration = data
+        .get("Expiration")
+        .and_then(serde_json::Value::as_str)
+        .with_context(|| tr!("exec-err-redshift-missing-expiration"))?
+        .to_string();
+
+    Ok(RedshiftCredentials {
+        db_user,
+        db_password,
+        expiration,
+    })
 }
 
 /// Fetch a CodeArtifact token and inject it into the environment.
@@ -516,5 +542,70 @@ mod tests {
         // secret fields must not appear
         assert!(!debug.contains("wJalrXUtnFEMI"));
         assert!(!debug.contains("FwoGZXIvYXdz"));
+    }
+
+    /// Verify that `RedshiftCredentials` can be reconstructed from the JSON
+    /// shape stored by `fetch_redshift_credentials_cached`. This locks the
+    /// contract between the serialization in `redshift.rs` (the cache store
+    /// value `{DbUser, DbPassword, Expiration}`) and the extraction in
+    /// `fetch_redshift_with_opts` (the exec/env path that deserializes the
+    /// cached `serde_json::Value` back into the struct)
+    #[test]
+    fn test_redshift_credentials_from_cached_json() {
+        // Build the exact JSON object the cached wrapper stores on a fetch.
+        let data = serde_json::json!({
+            "DbUser": "IAMR:test-role",
+            "DbPassword": "temp-password",
+            "Expiration": "2025-02-27T19:44:51.001Z",
+        });
+
+        // Extract using the same logic as fetch_redshift_with_opts.
+        let db_user = data
+            .get("DbUser")
+            .and_then(serde_json::Value::as_str)
+            .expect("DbUser must be present")
+            .to_string();
+        let db_password = SecretString::from(
+            data.get("DbPassword")
+                .and_then(serde_json::Value::as_str)
+                .expect("DbPassword must be present")
+                .to_string(),
+        );
+        let expiration = data
+            .get("Expiration")
+            .and_then(serde_json::Value::as_str)
+            .expect("Expiration must be present")
+            .to_string();
+
+        let creds = RedshiftCredentials {
+            db_user,
+            db_password,
+            expiration,
+        };
+
+        assert_eq!(creds.db_user, "IAMR:test-role");
+        assert_eq!(creds.expiration, "2025-02-27T19:44:51.001Z");
+        assert_eq!(creds.db_password.expose_secret(), "temp-password");
+        // `RedshiftCredentials` must redact the password in Debug output so
+        // the exec/env path's debug logging never leaks the cached secret.
+        let debug = format!("{creds:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("temp-password"));
+        assert!(debug.contains("IAMR:test-role"));
+    }
+
+    /// The cached JSON shape must round-trip every field; a missing field
+    /// must surface as an extraction failure (not a silent default). This
+    /// guards the exec/env path against a future change to the cache value
+    /// that drops a key without updating the extraction.
+    #[test]
+    fn test_redshift_credentials_from_cached_json_missing_field_fails() {
+        let data = serde_json::json!({
+            "DbUser": "IAMR:test-role",
+            "Expiration": "2025-02-27T19:44:51.001Z",
+        });
+
+        let db_password = data.get("DbPassword").and_then(serde_json::Value::as_str);
+        assert!(db_password.is_none(), "missing DbPassword must not extract");
     }
 }

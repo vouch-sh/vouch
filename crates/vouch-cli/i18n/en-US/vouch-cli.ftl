@@ -666,6 +666,9 @@ exec-err-github-fetch = failed to get GitHub token from { -product } server
 exec-err-codeartifact-fetch = failed to get CodeArtifact token
 exec-err-rds-needs-hostname = RDS credentials require --rds-hostname.
 exec-err-rds-needs-username = RDS credentials require --rds-username.
+exec-err-redshift-missing-db-user = Redshift credentials missing DbUser
+exec-err-redshift-missing-db-password = Redshift credentials missing DbPassword
+exec-err-redshift-missing-expiration = Redshift credentials missing Expiration
 
 ## diag command
 

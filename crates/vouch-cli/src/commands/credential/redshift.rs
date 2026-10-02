@@ -50,8 +50,38 @@ pub(crate) async fn run(
     region: Option<&str>,
     role: Option<&str>,
 ) -> Result<()> {
+    let data = fetch_redshift_credentials_cached(server, &target, db_name, region, role).await?;
+
+    let json =
+        serde_json::to_string(&data).context(tr!("err-failed-serialize-redshift-credentials"))?;
+    // Machine-readable JSON output: stays English (consumed by Redshift driver).
+    println!("{json}");
+    Ok(())
+}
+
+/// Fetch Redshift credentials through the shared agent-side cache.
+///
+/// This is the single cached entry point for Redshift credentials, mirroring
+/// the RDS pattern (`fetch_rds_token`): both the standalone `vouch credential
+/// redshift` command (`run`) and the exec/env paths
+/// (`exec::fetch_redshift_with_opts`) call this function so that an agent-side
+/// cache hit avoids a redundant Vouch → STS → Redshift round-trip.
+///
+/// Returns the cached JSON value (`{DbUser, DbPassword, Expiration}`) so that
+/// `run` can print it directly while the exec/env path deserializes the fields
+/// back into a [`RedshiftCredentials`] struct. The uncached
+/// [`fetch_redshift_credentials`] remains the inner fetcher used by the cache
+/// miss path; it must not be called directly from any command path that has a
+/// caching equivalent.
+pub(crate) async fn fetch_redshift_credentials_cached(
+    server: &ServerUrl,
+    target: &RedshiftTarget<'_>,
+    db_name: Option<&str>,
+    region: Option<&str>,
+    role: Option<&str>,
+) -> Result<serde_json::Value> {
     // Validate inputs
-    match &target {
+    match target {
         RedshiftTarget::Cluster { cluster_id, .. } => {
             validate_sigv4_input(cluster_id, "cluster ID")?;
         }
@@ -74,7 +104,7 @@ pub(crate) async fn run(
         .as_deref()
         .map_or(String::new(), |src| format!(":agent:{src}"));
 
-    let cache_key = match &target {
+    let cache_key = match target {
         RedshiftTarget::Cluster { cluster_id, .. } => {
             format!("redshift:{cluster_id}:{role_arn}{agent_suffix}")
         }
@@ -87,7 +117,7 @@ pub(crate) async fn run(
     let data = cache::get_or_fetch(&cache_key, "Redshift credentials", || async {
         let creds = fetch_redshift_credentials(
             server,
-            &target,
+            target,
             db_name,
             &region_name,
             &role_arn,
@@ -106,16 +136,14 @@ pub(crate) async fn run(
     })
     .await?;
 
-    let json =
-        serde_json::to_string(&data).context(tr!("err-failed-serialize-redshift-credentials"))?;
-    // Machine-readable JSON output: stays English (consumed by Redshift driver).
-    println!("{json}");
-    Ok(())
+    Ok(data)
 }
 
 /// Fetch Redshift credentials through the full Vouch → STS → Redshift flow.
 ///
 /// Routes to the provisioned cluster or serverless API based on `target`.
+/// This is the uncached inner fetcher; command paths must use
+/// [`fetch_redshift_credentials_cached`] to get cache-first behavior.
 pub(crate) async fn fetch_redshift_credentials(
     server: &ServerUrl,
     target: &RedshiftTarget<'_>,
