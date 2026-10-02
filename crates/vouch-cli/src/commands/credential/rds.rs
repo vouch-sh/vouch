@@ -17,6 +17,7 @@
 use anyhow::{Context, Result};
 use secrecy::{ExposeSecret, SecretString};
 use vouch_cli::tr;
+use vouch_common::aws::Partition;
 
 use crate::commands::credential::aws::{
     StsRequest, detect_agent_source, exchange_for_sts_credentials,
@@ -149,15 +150,66 @@ async fn generate_rds_token(
     Ok(token)
 }
 
+/// All AWS partitions the codebase supports.
+///
+/// Used to anchor RDS hostname region extraction to a real AWS DNS suffix
+/// (via [`Partition::dns_suffix`]) instead of any DNS label named `rds`,
+/// which can appear in private DNS aliases and proxies.
+const ALL_PARTITIONS: [Partition; 8] = [
+    Partition::Aws,
+    Partition::AwsCn,
+    Partition::AwsUsGov,
+    Partition::AwsEusc,
+    Partition::AwsIso,
+    Partition::AwsIsoB,
+    Partition::AwsIsoE,
+    Partition::AwsIsoF,
+];
+
 /// Extract the AWS region from an RDS hostname.
 ///
-/// RDS hostnames follow the pattern `{id}.{random}.{region}.rds.amazonaws.com`.
-/// Returns `None` if the hostname doesn't match.
+/// RDS hostnames follow the pattern
+/// `{id}.{random}.{region}.rds[.<service-seg>].<partition-dns-suffix>` — e.g.
+/// `mydb.abc.us-east-1.rds.amazonaws.com` (commercial),
+/// `mydb.abc.us-gov-west-1.rds.us-gov.amazonaws.com` (GovCloud), or
+/// `mydb.abc.cn-north-1.rds.amazonaws.com.cn` (China).
+///
+/// The labels after `rds` must end with a known AWS partition DNS suffix,
+/// matched on label boundaries, so a custom DNS alias that merely contains an
+/// `rds` label — e.g. `db.rds.mycompany.com` or
+/// `us-west-2.rds.mycompany.com` — returns `None` and the caller falls back to
+/// the region from `--region`, the AWS profile, or `AWS_REGION`/
+/// `AWS_DEFAULT_REGION`.
+///
+/// Returns `None` if the hostname doesn't match an AWS RDS shape.
 fn extract_region_from_rds_hostname(hostname: &str) -> Option<&str> {
     let parts: Vec<&str> = hostname.split('.').collect();
     let rds_idx = parts.iter().position(|&p| p == "rds")?;
+    // The labels after `rds` must end with a known AWS partition DNS suffix,
+    // matched on label boundaries so a domain such as `xamazonaws.com` is not
+    // mistaken for `amazonaws.com`. The GovCloud RDS endpoint inserts a
+    // `us-gov` service segment (`rds.us-gov.amazonaws.com`) before the shared
+    // `amazonaws.com` suffix, so an exact-equality check on the suffix portion
+    // would regress GovCloud; a label-aligned suffix match still accepts it.
+    let after_rds = parts.get(rds_idx.saturating_add(1)..).unwrap_or_default();
+    if !ends_with_partition_dns_suffix(after_rds) {
+        return None;
+    }
     let region_idx = rds_idx.checked_sub(1)?;
     parts.get(region_idx).copied()
+}
+
+/// Whether `labels` ends with a known AWS partition DNS suffix, compared
+/// label-by-label so a partial-string match (e.g. `xamazonaws.com` vs.
+/// `amazonaws.com`) is not accepted.
+fn ends_with_partition_dns_suffix(labels: &[&str]) -> bool {
+    ALL_PARTITIONS.iter().any(|partition| {
+        let suffix: Vec<&str> = partition.dns_suffix().split('.').collect();
+        labels
+            .len()
+            .checked_sub(suffix.len())
+            .is_some_and(|start| labels.get(start..).is_some_and(|tail| tail == suffix))
+    })
 }
 
 /// Compute cache expiry: 14 minutes from now (1 minute safety margin).
@@ -275,6 +327,107 @@ mod tests {
         assert_eq!(
             extract_region_from_rds_hostname("my-custom-proxy.example.com"),
             None
+        );
+    }
+
+    #[test]
+    fn test_extract_region_from_china_hostname() {
+        let hostname = "mydb.abc123.cn-north-1.rds.amazonaws.com.cn";
+        assert_eq!(
+            extract_region_from_rds_hostname(hostname),
+            Some("cn-north-1")
+        );
+    }
+
+    /// Every partition's DNS suffix must anchor extraction; this guards
+    /// against a partition being silently dropped from `ALL_PARTITIONS`.
+    #[test]
+    fn test_extract_region_recognizes_every_partition_suffix() {
+        let cases: [(Partition, &str, &str); 8] = [
+            (Partition::Aws, "amazonaws.com", "us-east-1"),
+            (Partition::AwsCn, "amazonaws.com.cn", "cn-north-1"),
+            (Partition::AwsUsGov, "amazonaws.com", "us-gov-west-1"),
+            (Partition::AwsEusc, "amazonaws.eu", "eusc-de-east-1"),
+            (Partition::AwsIso, "c2s.ic.gov", "us-iso-east-1"),
+            (Partition::AwsIsoB, "sc2s.sgov.gov", "us-isob-east-1"),
+            (Partition::AwsIsoE, "cloud.adc-e.uk", "eu-isoe-west-1"),
+            (Partition::AwsIsoF, "csp.hci.ic.gov", "us-isof-south-1"),
+        ];
+        for (partition, dns_suffix, region) in cases {
+            let hostname = format!("mydb.abc.{region}.rds.{dns_suffix}");
+            assert_eq!(
+                extract_region_from_rds_hostname(&hostname),
+                Some(region),
+                "partition {partition:?} did not extract region {region} for {hostname}"
+            );
+        }
+    }
+
+    /// Custom non-AWS hostnames that merely contain an `rds` label must yield
+    /// no region, satisfying the documented contract, so the caller falls back
+    /// to the user's configured region instead of inferring a garbage one.
+    #[test]
+    fn test_extract_region_rejects_custom_proxy_with_rds_label() {
+        assert_eq!(
+            extract_region_from_rds_hostname("db.rds.mycompany.com"),
+            None
+        );
+        assert_eq!(
+            extract_region_from_rds_hostname("proxy.rds.internal.corp"),
+            None
+        );
+        assert_eq!(
+            extract_region_from_rds_hostname("primary.rds.staging.mycloud.io"),
+            None
+        );
+    }
+
+    /// A pre-`rds` label that happens to be a valid AWS region code must still
+    /// be rejected when the suffix is not an AWS partition DNS suffix, so it
+    /// cannot override the user's configured region with a wrong-but-valid one.
+    #[test]
+    fn test_extract_region_rejects_valid_region_label_with_non_aws_suffix() {
+        assert_eq!(
+            extract_region_from_rds_hostname("us-west-2.rds.mycompany.com"),
+            None
+        );
+        assert_eq!(
+            extract_region_from_rds_hostname("ap-south-1.rds.mycompany.com"),
+            None
+        );
+        assert_eq!(
+            extract_region_from_rds_hostname("eu-west-1.rds.internal.corp"),
+            None
+        );
+    }
+
+    /// A domain whose final labels merely contain a DNS suffix as a substring
+    /// (not aligned to a label boundary) must be rejected, otherwise
+    /// `xamazonaws.com` would be mistaken for `amazonaws.com`.
+    #[test]
+    fn test_extract_region_rejects_partial_label_suffix_match() {
+        assert_eq!(
+            extract_region_from_rds_hostname("db.rds.xamazonaws.com"),
+            None
+        );
+        assert_eq!(
+            extract_region_from_rds_hostname("db.rds.not-amazonaws.com"),
+            None
+        );
+    }
+
+    /// `rds` with no suffix after it, or with no region label before it, yields
+    /// no region; the minimal valid AWS RDS shape still extracts the region.
+    #[test]
+    fn test_extract_region_rejects_rds_without_suffix_or_region() {
+        // No labels after `rds` -> not an AWS RDS hostname.
+        assert_eq!(extract_region_from_rds_hostname("foo.rds"), None);
+        // No label before `rds` -> no region to extract.
+        assert_eq!(extract_region_from_rds_hostname("rds.amazonaws.com"), None);
+        // Minimal valid AWS RDS shape extracts the single preceding label.
+        assert_eq!(
+            extract_region_from_rds_hostname("us-east-1.rds.amazonaws.com"),
+            Some("us-east-1")
         );
     }
 }
