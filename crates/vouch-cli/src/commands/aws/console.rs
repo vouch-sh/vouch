@@ -32,32 +32,50 @@ pub(crate) struct ConsoleArgs {
     pub role: Option<String>,
 
     /// AWS profile in ~/.aws/config to take the role from.
-    #[arg(long, conflicts_with_all = ["role", "account", "permission_set"])]
+    #[arg(
+        long,
+        conflicts_with_all = ["role", "account", "permission_set"],
+        help = tr!("arg-aws-console-profile-help"),
+    )]
     pub profile: Option<String>,
 
     /// AWS account ID for Identity Center (`GetRoleCredentials`) path.
-    #[arg(long, requires = "permission_set", conflicts_with = "role")]
+    #[arg(
+        long,
+        requires = "permission_set",
+        conflicts_with = "role",
+        help = tr!("arg-aws-console-account-help"),
+    )]
     pub account: Option<String>,
 
     /// IAM Identity Center permission-set name.
-    #[arg(long, requires = "account", conflicts_with = "role")]
+    #[arg(
+        long,
+        requires = "account",
+        conflicts_with = "role",
+        help = tr!("arg-aws-console-permission-set-help"),
+    )]
     pub permission_set: Option<String>,
 
     /// Management role ARN to chain through when multiple organizations are
     /// configured (STS role path only; not valid with --account/--permission-set).
-    #[arg(long, conflicts_with_all = ["idc_application", "account", "permission_set"])]
+    #[arg(
+        long,
+        conflicts_with_all = ["idc_application", "account", "permission_set"],
+        help = tr!("arg-aws-console-via-help"),
+    )]
     pub via: Option<String>,
 
     /// Identity Center application ARN disambiguator for multi-instance setups.
-    ///
-    /// IdC-only flag: its sole consumer is `resolve_identity_center`, reachable
-    /// only from the IdC path. `requires = "account"` plus
-    /// `conflicts_with_all` against the STS-only flags (`role`, `profile`,
-    /// `via`) rejects any invocation that would route to the STS path, where
-    /// `get_sts_console_creds` never reads this field and the flag would be
-    /// silently dropped. This is the reciprocal of `via`'s
-    /// `conflicts_with_all` guard.
-    #[arg(long, conflicts_with_all = ["role", "profile", "via"], requires = "account")]
+    // Read only on the Identity Center path, so it requires `--account`. The
+    // STS-only flags conflict explicitly because clap drops `requires` when the
+    // required argument conflicts with one that is present.
+    #[arg(
+        long,
+        conflicts_with_all = ["role", "profile", "via"],
+        requires = "account",
+        help = tr!("arg-aws-console-idc-application-help"),
+    )]
     pub idc_application: Option<String>,
 }
 
@@ -275,9 +293,7 @@ mod tests {
     use crate::commands::credential::aws::test_support::ENV_LOCK;
     use clap::Parser;
 
-    /// Wrapper to exercise `ConsoleArgs` clap validation through the real
-    /// `AwsCommands` subcommand enum (the `Console` variant), mirroring the
-    /// `setup` parse-time validation tests (#672).
+    /// Parses `ConsoleArgs` through the real `AwsCommands` enum.
     #[derive(Parser)]
     struct TestCli {
         #[command(subcommand)]
@@ -355,15 +371,6 @@ mod tests {
     }
 
     // Parse-time validation tests ---------------------------------------------
-    //
-    // `--idc-application` is an IdC-only flag (sole consumer is
-    // `resolve_identity_center`, reachable only from the IdC path). Without
-    // the `requires = "account"` / `conflicts_with_all` guard, `--idc-application`
-    // parses whenever `--account` is absent, dispatches to the STS path via
-    // `args.account.is_none()`, and is silently dropped by
-    // `get_sts_console_creds` which never reads it. These tests pin the guard
-    // that makes every STS-routed invocation of `--idc-application` fail at
-    // parse time instead.
 
     /// `--idc-application` alone must be rejected: `requires = "account"`.
     #[test]
@@ -384,10 +391,8 @@ mod tests {
     }
 
     /// `--idc-application` with `--role` must be rejected as a conflict: the
-    /// IdC-only flag cannot coexist with the STS-only `--role`. Without the
-    /// `conflicts_with_all` guard, clap silently accepts this combination
-    /// (its `requires = "account"` is voided because `account` conflicts with
-    /// the present `--role`), routing to the STS path and dropping the flag.
+    /// IdC-only flag cannot coexist with the STS-only `--role`; clap drops
+    /// `requires = "account"` when `account` conflicts with a present flag.
     #[test]
     fn console_rejects_idc_application_with_role() {
         let err = TestCli::try_parse_from([
@@ -430,8 +435,7 @@ mod tests {
     }
 
     /// The full IdC path (`--idc-application` + `--account` + `--permission-set`)
-    /// must still parse and route to the IdC path; the new guard adds no
-    /// regression to the valid IdC invocation.
+    /// parses.
     #[test]
     fn console_allows_idc_application_with_account_and_permission_set() {
         let cli = TestCli::try_parse_from([
@@ -457,9 +461,7 @@ mod tests {
         );
     }
 
-    /// A bare `--role` must still parse (STS path, role auto-resolved); the
-    /// new `conflicts_with_all` against `role` only fires when `--idc-application`
-    /// is also present, so the standard STS invocation is unaffected.
+    /// A bare `--role` parses.
     #[test]
     fn console_allows_role_alone_for_sts_path() {
         let cli = TestCli::try_parse_from([
