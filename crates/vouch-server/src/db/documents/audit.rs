@@ -74,6 +74,15 @@ pub(crate) struct AdminMemberActionData<'a> {
 pub enum Refusal {
     /// Removing or deactivating the organization's last active admin.
     LastAdmin,
+    /// The authoritative in-transaction write (the `active = false` persist
+    /// or the user-row delete) failed with a non-policy error — OCC retry
+    /// exhaustion or a non-retryable store fault — *after* access revocation
+    /// had already committed. The revocation stands and is audited; the
+    /// action did not happen, the member keeps their row (`active = true`
+    /// for deactivate, intact for remove), and the operation is retryable.
+    /// Mirrors the `LastAdmin` arm's rationale: a committed revocation still
+    /// belongs in the canonical admin audit log.
+    PersistError,
 }
 
 /// Admin-initiated additional-domain add/verify (`OrgDomainAdded`,
@@ -602,6 +611,28 @@ mod tests {
                     "target_user_id": "u-target",
                     "admin_user_id": "u-admin",
                     "refusal": "last_admin",
+                }),
+            ),
+            // members.rs `remove_member` / `deactivate_member` generic-error
+            // arm: revocation committed and the in-tx persist/delete then
+            // failed with a non-`LastAdmin` error (OCC exhaustion or a
+            // non-retryable store fault), so the row carries
+            // `refusal: "persist_error"` to distinguish a persist failure
+            // from a successful action and from a `last_admin` refusal.
+            (
+                serde_json::to_value(AdminMemberActionData {
+                    action: "deactivate",
+                    target_user_id: "u-target",
+                    admin_user_id: "u-admin",
+                    keys_revoked: None,
+                    refusal: Some(Refusal::PersistError),
+                })
+                .unwrap(),
+                json!({
+                    "action": "deactivate",
+                    "target_user_id": "u-target",
+                    "admin_user_id": "u-admin",
+                    "refusal": "persist_error",
                 }),
             ),
             // domains.rs add (method absent) and verify (method present)
