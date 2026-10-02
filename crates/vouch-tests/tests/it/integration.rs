@@ -3232,9 +3232,8 @@ mod httpsig {
         );
     }
 
-    // Regression guard: a signed POST with a non-empty body and a matching
-    // covered Content-Digest is accepted end-to-end (no body, no digest, no
-    // signature-path regression introduced by the fix).
+    // A signed POST with a non-empty body and a matching covered
+    // Content-Digest is accepted end-to-end.
     #[tokio::test]
     async fn test_httpsig_signed_post_with_body_succeeds() {
         let harness = TestHarness::new().await;

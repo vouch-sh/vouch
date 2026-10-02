@@ -102,13 +102,10 @@ impl CoverageChecked {
     /// in its signature *and* present a matching header. Coverage is required
     /// because an unsigned digest header could be swapped alongside the body.
     ///
-    /// Only genuinely bodyless requests — those carrying no `Content-Digest`
-    /// header at all (GET, bodyless POST) — are exempt. A request whose
-    /// signature bound a `Content-Digest` (the header is present) is never
-    /// exempt: the digest is verified against the actual body even when it
-    /// is empty, so an on-path attacker cannot strip a signed request's body
-    /// to empty and bypass the check while leaving the signed `Content-Digest`
-    /// in place.
+    /// An empty body is exempt only when the signature does not cover
+    /// `content-digest`. RFC 9530 §6.3: "including an Integrity field for
+    /// content and signing it can help a recipient detect where the content
+    /// was removed."
     ///
     /// # Errors
     ///
@@ -120,15 +117,16 @@ impl CoverageChecked {
         headers: &http::HeaderMap,
         body: &[u8],
     ) -> Result<DigestEnforced, HttpSigError> {
-        // Key the bodyless exemption on the absence of a Content-Digest header,
-        // not on body size: an on-path attacker can strip a signed request's
-        // body to empty (resetting Content-Length, which the signing paths do
-        // not cover) while leaving the signed Content-Digest bound to the
-        // original body in place. Gating on `body.is_empty()` alone would skip
-        // the digest check for that forged message; gating on the header's
-        // absence keeps the digest check running whenever a Content-Digest is
-        // present.
-        if !headers.contains_key("content-digest") && body.is_empty() {
+        // A covered `content-digest` binds the signature to a body, so it is
+        // checked even when the body arrives empty. `content-length` is not
+        // covered, so an empty body alone proves nothing.
+        let content_digest = ComponentIdentifier::field("content-digest");
+        let digest_covered = self
+            .params
+            .components
+            .iter()
+            .any(|c| c.covers(&content_digest));
+        if body.is_empty() && !digest_covered {
             return Ok(DigestEnforced {
                 params: self.params,
             });
@@ -817,9 +815,9 @@ mod tests {
         ));
     }
 
-    // Body-strip attack (RFC 9530): an on-path attacker empties the body while
-    // leaving a signed Content-Digest (bound to the original, non-empty body)
-    // in place. The digest check must still fire and reject the mismatch.
+    // RFC 9530 §6.3: "including an Integrity field for content and signing it
+    // can help a recipient detect where the content was removed." A covered
+    // digest of a non-empty body does not match an emptied body.
     #[test]
     fn test_enforce_body_digest_strip_attack_rejected() {
         let original_body = b"{\"amount\":100}";
@@ -833,8 +831,7 @@ mod tests {
         );
     }
 
-    // Genuinely bodyless requests (no Content-Digest header) remain exempt: the
-    // fix must not turn a bodyless GET/POST into a hard failure.
+    // A bodyless request whose signature does not cover content-digest is exempt.
     #[test]
     fn test_enforce_body_digest_empty_body_no_digest_header_still_exempt() {
         let headers = http::HeaderMap::new();
@@ -843,8 +840,7 @@ mod tests {
             .unwrap();
     }
 
-    // An honest client sending a Content-Digest of an empty body (e.g. the CLI
-    // with body Some(b"")) is not broken: verify_content_digest matches.
+    // A covered digest of the empty body verifies.
     #[test]
     fn test_enforce_body_digest_empty_body_matching_digest_accepted() {
         let mut headers = http::HeaderMap::new();
@@ -857,19 +853,14 @@ mod tests {
         );
     }
 
-    // A Content-Digest header present alongside an empty body is no longer
-    // exempt merely because the body is empty: the signature must still cover
-    // it. Before the fix the empty-body short-circuit returned Ok here; now the
-    // coverage check runs and rejects an uncovered digest header.
+    // An intermediary-added, uncovered Content-Digest on an empty body binds
+    // nothing, so the request stays exempt.
     #[test]
-    fn test_enforce_body_digest_empty_body_digest_present_but_not_covered() {
+    fn test_enforce_body_digest_empty_body_uncovered_digest_exempt() {
         let mut headers = http::HeaderMap::new();
-        headers.insert("content-digest", digest_header(b""));
-        let result = coverage_checked(vec![ComponentIdentifier::method()])
-            .enforce_body_digest(&headers, b"");
-        assert!(
-            matches!(result, Err(HttpSigError::MissingDigest)),
-            "Content-Digest present but not covered must be rejected even with an empty body, got {result:?}"
-        );
+        headers.insert("content-digest", digest_header(b"other"));
+        coverage_checked(vec![ComponentIdentifier::method()])
+            .enforce_body_digest(&headers, b"")
+            .unwrap();
     }
 }

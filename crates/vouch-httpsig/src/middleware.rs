@@ -78,8 +78,8 @@ const ACCEPT_SIG_LABEL: &str = "sig1";
 /// intentional: the set here matches what the CLI signs, not what verification
 /// strictly requires.
 ///
-/// `content-digest` is added only when the rejected request carried a non-empty
-/// body (`!body.is_empty()`), matching the `enforce_body_digest` exemption.
+/// `content-digest` is added only when the rejected request carried a body;
+/// `enforce_body_digest` exempts an empty body whose signature does not cover it.
 ///
 /// Returns `None` when `HeaderValue::from_str` fails (should never occur for
 /// well-formed ASCII, but the deny-lint forbids unwrap).
@@ -320,8 +320,8 @@ pub async fn require_signature<R: KeyResolver>(
     // POST/PUT/PATCH are conventionally body-bearing; also probe Content-Length /
     // Transfer-Encoding so HTTP/2 clients that omit Content-Length receive an
     // accurate Accept-Signature hint and avoid the advertise<enforce inversion.
-    // Over-advertising content-digest for an empty POST is harmless because
-    // enforce_body_digest short-circuits on empty bodies.
+    // Over-advertising content-digest for an empty POST is harmless: a client
+    // that covers it sends the digest of the empty body, which verifies.
     let has_body = matches!(
         req.method(),
         &http::Method::POST | &http::Method::PUT | &http::Method::PATCH
