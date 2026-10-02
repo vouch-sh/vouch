@@ -1699,8 +1699,6 @@ rfc7521#5.2#8662d935	MUST	The authorization server MUST reject assertions that h
 rfc7521#5.2#8f37fcca	MUST	o The assertion MUST contain an Issuer.
 rfc7521#5.2#c5998612	MUST	If an assertion is self-issued, the Issuer MUST be the value of the client's "client_id".
 rfc7521#5.2#f4c5190b	MUST	o The assertion MUST contain an Expires At entity that limits the time window during which the assertion can be used.
-rfc7523#3.1#1e4ab447	MUST	The value of the "error" parameter MUST be the "invalid_grant" error code.
-rfc7523#3.1#b04b6551	MUST	However, if client credentials are present in the request, the authorization server MUST validate them.
 rfc7591#2.3#3bc26542	MUST	When presented to the authorization server as part of a client registration request, the software statement MUST be digitally signed or MACed using JSON Web Sig
 rfc7591#2.3#c99e07e7	SHOULD	It is RECOMMENDED that software statements be digitally signed using the "RS256" signature algorithm, although particular applications MAY specify the use of di
 rfc7591#2.3#eb2faebc	SHOULD	It is RECOMMENDED that software statements contain the "software_id" claim to allow authorization servers to correlate different instances of software using the

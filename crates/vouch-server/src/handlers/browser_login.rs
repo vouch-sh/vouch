@@ -407,7 +407,7 @@ pub(crate) async fn login_page(
                 let extract = |key: &str| -> Option<String> {
                     meta.and_then(|m| m.get(key))
                         .and_then(|v| v.as_str())
-                        .filter(|s| s.starts_with("https://"))
+                        .filter(|s| url::Url::parse(s).is_ok_and(|u| u.scheme() == "https"))
                         .map(String::from)
                 };
                 (
@@ -1060,6 +1060,43 @@ mod tests {
         let resp = test_utils::http_get_full(&app, "/login", &[]).await;
 
         assert_eq!(resp.status, axum::http::StatusCode::OK);
+    }
+
+    // RFC 3986 §3.1: "Although schemes are case-insensitive, the canonical form
+    // is lowercase". Registration admits an `HTTPS://` logo, so the page shows
+    // it; an `http` link is still dropped.
+    #[tokio::test]
+    async fn test_login_page_shows_uppercase_scheme_client_links() {
+        let (app, state) = test_utils::test_app().await;
+        let user = test_utils::create_test_user(&state.store, "logo@example.com").await;
+        let client = test_utils::create_test_client(
+            &state.store,
+            &user.id,
+            test_utils::TestClientSpec {
+                registration_metadata: Some(serde_json::json!({
+                    "logo_uri": "HTTPS://logo.example.com/l.png",
+                    "policy_uri": "HTTP://policy.example.com/p",
+                })),
+                ..Default::default()
+            },
+        )
+        .await;
+        let pending_id = test_utils::create_test_pending_auth(
+            &state.store,
+            TestPendingAuthSpec {
+                client_id: &client.client_id,
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let resp =
+            test_utils::http_get_full(&app, &format!("/login?pending_auth={pending_id}"), &[])
+                .await;
+
+        assert_eq!(resp.status, axum::http::StatusCode::OK);
+        assert!(resp.body.contains("logo.example.com"), "{}", resp.body);
+        assert!(!resp.body.contains("policy.example.com"), "{}", resp.body);
     }
 
     // ========================================================================

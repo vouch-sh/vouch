@@ -69,8 +69,13 @@ async fn fetch_jwks(
     allow_loopback: bool,
     http_client: &reqwest::Client,
 ) -> ServiceResult<String> {
-    // HTTPS-only
-    if !uri.starts_with("https://") {
+    // HTTPS-only. RFC 3986 §3.1: "Although schemes are case-insensitive, the
+    // canonical form is lowercase". `Url::parse` lowercases the scheme, the
+    // same check registration uses to admit the URI.
+    let parsed = url::Url::parse(uri).map_err(|_| {
+        ServiceError::oauth(OAuthErrorCode::InvalidClient, "JWKS URI must use HTTPS")
+    })?;
+    if parsed.scheme() != "https" {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClient,
             "JWKS URI must use HTTPS",
@@ -363,6 +368,31 @@ mod tests {
             !matches!(&err, ServiceError::OAuth { description, .. } if description == "JWKS URI must use HTTPS"),
             "expected SSRF rejection, got: {err}"
         );
+    }
+
+    /// RFC 3986 §3.1: "Although schemes are case-insensitive, the canonical
+    /// form is lowercase". An `HTTPS://` URI passes the scheme check and is
+    /// refused by the SSRF guard instead (loopback without `allow_loopback`).
+    #[tokio::test]
+    async fn fetch_jwks_accepts_uppercase_scheme_https_uri() {
+        let client = reqwest::Client::new();
+        let err = fetch_jwks("HTTPS://127.0.0.1/jwks.json", false, &client)
+            .await
+            .expect_err("loopback must still be rejected without allow_loopback");
+        assert!(
+            !matches!(&err, ServiceError::OAuth { description, .. } if description == "JWKS URI must use HTTPS"),
+            "upper-case HTTPS:// must not be rejected by the scheme check; got: {err}"
+        );
+    }
+
+    /// `HTTP://` lowercases to `http` and is still refused.
+    #[tokio::test]
+    async fn fetch_jwks_still_rejects_uppercase_non_https_scheme() {
+        let client = reqwest::Client::new();
+        let err = fetch_jwks("HTTP://example.com/jwks", false, &client)
+            .await
+            .expect_err("an http scheme (any case) must be rejected as non-https");
+        assert_rejected_as_non_https(&err);
     }
 
     /// Assert the error is an `invalid_client` OAuth error with `expected_desc`.

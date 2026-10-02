@@ -293,3 +293,53 @@ async fn rfc7523_kid_miss_returns_structured_401_not_408_at_router() {
          a 408 instead of the structured 401 invalid_client"
     );
 }
+
+/// RFC 3986 §3.1: "Although schemes are case-insensitive, the canonical form
+/// is lowercase". Registration admits an `HTTPS://` `jwks_uri`, so client
+/// authentication must fetch it: one TLS fetch, the assertion verifies, and the
+/// request fails later at grant validation (`code=x`).
+#[tokio::test]
+async fn uppercase_scheme_jwks_uri_authenticates() {
+    let (pkcs8, jwk) = generate_es256_key();
+    let jwks_body = serde_json::json!({"keys": [jwk]}).to_string();
+    let accepted = Arc::new(AtomicU64::new(0));
+    let server_url = spawn_counting_jwks_server(jwks_body, accepted.clone()).await;
+
+    let http_client = https_client_trusting_any_cert();
+    let state = build_test_app_state_with_http_client(Vec::new(), |_| {}, http_client).await;
+    let router = build_production_router(state.clone());
+
+    let uppercase_url = server_url.replacen("https://", "HTTPS://", 1);
+    let (_client, client_id) =
+        make_private_key_jwt_client(&state, uppercase_url, "uppercase-scheme@example.com").await;
+
+    let now = jiff::Timestamp::now().as_second();
+    let header = serde_json::json!({"alg":"ES256","typ":"JWT","kid":"assertion-key"});
+    let claims = serde_json::json!({
+        "iss": client_id,
+        "sub": client_id,
+        "aud": "https://test.example.com",
+        "exp": now + 300,
+        "iat": now,
+        "jti": "uppercase-scheme-jti",
+    });
+    let assertion = sign_jwt_assertion(&pkcs8, &header, &claims);
+
+    let (status, body) = post_token(router, &client_id, &assertion).await;
+
+    assert_ne!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "upper-case HTTPS:// jwks_uri must pass client auth; got 401: {body}"
+    );
+    assert!(
+        !body.contains("\"invalid_client\""),
+        "must not be invalid_client; body: {body}"
+    );
+
+    let fetches = accepted.load(Ordering::SeqCst);
+    assert_eq!(
+        fetches, 1,
+        "upper-case-scheme jwks_uri must trigger exactly one TLS fetch (got {fetches})"
+    );
+}
