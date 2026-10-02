@@ -110,13 +110,15 @@ async fn test_jwt_bearer_grant_returns_unsupported_grant_type() {
 
 #[tokio::test]
 async fn test_rfc7521_mutual_exclusion_of_client_auth() {
-    // RFC 7521 Section 4.2: Sending both client_secret and client_assertion must be rejected.
+    // RFC 7521 §4.2.1: "if more than one client authentication mechanism is
+    // used ... The value of the "error" parameter MUST be the "invalid_client"
+    // error code." No HTTP scheme was attempted, so the 401 has no challenge.
     let (app, state) = test_app().await;
 
     let user = create_test_user(&state.store, "mutual-excl@example.com").await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
-    let (status, body) = http_post_form(
+    let response = http_post_form_full(
         &app,
         "/oauth/token",
         &format!(
@@ -127,24 +129,26 @@ async fn test_rfc7521_mutual_exclusion_of_client_auth() {
     )
     .await;
 
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(response.status, StatusCode::UNAUTHORIZED);
+    let error: serde_json::Value = serde_json::from_str(&response.body).expect("Valid JSON");
     assert_eq!(
-        error["error"], "invalid_request",
+        error["error"], "invalid_client",
         "Combining auth methods must be rejected"
     );
+    assert_eq!(www_authenticate(&response), "");
 }
 
 #[tokio::test]
 async fn test_rfc7521_basic_auth_and_assertion_mutual_exclusion() {
-    // RFC 7521 Section 4.2: Basic auth header + client_assertion must be rejected.
+    // RFC 7521 §4.2.1: Basic auth header + client_assertion is invalid_client;
+    // RFC 6749 §5.2 adds the 401 and a matching Basic challenge.
     let (app, state) = test_app().await;
 
     let user = create_test_user(&state.store, "basic-assert@example.com").await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
-    let (status, body) = http_post_form(
+    let response = http_post_form_full(
         &app,
         "/oauth/token",
         "grant_type=authorization_code&code=test&client_assertion=fake.jwt.assertion&client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
@@ -152,12 +156,13 @@ async fn test_rfc7521_basic_auth_and_assertion_mutual_exclusion() {
     )
     .await;
 
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(response.status, StatusCode::UNAUTHORIZED);
+    let error: serde_json::Value = serde_json::from_str(&response.body).expect("Valid JSON");
     assert_eq!(
-        error["error"], "invalid_request",
+        error["error"], "invalid_client",
         "Basic auth + client_assertion must be rejected"
     );
+    assert_eq!(www_authenticate(&response), "Basic");
 }
 
 #[tokio::test]
@@ -677,8 +682,11 @@ async fn test_rfc7523_private_key_jwt_iss_sub_mismatch() {
 
 #[tokio::test]
 async fn test_rfc7521_mutual_exclusion_secret_and_assertion() {
-    // RFC 7521 Section 4.2: client_assertion cannot be combined with
-    // client_secret or Basic auth.
+    // RFC 7521 §4.2.1: "if more than one client authentication mechanism is
+    // used ... The value of the "error" parameter MUST be the "invalid_client"
+    // error code." RFC 6749 §5.2: a client that "attempted to authenticate via
+    // the "Authorization" request header field" gets a 401 with a matching
+    // WWW-Authenticate challenge.
     let (app, state) = test_app().await;
 
     let user = create_test_user(&state.store, "jwt-mutual-excl@example.com").await;
@@ -711,7 +719,7 @@ async fn test_rfc7521_mutual_exclusion_secret_and_assertion() {
         assertion
     );
 
-    let (status, resp_body) = http_post_form(
+    let response = http_post_form_full(
         &app,
         "/oauth/token",
         &body,
@@ -719,12 +727,14 @@ async fn test_rfc7521_mutual_exclusion_secret_and_assertion() {
     )
     .await;
     assert_eq!(
-        status,
-        StatusCode::BAD_REQUEST,
-        "Combining Basic auth with client_assertion must be rejected: {resp_body}"
+        response.status,
+        StatusCode::UNAUTHORIZED,
+        "Combining Basic auth with client_assertion must be rejected: {}",
+        response.body
     );
-    let error: serde_json::Value = serde_json::from_str(&resp_body).expect("Valid JSON");
-    assert_eq!(error["error"], "invalid_request");
+    let error: serde_json::Value = serde_json::from_str(&response.body).expect("Valid JSON");
+    assert_eq!(error["error"], "invalid_client");
+    assert_eq!(www_authenticate(&response), "Basic");
 }
 
 // ========================================================================

@@ -370,6 +370,67 @@ async fn test_rfc6749_token_client_secret_post_succeeds() {
     assert_eq!(json["token_type"].as_str(), Some("Bearer"));
 }
 
+/// RFC 6749 §2.3: "The client MUST NOT use more than one authentication
+/// method in each request." §5.2 answers a request that "utilizes more than
+/// one mechanism for authenticating the client" with `invalid_request`, so a
+/// Basic header plus a body `client_secret` is refused at the token endpoint.
+#[tokio::test]
+async fn test_rfc6749_basic_and_body_secret_combined_rejected_e2e() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "csp-basic-combined@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let code = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // Both channels carry the same valid client_id and the correct secret, so
+    // the only reason to reject is the multi-mechanism presentation itself.
+    let body = format!(
+        "grant_type=authorization_code&code={code}&redirect_uri={}&client_id={}&client_secret={}",
+        urlencoding::encode("https://example.com/callback"),
+        client.client_id,
+        client.client_secret,
+    );
+    let auth_header = client.basic_auth_header();
+
+    let (status, response_body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &body,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert!(
+        !status.is_success(),
+        "RFC 6749 §2.3: request with both Basic header and body client_secret MUST be rejected; \
+         got status {status} body {response_body:?}"
+    );
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "RFC 6749 §2.3/§5.2: multi-mechanism client auth is invalid_request (400); \
+         got {status} body {response_body:?}"
+    );
+    let error: serde_json::Value =
+        serde_json::from_str(&response_body).expect("error response is JSON");
+    assert_eq!(
+        error["error"], "invalid_request",
+        "RFC 6749 §5.2 assigns 'utilizes more than one mechanism for authenticating the \
+         client' to invalid_request; got {response_body:?}"
+    );
+}
+
 // ========================================================================
 // Token endpoint — client lookup: DB error vs not-found vs inactive
 //

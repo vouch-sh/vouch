@@ -1685,7 +1685,6 @@ rfc7521#4.1#1cce511a	MUST	The authorization server MUST limit the scope of the i
 rfc7521#4.1#f4d74685	SHOULD NOT	An assertion used in this context is generally a short-lived representation of the authorization grant, and authorization servers SHOULD NOT issue access tokens
 rfc7521#4.1#f53a4fe8	MUST	As such, the requested scope MUST be equal to or less than the scope originally granted to the authorized accessor.
 rfc7521#4.1.1#1e4ab447	MUST	The value of the "error" parameter MUST be the "invalid_grant" error code.
-rfc7521#4.2.1#4cf54ea8	MUST	The value of the "error" parameter MUST be the "invalid_client" error code.
 rfc7521#5.1#19302b3a	MUST	Any entity that assigns an identifier MUST ensure that there is negligible probability for that entity or any other entity to accidentally assign the same ident
 rfc7521#5.1#a46f3c4b	MUST	In the absence of an application profile specifying otherwise, compliant applications MUST compare the Audience values using the Simple String Comparison method
 rfc7521#5.1#d3dfd9be	MUST	In the absence of an application profile specifying otherwise, compliant applications MUST compare Issuer values using the Simple String Comparison method defin

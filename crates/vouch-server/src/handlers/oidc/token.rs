@@ -3,8 +3,8 @@
 
 use super::client_auth::{
     ClientAuthFields, ClientAuthPresentation, ExtractedClientAuth, client_auth_proof,
-    complete_client_auth, extract_client_auth, extract_client_credentials,
-    with_client_auth_challenge,
+    complete_client_auth, enforce_client_auth_mutual_exclusion, extract_client_auth,
+    extract_client_credentials, with_client_auth_challenge,
 };
 use crate::AppState;
 use crate::arrival::ArrivalTime;
@@ -573,6 +573,10 @@ async fn resolve_non_jwt_auth(
     client_cert: &OptionalClientCert,
     arrival: ArrivalTime,
 ) -> Result<(OAuthClient, ClientAuthProof), Response> {
+    // RFC 6749 §2.3 / RFC 7521 §4.2.1: one authentication method per request.
+    // This path skips `extract_client_auth`, so it runs the check itself
+    // before `extract_client_credentials` can drop a body secret.
+    enforce_client_auth_mutual_exclusion(headers, auth)?;
     let creds = extract_client_credentials(headers, auth);
     let Some((c, _presentation)) = creds else {
         return Err(ServiceError::oauth(
