@@ -621,3 +621,105 @@ async fn test_update_scim_user_deactivates_non_admin_without_floor() {
         "a non-admin is not part of the admin count"
     );
 }
+
+// ============================================================================
+// Indexed `eq` pagination order
+// ============================================================================
+//
+// `find_by_indexes` orders by id, so the indexed `eq` fast path's
+// `skip(offset).take(count)` returns stable, non-overlapping pages.
+// `bump_document_to_end` makes SQLite's unordered row order reverse-id, so an
+// unordered query would fail these tests.
+// Only `externalId` (`uniqueness: "none"`) can match more than one user.
+
+#[tokio::test]
+async fn test_scim_user_indexed_external_id_eq_pagination_is_id_sorted_across_pages() {
+    // Two users share an `externalId` but have distinct emails (RFC-permitted:
+    // `externalId` has `uniqueness: none`). User ids are derived from the
+    // email via SHA-256 (version-8 UUID), so their `id` order is independent of
+    // insertion order. Bumping the smaller id makes unordered rows reverse-id.
+    let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
+
+    let u_a = create_scim_user(
+        &store,
+        Some(TEST_ORG_ID),
+        "dup-ext-a@example.com",
+        None,
+        Some("ext-dup"),
+        true,
+    )
+    .await
+    .expect("create user a");
+    let u_b = create_scim_user(
+        &store,
+        Some(TEST_ORG_ID),
+        "dup-ext-b@example.com",
+        None,
+        Some("ext-dup"),
+        true,
+    )
+    .await
+    .expect("create user b");
+    let (id_lo, id_hi) = if u_a.id < u_b.id {
+        (u_a.id.clone(), u_b.id.clone())
+    } else {
+        (u_b.id.clone(), u_a.id.clone())
+    };
+    bump_document_to_end(&store, &id_lo).await;
+
+    use crate::db::documents::user::UserDoc;
+    let raw: Vec<String> = store
+        .find_by_indexes::<UserDoc>(&[("external_id", "ext-dup"), ("org_id", TEST_ORG_ID)])
+        .await
+        .expect("raw find_by_indexes")
+        .into_iter()
+        .map(|d| d.id)
+        .collect();
+    assert_eq!(
+        raw,
+        vec![id_lo.clone(), id_hi.clone()],
+        "find_by_indexes must return id-ascending order"
+    );
+
+    let (page1, total) = list_scim_users(
+        &store,
+        TEST_ORG_ID,
+        Some(&user_filter(r#"externalId eq "ext-dup""#)),
+        1,
+        1,
+    )
+    .await
+    .expect("list page 1");
+    assert_eq!(
+        total, 2,
+        "totalResults is the full match count, not page size"
+    );
+    assert_eq!(page1.len(), 1);
+    let (page2, _) = list_scim_users(
+        &store,
+        TEST_ORG_ID,
+        Some(&user_filter(r#"externalId eq "ext-dup""#)),
+        2,
+        1,
+    )
+    .await
+    .expect("list page 2");
+    assert_eq!(page2.len(), 1);
+
+    let got: Vec<String> = page1
+        .iter()
+        .chain(page2.iter())
+        .map(|u| u.id.clone())
+        .collect();
+    assert_eq!(
+        got,
+        vec![id_lo.clone(), id_hi.clone()],
+        "paginated ids must be id-ascending and partition all matches; an \
+         unsorted slice over the raw reverse-id order would return [id_hi, id_lo]"
+    );
+    assert!(
+        page1[0].id < page2[0].id,
+        "page 1 must precede page 2 in id order"
+    );
+}

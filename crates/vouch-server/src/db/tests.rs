@@ -36,6 +36,7 @@
 
 #![expect(
     clippy::expect_used,
+    clippy::panic,
     reason = "test code: panic on assertion failure is acceptable; cast bounds are obvious in test fixtures"
 )]
 
@@ -162,6 +163,100 @@ fn test_org_doc(domain: &str) -> OrganizationDoc {
         additional_domains: Vec::new(),
         subdomain: None,
     }
+}
+
+/// Move `doc_id`'s `documents` row and every `document_indexes` row to the end
+/// of SQLite's rowid order (delete and re-insert verbatim). Without an
+/// `ORDER BY`, SQLite returns rows in the rowid order of whichever table drives
+/// the join, so bumping the smaller id makes an unordered query return
+/// reverse-id order. Tests use it to prove `find_by_indexes` orders by id.
+async fn bump_document_to_end(store: &DocumentStore, doc_id: &str) {
+    use crate::db::pool::Pool;
+
+    let Pool::Sqlite(pool) = store.pool() else {
+        panic!("in-memory test DB must be SQLite");
+    };
+
+    // Round-trip the documents row verbatim; delete + re-insert hands it a
+    // fresh, higher rowid so a documents-driven plan returns it last.
+    let row = sqlx::query_as::<_, RawDocumentsRowForBump>(
+        "SELECT id, doc_type, schema_version, encapped_key, data, \
+                expires_at, created_at, updated_at, version, last_used_at \
+         FROM documents WHERE id = ?",
+    )
+    .bind(doc_id)
+    .fetch_one(pool)
+    .await
+    .expect("fetch documents row to bump");
+    sqlx::query("DELETE FROM documents WHERE id = ?")
+        .bind(doc_id)
+        .execute(pool)
+        .await
+        .expect("delete documents row before re-insert");
+    sqlx::query(
+        "INSERT INTO documents (id, doc_type, schema_version, encapped_key, data, \
+                expires_at, created_at, updated_at, version, last_used_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&row.id)
+    .bind(&row.doc_type)
+    .bind(row.schema_version)
+    .bind(&row.encapped_key)
+    .bind(&row.data)
+    .bind(&row.expires_at)
+    .bind(&row.created_at)
+    .bind(&row.updated_at)
+    .bind(row.version)
+    .bind(&row.last_used_at)
+    .execute(pool)
+    .await
+    .expect("re-insert documents row with a higher rowid");
+
+    // Move every document_indexes row for this document to the end of that
+    // table's rowid order, one at a time (fresh rowid per re-insert).
+    let idx_rows: Vec<(String, String, String, String)> = sqlx::query_as(
+        "SELECT id, document_id, index_field, index_value \
+         FROM document_indexes WHERE document_id = ?",
+    )
+    .bind(doc_id)
+    .fetch_all(pool)
+    .await
+    .expect("fetch index rows to bump");
+    for (idx_id, document_id, field, value) in &idx_rows {
+        sqlx::query("DELETE FROM document_indexes WHERE id = ?")
+            .bind(idx_id)
+            .execute(pool)
+            .await
+            .expect("delete index row before re-insert");
+        let new_id = uuid::Uuid::now_v7().to_string();
+        sqlx::query(
+            "INSERT INTO document_indexes (id, document_id, index_field, index_value) \
+             VALUES (?, ?, ?, ?)",
+        )
+        .bind(&new_id)
+        .bind(document_id)
+        .bind(field)
+        .bind(value)
+        .execute(pool)
+        .await
+        .expect("re-insert index row with a higher rowid");
+    }
+}
+
+/// Raw `documents` row shape, for [`bump_document_to_end`] to round-trip a row
+/// verbatim with a fresh rowid.
+#[derive(sqlx::FromRow)]
+struct RawDocumentsRowForBump {
+    id: String,
+    doc_type: String,
+    schema_version: i32,
+    encapped_key: Option<String>,
+    data: String,
+    expires_at: Option<String>,
+    created_at: String,
+    updated_at: String,
+    version: i32,
+    last_used_at: Option<String>,
 }
 
 mod arrival_anchored_expiry;
