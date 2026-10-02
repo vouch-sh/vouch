@@ -1409,6 +1409,118 @@ async fn test_rfc7591_registration_response_echoes_tls_certificate_bound_flag() 
     }
 }
 
+/// RFC 7591 §3.2.1: "the authorization server MUST return all registered
+/// metadata about this client." `application_type` is registered metadata the
+/// server stores and enforces (`OAuthClientType::requires_pkce` drives PKCE
+/// independent of confidentiality, `reject_immutable_changes` refuses a PUT
+/// that changes it), so it must be echoed.
+///
+/// The bug scenario — a native client registered with a per-instance secret
+/// (RFC 8252 §8.4) — is confidential by `client_type()` yet PKCE-mandatory by
+/// `application_type.requires_pkce()`. Every other response signal (a present
+/// `client_secret`, `token_endpoint_auth_method: "client_secret_basic"`)
+/// tells the client PKCE is optional; only `application_type: "native"`
+/// reveals it is required. Server-inferred `Spa`/`Service` types are not valid
+/// OIDC `application_type` values, so the field must be omitted for them.
+#[tokio::test]
+async fn test_rfc7591_registration_response_echoes_application_type() {
+    let (app, _state) = test_app().await;
+
+    // The bug scenario: native + client_secret_basic. Confidential and
+    // secret-bearing, yet PKCE-mandatory — the response must surface both.
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "Native With Secret",
+        "application_type": "native",
+        "token_endpoint_auth_method": "client_secret_basic"
+    });
+    let (status, resp) = http_post_json(&app, "/oauth/register", &body.to_string(), &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "native + client_secret_basic must register (RFC 8252 §8.4): {resp}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+    assert_eq!(
+        json["application_type"].as_str(),
+        Some("native"),
+        "application_type must echo the declared native value, the only signal that \
+         PKCE is mandatory for this secret-bearing client: {json}"
+    );
+    assert!(
+        json.get("client_secret").is_some(),
+        "a secret must be issued for client_secret_basic: {json}"
+    );
+    assert_eq!(
+        json["token_endpoint_auth_method"].as_str(),
+        Some("client_secret_basic"),
+        "token_endpoint_auth_method must echo the secret method: {json}"
+    );
+
+    // A declared web client echoes "web".
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "Web Echo",
+        "application_type": "web"
+    });
+    let (status, resp) = http_post_json(&app, "/oauth/register", &body.to_string(), &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "web registration must succeed: {resp}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+    assert_eq!(
+        json["application_type"].as_str(),
+        Some("web"),
+        "application_type must echo the declared web value: {json}"
+    );
+
+    // A server-inferred Spa (public, non-native redirect) does NOT echo a
+    // value — Spa is not a valid OIDC application_type.
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "Inferred Spa",
+        "token_endpoint_auth_method": "none"
+    });
+    let (status, resp) = http_post_json(&app, "/oauth/register", &body.to_string(), &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "spa registration must succeed: {resp}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+    assert!(
+        json.get("application_type")
+            .is_none_or(serde_json::Value::is_null),
+        "application_type must be omitted for an inferred Spa client, not sent as a \
+         non-OIDC value: {json}"
+    );
+
+    // A server-inferred Service (client_credentials only, secret-bearing)
+    // likewise does not echo application_type.
+    let body = serde_json::json!({
+        "redirect_uris": [],
+        "response_types": [],
+        "client_name": "Inferred Service",
+        "grant_types": ["client_credentials"],
+        "token_endpoint_auth_method": "client_secret_basic"
+    });
+    let (status, resp) = http_post_json(&app, "/oauth/register", &body.to_string(), &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "service registration must succeed: {resp}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&resp).expect("Valid JSON");
+    assert!(
+        json.get("application_type")
+            .is_none_or(serde_json::Value::is_null),
+        "application_type must be omitted for an inferred Service client, not sent as \
+         a non-OIDC value: {json}"
+    );
+}
+
 #[tokio::test]
 async fn test_rfc7591_accepts_non_fapi_registration_with_rs256_only_jwks() {
     // RFC 7523 does not restrict client-assertion algorithms; non-FAPI

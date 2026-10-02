@@ -588,6 +588,7 @@ fn test_response_serialization_omits_none_fields() {
             "https://example.com/oauth/register/test-client-id".to_string(),
         ),
         redirect_uris: None,
+        application_type: None,
         token_endpoint_auth_method: "none".to_string(),
         grant_types: vec!["authorization_code".to_string()],
         response_types: vec!["code".to_string()],
@@ -636,6 +637,12 @@ fn test_response_serialization_omits_none_fields() {
     );
     assert!(value.get("client_secret_expires_at").is_none());
     assert!(value.get("redirect_uris").is_none());
+    // application_type is omitted for server-inferred types (Spa/Service) and
+    // when the client declares none — it must not serialize as null.
+    assert!(
+        value.get("application_type").is_none(),
+        "application_type must be absent when None, not sent as null"
+    );
     assert!(value.get("client_uri").is_none());
     assert!(value.get("logo_uri").is_none());
     assert!(value.get("tos_uri").is_none());
@@ -673,6 +680,7 @@ fn test_response_serialization_includes_secret_fields_when_present() {
         registration_access_token: None,
         registration_client_uri: None,
         redirect_uris: Some(vec!["https://example.com/cb".to_string()]),
+        application_type: None,
         token_endpoint_auth_method: "client_secret_basic".to_string(),
         grant_types: vec!["authorization_code".to_string()],
         response_types: vec!["code".to_string()],
@@ -728,6 +736,7 @@ fn test_response_serialization_echoes_rfc8705_metadata() {
         registration_access_token: None,
         registration_client_uri: None,
         redirect_uris: Some(vec!["https://example.com/callback".to_string()]),
+        application_type: None,
         token_endpoint_auth_method: "tls_client_auth".to_string(),
         grant_types: vec!["authorization_code".to_string()],
         response_types: vec!["code".to_string()],
@@ -792,6 +801,118 @@ fn test_response_serialization_echoes_rfc8705_metadata() {
         value["tls_client_auth_san_email"].as_str(),
         Some("mtls@example.com"),
         "tls_client_auth_san_email must echo when set: {json}"
+    );
+}
+
+/// The response must echo a declared `"native"`/`"web"` `application_type`
+/// verbatim so a client can discover whether PKCE is mandatory (RFC 7591 §3.2.1
+/// "the authorization server MUST return all registered metadata about this
+/// client"; `OAuthClientType::requires_pkce` drives PKCE independent of
+/// confidentiality). Server-inferred `Spa`/`Service` types are not valid OIDC
+/// `application_type` values and must be omitted, never sent as `null`.
+// RFC 7591 §3.2.1 / OIDC Registration §2: application_type is registered metadata.
+#[test]
+fn test_response_serialization_echoes_application_type() {
+    // A native client provisioned with a per-instance secret (RFC 8252 §8.4) —
+    // the bug scenario: confidential by `client_type()`, yet PKCE-mandatory by
+    // `application_type.requires_pkce()`. The response must surface the native
+    // type so the client can learn PKCE is required.
+    for declared in ["native", "web"] {
+        let response = RegistrationResponse {
+            client_id: "app-type-client".to_string(),
+            client_secret: Some("s3cr3t".into()),
+            client_secret_expires_at: Some(0),
+            client_id_issued_at: Some(1_700_000_000),
+            registration_access_token: None,
+            registration_client_uri: None,
+            redirect_uris: Some(vec!["https://example.com/cb".to_string()]),
+            application_type: Some(declared.to_string()),
+            token_endpoint_auth_method: "client_secret_basic".to_string(),
+            grant_types: vec!["authorization_code".to_string()],
+            response_types: vec!["code".to_string()],
+            client_name: Some("App Type Echo".to_string()),
+            client_uri: None,
+            logo_uri: None,
+            tos_uri: None,
+            policy_uri: None,
+            scope: None,
+            contacts: None,
+            jwks: None,
+            jwks_uri: None,
+            software_id: None,
+            software_version: None,
+            dpop_bound_access_tokens: None,
+            tls_client_certificate_bound_access_tokens: None,
+            tls_client_auth_subject_dn: None,
+            tls_client_auth_san_dns: None,
+            tls_client_auth_san_uri: None,
+            tls_client_auth_san_ip: None,
+            tls_client_auth_san_email: None,
+            id_token_signed_response_alg: "ES256".to_string(),
+            authorization_signed_response_alg: None,
+            introspection_signed_response_alg: None,
+            request_object_signing_alg: None,
+            require_signed_request_object: None,
+            userinfo_signed_response_alg: None,
+            request_uris: None,
+            post_logout_redirect_uris: None,
+        };
+
+        let json = serde_json::to_string(&response).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            value["application_type"].as_str(),
+            Some(declared),
+            "application_type must echo the declared value '{declared}': {json}"
+        );
+    }
+
+    // None (server-inferred Spa/Service, or a request that omitted the field)
+    // must serialize as absence, not null.
+    let response = RegistrationResponse {
+        client_id: "no-app-type".to_string(),
+        client_secret: None,
+        client_secret_expires_at: None,
+        client_id_issued_at: Some(1_700_000_000),
+        registration_access_token: None,
+        registration_client_uri: None,
+        redirect_uris: Some(vec!["https://example.com/cb".to_string()]),
+        application_type: None,
+        token_endpoint_auth_method: "none".to_string(),
+        grant_types: vec!["authorization_code".to_string()],
+        response_types: vec!["code".to_string()],
+        client_name: None,
+        client_uri: None,
+        logo_uri: None,
+        tos_uri: None,
+        policy_uri: None,
+        scope: None,
+        contacts: None,
+        jwks: None,
+        jwks_uri: None,
+        software_id: None,
+        software_version: None,
+        dpop_bound_access_tokens: None,
+        tls_client_certificate_bound_access_tokens: None,
+        tls_client_auth_subject_dn: None,
+        tls_client_auth_san_dns: None,
+        tls_client_auth_san_uri: None,
+        tls_client_auth_san_ip: None,
+        tls_client_auth_san_email: None,
+        id_token_signed_response_alg: "ES256".to_string(),
+        authorization_signed_response_alg: None,
+        introspection_signed_response_alg: None,
+        request_object_signing_alg: None,
+        require_signed_request_object: None,
+        userinfo_signed_response_alg: None,
+        request_uris: None,
+        post_logout_redirect_uris: None,
+    };
+    let json = serde_json::to_string(&response).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert!(
+        value.get("application_type").is_none(),
+        "application_type must be absent when None, not sent as null: {json}"
     );
 }
 
