@@ -2761,6 +2761,60 @@ async fn test_rfc9126_par_rejects_dpop_jkt_jar_claim_mismatch() {
     );
 }
 
+#[tokio::test]
+async fn test_rfc9126_par_jar_dpop_jkt_overrides_conflicting_form_dpop_jkt() {
+    // RFC 9101 §6.3: "The authorization server MUST only use the parameters in
+    // the Request Object, even if the same parameter is provided in the query
+    // parameter." When a JAR carries a `dpop_jkt` claim that matches the DPoP
+    // proof, a conflicting `dpop_jkt` in the form body must be ignored.
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "par-dpop-jkt-jar-overrides-form@example.com").await;
+    let (client, pkcs8_bytes) = create_fapi_jwt_client(&state.store, &user.id).await;
+    let par_uri = format!("{}/oauth/par", state.config().base_url);
+    let dpop_key = generate_dpop_pkcs8();
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = sha256_base64url(verifier);
+
+    // Determine the real DPoP JWK thumbprint (same key → same jkt for any proof).
+    let (_, real_jkt) = build_dpop_proof_with_jkt(&dpop_key, "POST", &par_uri, None);
+
+    // Build a Request Object whose dpop_jkt matches the DPoP proof.
+    let request_jwt = build_fapi_request_object(
+        &client.client_id,
+        &state.config().base_url,
+        &pkcs8_bytes,
+        &challenge,
+        |claims| {
+            claims["dpop_jkt"] = serde_json::Value::String(real_jkt.clone());
+        },
+    );
+    let assertion = build_client_assertion(
+        &client.client_id,
+        &state.config().base_url,
+        &pkcs8_bytes,
+        None,
+    );
+
+    // Form body carries a CONFLICTING dpop_jkt alongside the JAR.
+    let body = format!(
+        "request={request_jwt}\
+         &client_id={cid}\
+         &dpop_jkt=stale-thumbprint-aaaaaaaaaaaaaaaaaaaa\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={assertion}",
+        cid = client.client_id
+    );
+
+    let nonce = acquire_par_dpop_nonce(&app, &dpop_key, &par_uri, &body, None).await;
+    let (proof, _) = build_dpop_proof_with_jkt(&dpop_key, "POST", &par_uri, Some(&nonce));
+    let (status, response_body) = par_post_with_dpop(&app, &body, &proof, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "JAR dpop_jkt matching the proof must be accepted despite conflicting form dpop_jkt: {response_body}"
+    );
+}
+
 // RFC 9449 Section 10: `dpop_jkt` is a free-form string persisted verbatim into
 // the PAR record, so it is bounded like every other free-form authorization
 // request parameter. With no `DPoP` header the proof cross-check is skipped,

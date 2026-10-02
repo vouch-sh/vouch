@@ -321,7 +321,16 @@ pub(crate) async fn par(
 
     // RFC 9449 Section 10: If both a DPoP proof header and a dpop_jkt request
     // parameter are present, the JWK thumbprints MUST match.
-    if let (Some(proof_jkt), Some(param_jkt)) = (dpop_jkt, &params.dpop_jkt) {
+    //
+    // RFC 9101 §6.3: When a JAR Request Object is present, the authorization
+    // server MUST only use parameters from the Request Object, even if the
+    // same parameter is provided in the form body. The authoritative
+    // dpop_jkt check (against the JAR-sourced value) is performed below,
+    // after JAR validation, via `effective_dpop_jkt`. Only perform this
+    // form-body check when no Request Object is present.
+    if params.request.is_none()
+        && let (Some(proof_jkt), Some(param_jkt)) = (dpop_jkt, &params.dpop_jkt)
+    {
         let is_match: bool = proof_jkt.as_bytes().ct_eq(param_jkt.as_bytes()).into();
         if !is_match {
             return par_error_response(
