@@ -145,39 +145,17 @@ fn publish_ready_at(staged_at: Timestamp) -> Result<Timestamp> {
         .context("publish window overflow")
 }
 
-/// Ceiling on supported `session_hours` and the default drain used when an
-/// unrepresentable `session_hours` reaches the gate math. One year (8760h) is
-/// beyond any real session lifetime; `session_hours` above this is rejected at
-/// startup config validation (env, CLI, and the S3 merge path), so this const
-/// mainly serves as the fail-long default for unrepresentable values via
-/// `i64::try_from(...).unwrap_or(...)`. It is intentionally NOT applied as a
-/// `.min()` clamp on the post-margin drain: that would shorten the gate below a
-/// representable `session_hours`, opening it before the last token's `exp` —
-/// the opposite of the "fail toward a longer gate" goal. Overflow for
-/// representable-but-unbounded values is guarded by `try_hours` and
-/// `checked_add`, which fail closed (return `Err`) rather than shortening the
-/// gate. Mirrors the `u64` ceiling `SESSION_HOURS_MAX` enforced on
-/// `session_hours` in `config`.
-pub(crate) const REVOKE_GATE_CAP_HOURS: i64 = 24 * 365;
-
 /// The instant a key demoted at `demoted_at` may be revoked: the token-drain
 /// gate `max(session_hours, RETIREMENT_FLOOR_HOURS) + RETIREMENT_MARGIN_HOURS`
 /// (the floor keeps a `session_hours` reduction from shortening the gate under
-/// what already-issued tokens need). An unrepresentable `session_hours` defaults
-/// to [`REVOKE_GATE_CAP_HOURS`], so the failure direction is always a LONGER
-/// gate, never a shorter one (deleting a key early breaks live sessions; a
-/// late one breaks nothing). A representable-but-huge `session_hours` whose
-/// drain overflows the span or timestamp range fails closed via `try_hours`
-/// and `checked_add` rather than being clamped short (which would open the
-/// gate before the last token's `exp`).
+/// what already-issued tokens need). A `session_hours` too large for the span
+/// arithmetic is an error, so the key is kept: deleting a key early breaks live
+/// sessions; waiting longer breaks nothing.
 fn revoke_ready_at(demoted_at: Timestamp, session_hours: u64) -> Result<Timestamp> {
-    let session_h = i64::try_from(session_hours).unwrap_or(REVOKE_GATE_CAP_HOURS);
+    let session_h = i64::try_from(session_hours).context("session_hours out of range")?;
     let drain = session_h
         .max(RETIREMENT_FLOOR_HOURS)
         .saturating_add(RETIREMENT_MARGIN_HOURS);
-    // `try_hours` fails closed on a span-hours range overflow (~±20k years) and
-    // `checked_add` fails closed on a timestamp-range overflow; both return
-    // `Err` instead of panicking or shortening the gate.
     let span = Span::new()
         .try_hours(drain)
         .context("revoke gate span overflow")?;
@@ -928,27 +906,14 @@ mod tests {
         );
     }
 
-    /// An unrepresentable `session_hours` (e.g. `u64::MAX`) defaults to
-    /// [`REVOKE_GATE_CAP_HOURS`] and then takes the margin, so the failure
-    /// direction is always a LONGER gate, never a shorter one (an early revoke
-    /// breaks live sessions; a late one breaks nothing). Zero clamps to the
-    /// floor like any short lifetime. The representable-value regression this
-    /// test's predecessor missed (when `.min()` clamped the post-margin drain
-    /// short for `session_hours` above the cap) is covered by
-    /// `revoke_gate_never_opens_before_token_expiry`.
+    /// A `session_hours` too large for the gate math is an error (the key is
+    /// kept), never a shorter gate. Zero clamps to the floor like any short
+    /// lifetime.
     #[test]
-    fn revoke_gate_clamps_absurd_session_hours_long() {
+    fn revoke_gate_refuses_absurd_session_hours() {
         let demoted_at = Timestamp::from_second(1_700_000_000).unwrap();
-        let default_drain = super::REVOKE_GATE_CAP_HOURS
-            .checked_add(super::RETIREMENT_MARGIN_HOURS)
-            .unwrap();
-        // An unrepresentable value defaults to the cap, then takes the margin.
-        assert_eq!(
-            super::revoke_ready_at(demoted_at, u64::MAX).unwrap(),
-            demoted_at
-                .checked_add(Span::new().hours(default_drain))
-                .unwrap()
-        );
+        assert!(super::revoke_ready_at(demoted_at, u64::MAX).is_err());
+        assert!(super::revoke_ready_at(demoted_at, u64::try_from(i64::MAX).unwrap()).is_err());
         // Zero clamps to the floor, like any other short lifetime.
         let floor = demoted_at
             .checked_add(
@@ -962,29 +927,16 @@ mod tests {
         assert_eq!(super::revoke_ready_at(demoted_at, 0).unwrap(), floor);
     }
 
-    /// Regression for the `.min(REVOKE_GATE_CAP_HOURS)` bug: for representable
-    /// `session_hours` whose natural drain `max(session_hours, FLOOR) + MARGIN`
-    /// exceeds the cap, the gate must still open no earlier than the last token's
-    /// `exp` (`demoted_at + session_hours`). The pre-fix `.min()` clamp
-    /// shortened the gate for `session_hours >= 8759` and opened it *before*
-    /// `exp` for `session_hours >= 8761`, stranding live tokens that lose their
-    /// verification key. The cap is now a default for unrepresentable values
-    /// only, and `checked_add` guards overflow (see
-    /// `revoke_gate_fails_closed_on_unbounded_representable_session_hours`).
+    /// The gate opens no earlier than the last token's `exp`
+    /// (`demoted_at + session_hours`) for every lifetime, including those
+    /// longer than a year.
     #[test]
     fn revoke_gate_never_opens_before_token_expiry() {
         let demoted_at = Timestamp::from_second(1_700_000_000).unwrap();
 
         // The gate must be >= the longest-lived token's `exp`
         // (`demoted_at + session_hours`) for every representable value.
-        for session_hours in [
-            0u64, 4, 8, 12, 8758, // natural drain == cap (8760): gate opens 2h after exp
-            8759, // pre-fix: margin eroded to 1h; now: 2h after exp
-            8760, // pre-fix: zero margin; now: 2h after exp
-            8761, // pre-fix: 1h BEFORE exp (the bug); now: 2h after exp
-            8762, // pre-fix: 2h before exp; now: 2h after exp
-            9000, // pre-fix: ~140h before exp; now: 2h after exp
-        ] {
+        for session_hours in [0u64, 4, 8, 12, 8758, 8759, 8760, 8761, 8762, 9000] {
             let expiry = demoted_at
                 .checked_add(Span::new().hours(i64::try_from(session_hours).unwrap_or(0)))
                 .unwrap();
@@ -995,9 +947,7 @@ mod tests {
             );
         }
 
-        // Pin the exact boundary the bug report identified: a 8761h session
-        // must produce a 8763h drain (8761 + RETIREMENT_MARGIN_HOURS), opening
-        // 2h after the last token expires — not 1h before it.
+        // A 8761h session drains 8761 + RETIREMENT_MARGIN_HOURS hours.
         let token_expiry = demoted_at.checked_add(Span::new().hours(8761)).unwrap();
         let gate = super::revoke_ready_at(demoted_at, 8761).unwrap();
         assert_eq!(
@@ -1009,35 +959,13 @@ mod tests {
         assert!(gate >= token_expiry);
     }
 
-    /// A representable-but-huge `session_hours` whose drain overflows the
-    /// span or timestamp range fails closed (returns `Err`) rather than being
-    /// clamped to a short gate. This is the overflow defense (`try_hours` /
-    /// `checked_add`) that replaces the removed `.min()` clamp — fail safe
-    /// (no gate / error) over fail short (gate before `exp`).
-    #[test]
-    fn revoke_gate_fails_closed_on_unbounded_representable_session_hours() {
-        let demoted_at = Timestamp::from_second(1_700_000_000).unwrap();
-        // `i64::MAX` fits in `u64` (representable) and in `i64`, so `try_from`
-        // succeeds; the drain saturates to `i64::MAX`, which exceeds jiff's
-        // `Span` hours range, so `try_hours` fails closed (had it fit,
-        // `checked_add` would catch the timestamp-range overflow).
-        let huge = u64::try_from(i64::MAX).unwrap();
-        assert!(
-            super::revoke_ready_at(demoted_at, huge).is_err(),
-            "a representable-but-unbounded session_hours must fail closed, not clamp short"
-        );
-    }
-
-    /// End-to-end rotate→revoke at the one-year boundary through the service
-    /// entrypoint (`revoke_org_previous_keys`), not just the pure gate fn. The
-    /// `session_hours = 8760` config (the supported ceiling) is the regime the
-    /// pre-fix `.min()` clamp silently broke: a token issued with a 8760h
-    /// lifetime would have lost its verification key the instant the gate opened.
+    /// Rotate then revoke through `revoke_org_previous_keys` with a one-year
+    /// `session_hours`: the gate opens at `demoted_at + 8762h`, after the last
+    /// token expires.
     #[tokio::test]
     async fn revoke_boundary_end_to_end_with_year_long_session() {
         let (state, org_id, org) = setup().await;
 
-        // Override session_hours to the one-year ceiling (the max supported).
         let mut cfg = (**state.config()).clone();
         cfg.session_hours = 8760;
         state.config.store(std::sync::Arc::new(cfg));

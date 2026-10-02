@@ -256,23 +256,6 @@ fn parse_comma_list_preserve_case(s: &str) -> Vec<String> {
 // Command Line Arguments
 // ============================================================================
 
-/// Upper bound on `VOUCH_SESSION_HOURS`: one year (8760h) is beyond any real
-/// session lifetime, and a longer value would outrun the per-org signing key
-/// rotation revoke gate (`max(session_hours, floor) + margin`), which could then
-/// open before the last token's `exp` and strand live tokens that lose their
-/// verification key. Applied as a `clap` range on the env/CLI path and
-/// re-checked in [`ServerConfig::validate`] for the S3 config path, which
-/// bypasses `clap` and applies the value verbatim. Mirrors
-/// `REVOKE_GATE_CAP_HOURS` in the rotation module (kept here as `u64` to match
-/// the `session_hours` field type).
-pub(crate) const SESSION_HOURS_MAX: u64 = 24 * 365;
-const _: () = {
-    assert!(
-        SESSION_HOURS_MAX >= 1,
-        "session_hours ceiling must be positive"
-    );
-};
-
 /// Vouch identity server.
 #[derive(Parser)]
 #[command(name = "vouch-server", about = "Vouch identity server")]
@@ -301,16 +284,8 @@ pub struct Args {
     #[arg(long, env = "VOUCH_JWT_SECRET", default_value = "")]
     pub jwt_secret: String,
 
-    /// Session duration in hours, capped at one year (8760h). Longer values
-    /// would outrun the per-org signing key rotation revoke gate and are
-    /// rejected here on the env/CLI path. The S3 config path re-checks this
-    /// ceiling in `ServerConfig::validate`, which bypasses `clap`.
-    #[arg(
-        long,
-        env = "VOUCH_SESSION_HOURS",
-        default_value = "8",
-        value_parser = clap::value_parser!(u64).range(..=SESSION_HOURS_MAX)
-    )]
+    /// Session duration in hours.
+    #[arg(long, env = "VOUCH_SESSION_HOURS", default_value = "8")]
     pub session_hours: u64,
 
     /// Comma-separated list of IdP slugs (e.g., "google,entra,corp-saml").
@@ -1388,24 +1363,6 @@ impl ServerConfig {
             );
         }
 
-        // session_hours above one year is unsupported: the per-org signing key
-        // rotation revoke gate (`max(session_hours, floor) + margin`) can no
-        // longer guarantee it opens after the last token's `exp`, so an operator
-        // revoke could delete a Previous key while tokens it signed are still
-        // live. The `clap` range rejects this on the env/CLI path; re-check here
-        // for the S3 config merge (`infra::s3_config`), which bypasses `clap` and
-        // applies `session_hours` verbatim.
-        if self.session_hours > SESSION_HOURS_MAX {
-            anyhow::bail!(
-                "VOUCH_SESSION_HOURS={} exceeds the one-year ceiling ({}); longer \
-                 sessions are unsupported because the per-org signing key rotation \
-                 revoke gate cannot cover them. Use {} or fewer.",
-                self.session_hours,
-                SESSION_HOURS_MAX,
-                SESSION_HOURS_MAX
-            );
-        }
-
         // Temporal posture policies evaluate a 24h window of audit history.
         // Retention shorter than that silently truncates the window: the
         // sweep deletes evidence a live policy still needs, so aggregation
@@ -1712,81 +1669,6 @@ mod tests {
     fn test_validate_good_secret_accepted() {
         let config = test_config();
         assert!(config.validate().is_ok());
-    }
-
-    #[test]
-    fn test_validate_accepts_default_session_hours() {
-        // The shipped default (8h) is far below the one-year ceiling and must
-        // validate.
-        let config = test_config();
-        assert_eq!(config.session_hours, 8);
-        assert!(
-            config.validate().is_ok(),
-            "default session_hours must validate"
-        );
-    }
-
-    #[test]
-    fn test_validate_accepts_session_hours_at_one_year() {
-        // Exactly the one-year ceiling (8760h) is the last supported value;
-        // the revoke gate (8760 + margin) still clears the last token's exp.
-        let mut config = test_config();
-        config.session_hours = 8760;
-        assert!(config.validate().is_ok());
-    }
-
-    #[test]
-    fn test_validate_rejects_session_hours_above_one_year() {
-        // One hour past the ceiling: the pre-fix gate math would have opened
-        // the revoke gate 1h before this session's last token expired.
-        let mut config = test_config();
-        config.session_hours = 8761;
-        let err = config.validate().unwrap_err();
-        assert!(
-            err.to_string().contains("one-year ceiling"),
-            "expected session_hours ceiling error, got: {err}"
-        );
-    }
-
-    #[test]
-    fn test_validate_rejects_unbounded_session_hours() {
-        // `validate()` is the only gate for the S3 config path (which bypasses
-        // `clap` and applies the value verbatim), so it must catch values far
-        // beyond the ceiling too.
-        let mut config = test_config();
-        config.session_hours = u64::MAX;
-        assert!(
-            config.validate().is_err(),
-            "u64::MAX session_hours must be rejected by validate"
-        );
-    }
-
-    /// clap rejects `--session-hours` above the one-year ceiling at parse time
-    /// (env/CLI path), before `validate()` runs. This is the front-door guard
-    /// (B1); `validate()` is the backstop for the S3 path that bypasses clap.
-    #[test]
-    fn test_clap_rejects_session_hours_above_ceiling() {
-        let err = Args::try_parse_from(["vouch-server", "--session-hours", "8761"])
-            .err()
-            .unwrap();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("8760") || msg.contains("out of range") || msg.contains("not in range"),
-            "expected a clap range error naming the ceiling, got: {msg}"
-        );
-    }
-
-    /// clap accepts the ceiling (8760) and the default (8) on the CLI path (B2).
-    #[test]
-    fn test_clap_accepts_session_hours_at_ceiling_and_default() {
-        assert!(
-            Args::try_parse_from(["vouch-server", "--session-hours", "8760"]).is_ok(),
-            "8760 (the ceiling) must be accepted by clap"
-        );
-        assert!(
-            Args::try_parse_from(["vouch-server", "--session-hours", "8"]).is_ok(),
-            "8 (the default) must be accepted by clap"
-        );
     }
 
     #[test]

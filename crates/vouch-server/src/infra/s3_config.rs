@@ -1326,41 +1326,6 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_s3_config_session_hours_above_ceiling_rejected_by_validate() {
-        // The S3 config path bypasses `clap`, so `merge_s3_config` applies
-        // `session_hours` verbatim (no bounds check). The one-year ceiling is
-        // therefore enforced by `ServerConfig::validate`, which runs after the
-        // merge at startup, catching the misconfiguration before any token is
-        // issued. A session above the ceiling would let the rotation revoke
-        // gate open before the last token's `exp`.
-        let mut config = test_utils::test_config();
-        let s3 = S3Config {
-            session_hours: Some(9000),
-            ..Default::default()
-        };
-        config.merge_s3_config(&s3, false).unwrap();
-        assert_eq!(
-            config.session_hours, 9000,
-            "merge applies the value verbatim"
-        );
-        let err = config.validate().unwrap_err();
-        assert!(
-            err.to_string().contains("one-year ceiling"),
-            "validate must reject an S3-sourced session_hours above the ceiling: {err}"
-        );
-
-        // A value at the ceiling is accepted after merge.
-        let mut config = test_utils::test_config();
-        let s3 = S3Config {
-            session_hours: Some(8760),
-            ..Default::default()
-        };
-        config.merge_s3_config(&s3, false).unwrap();
-        assert_eq!(config.session_hours, 8760);
-        assert!(config.validate().is_ok());
-    }
-
-    #[test]
     fn test_s3_config_deserialization() {
         // Legacy top-level `oidc` block is unknown to serde and silently dropped.
         let json = r#"{

@@ -97,7 +97,7 @@ The S3 configuration file is a JSON document with the following schema:
 | `database_url` | string | Database connection URL (`sqlite:`, `postgres:`, or Aurora DSQL). |
 | `dsql_endpoints` | object | Regional DSQL endpoints. Maps AWS region to full connection string. |
 | `jwt_secret` | string | JWT signing secret (minimum 32 characters). Not required if `jwt_hmac_kms_key_id` is set. |
-| `session_hours` | integer | Session duration in hours. Capped at `8760` (one year); the server rejects a larger value at startup, because the per-org signing key rotation revoke gate cannot cover a session that outlives its demoted signing key. (The S3 value bypasses the CLI/env range check but is still validated at startup.) |
+| `session_hours` | integer | Session duration in hours. |
 | `org_name` | string | Organization display name for branding in the UI. |
 | `tls.cert` | string | TLS certificate (base64-encoded PEM). |
 | `tls.key` | string | TLS private key (base64-encoded PEM). |

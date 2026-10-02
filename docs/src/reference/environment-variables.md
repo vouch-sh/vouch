@@ -72,7 +72,7 @@ OIDC IdPs auto-discover authorization, token, and JWKS endpoints from `{issuer}/
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `VOUCH_SESSION_HOURS` | No | `8` | Session duration in hours. After this time, the user must re-authenticate. Capped at `8760` (one year); longer values are rejected, because the per-org signing key rotation revoke gate cannot cover a session that outlives its demoted signing key. |
+| `VOUCH_SESSION_HOURS` | No | `8` | Session duration in hours. After this time, the user must re-authenticate. |
 | `VOUCH_DEVICE_CODE_EXPIRES` | No | `600` | Device code expiration in seconds. How long a device code remains valid during enrollment. |
 | `VOUCH_DEVICE_POLL_INTERVAL` | No | `5` | Device code polling interval in seconds. How frequently the CLI polls for device code completion. |
 | `VOUCH_SESSION_CACHE_MAX_CAPACITY` | No | `10000` | Maximum entries in the in-memory session lookup cache. |
