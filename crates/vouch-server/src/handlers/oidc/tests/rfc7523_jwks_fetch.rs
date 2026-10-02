@@ -294,32 +294,12 @@ async fn rfc7523_kid_miss_returns_structured_401_not_408_at_router() {
     );
 }
 
-/// Regression: a `jwks_uri` whose scheme is not all-lowercase (e.g.
-/// `HTTPS://127.0.0.1:<port>/jwks`) must authenticate end-to-end.
-///
-/// RFC 3986 Section 3.1 makes schemes case-insensitive, and `url::Url::parse`
-/// normalizes the scheme to lowercase, so the admission-side validators
-/// (`services::oidc::registration::validate_jwks_shape` and
-/// `handlers::applications::validate::validate_jwks_uri`) admit such URIs via
-/// `Url::parse(...).scheme() == "https"`. The runtime fetcher in
-/// `fetch_jwks` previously used `str::starts_with("https://")` — a byte-level
-/// test that rejected those same URIs before any network I/O — so a freshly
-/// registered client could never authenticate (the registration response
-/// echoed the URI back with `201 Created`, then the very next token request
-/// returned `401 invalid_client / "Client authentication failed"`). After the
-/// fix `fetch_jwks` uses the same `Url::parse(...).scheme()` check as the
-/// validators.
-///
-/// This test pins the full round-trip at the production-router level: the
-/// upper-case-scheme `jwks_uri` reaches `reqwest` (which parses via `url::Url`
-/// and normalizes the scheme), passes the SSRF guard (which re-parses with
-/// `Url::parse`), drives exactly one real TLS fetch of the JWK Set over the
-/// loopback mock, and the assertion signature verifies — so client auth
-/// succeeds and the request proceeds to grant validation, which fails for the
-/// unrelated reason that `code=x` is not a valid auth code. Before the fix
-/// this returned `401 invalid_client` with zero TLS fetches.
+/// RFC 3986 §3.1: "Although schemes are case-insensitive, the canonical form
+/// is lowercase". Registration admits an `HTTPS://` `jwks_uri`, so client
+/// authentication must fetch it: one TLS fetch, the assertion verifies, and the
+/// request fails later at grant validation (`code=x`).
 #[tokio::test]
-async fn uppercase_scheme_jwks_uri_authenticates_after_case_insensitive_fix() {
+async fn uppercase_scheme_jwks_uri_authenticates() {
     let (pkcs8, jwk) = generate_es256_key();
     let jwks_body = serde_json::json!({"keys": [jwk]}).to_string();
     let accepted = Arc::new(AtomicU64::new(0));
@@ -329,9 +309,6 @@ async fn uppercase_scheme_jwks_uri_authenticates_after_case_insensitive_fix() {
     let state = build_test_app_state_with_http_client(Vec::new(), |_| {}, http_client).await;
     let router = build_production_router(state.clone());
 
-    // Register a `private_key_jwt` client whose `jwks_uri` differs from the
-    // control only in scheme casing — same loopback host, port, cert, and
-    // served JWK Set.
     let uppercase_url = server_url.replacen("https://", "HTTPS://", 1);
     let (_client, client_id) =
         make_private_key_jwt_client(&state, uppercase_url, "uppercase-scheme@example.com").await;
@@ -350,22 +327,16 @@ async fn uppercase_scheme_jwks_uri_authenticates_after_case_insensitive_fix() {
 
     let (status, body) = post_token(router, &client_id, &assertion).await;
 
-    // Client auth must succeed past the JWKS fetch and signature verification
-    // into grant validation, which rejects `code=x` with a non-`invalid_client`
-    // error. Before the fix this was `401 invalid_client`.
     assert_ne!(
         status,
         StatusCode::UNAUTHORIZED,
-        "upper-case HTTPS:// jwks_uri must pass client auth after the fix; got 401: {body}"
+        "upper-case HTTPS:// jwks_uri must pass client auth; got 401: {body}"
     );
     assert!(
         !body.contains("\"invalid_client\""),
-        "must not be invalid_client after the fix; body: {body}"
+        "must not be invalid_client; body: {body}"
     );
 
-    // The upper-case-scheme URL must reach `reqwest`, drive a real TLS
-    // handshake, and fetch the JWK Set exactly once. Before the fix this was 0
-    // (the scheme check rejected before any network I/O).
     let fetches = accepted.load(Ordering::SeqCst);
     assert_eq!(
         fetches, 1,

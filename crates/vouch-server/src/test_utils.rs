@@ -2219,6 +2219,9 @@ pub struct TestClientSpec {
     /// the RFC 7592 GET/PUT/DELETE endpoints against a client built through
     /// this factory rather than through `/oauth/register`.
     pub registration_access_token_hash: Option<String>,
+    /// Stored RFC 7591 registration metadata (`logo_uri`, `policy_uri`, ...).
+    /// Default: `None`.
+    pub registration_metadata: Option<serde_json::Value>,
 }
 
 /// Every `grant_type` the token endpoint dispatches (`OAuthGrantType`), as the
@@ -2268,6 +2271,7 @@ impl Default for TestClientSpec {
             require_signed_request_object: Option::None,
             post_logout_redirect_uris: vec![],
             registration_access_token_hash: Option::None,
+            registration_metadata: Option::None,
         }
     }
 }
@@ -2342,7 +2346,7 @@ pub async fn create_test_client(
             software_version: Option::None,
             registration_source: RegistrationSource::Manual,
             registration_access_token_hash: spec.registration_access_token_hash.as_deref(),
-            registration_metadata: Option::None,
+            registration_metadata: spec.registration_metadata.as_ref(),
             id_token_signed_response_alg: spec.id_token_signed_response_alg,
             tls_client_auth_subject_dn: spec.tls_client_auth_subject_dn.as_deref(),
             tls_client_auth_san_dns: Option::None,
