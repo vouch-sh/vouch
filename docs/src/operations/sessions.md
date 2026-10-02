@@ -89,4 +89,6 @@ Clients registered without `resource_uris` may request any `resource` value
 at issuance. This is safe under enforcement: a token narrowed to an external
 resource server is *less* usable at Vouch, not more — it can only be spent at
 the external service it names. Registering `resource_uris` additionally
-restricts which values a client may request at all.
+restricts which values a client may request at all. That includes the default:
+an RFC 8693 exchange for an ID token with no `audience` gets `aud` set to the
+issuer, so a client with `resource_uris` must list the issuer to use it.

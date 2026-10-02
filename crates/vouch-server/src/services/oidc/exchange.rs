@@ -7,6 +7,7 @@
 use crate::AppState;
 use crate::arrival::ArrivalTime;
 use crate::crypto::hash_token;
+use crate::db::OAuthClient;
 use crate::db::{self, SessionPurpose};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use crate::infra::metrics;
@@ -654,7 +655,7 @@ pub(crate) async fn exchange_token(
                 expires_in,
                 hardware_aaguid: subject_session.hardware_aaguid.as_deref(),
                 org_domain: subject_session.org_domain.as_deref(),
-                client_id: &params.client.client_id,
+                client: params.client,
                 client_info: params.client_info,
             },
             arrival,
@@ -816,8 +817,9 @@ struct IdTokenContext<'a> {
     hardware_aaguid: Option<&'a str>,
     /// Organization domain snapshot from the subject session (`hd` claim).
     org_domain: Option<&'a str>,
-    /// OAuth client performing the exchange, for the audit event.
-    client_id: &'a str,
+    /// OAuth client performing the exchange: its registered resources bound
+    /// the default audience, and its id goes in the audit event.
+    client: &'a OAuthClient,
     /// The request's transport metadata, for the audit event.
     client_info: &'a db::ClientInfo,
 }
@@ -859,6 +861,16 @@ async fn issue_id_token(
     };
     let issuer = super::org_keys::org_issuer_or_base(&config, org.as_ref())?;
     let audience = ctx.audience.unwrap_or(&issuer);
+    // A requested audience was checked against the client's registered
+    // resources with the request; the issuer default is checked here, where it
+    // is known, so omitting `audience` cannot step around the allowlist.
+    if ctx.audience.is_none() && !ctx.client.is_valid_resource_uri(audience) {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidTarget,
+            "No audience was requested, and the default audience (the issuer) is not \
+             registered for this client",
+        ));
+    }
     let expires_in = ctx.expires_in.min(DEFAULT_ID_TOKEN_EXPIRES_SECS);
 
     // Stamp the arrival instant once and use it for every temporal claim of
@@ -935,7 +947,7 @@ async fn issue_id_token(
                 ..db::CredentialAuditEnvelope::succeeded(db::TOKEN_ISSUED, ctx.client_info)
             },
             &db::TokenExchangeDetails {
-                client_id: ctx.client_id.to_string(),
+                client_id: ctx.client.client_id.to_string(),
                 audience: ctx.audience.map(String::from),
                 scope: None,
                 issued_token_type: TokenType::IdToken.as_urn().to_string(),
@@ -1409,6 +1421,82 @@ mod tests {
         serde_json::from_slice(&bytes).expect("JSON payload")
     }
 
+    /// An OAuth client registered with `resource_uris`.
+    async fn exchange_client(
+        state: &AppState,
+        user_id: &str,
+        resource_uris: Vec<String>,
+    ) -> OAuthClient {
+        use crate::test_utils::{TestClientSpec, create_test_client};
+        let created = create_test_client(
+            &state.store,
+            user_id,
+            TestClientSpec {
+                resource_uris,
+                ..Default::default()
+            },
+        )
+        .await;
+        db::get_oauth_client_by_client_id(&state.store, &created.client_id)
+            .await
+            .expect("load client")
+            .expect("client exists")
+    }
+
+    /// An ID-token exchange with no `audience` defaults `aud` to the issuer,
+    /// and a client that registered `resource_uris` must list it: omitting the
+    /// parameter cannot step around the allowlist the request would face if it
+    /// named the issuer.
+    #[tokio::test]
+    async fn test_issue_id_token_default_audience_respects_resource_allowlist() {
+        use crate::test_utils::{create_test_user, test_app_state};
+
+        let state = test_app_state().await;
+        let user = create_test_user(&state.store, "id-token-allowlist@example.com").await;
+        let issuer = super::super::org_keys::org_issuer_or_base(&state.config(), None)
+            .expect("issuer")
+            .to_string();
+        let restricted =
+            exchange_client(&state, &user.id, vec!["https://rp.example.com".to_string()]).await;
+        let issuer_listed = exchange_client(&state, &user.id, vec![issuer]).await;
+
+        let client_info = ClientInfo::default();
+        let issue = |client| {
+            issue_id_token(
+                &state,
+                IdTokenContext {
+                    user_id: &user.id,
+                    email: &user.email,
+                    subject_token_hash: "subject-token-hash-test",
+                    audience: None,
+                    expires_in: 60,
+                    hardware_aaguid: None,
+                    org_domain: None,
+                    client,
+                    client_info: &client_info,
+                },
+                ArrivalTime::for_test_second(1_700_000_000),
+            )
+        };
+
+        let err = issue(&restricted)
+            .await
+            .expect_err("issuer is not registered");
+        assert!(
+            matches!(
+                err,
+                ServiceError::OAuth {
+                    code: OAuthErrorCode::InvalidTarget,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+        issue(&issuer_listed)
+            .await
+            .expect("a client that registered the issuer gets the default audience");
+    }
+
     /// A request for an exchanged ID token is anchored on a single arrival
     /// instant: the JWT's `iat`/`exp` and the audit's `expires_at` all read
     /// that instant, so the row and the signed token cannot disagree about
@@ -1420,6 +1508,7 @@ mod tests {
 
         let state = test_app_state().await;
         let user = create_test_user(&state.store, "id-token-arrival@example.com").await;
+        let client = exchange_client(&state, &user.id, vec![]).await;
         // Far below `DEFAULT_ID_TOKEN_EXPIRES_SECS` (600s) so the federation
         // ceiling in `issue_id_token` does not clamp `expires_in`.
         let expires_in = 60;
@@ -1436,7 +1525,7 @@ mod tests {
                 expires_in,
                 hardware_aaguid: None,
                 org_domain: None,
-                client_id: "token-exchange-client-id",
+                client: &client,
                 client_info: &ClientInfo::default(),
             },
             arrival,
