@@ -57,9 +57,9 @@ pub(crate) struct AdminSubdomainTemplate {
     /// or the keys have not been created yet).
     pub signing_keys: Vec<SigningKeyRow>,
     /// Localized reason the Rotate button is disabled; `None` = enabled.
-    pub rotate_blocked: Option<String>,
+    pub rotate_blocked: Option<Tr<'static>>,
     /// Localized reason the Revoke button is disabled; `None` = enabled.
-    pub revoke_blocked: Option<String>,
+    pub revoke_blocked: Option<Tr<'static>>,
     /// Whether any Previous key exists (controls the Revoke button's presence).
     pub has_previous: bool,
     pub flash_message: Option<String>,
@@ -79,45 +79,38 @@ pub(crate) struct SigningKeyRow {
 /// Localized display label for a key state.
 fn state_label(state: SigningKeyState) -> String {
     match state {
-        SigningKeyState::Current => Tr::new("admin-subdomain-key-state-current").to_string(),
-        SigningKeyState::Next => Tr::new("admin-subdomain-key-state-next").to_string(),
-        SigningKeyState::Previous => Tr::new("admin-subdomain-key-state-previous").to_string(),
+        SigningKeyState::Current => Tr::new("admin-subdomain-key-state-current"),
+        SigningKeyState::Next => Tr::new("admin-subdomain-key-state-next"),
+        SigningKeyState::Previous => Tr::new("admin-subdomain-key-state-previous"),
     }
+    .to_string()
 }
 
 /// Localized reason a rotate is (or would be) rejected; `None` when allowed.
-fn rotate_blocked_message(outcome: &RotateOutcome) -> Option<String> {
+fn rotate_blocked_message(outcome: &RotateOutcome) -> Option<Tr<'static>> {
     match outcome {
         RotateOutcome::Rotated { .. } => None,
         RotateOutcome::NextNotReady { ready_at } => Some(
-            Tr::new("admin-subdomain-flash-rotate-not-ready")
-                .arg("ready", ready_at.to_string().as_str())
-                .to_string(),
+            Tr::new("admin-subdomain-flash-rotate-not-ready").arg("ready", ready_at.to_string()),
         ),
         RotateOutcome::PreviousUnrevoked => {
-            Some(Tr::new("admin-subdomain-flash-rotate-previous-unrevoked").to_string())
+            Some(Tr::new("admin-subdomain-flash-rotate-previous-unrevoked"))
         }
         RotateOutcome::NotBootstrapped => {
-            Some(Tr::new("admin-subdomain-flash-rotate-not-bootstrapped").to_string())
+            Some(Tr::new("admin-subdomain-flash-rotate-not-bootstrapped"))
         }
-        RotateOutcome::SubdomainReleased => {
-            Some(Tr::new("admin-subdomain-error-no-subdomain").to_string())
-        }
+        RotateOutcome::SubdomainReleased => Some(Tr::new("admin-subdomain-error-no-subdomain")),
     }
 }
 
 /// Localized reason a revoke is (or would be) rejected; `None` when allowed.
-fn revoke_blocked_message(outcome: &RevokeOutcome) -> Option<String> {
+fn revoke_blocked_message(outcome: &RevokeOutcome) -> Option<Tr<'static>> {
     match outcome {
         RevokeOutcome::Revoked { .. } => None,
         RevokeOutcome::NotReady { ready_at } => Some(
-            Tr::new("admin-subdomain-flash-revoke-not-ready")
-                .arg("ready", ready_at.to_string().as_str())
-                .to_string(),
+            Tr::new("admin-subdomain-flash-revoke-not-ready").arg("ready", ready_at.to_string()),
         ),
-        RevokeOutcome::NothingToRevoke => {
-            Some(Tr::new("admin-subdomain-flash-nothing-to-revoke").to_string())
-        }
+        RevokeOutcome::NothingToRevoke => Some(Tr::new("admin-subdomain-flash-nothing-to-revoke")),
     }
 }
 
@@ -130,64 +123,42 @@ pub(crate) struct ClaimSubdomainForm {
 
 const REDIRECT_BASE: &str = "/admin/subdomain";
 
-fn redirect_error(jar: CookieJar, msg: impl Into<String>) -> Response {
+fn redirect_error(jar: CookieJar, msg: impl Into<flash::FlashText>) -> Response {
     (flash::set_err(jar, msg), Redirect::to(REDIRECT_BASE)).into_response()
 }
 
-fn redirect_ok(jar: CookieJar, msg: impl Into<String>) -> Response {
+fn redirect_ok(jar: CookieJar, msg: impl Into<flash::FlashText>) -> Response {
     (flash::set_ok(jar, msg), Redirect::to(REDIRECT_BASE)).into_response()
 }
 
 /// Render a claim failure as a localized flash message.
-fn claim_error_message(e: &SubdomainClaimError) -> String {
+fn claim_error_message(e: &SubdomainClaimError) -> Tr<'_> {
     match e {
         SubdomainClaimError::InvalidLabel(reason) => match reason {
-            SubdomainLabelError::Empty => {
-                Tr::new("admin-subdomain-error-invalid-empty").to_string()
-            }
-            SubdomainLabelError::NotAscii => {
-                Tr::new("admin-subdomain-error-invalid-ascii").to_string()
-            }
-            SubdomainLabelError::TooLong => {
-                Tr::new("admin-subdomain-error-invalid-length").to_string()
-            }
-            SubdomainLabelError::ContainsDot => {
-                Tr::new("admin-subdomain-error-invalid-dot").to_string()
-            }
-            SubdomainLabelError::HyphenEdge => {
-                Tr::new("admin-subdomain-error-invalid-hyphen").to_string()
-            }
-            SubdomainLabelError::InvalidChar => {
-                Tr::new("admin-subdomain-error-invalid-charset").to_string()
-            }
-            SubdomainLabelError::NoLetter => {
-                Tr::new("admin-subdomain-error-invalid-letter").to_string()
-            }
+            SubdomainLabelError::Empty => Tr::new("admin-subdomain-error-invalid-empty"),
+            SubdomainLabelError::NotAscii => Tr::new("admin-subdomain-error-invalid-ascii"),
+            SubdomainLabelError::TooLong => Tr::new("admin-subdomain-error-invalid-length"),
+            SubdomainLabelError::ContainsDot => Tr::new("admin-subdomain-error-invalid-dot"),
+            SubdomainLabelError::HyphenEdge => Tr::new("admin-subdomain-error-invalid-hyphen"),
+            SubdomainLabelError::InvalidChar => Tr::new("admin-subdomain-error-invalid-charset"),
+            SubdomainLabelError::NoLetter => Tr::new("admin-subdomain-error-invalid-letter"),
             SubdomainLabelError::Reserved(label) => {
-                Tr::new("admin-subdomain-error-invalid-reserved")
-                    .arg("label", label.as_str())
-                    .to_string()
+                Tr::new("admin-subdomain-error-invalid-reserved").arg("label", label.as_str())
             }
         },
-        SubdomainClaimError::NotEligible => {
-            Tr::new("admin-subdomain-error-not-eligible").to_string()
-        }
+        SubdomainClaimError::NotEligible => Tr::new("admin-subdomain-error-not-eligible"),
         SubdomainClaimError::AlreadyClaimed(existing) => {
-            Tr::new("admin-subdomain-error-already-claimed")
-                .arg("existing", existing.as_str())
-                .to_string()
+            Tr::new("admin-subdomain-error-already-claimed").arg("existing", existing.as_str())
         }
-        SubdomainClaimError::Conflict => Tr::new("admin-subdomain-error-conflict").to_string(),
-        SubdomainClaimError::RecentlyReleased => {
-            Tr::new("admin-subdomain-error-recently-released").to_string()
-        }
+        SubdomainClaimError::Conflict => Tr::new("admin-subdomain-error-conflict"),
+        SubdomainClaimError::RecentlyReleased => Tr::new("admin-subdomain-error-recently-released"),
         SubdomainClaimError::OccConflict => {
             tracing::error!("subdomain claim retry budget exhausted");
-            Tr::new("admin-subdomain-error-internal").to_string()
+            Tr::new("admin-subdomain-error-internal")
         }
         SubdomainClaimError::Other(e) => {
             tracing::error!("subdomain claim failed: {e}");
-            Tr::new("admin-subdomain-error-internal").to_string()
+            Tr::new("admin-subdomain-error-internal")
         }
     }
 }
@@ -298,7 +269,7 @@ pub(crate) async fn admin_claim_subdomain(
     if !state.store.is_encrypted() {
         return Ok(redirect_error(
             jar,
-            Tr::new("admin-subdomain-error-requires-encryption").to_string(),
+            Tr::new("admin-subdomain-error-requires-encryption"),
         ));
     }
 
@@ -348,11 +319,8 @@ pub(crate) async fn admin_claim_subdomain(
         match issuer {
             Some(iss) => Tr::new("admin-subdomain-flash-claimed")
                 .arg("label", label.as_str())
-                .arg("issuer", iss.as_str())
-                .to_string(),
-            None => Tr::new("admin-subdomain-flash-claimed-plain")
-                .arg("label", label.as_str())
-                .to_string(),
+                .arg("issuer", iss),
+            None => Tr::new("admin-subdomain-flash-claimed-plain").arg("label", label.as_str()),
         },
     ))
 }
@@ -378,14 +346,14 @@ pub(crate) async fn admin_release_subdomain(
         Ok(None) => {
             return Ok(redirect_error(
                 jar,
-                Tr::new("admin-subdomain-error-nothing-to-release").to_string(),
+                Tr::new("admin-subdomain-error-nothing-to-release"),
             ));
         }
         Err(e) => {
             tracing::error!(error = %e, org_id = %org_id, "Subdomain release failed");
             return Ok(redirect_error(
                 jar,
-                Tr::new("admin-subdomain-error-internal").to_string(),
+                Tr::new("admin-subdomain-error-internal"),
             ));
         }
     };
@@ -414,9 +382,7 @@ pub(crate) async fn admin_release_subdomain(
 
     Ok(redirect_ok(
         jar,
-        Tr::new("admin-subdomain-flash-released")
-            .arg("label", released.as_str())
-            .to_string(),
+        Tr::new("admin-subdomain-flash-released").arg("label", released.as_str()),
     ))
 }
 
@@ -437,7 +403,7 @@ async fn subdomain_action_guard(
         // No org association is an auth/session problem, not a subdomain one.
         return Ok(Err(redirect_error(
             jar.clone(),
-            Tr::new("admin-subdomain-error-internal").to_string(),
+            Tr::new("admin-subdomain-error-internal"),
         )));
     }
     let org = match db::get_organization(&state.store, &org_id).await {
@@ -445,14 +411,14 @@ async fn subdomain_action_guard(
         Ok(None) | Err(_) => {
             return Ok(Err(redirect_error(
                 jar.clone(),
-                Tr::new("admin-subdomain-error-internal").to_string(),
+                Tr::new("admin-subdomain-error-internal"),
             )));
         }
     };
     if org.subdomain.is_none() {
         return Ok(Err(redirect_error(
             jar.clone(),
-            Tr::new("admin-subdomain-error-no-subdomain").to_string(),
+            Tr::new("admin-subdomain-error-no-subdomain"),
         )));
     }
     Ok(Ok((admin, org_id)))
@@ -485,22 +451,19 @@ pub(crate) async fn admin_rotate_keys(
                 org_id = %org_id,
                 "Rotated org issuer keys"
             );
-            Ok(redirect_ok(
-                jar,
-                Tr::new("admin-subdomain-flash-rotated").to_string(),
-            ))
+            Ok(redirect_ok(jar, Tr::new("admin-subdomain-flash-rotated")))
         }
         Ok(blocked) => {
             // The service emits no audit event for a rejected rotate.
             let message = rotate_blocked_message(&blocked)
-                .unwrap_or_else(|| Tr::new("admin-subdomain-error-internal").to_string());
+                .unwrap_or_else(|| Tr::new("admin-subdomain-error-internal"));
             Ok(redirect_error(jar, message))
         }
         Err(e) => {
             tracing::error!(error = %e, org_id, "Org issuer key rotation failed");
             Ok(redirect_error(
                 jar,
-                Tr::new("admin-subdomain-error-internal").to_string(),
+                Tr::new("admin-subdomain-error-internal"),
             ))
         }
     }
@@ -531,21 +494,18 @@ pub(crate) async fn admin_revoke_keys(
                 org_id = %org_id,
                 "Revoked previous org issuer keys"
             );
-            Ok(redirect_ok(
-                jar,
-                Tr::new("admin-subdomain-flash-revoked").to_string(),
-            ))
+            Ok(redirect_ok(jar, Tr::new("admin-subdomain-flash-revoked")))
         }
         Ok(blocked) => {
             let message = revoke_blocked_message(&blocked)
-                .unwrap_or_else(|| Tr::new("admin-subdomain-error-internal").to_string());
+                .unwrap_or_else(|| Tr::new("admin-subdomain-error-internal"));
             Ok(redirect_error(jar, message))
         }
         Err(e) => {
             tracing::error!(error = %e, org_id, "Org issuer key revoke failed");
             Ok(redirect_error(
                 jar,
-                Tr::new("admin-subdomain-error-internal").to_string(),
+                Tr::new("admin-subdomain-error-internal"),
             ))
         }
     }
@@ -585,14 +545,14 @@ pub(crate) async fn admin_emergency_rotate_keys(
         Ok(None) => {
             return Ok(redirect_error(
                 jar,
-                Tr::new("admin-subdomain-flash-rotate-not-bootstrapped").to_string(),
+                Tr::new("admin-subdomain-flash-rotate-not-bootstrapped"),
             ));
         }
         Err(e) => {
             tracing::error!(error = %e, org_id, "failed to load current signing key");
             return Ok(redirect_error(
                 jar,
-                Tr::new("admin-subdomain-error-internal").to_string(),
+                Tr::new("admin-subdomain-error-internal"),
             ));
         }
     }
@@ -607,18 +567,18 @@ pub(crate) async fn admin_emergency_rotate_keys(
             );
             Ok(redirect_ok(
                 jar,
-                Tr::new("admin-subdomain-flash-emergency-rotation-done").to_string(),
+                Tr::new("admin-subdomain-flash-emergency-rotation-done"),
             ))
         }
         Ok(EmergencyOutcome::SubdomainReleased) => Ok(redirect_error(
             jar,
-            Tr::new("admin-subdomain-error-no-subdomain").to_string(),
+            Tr::new("admin-subdomain-error-no-subdomain"),
         )),
         Err(e) => {
             tracing::error!(error = %e, org_id, "Emergency org issuer key rotation failed");
             Ok(redirect_error(
                 jar,
-                Tr::new("admin-subdomain-error-internal").to_string(),
+                Tr::new("admin-subdomain-error-internal"),
             ))
         }
     }

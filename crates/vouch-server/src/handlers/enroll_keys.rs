@@ -79,12 +79,11 @@ pub(crate) async fn rename_key_form(
         Ok(name) => name,
         Err(err) => {
             let message = match err {
-                ResourceLabelError::Empty => Tr::new("keys-error-name-empty").to_string(),
+                ResourceLabelError::Empty => Tr::new("keys-error-name-empty"),
                 ResourceLabelError::TooLong => Tr::new("keys-error-name-too-long")
-                    .arg("max", ResourceLabel::MAX_CHARS.to_string())
-                    .to_string(),
+                    .arg("max", ResourceLabel::MAX_CHARS.to_string()),
             };
-            let jar = flash::set_err_at(jar, &message, KEYS_PATH);
+            let jar = flash::set_err_at(jar, message, KEYS_PATH);
             return (jar, Redirect::to("/enroll/keys")).into_response();
         }
     };
@@ -109,8 +108,7 @@ pub(crate) async fn rename_key_form(
             // Name-shape failures are handled above with specific messages; the
             // remaining errors get a generic message that surfaces no internal
             // detail.
-            let message = Tr::new("keys-error-rename-failed").to_string();
-            let jar = flash::set_err_at(jar, &message, KEYS_PATH);
+            let jar = flash::set_err_at(jar, Tr::new("keys-error-rename-failed"), KEYS_PATH);
             (jar, Redirect::to("/enroll/keys")).into_response()
         }
     }

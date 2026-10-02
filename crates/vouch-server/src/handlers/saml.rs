@@ -20,6 +20,7 @@ use serde::Deserialize;
 use crate::AppState;
 use crate::db::{self, ClientInfo, UpstreamLogin};
 use crate::handlers::enroll::{ErrorTemplate, complete_enrollment_after_identity};
+use crate::infra::i18n::Tr;
 use crate::services::idp::saml::{metadata, response};
 use crate::services::idp::{ConfiguredIdp, IdentityResult};
 
@@ -83,8 +84,8 @@ pub(crate) async fn acs(
         Some(rs) if !rs.is_empty() => rs,
         _ => {
             return ErrorTemplate {
-                title: "Error".to_string(),
-                message: "Missing RelayState parameter".to_string(),
+                title: Tr::new("error-heading"),
+                message: Tr::new("saml-error-missing-relay-state"),
                 back_url: None,
             }
             .into_response();
@@ -94,8 +95,8 @@ pub(crate) async fn acs(
     // Step 2: Validate RelayState length before DB lookup.
     if relay_state.len() > 128 {
         return ErrorTemplate {
-            title: "Error".to_string(),
-            message: "Invalid RelayState parameter".to_string(),
+            title: Tr::new("error-heading"),
+            message: Tr::new("saml-error-invalid-relay-state"),
             back_url: None,
         }
         .into_response();
@@ -111,8 +112,8 @@ pub(crate) async fn acs(
             Ok(pair) => pair,
             Err(db::ClaimError::AlreadyConsumed) => {
                 return ErrorTemplate {
-                    title: "Error".to_string(),
-                    message: "Invalid or expired state".to_string(),
+                    title: Tr::new("error-heading"),
+                    message: Tr::new("enroll-error-state-expired"),
                     back_url: None,
                 }
                 .into_response();
@@ -120,8 +121,8 @@ pub(crate) async fn acs(
             Err(e) => {
                 tracing::error!("Failed to consume SAML state: {e:#}");
                 return ErrorTemplate {
-                    title: "Error".to_string(),
-                    message: "Failed to verify state".to_string(),
+                    title: Tr::new("error-heading"),
+                    message: Tr::new("enroll-error-state-verify-failed"),
                     back_url: None,
                 }
                 .into_response();
@@ -144,10 +145,8 @@ pub(crate) async fn acs(
     };
     let Some(saml_provider) = saml_provider else {
         return ErrorTemplate {
-            title: "Error".to_string(),
-            message: "SAML IdP not configured for this state. If using OIDC, \
-                      responses go to /oauth/callback."
-                .to_string(),
+            title: Tr::new("error-heading"),
+            message: Tr::new("saml-error-idp-not-configured"),
             back_url: None,
         }
         .into_response();
@@ -164,8 +163,8 @@ pub(crate) async fn acs(
         Err(e) => {
             tracing::warn!("SAML response validation failed: {e:#}");
             return ErrorTemplate {
-                title: "Authentication Failed".to_string(),
-                message: "Failed to verify SAML response. Please try again.".to_string(),
+                title: Tr::new("saml-error-auth-failed-title"),
+                message: Tr::new("saml-error-response-invalid"),
                 back_url: None,
             }
             .into_response();
@@ -288,11 +287,13 @@ mod tests {
         let (app, _state) = test_app().await;
         // Post SAMLResponse without RelayState — serde fills with None for Option
         let form_body = "SAMLResponse=dGVzdA%3D%3D"; // base64("test")
-        let (status, _body) = http_post_form(&app, "/saml/acs", form_body, &[]).await;
-        // Should return an error page (200 HTML) — handler renders error, not 4xx
+        let (status, body) = http_post_form(&app, "/saml/acs", form_body, &[]).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
         assert!(
-            status == StatusCode::OK || status.is_client_error(),
-            "Expected error response for missing RelayState, got: {status}"
+            body.contains(
+                &crate::infra::i18n::Tr::new("saml-error-missing-relay-state").to_string()
+            ),
+            "the page renders the catalog message: {body}"
         );
     }
 

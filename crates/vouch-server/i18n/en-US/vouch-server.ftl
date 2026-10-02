@@ -315,6 +315,13 @@ enroll-error-missing-state = Missing state parameter
 enroll-error-invalid-state = Invalid state parameter
 enroll-error-state-expired = Invalid or expired state
 enroll-error-state-verify-failed = Failed to verify state
+enroll-error-idp-returned = The identity provider returned an error: { $error }
+enroll-error-idp-returned-detail = The identity provider returned an error: { $error } ({ $detail })
+saml-error-missing-relay-state = Missing RelayState parameter
+saml-error-invalid-relay-state = Invalid RelayState parameter
+saml-error-idp-not-configured = The SAML identity provider for this sign-in is not configured. Please contact your administrator.
+saml-error-auth-failed-title = Authentication Failed
+saml-error-response-invalid = Failed to verify the SAML response. Please try again.
 
 ## Browser key management and WebAuthn errors.
 ##
@@ -1159,3 +1166,51 @@ audit-event-org-subdomain-released = Issuer subdomain released (by an admin, or 
 audit-event-org-issuer-key-rotated = Per-org issuer signing keys rotated (one event per algorithm)
 audit-event-org-issuer-key-revoked = Per-org previous signing keys revoked (one event per algorithm)
 audit-event-org-issuer-key-emergency-rotation = Emergency rotation of per-org issuer keys (one event per algorithm)
+
+## GitHub integration error page
+
+github-error-not-available-title = Not Available
+github-error-configuration-title = Configuration Error
+github-error-unauthorized-title = Unauthorized
+github-error-invalid-state-title = Invalid State
+github-error-invalid-flow-title = Invalid Flow
+github-error-sign-in-title = Sign In Required
+github-error-session-mismatch-title = Session Mismatch
+github-error-organization-title = Organization Required
+github-error-admin-title = Admin Required
+github-error-account-title = GitHub Account Required
+github-error-access-denied-title = Access Denied
+github-error-already-connected-title = Already Connected
+github-error-api-title = GitHub Error
+github-error-not-configured = GitHub integration is not configured on this server.
+github-error-oauth-not-configured = GitHub OAuth is not configured on this server.
+github-error-webhook-secret-not-configured = The GitHub webhook secret is not configured.
+github-error-invalid-signature = Invalid webhook signature.
+github-error-invalid-state = Invalid or expired state token. Please start the GitHub connection again.
+github-error-wrong-flow = This link belongs to a different GitHub flow. Please start again.
+github-error-session-required = Please sign in before completing the GitHub connection.
+github-error-session-mismatch = This GitHub callback does not match your current session.
+github-error-organization-required = GitHub integration requires an organization account.
+github-error-not-org-admin = Only organization administrators can perform this action.
+github-error-account-not-linked = Please link your GitHub account first.
+github-error-installation-access-denied = You do not have access to this GitHub installation.
+github-error-installation-already-connected = This GitHub installation is already connected to an organization.
+github-error-api = GitHub returned an error. Please try again later.
+github-error-internal = Something went wrong connecting to GitHub. Please try again later.
+
+## Admin policies flash messages
+
+admin-policies-error-max-active = Maximum of { $max } active policies allowed
+admin-policies-error-max-custom = Maximum of { $max } custom policies allowed
+admin-policies-error-name-length = Name must be between 1 and 100 characters
+admin-policies-error-text-length = Policy text must be between 1 and { $max } characters
+admin-policies-error-description-length = Description must be { $max } characters or less
+# $detail is the Cedar parser's message, shown verbatim.
+admin-policies-error-invalid = Invalid policy: { $detail }
+
+## Admin SCIM token flash messages
+
+admin-scim-tokens-error-description-length = Description must be { $max } characters or less
+admin-scim-tokens-error-expiration = Expiration must be between 1 and 365 days
+admin-scim-tokens-error-limit = Maximum of { $max } SCIM tokens per organization. Revoke one before creating another.
+admin-scim-tokens-error-not-found = SCIM token not found
