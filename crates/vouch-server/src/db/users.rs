@@ -540,6 +540,12 @@ pub async fn demote_or_deactivate_member(
         #[cfg(test)]
         store.run_last_admin_count_test_hook(user_id).await;
 
+        // Test-only seam: a write failure after the caller's revocation.
+        #[cfg(test)]
+        if let Some(e) = store.inject_persist_error(user_id) {
+            return Err(MemberDowngradeError::Other(e));
+        }
+
         let Some(user_doc) = tx.get::<UserDoc>(user_id).await? else {
             return Ok(false);
         };
@@ -658,6 +664,12 @@ pub async fn delete_user(
         // builds, so production pays nothing.
         #[cfg(test)]
         store.run_delete_test_hook(user_id).await;
+
+        // Test-only seam: a write failure after the caller's revocation.
+        #[cfg(test)]
+        if let Some(e) = store.inject_persist_error(user_id) {
+            return Err(DeleteUserError::Other(e));
+        }
 
         // Return `false` when the user document is missing so callers can
         // surface a 404 and skip the audit event. A concurrent delete that

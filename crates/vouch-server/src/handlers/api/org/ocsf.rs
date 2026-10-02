@@ -790,6 +790,37 @@ mod tests {
         assert_eq!(removed.status_id.value(), StatusId::Success.value());
     }
 
+    /// A `persist_error` refusal — the in-transaction write failed after
+    /// revocation already committed — projects to the same Failure status as
+    /// `last_admin`. The OCSF projection is variant-agnostic: any `refusal`
+    /// member flips the row to a failure, whatever the reason. Pinning this
+    /// guards the audit-completeness fix for the admin `remove_member` /
+    /// `deactivate_member` generic-error arms against a future change that
+    /// special-cases `LastAdmin`.
+    #[test]
+    fn persist_error_refusal_reports_failure_status() {
+        let data = |refusal, action| {
+            serde_json::to_string(&AdminMemberActionData {
+                action,
+                target_user_id: "u-target",
+                admin_user_id: "u-admin",
+                keys_revoked: None,
+                refusal,
+            })
+            .unwrap()
+        };
+        let removed = to_ocsf(&sample_event(
+            AuditEventKind::AdminRemoveUser,
+            &data(Some(Refusal::PersistError), "remove_user"),
+        ));
+        assert_eq!(removed.status_id.value(), StatusId::Failure.value());
+        let deactivated = to_ocsf(&sample_event(
+            AuditEventKind::AdminDeactivate,
+            &data(Some(Refusal::PersistError), "deactivate"),
+        ));
+        assert_eq!(deactivated.status_id.value(), StatusId::Failure.value());
+    }
+
     #[test]
     fn refused_scim_delete_reports_failure_status() {
         let data = serde_json::to_string(&ScimAuditData {

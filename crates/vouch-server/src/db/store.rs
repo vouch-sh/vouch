@@ -370,6 +370,9 @@ pub struct DocumentStore {
     /// See [`LastAdminCountTestHook`]. Compiled out of non-test builds.
     #[cfg(test)]
     last_admin_count_test_hook: Option<LastAdminCountTestHook>,
+    /// See [`InjectPersistErrorTestHook`]. Compiled out of non-test builds.
+    #[cfg(test)]
+    inject_persist_error_test_hook: Option<InjectPersistErrorTestHook>,
     /// See [`PostSecretRevokeTestHook`]. Compiled out of non-test builds.
     #[cfg(test)]
     post_secret_revoke_test_hook: Option<PostSecretRevokeTestHook>,
@@ -499,6 +502,14 @@ pub(crate) type DeleteTestHook = Arc<dyn Fn(&str) -> DeleteHookFuture + Send + S
 #[cfg(test)]
 pub(crate) type LastAdminCountTestHook = Arc<dyn Fn(&str) -> DeleteHookFuture + Send + Sync>;
 
+/// Test-only seam for the write that completes a member action after access
+/// revocation (`delete_user`, `demote_or_deactivate_member`,
+/// `update_scim_user`, and admin key revocation). `Some(error)` fails that
+/// write with a non-retryable error for the given user id.
+#[cfg(test)]
+pub(crate) type InjectPersistErrorTestHook =
+    Arc<dyn Fn(&str) -> Option<anyhow::Error> + Send + Sync>;
+
 /// Test-only hook invoked inside
 /// [`delete_oauth_client_and_revoke_sessions`](crate::db::delete_oauth_client_and_revoke_sessions)
 /// after [`revoke_all_oauth_client_secrets`](crate::db::revoke_all_oauth_client_secrets)
@@ -591,6 +602,8 @@ impl DocumentStore {
             #[cfg(test)]
             last_admin_count_test_hook: None,
             #[cfg(test)]
+            inject_persist_error_test_hook: None,
+            #[cfg(test)]
             post_secret_revoke_test_hook: None,
             #[cfg(test)]
             get_user_by_id_test_hook: None,
@@ -678,6 +691,19 @@ impl DocumentStore {
         if let Some(hook) = &self.last_admin_count_test_hook {
             hook(id).await;
         }
+    }
+
+    /// Install the [`InjectPersistErrorTestHook`] seam.
+    #[cfg(test)]
+    pub(crate) fn set_inject_persist_error_test_hook(&mut self, hook: InjectPersistErrorTestHook) {
+        self.inject_persist_error_test_hook = Some(hook);
+    }
+
+    /// The injected persist error for `id`, if a hook is installed.
+    #[cfg(test)]
+    pub(crate) fn inject_persist_error(&self, id: &str) -> Option<anyhow::Error> {
+        let hook = self.inject_persist_error_test_hook.as_ref()?;
+        hook(id)
     }
 
     /// Install the [`GetUserByIdTestHook`] seam for

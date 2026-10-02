@@ -922,7 +922,7 @@ async fn persist_user_update(
                             })
                             .to_string(),
                         ),
-                        refusal: None,
+                        refusal: Some(db::Refusal::PersistError),
                     },
                     auth.org_domain.as_deref(),
                 )
@@ -1153,7 +1153,7 @@ pub(crate) async fn delete_user(
                     details: Some(
                         &serde_json::json!({"accessRevoked": true, "deleted": false}).to_string(),
                     ),
-                    refusal: None,
+                    refusal: Some(db::Refusal::PersistError),
                 },
                 auth.org_domain.as_deref(),
             )
