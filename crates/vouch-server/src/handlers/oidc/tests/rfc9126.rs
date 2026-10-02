@@ -4208,3 +4208,254 @@ async fn test_rfc9126_pending_resume_retry_re_renders_par_already_consumed_not_s
         "retry must NOT issue a code: {retry_location}"
     );
 }
+
+// ========================================================================
+// PAR-URN `response_mode` validation — parity with the direct/JAR paths
+//
+// PR #1121 made `parse_response_mode` the single chokepoint that turns a
+// client-supplied `response_mode` string into a `ResponseMode` and routed the
+// direct and JAR authorize paths through it, but the PAR-URN dispatch branch
+// kept `ResponseMode::parse(...).unwrap_or(ResponseMode::Query)`, silently
+// answering an unrecognized mode in `query`. The PAR-URN error exit then
+// disagreed with every sibling path for the same input: a client that typos its
+// `response_mode` and whose `request_uri` has expired got a query-string
+// `error=invalid_request_uri` redirect instead of the `error=invalid_request`
+// rejection the direct path returns. These tests pin the parity fix: the
+// URL-supplied `response_mode` on a PAR-URN request now goes through
+// `parse_response_mode`, and the recognized-mode / no-redirect-uri /
+// consumed-PAR behaviours the fix deliberately preserves stay pinned.
+// ========================================================================
+
+/// A typo `response_mode` on a PAR-URN authorize request is rejected with
+/// `error=invalid_request`, exactly as the direct path rejects the same typo —
+/// not silently substituted with `Query` and surfaced as
+/// `error=invalid_request_uri` when the PAR lookup fails.
+#[tokio::test]
+async fn test_rfc9126_par_urn_unrecognized_response_mode_rejected_like_direct_path() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "par-urn-rm-repro@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let registered_redirect = "https://example.com/callback";
+
+    // Direct path: parse_response_mode rejects the typo with invalid_request.
+    let direct_resp = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid\
+             &response_mode=fomr_post",
+            client.client_id,
+            urlencoding::encode(registered_redirect),
+        ),
+        &[],
+    )
+    .await;
+    assert!(
+        direct_resp.status == StatusCode::FOUND || direct_resp.status == StatusCode::SEE_OTHER,
+        "direct path should redirect the typo, got status={}: {}",
+        direct_resp.status,
+        direct_resp.body,
+    );
+    let direct_loc = direct_resp
+        .headers
+        .get("Location")
+        .map(|h| h.to_str().unwrap_or("").to_string())
+        .unwrap_or_default();
+    assert!(
+        direct_loc.contains("error=invalid_request")
+            && !direct_loc.contains("error=invalid_request_uri"),
+        "direct path should reject typo with invalid_request, got: {direct_loc}",
+    );
+
+    // PAR-URN path: bogus request_uri + the same typo. Before the fix this
+    // silently substituted Query and rendered `error=invalid_request_uri`;
+    // after the fix it rejects with `error=invalid_request` like the direct path.
+    let bogus_request_uri = "urn:ietf:params:oauth:request_uri:nonexistent_repro";
+    let par_resp = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?client_id={}&request_uri={}&redirect_uri={}&response_mode=fomr_post",
+            client.client_id,
+            urlencoding::encode(bogus_request_uri),
+            urlencoding::encode(registered_redirect),
+        ),
+        &[],
+    )
+    .await;
+    assert!(
+        par_resp.status == StatusCode::FOUND || par_resp.status == StatusCode::SEE_OTHER,
+        "PAR-URN path should redirect the typo with invalid_request, got status={}: {}",
+        par_resp.status,
+        par_resp.body,
+    );
+    let par_loc = par_resp
+        .headers
+        .get("Location")
+        .map(|h| h.to_str().unwrap_or("").to_string())
+        .unwrap_or_default();
+    assert!(
+        par_loc.starts_with(registered_redirect),
+        "PAR-URN rejection must redirect to the registered URI: {par_loc}",
+    );
+    assert!(
+        par_loc.contains("error=invalid_request") && !par_loc.contains("error=invalid_request_uri"),
+        "PAR-URN path should reject fomr_post with invalid_request (like the direct path), \
+         not silently substitute Query and report invalid_request_uri: {par_loc}",
+    );
+}
+
+/// With no `redirect_uri` on the URL and a single registered URI, an
+/// unrecognized `response_mode` is still rejected — to the auto-selected
+/// registered URI (OIDC Core 3.1.2.1), exactly as the direct path renders it.
+/// The two error exits agree even when the client omits `redirect_uri`.
+#[tokio::test]
+async fn test_rfc9126_par_urn_unrecognized_response_mode_no_redirect_uri_auto_selects() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "par-urn-rm-noredir@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let registered_redirect = "https://example.com/callback";
+
+    let bogus_request_uri = "urn:ietf:params:oauth:request_uri:nonexistent_noredir";
+    let par_resp = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?client_id={}&request_uri={}&response_mode=fomr_post",
+            client.client_id,
+            urlencoding::encode(bogus_request_uri),
+        ),
+        &[],
+    )
+    .await;
+    assert!(
+        par_resp.status == StatusCode::FOUND || par_resp.status == StatusCode::SEE_OTHER,
+        "PAR-URN with unrecognized response_mode and no redirect_uri should redirect to the \
+         auto-selected URI, got status={}: {}",
+        par_resp.status,
+        par_resp.body,
+    );
+    let par_loc = par_resp
+        .headers
+        .get("Location")
+        .map(|h| h.to_str().unwrap_or("").to_string())
+        .unwrap_or_default();
+    assert!(
+        par_loc.starts_with(registered_redirect),
+        "PAR-URN rejection should auto-select the single registered URI: {par_loc}",
+    );
+    assert!(
+        par_loc.contains("error=invalid_request") && !par_loc.contains("error=invalid_request_uri"),
+        "PAR-URN with no redirect_uri + typo should still reject with invalid_request: {par_loc}",
+    );
+}
+
+/// A *recognized* `response_mode` on the URL is NOT rejected early — it flows
+/// through to `lookup_par`'s error branch and renders `invalid_request_uri` in
+/// that mode. This is the behaviour the fix preserves: only an unrecognized
+/// value is rejected; a `form_post` client whose `request_uri` has expired
+/// still receives a `form_post` form, not a query redirect.
+#[tokio::test]
+async fn test_rfc9126_par_urn_recognized_response_mode_drives_lookup_failure_redirect() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "par-urn-rm-formpost@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let registered_redirect = "https://example.com/callback";
+
+    let bogus_request_uri = "urn:ietf:params:oauth:request_uri:nonexistent_formpost";
+    let par_resp = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?client_id={}&request_uri={}&redirect_uri={}&response_mode=form_post",
+            client.client_id,
+            urlencoding::encode(bogus_request_uri),
+            urlencoding::encode(registered_redirect),
+        ),
+        &[],
+    )
+    .await;
+
+    // FormPost mode renders an HTML auto-submitting form (200), not a redirect.
+    assert_eq!(
+        par_resp.status,
+        StatusCode::OK,
+        "form_post error must be an HTML form page, got status={}: {}",
+        par_resp.status,
+        par_resp.body,
+    );
+    assert!(
+        par_resp
+            .headers
+            .get("Content-Type")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|ct| ct.contains("text/html")),
+        "form_post error must carry a text/html body, got Content-Type: {:?}",
+        par_resp.headers.get("Content-Type"),
+    );
+    assert!(
+        par_resp.body.contains(r#"method="post""#),
+        "form_post error must render a POST form: {}",
+        par_resp.body,
+    );
+    assert!(
+        par_resp.body.contains(registered_redirect),
+        "form_post error must target the registered redirect_uri: {}",
+        par_resp.body,
+    );
+    assert!(
+        par_resp.body.contains(r#"value="invalid_request_uri""#),
+        "recognized response_mode must render the PAR lookup failure as \
+         error=invalid_request_uri, not be rejected as invalid_request: {}",
+        par_resp.body,
+    );
+}
+
+/// A consumed/missing PAR with no `redirect_uri` and no `response_mode` on the
+/// URL must still return the error page — the fix touched only `response_mode`
+/// validation, not the `lookup_par` fallback-redirect semantics. A 302 here
+/// would mean the helper widened `fallback_redirect_uri` to the resolved URI
+/// (the approach the bug report's literal recommendation would have taken),
+/// which would break the consumed-PAR error-page contract.
+#[tokio::test]
+async fn test_rfc9126_par_urn_missing_par_no_redirect_uri_still_error_page() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "par-urn-rm-errorpage@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let bogus_request_uri = "urn:ietf:params:oauth:request_uri:nonexistent_errorpage";
+    let par_resp = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?client_id={}&request_uri={}",
+            client.client_id,
+            urlencoding::encode(bogus_request_uri),
+        ),
+        &[],
+    )
+    .await;
+
+    assert_eq!(
+        par_resp.status,
+        StatusCode::OK,
+        "missing PAR with no redirect_uri must return an error page, got status={}: {}",
+        par_resp.status,
+        par_resp.body,
+    );
+    assert!(
+        !par_resp
+            .headers
+            .get("Location")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|loc| loc.contains("error=")),
+        "missing PAR with no redirect_uri must NOT redirect: {:?}",
+        par_resp.headers.get("Location"),
+    );
+    assert!(
+        par_resp.body.contains("expired")
+            || par_resp.body.contains("Invalid")
+            || par_resp.body.contains("error"),
+        "missing PAR error page should indicate the request_uri is invalid: {}",
+        par_resp.body,
+    );
+}

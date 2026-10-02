@@ -586,17 +586,31 @@ async fn authorize_inner(
                 }
                 .into_response();
             }
+            // The URL-supplied `response_mode` must go through `parse_response_mode`
+            // before it reaches the PAR-lookup-failure branch, which renders its
+            // error in this mode. An unrecognized value is rejected with
+            // `invalid_request` here — matching the direct and JAR entry points and
+            // the invariant `parse_response_mode` documents — instead of being
+            // silently substituted with `Query` (the pattern it exists to forbid).
+            let response_mode = match resolve_par_urn_response_mode(
+                &state,
+                &client_id,
+                params.redirect_uri.as_deref(),
+                params.response_mode.as_deref(),
+                params.state.as_deref(),
+            )
+            .await
+            {
+                Ok(mode) => mode,
+                Err(resp) => return resp,
+            };
             return handle_par_request(
                 &state,
                 ParRequestContext {
                     request_uri,
                     client_id: &client_id,
                     fallback_redirect_uri: params.redirect_uri.as_deref(),
-                    response_mode: params
-                        .response_mode
-                        .as_deref()
-                        .and_then(ResponseMode::parse)
-                        .unwrap_or(ResponseMode::Query),
+                    response_mode,
                 },
                 jar,
                 arrival,
@@ -922,6 +936,65 @@ async fn lookup_par(
                 error_message: Tr::new("authorize-denied-generic"),
             }
             .into_response())
+        }
+    }
+}
+
+/// Resolve the URL-supplied `response_mode` for the PAR-URN dispatch branch.
+///
+/// This is the PAR-URN equivalent of the `ResponseModeSource::Requested` arm of
+/// [`AuthorizeResponseTarget::finish`]: the URL-supplied value is parsed through
+/// [`parse_response_mode`], the single chokepoint that rejects an unrecognized
+/// mode with `invalid_request` rather than silently answering in `query`. On
+/// rejection the error is rendered to the request's `redirect_uri` exactly as
+/// the direct path renders it — load the client, resolve the `redirect_uri`
+/// (which auto-selects a single registered URI per OIDC Core 3.1.2.1), then
+/// emit the `invalid_request` redirect in the `query` mode an unusable request
+/// mode falls back to. An unregistered/absent `redirect_uri` or unknown client
+/// surfaces as the matching error page, never as a redirect to an unvalidated
+/// URI — the same outcomes the direct path produces for the same inputs.
+///
+/// It is deliberately *not* [`AuthorizeResponseTarget::resolve`]: that
+/// constructor also runs the `ValidatedOAuthClient::for_authorize` gate, which
+/// the PAR-URN success path must run later against the *stored* PAR
+/// `response_mode` (so a `jwt`/`form_post` gate rejection is rendered in the
+/// stored mode, not the URL's). Running the gate here — against the URL mode —
+/// would render those rejections in `query` and break the stored-mode
+/// guarantees pinned by `test_par_{jwt,form_post,query}_gate_rejection_*`. Nor
+/// is `fallback_redirect_uri` widened to the resolved URI: the PAR-lookup
+/// failure branch keeps using the request's own `redirect_uri` (or `None`) as
+/// its fallback, so a consumed/missing PAR with no `redirect_uri` on the URL
+/// still returns the error page that `test_rfc9126_request_uri_is_single_use`
+/// and `test_rfc9126_par_already_consumed_returns_error_not_login` pin. Only an
+/// unrecognized `response_mode` changes behaviour.
+#[expect(
+    clippy::result_large_err,
+    reason = "Err is an HTTP Response; size is acceptable in error path"
+)]
+async fn resolve_par_urn_response_mode(
+    state: &Arc<AppState>,
+    client_id: &str,
+    redirect_uri_param: Option<&str>,
+    response_mode_param: Option<&str>,
+    oauth_state: Option<&str>,
+) -> Result<ResponseMode, Response> {
+    match parse_response_mode(response_mode_param) {
+        Ok(mode) => Ok(mode),
+        Err(e) => {
+            // Render `invalid_request` to the request's redirect_uri, mirroring
+            // the direct path's ordering of refusal vs. redirect target.
+            let client = lookup_and_check_active(state, client_id).await?;
+            let redirect_uri = resolve_redirect_uri(redirect_uri_param, &client)?;
+            Err(oauth_error_response(
+                state,
+                &client,
+                &redirect_uri,
+                OAuthErrorCode::InvalidRequest,
+                &e.oauth_description(),
+                oauth_state,
+                ResponseMode::Query,
+            )
+            .await)
         }
     }
 }
