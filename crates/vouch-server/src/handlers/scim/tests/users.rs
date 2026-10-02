@@ -3324,3 +3324,80 @@ async fn test_patch_user_operation_name_is_case_insensitive() {
         assert_eq!(patched["externalId"], op);
     }
 }
+
+/// A SCIM deactivation or delete whose write fails after revocation committed
+/// records a `scim_operation` row with `refusal: "persist_error"`, so the OCSF
+/// export reports a failure rather than a success.
+#[tokio::test]
+async fn test_scim_persist_failure_after_revocation_is_audited_as_refused() {
+    use std::sync::{Arc, Mutex};
+
+    let failing: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let f = Arc::clone(&failing);
+    let (app, state) = test_app_with_modify_hook(move |store| {
+        store.set_inject_persist_error_test_hook(Arc::new(move |user_id: &str| {
+            f.lock()
+                .expect("failing lock")
+                .iter()
+                .any(|id| id == user_id)
+                .then(|| anyhow::anyhow!("injected non-retryable storage fault"))
+        }));
+    })
+    .await;
+
+    let (admin, _) = create_test_org_admin(&state).await;
+    let org_id = admin.org_id.as_deref().expect("admin has org").to_string();
+    let to_deactivate =
+        create_test_user_in_org(&state.store, "deactivate@example.com", &org_id, false).await;
+    let to_delete =
+        create_test_user_in_org(&state.store, "delete@example.com", &org_id, false).await;
+    let token = create_test_org_token_with_scope(
+        &state.store,
+        "idp",
+        &org_id,
+        ScimScopeSet::from_scopes(vec![ScimScope::UsersWrite]),
+    )
+    .await;
+    let auth_header = format!("Bearer {token}");
+    failing
+        .lock()
+        .expect("failing lock")
+        .extend([to_deactivate.id.clone(), to_delete.id.clone()]);
+
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Users/{}", to_deactivate.id),
+        Some(r#"{"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{"op": "replace", "path": "active", "value": false}]}"#.to_string()),
+        &[
+            ("Authorization", &auth_header),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    let (status, body) = http_delete(
+        &app,
+        &format!("/scim/v2/Users/{}", to_delete.id),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+
+    let events = state
+        .audit
+        .query_events(&AuditEventFilter {
+            event_types: Some(vec!["scim_operation".to_string()]),
+            ..AuditEventFilter::default()
+        })
+        .await
+        .expect("query audit events");
+    for id in [&to_deactivate.id, &to_delete.id] {
+        let row = events
+            .iter()
+            .filter_map(|e| serde_json::from_str::<serde_json::Value>(&e.data).ok())
+            .find(|v| v["resource_id"] == **id)
+            .expect("audit row for the failed write");
+        assert_eq!(row["refusal"], "persist_error", "{row}");
+    }
+}

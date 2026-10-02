@@ -495,21 +495,10 @@ pub(crate) type DeleteTestHook = Arc<dyn Fn(&str) -> DeleteHookFuture + Send + S
 #[cfg(test)]
 pub(crate) type LastAdminCountTestHook = Arc<dyn Fn(&str) -> DeleteHookFuture + Send + Sync>;
 
-/// Test-only hook invoked inside [`crate::db::delete_user`] and
-/// [`demote_or_deactivate_member`](crate::db::demote_or_deactivate_member)
-/// right after the transaction begins (and after the
-/// [`DeleteTestHook`]/[`LastAdminCountTestHook`] side-effect seam runs),
-/// receiving the `user_id` being acted on.
-///
-/// Returning `Some(error)` short-circuits the write to
-/// `Err(DeleteUserError::Other(error))` /
-/// `Err(MemberDowngradeError::Other(error))` — a non-retryable storage fault,
-/// exactly the shape `is_retryable_db_error` declines to retry. The admin
-/// `remove_member` / `deactivate_member` handlers revoke access *before* this
-/// write runs, so the injected fault surfaces to the handler after
-/// `revoke_user_access` has already committed; tests assert the committed
-/// revocation is recorded in the canonical admin audit log. Compiled out of
-/// non-test builds, so production pays nothing.
+/// Test-only seam for the write that completes a member action after access
+/// revocation (`delete_user`, `demote_or_deactivate_member`,
+/// `update_scim_user`, and admin key revocation). `Some(error)` fails that
+/// write with a non-retryable error for the given user id.
 #[cfg(test)]
 pub(crate) type InjectPersistErrorTestHook =
     Arc<dyn Fn(&str) -> Option<anyhow::Error> + Send + Sync>;
@@ -655,19 +644,13 @@ impl DocumentStore {
         }
     }
 
-    /// Install the [`InjectPersistErrorTestHook`] seam for
-    /// [`delete_user`](super::users::delete_user) and
-    /// [`demote_or_deactivate_member`](super::users::demote_or_deactivate_member).
+    /// Install the [`InjectPersistErrorTestHook`] seam.
     #[cfg(test)]
     pub(crate) fn set_inject_persist_error_test_hook(&mut self, hook: InjectPersistErrorTestHook) {
         self.inject_persist_error_test_hook = Some(hook);
     }
 
-    /// Return the injected persist error for `id`, if any. Invoked by
-    /// `delete_user` and `demote_or_deactivate_member` right after the
-    /// transaction begins; `Some` short-circuits the write to a non-retryable
-    /// `Other` error. No-op (`None`) in non-test builds and when no hook is
-    /// installed.
+    /// The injected persist error for `id`, if a hook is installed.
     #[cfg(test)]
     pub(crate) fn inject_persist_error(&self, id: &str) -> Option<anyhow::Error> {
         let hook = self.inject_persist_error_test_hook.as_ref()?;

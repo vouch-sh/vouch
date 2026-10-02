@@ -246,63 +246,28 @@ pub(crate) async fn deactivate_member(
         Ok(updated) => updated,
         Err(DeactivationError::Revoke(err)) => return Err(err),
         Err(DeactivationError::Persist(err)) => {
-            if matches!(err, db::MemberDowngradeError::LastAdmin) {
-                // `revoke_then_persist` already committed the target's
-                // session deletions, SSH-cert revocations, and GitHub
-                // refresh-token clear. The authoritative in-transaction
-                // last-admin floor then refused the `active = false` write,
-                // so that write never committed — but the committed
-                // revocation still belongs in the canonical admin audit log.
-                // Record an `AdminDeactivate` event carrying
-                // `refusal: "last_admin"` so the committed revocation is
-                // attributable and distinguishable from a successful
-                // deactivation, as the SCIM handlers do.
-                state
-                    .audit
-                    .record_event(
-                        db::AuditEventKind::AdminDeactivate,
-                        Some(&admin.id),
-                        Some(&target.email),
-                        &AdminMemberActionData {
-                            action: "deactivate",
-                            target_user_id: &target_id,
-                            admin_user_id: &admin.id,
-                            keys_revoked: None,
-                            refusal: Some(Refusal::LastAdmin),
-                        },
-                    )
-                    .await;
+            // Revocation committed and the `active = false` write did not, so
+            // the committed revocation is audited with the reason it stopped.
+            let refusal = if matches!(err, db::MemberDowngradeError::LastAdmin) {
+                Refusal::LastAdmin
             } else {
-                // `revoke_then_persist` already committed the target's
-                // session deletions, SSH-cert revocations, and GitHub
-                // refresh-token clear. The authoritative `active = false`
-                // write then failed with a non-`LastAdmin` error (OCC retry
-                // exhaustion or a non-retryable store fault), so that write
-                // never committed — but the committed revocation still
-                // belongs in the canonical admin audit log, the same
-                // principle the `LastAdmin` arm above records for. Record an
-                // `AdminDeactivate` event carrying `refusal: "persist_error"`
-                // so the committed revocation is attributable and
-                // distinguishable from a successful deactivation and from a
-                // `last_admin` refusal, as the SCIM handlers do for their
-                // generic-error arm. The OCSF projection reports any row
-                // carrying a `refusal` as a failure, whatever the reason.
-                state
-                    .audit
-                    .record_event(
-                        db::AuditEventKind::AdminDeactivate,
-                        Some(&admin.id),
-                        Some(&target.email),
-                        &AdminMemberActionData {
-                            action: "deactivate",
-                            target_user_id: &target_id,
-                            admin_user_id: &admin.id,
-                            keys_revoked: None,
-                            refusal: Some(Refusal::PersistError),
-                        },
-                    )
-                    .await;
-            }
+                Refusal::PersistError
+            };
+            state
+                .audit
+                .record_event(
+                    db::AuditEventKind::AdminDeactivate,
+                    Some(&admin.id),
+                    Some(&target.email),
+                    &AdminMemberActionData {
+                        action: "deactivate",
+                        target_user_id: &target_id,
+                        admin_user_id: &admin.id,
+                        keys_revoked: None,
+                        refusal: Some(refusal),
+                    },
+                )
+                .await;
             return Err(last_admin_error(err));
         }
     };
@@ -430,6 +395,10 @@ pub(crate) async fn revoke_member_credentials(
             // concurrent enrollment and deletes it with the rest.
             use crate::db::documents::authenticator::AuthenticatorDoc;
             crate::with_dsql_retry!(async {
+                #[cfg(test)]
+                if let Some(e) = state.store.inject_persist_error(&target_id) {
+                    return Err(ServiceError::Internal(e.to_string()));
+                }
                 let mut tx = state.store.begin().await.map_err(|e| {
                     ServiceError::from_db_contention(e, "Failed to start transaction")
                 })?;
@@ -459,11 +428,30 @@ pub(crate) async fn revoke_member_credentials(
             })
         },
     )
-    .await
-    .map_err(|e| match e {
-        DeactivationError::Revoke(err) => err,
-        DeactivationError::Persist(err) => err,
-    })?;
+    .await;
+    let key_count = match key_count {
+        Ok(key_count) => key_count,
+        Err(DeactivationError::Revoke(err)) => return Err(err),
+        Err(DeactivationError::Persist(err)) => {
+            // Revocation committed and the key deletion did not.
+            state
+                .audit
+                .record_event(
+                    db::AuditEventKind::AdminRevokeCredentials,
+                    Some(&admin.id),
+                    Some(&target.email),
+                    &AdminMemberActionData {
+                        action: "revoke_credentials",
+                        target_user_id: &target_id,
+                        admin_user_id: &admin.id,
+                        keys_revoked: None,
+                        refusal: Some(Refusal::PersistError),
+                    },
+                )
+                .await;
+            return Err(err);
+        }
+    };
 
     let data = AdminMemberActionData {
         action: "revoke_credentials",
@@ -525,50 +513,21 @@ pub(crate) async fn remove_member(
     .await
     {
         Ok(deleted) => deleted,
-        Err(db::DeleteUserError::LastAdmin) => {
-            // `revoke_user_access` above already committed the target's
-            // session deletions, SSH-cert revocations, and GitHub
-            // refresh-token clear. The authoritative in-transaction last-admin
-            // floor then refused the delete, so the user row was never
-            // removed — but that committed revocation still belongs in the
-            // canonical admin audit log. Record an `AdminRemoveUser` event
-            // carrying `refusal: "last_admin"` so the committed revocation is
-            // attributable and distinguishable from a successful removal,
-            // as the SCIM handlers do. Same refusal
-            // `demote_member` gives, for the same reason: the organization
-            // must keep one active admin, and removing the member outright
-            // removes them from that count just as demoting does.
-            state
-                .audit
-                .record_event(
-                    db::AuditEventKind::AdminRemoveUser,
-                    Some(&admin.id),
-                    Some(&target_email),
-                    &AdminMemberActionData {
-                        action: "remove_user",
-                        target_user_id: &target_id,
-                        admin_user_id: &admin.id,
-                        keys_revoked: None,
-                        refusal: Some(Refusal::LastAdmin),
-                    },
-                )
-                .await;
-            return Err(last_admin_refusal());
-        }
         Err(e) => {
-            // `revoke_user_access` above already committed the target's
-            // session deletions, SSH-cert revocations, and GitHub
-            // refresh-token clear. The `delete_user` write then failed with
-            // a non-`LastAdmin` error (OCC retry exhaustion or a
-            // non-retryable store fault), so the user row was never removed
-            // — but that committed revocation still belongs in the canonical
-            // admin audit log, the same principle the `LastAdmin` arm above
-            // records for. Record an `AdminRemoveUser` event carrying
-            // `refusal: "persist_error"` so the committed revocation is
-            // attributable and distinguishable from a successful removal and
-            // from a `last_admin` refusal, as the SCIM handlers do for
-            // their generic-error arm. The OCSF projection reports any row
-            // carrying a `refusal` as a failure, whatever the reason.
+            // Revocation committed and the delete did not, so the committed
+            // revocation is audited with the reason it stopped. The last-admin
+            // refusal matches `demote_member`'s: removing the member takes
+            // them out of the admin count just as demoting does.
+            let (refusal, error) = match e {
+                db::DeleteUserError::LastAdmin => (Refusal::LastAdmin, last_admin_refusal()),
+                e => {
+                    tracing::error!("Failed to delete user: {e}");
+                    (
+                        Refusal::PersistError,
+                        ServiceError::Internal("Failed to delete user".to_string()),
+                    )
+                }
+            };
             state
                 .audit
                 .record_event(
@@ -580,12 +539,11 @@ pub(crate) async fn remove_member(
                         target_user_id: &target_id,
                         admin_user_id: &admin.id,
                         keys_revoked: None,
-                        refusal: Some(Refusal::PersistError),
+                        refusal: Some(refusal),
                     },
                 )
                 .await;
-            tracing::error!("Failed to delete user: {e}");
-            return Err(ServiceError::Internal("Failed to delete user".to_string()));
+            return Err(error);
         }
     };
     if !deleted {
@@ -2307,7 +2265,7 @@ mod tests {
             "admin2 is the last active admin after admin1 was deactivated by the hook",
         );
 
-        // The fix: an `admin_remove_user` audit event records the committed
+        // An `admin_remove_user` audit event records the committed
         // revocation, tying it to the calling admin. The payload carries
         // `refusal: "last_admin"` to distinguish a floor refusal from a
         // successful removal.
@@ -2556,7 +2514,7 @@ mod tests {
             "admin2 is the last active admin after admin1 was deactivated by the hook",
         );
 
-        // The fix: an `admin_deactivate` audit event records the committed
+        // An `admin_deactivate` audit event records the committed
         // revocation, tying it to the calling admin. The payload carries
         // `refusal: "last_admin"` to distinguish a floor refusal from a
         // successful deactivation.
@@ -2627,7 +2585,7 @@ mod tests {
     /// `last_admin` refusal.
     #[expect(
         clippy::too_many_lines,
-        reason = "end-to-end regression: stand up two admins, inject a persist fault, assert revocation + audit"
+        reason = "end-to-end: stand up two admins, inject a persist fault, assert revocation and audit"
     )]
     #[tokio::test]
     async fn test_remove_member_audits_committed_revocation_when_persist_fails() {
@@ -2786,7 +2744,7 @@ mod tests {
         );
         assert!(admin2_after.is_org_admin, "admin2 still admin");
 
-        // The fix: an `admin_remove_user` audit event records the committed
+        // An `admin_remove_user` audit event records the committed
         // revocation, tying it to the calling admin. The payload carries
         // `refusal: "persist_error"` to distinguish a persist failure from a
         // successful removal and from a `last_admin` refusal.
@@ -2836,7 +2794,7 @@ mod tests {
     /// deactivation and from a `last_admin` refusal.
     #[expect(
         clippy::too_many_lines,
-        reason = "end-to-end regression: stand up two admins, inject a persist fault, assert revocation + audit"
+        reason = "end-to-end: stand up two admins, inject a persist fault, assert revocation and audit"
     )]
     #[tokio::test]
     async fn test_deactivate_member_audits_committed_revocation_when_persist_fails() {
@@ -2989,7 +2947,7 @@ mod tests {
         );
         assert!(admin2_after.is_org_admin, "admin2 still admin");
 
-        // The fix: an `admin_deactivate` audit event records the committed
+        // An `admin_deactivate` audit event records the committed
         // revocation, tying it to the calling admin. The payload carries
         // `refusal: "persist_error"` to distinguish a persist failure from a
         // successful deactivation and from a `last_admin` refusal.
@@ -3029,5 +2987,97 @@ mod tests {
             "the persist-failure audit payload must not contain the raw target email; got {}",
             events[0].data,
         );
+    }
+
+    /// Records an `admin_revoke_credentials` row with `refusal:
+    /// "persist_error"` when key deletion fails after revocation committed.
+    #[tokio::test]
+    async fn test_revoke_credentials_audits_committed_revocation_when_persist_fails() {
+        use crate::db::documents::authenticator::AuthenticatorDoc;
+        use crate::db::documents::session::SessionDoc;
+        use std::sync::{Arc, Mutex};
+
+        let target_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let t = Arc::clone(&target_slot);
+        let (app, state) = test_app_with_modify_hook(move |store| {
+            store.set_inject_persist_error_test_hook(Arc::new(move |user_id: &str| {
+                (t.lock().expect("target lock").as_deref() == Some(user_id))
+                    .then(|| anyhow::anyhow!("injected non-retryable storage fault"))
+            }));
+        })
+        .await;
+
+        let org = create_test_org(&state.store, "example.com").await;
+        let admin = create_test_user_in_org(&state.store, "admin@example.com", &org.id, true).await;
+        let admin_auth_id = create_test_authenticator(&state.store, &admin.id).await;
+        let admin_token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &admin.id,
+                email: &admin.email,
+                auth_id: Some(&admin_auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let member =
+            create_test_user_in_org(&state.store, "member@example.com", &org.id, false).await;
+        let member_auth_id = create_test_authenticator(&state.store, &member.id).await;
+        create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &member.id,
+                email: &member.email,
+                auth_id: Some(&member_auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        *target_slot.lock().expect("target lock") = Some(member.id.clone());
+        let (status, body) = http_post_form(
+            &app,
+            &format!("/admin/members/{}/revoke-credentials", member.id),
+            "",
+            &[
+                ("Cookie", &admin_cookie(&admin_token)),
+                ("Origin", "https://test.example.com"),
+            ],
+        )
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+
+        assert_eq!(
+            state
+                .store
+                .count::<SessionDoc>("user_id", &member.id)
+                .await
+                .expect("count sessions"),
+            0,
+            "revocation committed before the key deletion failed"
+        );
+        assert_eq!(
+            state
+                .store
+                .count::<AuthenticatorDoc>("user_id", &member.id)
+                .await
+                .expect("count keys"),
+            1,
+            "the key deletion did not commit"
+        );
+
+        let events = state
+            .audit
+            .query_events(&AuditEventFilter {
+                event_types: Some(vec!["admin_revoke_credentials".to_string()]),
+                ..AuditEventFilter::default()
+            })
+            .await
+            .expect("query audit events");
+        assert_eq!(events.len(), 1);
+        let data: serde_json::Value =
+            serde_json::from_str(&events[0].data).expect("audit data is JSON");
+        assert_eq!(data["refusal"], "persist_error", "{data}");
+        assert!(data.get("keys_revoked").is_none(), "{data}");
     }
 }

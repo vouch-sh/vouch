@@ -540,10 +540,7 @@ pub async fn demote_or_deactivate_member(
         #[cfg(test)]
         store.run_last_admin_count_test_hook(user_id).await;
 
-        // Test-only fault injection: a non-retryable `Other` error here is
-        // the realistic admin-path trigger (the handler's
-        // `revoke_user_access` has already committed by the time this runs),
-        // so handler tests can assert the committed revocation is audited.
+        // Test-only seam: a write failure after the caller's revocation.
         #[cfg(test)]
         if let Some(e) = store.inject_persist_error(user_id) {
             return Err(MemberDowngradeError::Other(e));
@@ -668,10 +665,7 @@ pub async fn delete_user(
         #[cfg(test)]
         store.run_delete_test_hook(user_id).await;
 
-        // Test-only fault injection: a non-retryable `Other` error here is
-        // the realistic admin-path trigger (the handler's
-        // `revoke_user_access` has already committed by the time this runs),
-        // so handler tests can assert the committed revocation is audited.
+        // Test-only seam: a write failure after the caller's revocation.
         #[cfg(test)]
         if let Some(e) = store.inject_persist_error(user_id) {
             return Err(DeleteUserError::Other(e));
