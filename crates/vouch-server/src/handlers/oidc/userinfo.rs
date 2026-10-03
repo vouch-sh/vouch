@@ -8,12 +8,11 @@
 
 use crate::arrival::ArrivalTime;
 use crate::crypto::alg::JwsAlgorithm;
-use crate::crypto::keys::OidcSigningKey;
 use crate::db::{self};
 use crate::error::OAuthErrorCode;
 use crate::error::OAuthErrorResponse;
 use crate::handlers::extractors::OptionalClientCert;
-use crate::services::auth::decode_token;
+use crate::services::auth::{DecodedToken, decode_token};
 use crate::services::oidc::OAuthScope;
 use crate::services::oidc::claims::PossessionError;
 use crate::services::oidc::dpop::{self, DpopChallenge};
@@ -204,8 +203,16 @@ pub(crate) async fn userinfo(
     }
 
     // RFC 8705 Section 3: Verify mTLS certificate binding.
-    if let Err(resp) = verify_mtls_binding(&token, &state.oidc_key, &config.base_url, &client_cert)
-    {
+    //
+    // Reuse the `decoded` claims from the gate decode above (line 144) instead
+    // of re-decoding here. A second `decode_token` would read `SystemTime::now()`
+    // again — after the `.await`ed DB lookups in `validate_session_token` and
+    // the proof validation above — and a divergent integer-second `exp`
+    // boundary at the second reading silently skips the binding check (the
+    // `Ok(())`-on-decode-failure arm that lived here before). One decode, used
+    // everywhere, matches the `/v1/*` path and the `ArrivalTime` design in
+    // `arrival.rs` (one wall-clock reading per decision, no TOCTOU window).
+    if let Err(resp) = verify_mtls_binding(&decoded, &client_cert) {
         return *resp;
     }
 
@@ -328,24 +335,23 @@ async fn build_signed_userinfo_response(
 
 /// Verify mTLS certificate binding per RFC 8705 Section 3.
 ///
+/// `decoded` is the already-validated token from the gate decode at the top
+/// of [`userinfo`]. The caller has confirmed it is decodable, so there is no
+/// decode-failure path here that could silently skip the binding check — the
+/// former redundant `decode_token` would read `SystemTime::now()` a second
+/// time after `validate_session_token`'s `.await`ed DB lookups, and mapping
+/// that second failure to `Ok(())` opened a TOCTOU window at the integer-
+/// second `exp` boundary (reusing the gate decode is the `/v1/*` pattern).
+///
 /// If the access token contains a `cnf.x5t#S256` claim, the client MUST
 /// present a certificate whose thumbprint matches. Returns `Err(Box<Response>)` on
 /// mismatch so the caller can short-circuit with the error response.
 ///
 /// The `Response` is boxed to satisfy `clippy::result_large_err`.
 fn verify_mtls_binding(
-    token: &str,
-    oidc_key: &OidcSigningKey,
-    issuer: &str,
+    decoded: &DecodedToken,
     client_cert: &OptionalClientCert,
 ) -> Result<(), Box<Response>> {
-    // Decode the token to check for a cnf claim. If decoding fails here,
-    // the token is invalid — validate_session_token will reject it shortly.
-    let decoded = match decode_token(token, oidc_key, issuer) {
-        Some(d) => d,
-        None => return Ok(()),
-    };
-
     // Only a token carrying an x5t#S256 certificate binding needs checking.
     let Some(cnf) = decoded.cnf().filter(|cnf| cnf.x5t_s256.is_some()) else {
         return Ok(());
@@ -393,5 +399,101 @@ fn oauth_error(status: StatusCode, error: OAuthErrorCode, description: &str) -> 
         (status, [("WWW-Authenticate", www_auth.as_str())], body).into_response()
     } else {
         (status, body).into_response()
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
+mod tests {
+    use super::*;
+    use crate::services::auth::AccessTokenClaims;
+    use crate::services::oidc::claims::CnfClaim;
+    use crate::services::oidc::mtls::{self, CertThumbprint};
+    use crate::test_utils::make_test_cert_der;
+
+    /// Minimal access-token claims carrying `cnf` = `binding`.
+    ///
+    /// The mTLS check only inspects `cnf`, so every other field is a placeholder.
+    fn claims_with_cnf(binding: Option<CnfClaim>) -> DecodedToken {
+        DecodedToken::AccessToken(AccessTokenClaims {
+            iss: "https://test.example.com".to_string(),
+            sub: "user-1".to_string(),
+            aud: "client-1".to_string(),
+            exp: 9_999_999_999,
+            iat: 1_000_000_000,
+            nbf: None,
+            jti: "jti-1".to_string(),
+            client_id: "client-1".to_string(),
+            scope: None,
+            email: None,
+            email_verified: None,
+            hardware_verified: false,
+            cnf: binding,
+            auth_time: None,
+            act: None,
+            amr: None,
+            acr: None,
+        })
+    }
+
+    /// A `cnf` claiming the SHA-256 thumbprint of a freshly generated cert.
+    fn cert_bound_cnf(thumbprint: &CertThumbprint) -> CnfClaim {
+        CnfClaim {
+            jkt: None,
+            x5t_s256: Some(thumbprint.as_str().to_string()),
+        }
+    }
+
+    /// RFC 8705 §3: a token whose claims carry `cnf.x5t#S256` MUST be refused
+    /// when no client certificate is presented.
+    ///
+    /// This is the regression guard for the TOCTOU fixed here: before the fix,
+    /// `verify_mtls_binding` re-decoded the token and returned `Ok(())` on
+    /// decode failure, so a cert-bound token whose second decode failed (the
+    /// `exp` boundary elapsing after `.await`ed DB lookups) silently skipped
+    /// the binding check. The fix takes already-decoded claims, so there is no
+    /// decode-failure path and the binding check is always enforced.
+    #[test]
+    fn verify_mtls_binding_enforces_check_when_claims_carry_x5t_and_no_cert() {
+        let der = make_test_cert_der("bound-cert");
+        let thumbprint = mtls::compute_cert_thumbprint(&der);
+        let decoded = claims_with_cnf(Some(cert_bound_cnf(&thumbprint)));
+
+        let result = verify_mtls_binding(&decoded, &OptionalClientCert(None));
+
+        let err = result.expect_err("cert-bound claim must be refused without a client cert");
+        assert_eq!(err.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// A token bound by DPoP only (`cnf.jkt`, no `cnf.x5t#S256`) is not
+    /// certificate-bound at the mTLS layer (DPoP is checked earlier). The mTLS
+    /// check must pass so a Bearer-presented DPoP token still reaches the
+    /// DPoP-scheme refusal at the binding check, rather than failing here.
+    #[test]
+    fn verify_mtls_binding_passes_when_cnf_is_dpop_only() {
+        let decoded = claims_with_cnf(Some(CnfClaim {
+            jkt: Some("dpop-thumbprint".to_string()),
+            x5t_s256: None,
+        }));
+        let result = verify_mtls_binding(&decoded, &OptionalClientCert(None));
+        assert!(
+            result.is_ok(),
+            "DPoP-only cnf is not cert-bound: {result:?}"
+        );
+    }
+
+    /// A `cnf` that names neither key (`jkt: None`, `x5t_s256: None`) binds the
+    /// token to nothing; the mTLS check must not require a certificate.
+    #[test]
+    fn verify_mtls_binding_passes_when_cnf_names_no_key() {
+        let decoded = claims_with_cnf(Some(CnfClaim {
+            jkt: None,
+            x5t_s256: None,
+        }));
+        let result = verify_mtls_binding(&decoded, &OptionalClientCert(None));
+        assert!(result.is_ok(), "empty cnf binds to nothing: {result:?}");
     }
 }
