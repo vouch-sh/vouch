@@ -107,7 +107,7 @@ fn run_command_stderr(program: &str, args: &[&str]) -> Option<String> {
         return None;
     }
 
-    Some(String::from_utf8_lossy(&output.stderr).into_owned())
+    Some(String::from_utf8_lossy_owned(output.stderr))
 }
 
 /// Detect macOS Application Firewall status.
