@@ -195,7 +195,6 @@ pub(crate) async fn create_application_form(
                 user_id,
                 description: form.description.as_deref(),
                 redirect_uris: &redirect_uris,
-                resource_uris: &resource_uris,
                 post_logout_redirect_uris: post_logout_redirect_uris_input,
                 access_scope,
                 org_id,

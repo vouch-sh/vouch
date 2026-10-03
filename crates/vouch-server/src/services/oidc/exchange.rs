@@ -1497,6 +1497,90 @@ mod tests {
             .expect("a client that registered the issuer gets the default audience");
     }
 
+    /// Trailing-slash companion to
+    /// `test_issue_id_token_default_audience_respects_resource_allowlist`.
+    ///
+    /// The system's canonical issuer is always slash-stripped (OIDC Discovery
+    /// §4.3 / RFC 8414) while the registration surface accepts a root URL with a
+    /// trailing slash verbatim. Before the fix the default-audience gate
+    /// compared `"https://host" == "https://host/"` with raw byte `==` and
+    /// rejected the exchange with `invalid_target` even though the operator
+    /// had registered the issuer, exactly as the documentation instructs
+    /// (`docs/src/operations/sessions.md`). The gate must now treat the two
+    /// root forms as equivalent and issue the token with `aud` set to the
+    /// slash-stripped issuer.
+    #[tokio::test]
+    async fn test_issue_id_token_default_audience_accepts_trailing_slash_issuer() {
+        use crate::test_utils::{create_test_user, test_app_state};
+
+        let state = test_app_state().await;
+        let user = create_test_user(&state.store, "id-token-allowlist-slash@example.com").await;
+        let issuer = super::super::org_keys::org_issuer_or_base(&state.config(), None)
+            .expect("issuer")
+            .to_string();
+
+        // Register the issuer exactly as an operator who typed a trailing
+        // slash on the root URL would — the form `url::Url::parse` normalizes a
+        // host-only URI to, and which the registration surface accepts.
+        let issuer_with_slash = exchange_client(&state, &user.id, vec![format!("{issuer}/")]).await;
+        // A client restricted to an unrelated external resource, for contrast.
+        let restricted = exchange_client(
+            &state,
+            &user.id,
+            vec!["https://rp.example.com/".to_string()],
+        )
+        .await;
+
+        let client_info = ClientInfo::default();
+        let issue = |client| {
+            issue_id_token(
+                &state,
+                IdTokenContext {
+                    user_id: &user.id,
+                    email: &user.email,
+                    subject_token_hash: "subject-token-hash-test",
+                    audience: None,
+                    expires_in: 60,
+                    hardware_aaguid: None,
+                    org_domain: None,
+                    client,
+                    client_info: &client_info,
+                },
+                ArrivalTime::for_test_second(1_700_000_000),
+            )
+        };
+
+        // The default-audience gate must accept the slash-form issuer
+        // registration and mint a token whose `aud` is the slash-stripped issuer.
+        let result = issue(&issuer_with_slash).await.expect(
+            "a client that registered the issuer (with a trailing slash) \
+                     gets the default audience",
+        );
+        let claims = decode_jwt_payload(result.access_token.expose_secret());
+        assert_eq!(
+            claims.get("aud").and_then(|v| v.as_str()),
+            Some(issuer.as_str()),
+            "issued ID token aud must be the canonical (slash-stripped) issuer"
+        );
+
+        // An unrelated external resource registered with a trailing slash does
+        // NOT broaden to the issuer — the trailing-slash equivalence only
+        // applies when the stored URI *is* the issuer root.
+        let err = issue(&restricted)
+            .await
+            .expect_err("an unrelated resource must not satisfy the issuer gate");
+        assert!(
+            matches!(
+                err,
+                ServiceError::OAuth {
+                    code: OAuthErrorCode::InvalidTarget,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
     /// A request for an exchanged ID token is anchored on a single arrival
     /// instant: the JWT's `iat`/`exp` and the audit's `expires_at` all read
     /// that instant, so the row and the signed token cannot disagree about

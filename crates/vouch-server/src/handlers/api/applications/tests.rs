@@ -2566,6 +2566,78 @@ async fn test_create_application_with_post_logout_redirect_uris() {
 }
 
 #[tokio::test]
+async fn test_create_application_canonicalizes_resource_uris() {
+    // POST /api/v1/applications accepts root-shaped `resource_uris` with a
+    // trailing slash (the form `url::Url::parse` normalizes a host-only URI to,
+    // and which the registration surface accepts verbatim) but must store and
+    // echo the slash-stripped canonical form, so the stored row matches the
+    // slash-stripped issuer the default-audience gate compares against.
+    // Path-bearing URIs are stored verbatim, including any trailing slash.
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "resource-canonical@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+    let auth = bearer(&token);
+
+    let payload = serde_json::json!({
+        "name": "Resource Canonical App",
+        "application_type": "web",
+        "redirect_uris": ["https://example.com/callback"],
+        "resource_uris": [
+            "https://vouch.example.com/",
+            "https://api.example.com/v1/resources/"
+        ]
+    });
+
+    let (status, body) = http_request(
+        &app,
+        "POST",
+        "/api/v1/applications",
+        Some(payload.to_string()),
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", &auth),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let create_json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+    let app_id = create_json["id"].as_str().expect("id in create response");
+    assert_eq!(
+        create_json["resource_uris"],
+        serde_json::json!([
+            "https://vouch.example.com",
+            "https://api.example.com/v1/resources/"
+        ]),
+        "create response must echo the canonical (root slash-stripped, path verbatim) form"
+    );
+
+    // The stored row must hold the canonical form too — the default-audience
+    // gate reads `client.resource_uris` from the DB.
+    let stored = db::get_oauth_client_by_id(&state.store, app_id)
+        .await
+        .expect("db lookup")
+        .expect("client exists");
+    assert_eq!(
+        stored.resource_uris,
+        vec![
+            "https://vouch.example.com".to_string(),
+            "https://api.example.com/v1/resources/".to_string(),
+        ],
+        "stored resource_uris must be canonical (root-shaped slash-stripped, path-bearing verbatim)"
+    );
+}
+
+#[tokio::test]
 async fn test_create_application_rejects_invalid_post_logout_redirect_uri() {
     // A post_logout_redirect_uri with ftp:// scheme must be rejected.
     let (app, state) = test_app().await;

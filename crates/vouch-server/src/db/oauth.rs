@@ -175,12 +175,36 @@ impl OAuthClient {
         })
     }
 
+    /// Whether `uri` is on this client's registered `resource_uris` allowlist
+    /// (RFC 8707), with an empty list treated as permissive.
+    ///
+    /// Comparison is exact byte `==` per RFC 8707 §2's "opaque value" rule,
+    /// with one narrow equivalence for *root-shaped* URIs (path is `/` or
+    /// empty): a trailing slash is insignificant there. RFC 3986 §6.2.3 says
+    /// "the empty path prefix '/' MUST be considered equivalent to an empty
+    /// path", and `url::Url::parse("https://host").to_string()` normalizes a
+    /// host-only URI to `"https://host/"`, so the operator- and system-supplied
+    /// forms of the same root URL legitimately differ by exactly one `/`.
+    ///
+    /// That matters at the default-audience gate in `issue_id_token`, where
+    /// the system generates the canonical issuer (always slash-stripped per
+    /// OIDC Discovery §4.3 / RFC 8414) and compares it against the operator's
+    /// stored `resource_uris`, which the registration surface accepts verbatim
+    /// — including a trailing slash on a root URL. Raw `==` would reject
+    /// `"https://host" == "https://host/"` and break the documented
+    /// default-audience path (`docs/src/operations/sessions.md`).
+    ///
+    /// For path-bearing URIs the comparison stays exact, so `/v1/resources`
+    /// and `/v1/resources/` remain distinct (RFC 3986 §3.3). The equivalence
+    /// applies only when *both* sides parse as root-shaped; any other input
+    /// falls back to exact `==`, so the normalization can only broaden, never
+    /// over-broaden. The allowlist is per-client and operator-controlled.
     #[must_use]
     pub fn is_valid_resource_uri(&self, uri: &str) -> bool {
         if self.resource_uris.is_empty() {
             return true;
         }
-        self.resource_uris.iter().any(|u| u == uri)
+        self.resource_uris.iter().any(|u| resource_uri_eq(u, uri))
     }
 
     #[must_use]
@@ -276,6 +300,62 @@ pub enum ClientType {
 /// Enforced both at RFC 7591 dynamic registration time (services layer) and at
 /// self-service application creation time (handlers layer).
 pub const MAX_POST_LOGOUT_REDIRECT_URIS: usize = 10;
+
+/// Whether a registered `resource_uri` matches a requested one, with the
+/// trailing-slash equivalence RFC 3986 §6.2.3 establishes for *root-shaped*
+/// URIs only — see [`OAuthClient::is_valid_resource_uri`].
+///
+/// For root-shaped URIs (path is `/` or empty) a single trailing slash is
+/// stripped on both sides before a raw-string comparison, so the system's
+/// canonical issuer `https://host` matches an operator-stored `https://host/`.
+/// Host case, default-port elision, scheme case, percent-encoding, IDNA, IPv6
+/// literals, and userinfo are all preserved because the trim operates on the
+/// raw string and the predicate only tests root-shapedness. For any non-
+/// root-shaped input, comparison is exact byte `==` per RFC 8707 §2, so
+/// `/v1/resources` and `/v1/resources/` stay distinct (RFC 3986 §3.3).
+fn resource_uri_eq(stored: &str, requested: &str) -> bool {
+    if is_root_shaped_uri(stored) && is_root_shaped_uri(requested) {
+        trim_trailing_slash(stored) == trim_trailing_slash(requested)
+    } else {
+        stored == requested
+    }
+}
+
+/// Strip at most one trailing `/` so `https://host/` and `https://host`
+/// compare equal. Operates on the raw string; it does not parse the URL.
+fn trim_trailing_slash(uri: &str) -> &str {
+    uri.strip_suffix('/').unwrap_or(uri)
+}
+
+/// True when `uri` parses as an absolute URI whose path is the root (`/` or
+/// empty) — a host-only URL where a trailing slash is insignificant. A
+/// non-parseable or path-bearing URI returns `false` so the caller falls back
+/// to exact `==`.
+fn is_root_shaped_uri(uri: &str) -> bool {
+    url::Url::parse(uri).is_ok_and(|u| u.path().is_empty() || u.path() == "/")
+}
+
+/// Canonicalize a `resource_uri` for *storage*: for root-shaped URIs (path is
+/// `/` or empty) strip a single trailing `/`, so a newly registered row stores
+/// the slash-stripped form the default-audience gate compares against. For
+/// path-bearing URIs the value is returned verbatim — RFC 8707 §2 treats the
+/// `resource` parameter as an opaque value and RFC 3986 §3.3 keeps
+/// `/v1/resources` and `/v1/resources/` distinct.
+///
+/// This is the storage-side companion to [`OAuthClient::is_valid_resource_uri`],
+/// which tolerates a trailing slash on root-shaped URIs for rows already
+/// stored before this normalization. Defense-in-depth: new rows are stored
+/// canonically, so the gate's `==` would already suffice for them; the gate
+/// keeps the trailing-slash equivalence to repair legacy rows without a
+/// migration.
+#[must_use]
+pub fn normalize_resource_uri(uri: &str) -> String {
+    if is_root_shaped_uri(uri) {
+        trim_trailing_slash(uri).to_string()
+    } else {
+        uri.to_string()
+    }
+}
 
 /// Whether a registered loopback IP redirect URI matches a requested one that
 /// differs only in port — the RFC 8252 §7.3 any-port rule.
@@ -2508,6 +2588,158 @@ mod tests {
         ));
         // Garbage / relative URIs are rejected.
         assert!(!is_valid_post_logout_redirect_uri_str("not-a-url"));
+    }
+
+    // ========================================================================
+    // RFC 8707 resource-URI allowlist + RFC 3986 §6.2.3 root-shaped trailing-
+    // slash equivalence. The system's canonical issuer (the default audience
+    // for an RFC 8693 ID-token exchange) is always slash-stripped, but the
+    // registration surface accepts a trailing slash on a root URL; the gate
+    // must treat `https://host` and `https://host/` as the same root. See
+    // `OAuthClient::is_valid_resource_uri` for the contract.
+    // ========================================================================
+
+    #[test]
+    fn test_is_root_shaped_uri_predicate() {
+        // Host-only URIs parse to path "/" → root-shaped (url lowercases the
+        // scheme/host but the predicate only tests the path).
+        assert!(is_root_shaped_uri("https://host"));
+        assert!(is_root_shaped_uri("https://host/"));
+        assert!(is_root_shaped_uri("http://localhost:8080"));
+        assert!(is_root_shaped_uri("https://[::1]/"));
+        assert!(is_root_shaped_uri("https://user@host"));
+        // Any non-empty path beyond "/" is path-bearing, not root-shaped.
+        assert!(!is_root_shaped_uri("https://host/v1/resources"));
+        assert!(!is_root_shaped_uri("https://host/v1/resources/"));
+        assert!(!is_root_shaped_uri("https://host/v1/keys/register"));
+        // Non-absolute / non-parseable URIs are not root-shaped: callers fall
+        // back to exact `==`.
+        assert!(!is_root_shaped_uri("/relative/path"));
+        assert!(!is_root_shaped_uri("not-a-url"));
+        assert!(!is_root_shaped_uri(""));
+    }
+
+    #[test]
+    fn test_trim_trailing_slash_strips_at_most_one() {
+        assert_eq!(trim_trailing_slash("https://host/"), "https://host");
+        assert_eq!(trim_trailing_slash("https://host"), "https://host");
+        assert_eq!(trim_trailing_slash("https://host//"), "https://host/");
+        // Path-bearing URIs are untouched by this helper; only the predicate
+        // decides whether to apply it.
+        assert_eq!(
+            trim_trailing_slash("https://host/v1/x/"),
+            "https://host/v1/x"
+        );
+        assert_eq!(
+            trim_trailing_slash("https://host/v1/x"),
+            "https://host/v1/x"
+        );
+    }
+
+    #[test]
+    fn test_normalize_resource_uri_for_storage() {
+        // Root-shaped URIs are stored slash-stripped, matching the canonical
+        // issuer the default-audience gate compares against.
+        assert_eq!(normalize_resource_uri("https://host/"), "https://host");
+        assert_eq!(normalize_resource_uri("https://host"), "https://host");
+        assert_eq!(normalize_resource_uri("https://Host/"), "https://Host");
+        assert_eq!(
+            normalize_resource_uri("https://host:443/"),
+            "https://host:443"
+        );
+        // Path-bearing URIs are stored verbatim: RFC 8707 §2 treats `resource`
+        // as an opaque value and RFC 3986 §3.3 keeps `/v1/x` and `/v1/x/` distinct.
+        assert_eq!(
+            normalize_resource_uri("https://host/v1/resources"),
+            "https://host/v1/resources"
+        );
+        assert_eq!(
+            normalize_resource_uri("https://host/v1/resources/"),
+            "https://host/v1/resources/"
+        );
+    }
+
+    #[test]
+    fn test_resource_uri_eq_root_shaped_trailing_slash_equivalence() {
+        // The bug: the system generates the slash-stripped issuer `https://host`
+        // and compares it to an operator-stored `https://host/`. They must match.
+        assert!(resource_uri_eq("https://host/", "https://host"));
+        assert!(resource_uri_eq("https://host", "https://host/"));
+        // Both sides slash-stripped / both slash-form also match.
+        assert!(resource_uri_eq("https://host", "https://host"));
+        assert!(resource_uri_eq("https://host/", "https://host/"));
+        // A different host does not match.
+        assert!(!resource_uri_eq("https://host/", "https://other/"));
+        assert!(!resource_uri_eq("https://host", "https://other"));
+    }
+
+    #[test]
+    fn test_resource_uri_eq_path_bearing_stays_exact() {
+        // RFC 8707 §2 "opaque value": `/v1/x` and `/v1/x/` are distinct paths
+        // (RFC 3986 §3.3). Trailing-slash equivalence MUST NOT flatten them.
+        assert!(resource_uri_eq(
+            "https://host/v1/resources",
+            "https://host/v1/resources"
+        ));
+        assert!(!resource_uri_eq(
+            "https://host/v1/resources/",
+            "https://host/v1/resources"
+        ));
+        assert!(!resource_uri_eq(
+            "https://host/v1/resources",
+            "https://host/v1/resources/"
+        ));
+        // A sub-path is not a prefix match.
+        assert!(!resource_uri_eq(
+            "https://host/v1/keys",
+            "https://host/v1/keys/register"
+        ));
+    }
+
+    #[test]
+    fn test_resource_uri_eq_preserves_host_case_port_scheme() {
+        // The comparison is on raw strings; only a single trailing `/` on a
+        // root-shaped URI is insignificant. Host case, default-port elision,
+        // scheme case, and userinfo are all preserved (a mismatch stays a
+        // mismatch), so the equivalence cannot widen the allowlist beyond one
+        // trailing slash on a root path.
+        assert!(!resource_uri_eq("https://Host/", "https://host"));
+        assert!(!resource_uri_eq("https://host:443/", "https://host"));
+        assert!(!resource_uri_eq("HTTPS://host/", "https://host"));
+        assert!(!resource_uri_eq("https://user@host/", "https://host"));
+        // A non-parseable side falls back to exact `==`.
+        assert!(!resource_uri_eq("https://host", "not-a-url"));
+        assert!(resource_uri_eq("kubernetes", "kubernetes"));
+    }
+
+    #[tokio::test]
+    async fn test_is_valid_resource_uri_allowlist_gate() {
+        let store = test_store().await;
+        let (mut client, _secret, _hash) = create_client_and_secret(&store).await;
+
+        // An empty allowlist is permissive (the DCR/self-service default).
+        client.resource_uris = vec![];
+        assert!(client.is_valid_resource_uri("https://anything.example.com/"));
+        assert!(client.is_valid_resource_uri("https://vouch.example.com"));
+
+        // The bug scenario: the issuer is registered with a trailing slash on
+        // a root URL; the default-audience gate supplies the slash-stripped
+        // issuer. The gate must accept it.
+        client.resource_uris = vec!["https://vouch.example.com/".to_string()];
+        assert!(client.is_valid_resource_uri("https://vouch.example.com"));
+        // And the symmetric direction.
+        client.resource_uris = vec!["https://vouch.example.com".to_string()];
+        assert!(client.is_valid_resource_uri("https://vouch.example.com/"));
+
+        // An unregistered root is still rejected.
+        client.resource_uris = vec!["https://vouch.example.com/".to_string()];
+        assert!(!client.is_valid_resource_uri("https://other.example.com"));
+
+        // A path-bearing URI is matched exactly; the trailing-slash
+        // equivalence does not apply to `/v1/resources` vs `/v1/resources/`.
+        client.resource_uris = vec!["https://api.example.com/v1/resources".to_string()];
+        assert!(client.is_valid_resource_uri("https://api.example.com/v1/resources"));
+        assert!(!client.is_valid_resource_uri("https://api.example.com/v1/resources/"));
     }
 
     // RFC 7517 §4.1 (<https://www.rfc-editor.org/rfc/rfc7517#section-4.1>):

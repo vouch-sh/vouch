@@ -101,6 +101,75 @@ async fn test_rfc8707_resource_passthrough_authorize_to_token() {
 }
 
 #[tokio::test]
+async fn test_rfc8707_authorize_accepts_trailing_slash_root_resource() {
+    // RFC 3986 §6.2.3: a trailing slash on a root-shaped URI is insignificant.
+    // A client that registered `https://api.example.com/` must accept a
+    // `/authorize` request whose `resource` is `https://api.example.com` (no
+    // slash) — the same root-shaped trailing-slash equivalence the default-
+    // audience gate relies on. This exercises the shared
+    // `is_valid_resource_uri` chokepoint at the `/authorize` front door.
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "resource-slash-root@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    // Register the resource with a trailing slash on the root URL — the form
+    // `url::Url::parse` normalizes a host-only URI to and the registration
+    // surface accepts verbatim.
+    let client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            resource_uris: vec!["https://api.example.com/".to_string()],
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // Request the no-slash form; before the fix the `/authorize` resource gate
+    // rejected this with `invalid_target` via raw byte `==`.
+    let resource_uri = "https://api.example.com";
+    let code = issue_code(
+        &state,
+        &user,
+        &auth_id,
+        &client.client_id,
+        TestCodeSpec {
+            scope: "openid",
+            resource: Some(resource_uri),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // The code was issued; exchange it and confirm `aud` is the requested
+    // (no-slash) resource, proving the front-door gate accepted the slash-form
+    // registration against the no-slash request.
+    let auth_header = client.basic_auth_header();
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=authorization_code&code={code}\
+             &redirect_uri=https://example.com/callback"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "Token exchange should succeed: {body}"
+    );
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let access_token = response["access_token"].as_str().expect("access_token");
+    let claims = decode_jwt_payload(access_token);
+    assert_eq!(
+        claims.get("aud").and_then(|v| v.as_str()),
+        Some(resource_uri),
+        "Access token aud should match the no-slash resource request"
+    );
+}
+
+#[tokio::test]
 async fn test_rfc8707_resource_uri_with_fragment_rejected() {
     // RFC 8707 Section 2: Resource URI MUST NOT contain a fragment component.
     let (app, state) = test_app().await;

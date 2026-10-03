@@ -155,7 +155,6 @@ pub(crate) async fn create_application_api(
                 user_id: &token.sub,
                 description: req.description.as_deref(),
                 redirect_uris: &req.redirect_uris,
-                resource_uris,
                 post_logout_redirect_uris: post_logout_redirect_uris_raw,
                 access_scope,
                 org_id,
@@ -211,6 +210,11 @@ pub(crate) async fn create_application_api(
         .and_then(db::ClientKeys::uri)
         .map(String::from);
 
+    // Snapshot the canonical resource_uris (root-shaped URIs slash-stripped)
+    // before the response. `validated` borrows `req`, so its last use must
+    // precede the move of `req.application_type` in the response below.
+    let response_resource_uris = validated.resource_uris.clone();
+
     Ok(Json(CreateApplicationResponse {
         id: client.id,
         client_id,
@@ -218,7 +222,9 @@ pub(crate) async fn create_application_api(
         name: name.to_string(),
         application_type: req.application_type,
         access_scope: access_scope.as_str().to_string(),
-        resource_uris: resource_uris.to_vec(),
+        // Echo the canonical form stored for the client, not the raw request
+        // input (root-shaped URIs are slash-stripped at storage).
+        resource_uris: response_resource_uris,
         token_endpoint_auth_method: client.token_endpoint_auth_method.as_str().to_string(),
         fapi_profile: client.fapi_profile.as_str().to_string(),
         jwks_configured,

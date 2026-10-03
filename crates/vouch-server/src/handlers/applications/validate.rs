@@ -326,6 +326,13 @@ pub(crate) struct ValidatedCreateApp<'a> {
     /// pairs `authorization_code` with `code`, and `client_credentials` with
     /// none.
     pub response_types: Vec<String>,
+    /// `resource_uris` validated and canonicalized for storage: root-shaped
+    /// URIs are slash-stripped (see [`db::normalize_resource_uri`]) so the
+    /// stored row matches the slash-stripped issuer the default-audience gate
+    /// compares against. Path-bearing URIs are kept verbatim. Owned here
+    /// because `CreateOAuthClientParams` borrows the slice and the validated
+    /// value may differ from the raw request input.
+    pub resource_uris: Vec<String>,
 }
 
 /// Validate the format of a create-application request.
@@ -359,8 +366,9 @@ pub(crate) fn validate_create_application<'a>(
             .map_err(AppValidationError::InvalidPostLogoutRedirectUris)?;
     }
 
-    // Validate resource URIs per RFC 8707 (absolute URI, no fragment).
-    validate_resource_uris(input.resource_uris)?;
+    // Validate resource URIs per RFC 8707 (absolute URI, no fragment) and
+    // canonicalize them for storage (root-shaped URIs slash-stripped).
+    let resource_uris = validate_resource_uris(input.resource_uris)?;
 
     let access_scope = match input.access_scope {
         None => AccessScope::default(),
@@ -446,6 +454,7 @@ pub(crate) fn validate_create_application<'a>(
         keys,
         grant_types,
         response_types,
+        resource_uris,
     })
 }
 
@@ -534,8 +543,10 @@ pub(crate) struct ValidatedUpdateApp<'a> {
     pub name: Option<&'a str>,
     /// Description (`None` = field absent, preserve existing).
     pub description: Option<&'a str>,
-    /// Resource URIs (`None` = field absent, preserve existing).
-    pub resource_uris: Option<&'a [String]>,
+    /// Resource URIs, validated and canonicalized for storage (root-shaped
+    /// URIs slash-stripped). `None` = field absent, preserve existing;
+    /// `Some(vec![])` = explicitly clear the list.
+    pub resource_uris: Option<Vec<String>>,
     pub is_fapi: bool,
     /// Whether `fapi_profile` was present in the request at all. A provided
     /// non-FAPI value is an explicit transition away from FAPI; an absent
@@ -570,9 +581,14 @@ pub(crate) fn validate_update_format<'a>(
         return Err(AppValidationError::EmptyName);
     }
 
-    if let Some(uris) = input.resource_uris {
-        validate_resource_uris(uris)?;
-    }
+    // Validate + canonicalize `resource_uris` for storage when present: root-
+    // shaped URIs are slash-stripped so the stored row matches the slash-
+    // stripped issuer the default-audience gate compares against. An absent
+    // field (`None`) preserves the existing row; `Some(&[])` explicitly clears.
+    let resource_uris = match input.resource_uris {
+        Some(uris) => Some(validate_resource_uris(uris)?),
+        None => None,
+    };
 
     if let Some(uris) = input.post_logout_redirect_uris
         && !uris.is_empty()
@@ -601,7 +617,7 @@ pub(crate) fn validate_update_format<'a>(
     Ok(ValidatedUpdateApp {
         name,
         description: input.description,
-        resource_uris: input.resource_uris,
+        resource_uris,
         is_fapi,
         fapi_profile_provided: input.fapi_profile.is_some(),
         access_scope,
@@ -821,7 +837,6 @@ pub(crate) struct CreateAppContext<'a> {
     pub user_id: &'a str,
     pub description: Option<&'a str>,
     pub redirect_uris: &'a [String],
-    pub resource_uris: &'a [String],
     /// `None` or empty → no post-logout redirect URIs stored.
     pub post_logout_redirect_uris: Option<&'a [String]>,
     pub access_scope: AccessScope,
@@ -850,7 +865,7 @@ pub(crate) fn build_create_params<'a>(
         redirect_uris: ctx.redirect_uris,
         access_scope: ctx.access_scope,
         org_id: ctx.org_id,
-        resource_uris: ctx.resource_uris,
+        resource_uris: &validated.resource_uris,
         token_endpoint_auth_method: validated.token_endpoint_auth_method,
         keys: validated.keys.as_ref(),
         fapi_profile: if is_fapi {
@@ -993,9 +1008,10 @@ impl ValidatedUpdateApp<'_> {
             access_scope: self
                 .access_scope
                 .map(|scope| (scope, org_id.map(String::from))),
-            resource_uris: self
-                .resource_uris
-                .map_or_else(|| client.resource_uris.clone(), <[String]>::to_vec),
+            resource_uris: match &self.resource_uris {
+                Some(uris) => uris.clone(),
+                None => client.resource_uris.clone(),
+            },
             token_endpoint_auth_method: fapi.token_endpoint_auth_method,
             keys: fapi.keys.cloned(),
             fapi_profile: fapi.fapi_profile,
@@ -1033,7 +1049,15 @@ fn validate_fapi_profile_value(p: &str) -> Result<bool, AppValidationError> {
     }
 }
 
-fn validate_resource_uris(uris: &[String]) -> Result<(), AppValidationError> {
+/// Validate each `resource_uri` per RFC 8707 (absolute URI, no fragment) and
+/// return the list in canonical storage form: root-shaped URIs have their
+/// single trailing `/` stripped (see [`db::normalize_resource_uri`]), so a
+/// newly registered row stores the slash-stripped form the default-audience
+/// gate compares against. Path-bearing URIs are returned verbatim — RFC 8707
+/// §2 treats `resource` as an opaque value and RFC 3986 §3.3 keeps
+/// `/v1/resources` and `/v1/resources/` distinct.
+fn validate_resource_uris(uris: &[String]) -> Result<Vec<String>, AppValidationError> {
+    let mut normalized = Vec::with_capacity(uris.len());
     for uri in uris {
         if let Err(e) = ResourceUri::parse(uri) {
             return Err(AppValidationError::InvalidResourceUri {
@@ -1041,8 +1065,9 @@ fn validate_resource_uris(uris: &[String]) -> Result<(), AppValidationError> {
                 detail: e.to_string(),
             });
         }
+        normalized.push(db::normalize_resource_uri(uri));
     }
-    Ok(())
+    Ok(normalized)
 }
 
 fn parse_jwks(jwks_json: &str) -> Result<serde_json::Value, AppValidationError> {
@@ -1115,7 +1140,6 @@ mod tests {
                 user_id: "user-1",
                 description: None,
                 redirect_uris: &redirect_uris,
-                resource_uris: &[],
                 post_logout_redirect_uris: None,
                 access_scope: AccessScope::Personal,
                 org_id: None,
@@ -1158,7 +1182,6 @@ mod tests {
                 user_id: "user-1",
                 description: Some("desc"),
                 redirect_uris: &redirect_uris,
-                resource_uris: &[],
                 post_logout_redirect_uris: None,
                 access_scope: AccessScope::Personal,
                 org_id: None,
@@ -1180,7 +1203,6 @@ mod tests {
             user_id: "user-1",
             description: None,
             redirect_uris,
-            resource_uris: &[],
             post_logout_redirect_uris: None,
             access_scope: AccessScope::Personal,
             org_id: None,
@@ -1443,7 +1465,6 @@ mod tests {
                     user_id: "user-1",
                     description: None,
                     redirect_uris: &redirect_uris,
-                    resource_uris: &[],
                     post_logout_redirect_uris: None,
                     access_scope: AccessScope::Personal,
                     org_id: None,
@@ -1480,7 +1501,6 @@ mod tests {
             user_id: "user-1",
             description: None,
             redirect_uris: &redirect_uris,
-            resource_uris: &[],
             post_logout_redirect_uris: uris,
             access_scope: AccessScope::Personal,
             org_id: None,
@@ -1502,13 +1522,183 @@ mod tests {
                 user_id: "user-1",
                 description: None,
                 redirect_uris: &redirect_uris,
-                resource_uris: &[],
                 post_logout_redirect_uris: Some(&post_logout),
                 access_scope: AccessScope::Personal,
                 org_id: None,
             },
         );
         assert_eq!(params.post_logout_redirect_uris, Some(post_logout.clone()));
+    }
+
+    // ========================================================================
+    // RFC 8707 resource_uri canonicalization at registration (defense-in-depth
+    // for the default-audience gate): root-shaped URIs are stored slash-stripped
+    // so a newly registered row matches the slash-stripped issuer the gate
+    // compares against. Path-bearing URIs are stored verbatim.
+    // ========================================================================
+
+    #[test]
+    fn create_params_canonicalizes_resource_uris_for_storage() {
+        let redirect_uris = vec!["https://example.com/cb".to_string()];
+        // A mix of root-shaped (slash and no-slash) and path-bearing URIs.
+        let input = vec![
+            "https://vouch.example.com/".to_string(),
+            "https://api.example.com".to_string(),
+            "https://api.example.com/v1/resources".to_string(),
+            "https://api.example.com/v1/resources/".to_string(),
+        ];
+        let validated = validate_create_application(CreateAppInput {
+            name: "App",
+            application_type: "web",
+            redirect_uris: &redirect_uris,
+            resource_uris: &input,
+            post_logout_redirect_uris: None,
+            access_scope: None,
+            fapi_profile: None,
+            token_endpoint_auth_method: None,
+            jwks: None,
+            jwks_uri: None,
+        })
+        .expect("valid create input");
+
+        // `ValidatedCreateApp` carries the canonicalized list: root-shaped
+        // URIs slash-stripped, path-bearing URIs verbatim (including any
+        // trailing slash on a non-root path).
+        assert_eq!(
+            validated.resource_uris,
+            vec![
+                "https://vouch.example.com",
+                "https://api.example.com",
+                "https://api.example.com/v1/resources",
+                "https://api.example.com/v1/resources/",
+            ]
+        );
+
+        // `build_create_params` forwards the canonicalized list to the stored
+        // row, so the gate's exact `==` would already match the issuer for new
+        // rows; the gate's trailing-slash equivalence remains to repair legacy
+        // rows stored before this normalization.
+        let params = build_create_params(
+            &validated,
+            CreateAppContext {
+                user_id: "user-1",
+                description: None,
+                redirect_uris: &redirect_uris,
+                post_logout_redirect_uris: None,
+                access_scope: AccessScope::Personal,
+                org_id: None,
+            },
+        );
+        assert_eq!(
+            params.resource_uris,
+            &[
+                "https://vouch.example.com",
+                "https://api.example.com",
+                "https://api.example.com/v1/resources",
+                "https://api.example.com/v1/resources/",
+            ]
+        );
+    }
+
+    #[test]
+    fn validate_resource_uris_rejects_invalid_uri_before_canonicalizing() {
+        // A fragment-bearing URI is rejected per RFC 8707 §2 even though its
+        // path would be root-shaped; canonicalization never runs on invalid input.
+        let input = vec!["https://host/#frag".to_string()];
+        let err = validate_resource_uris(&input).expect_err("fragment must be rejected");
+        assert!(
+            matches!(err, AppValidationError::InvalidResourceUri { .. }),
+            "{err:?}"
+        );
+
+        // Empty input is accepted and yields an empty (canonical) list.
+        assert_eq!(
+            validate_resource_uris(&[]).expect("empty is valid"),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn validate_update_format_canonicalizes_resource_uris() {
+        // A provided `resource_uris` is canonicalized for storage: root-shaped
+        // URIs are slash-stripped, path-bearing URIs are kept verbatim.
+        let root_slash = vec!["https://vouch.example.com/".to_string()];
+        let validated = validate_update_format(UpdateAppInput {
+            name: Some("App"),
+            description: None,
+            redirect_uris: None,
+            resource_uris: Some(&root_slash),
+            post_logout_redirect_uris: None,
+            access_scope: None,
+            fapi_profile: None,
+            jwks: None,
+            jwks_uri: None,
+        })
+        .expect("valid update");
+        assert_eq!(
+            validated.resource_uris,
+            Some(vec!["https://vouch.example.com".to_string()]),
+            "root-shaped URI should be stored slash-stripped"
+        );
+
+        // A path-bearing URI keeps its trailing slash (RFC 3986 §3.3).
+        let path_slash = vec!["https://api.example.com/v1/resources/".to_string()];
+        let validated = validate_update_format(UpdateAppInput {
+            name: Some("App"),
+            description: None,
+            redirect_uris: None,
+            resource_uris: Some(&path_slash),
+            post_logout_redirect_uris: None,
+            access_scope: None,
+            fapi_profile: None,
+            jwks: None,
+            jwks_uri: None,
+        })
+        .expect("valid update");
+        assert_eq!(
+            validated.resource_uris,
+            Some(vec!["https://api.example.com/v1/resources/".to_string()]),
+            "path-bearing URI must be stored verbatim"
+        );
+
+        // An absent `resource_uris` preserves the existing row (`None`).
+        let validated = validate_update_format(UpdateAppInput {
+            name: Some("App"),
+            description: None,
+            redirect_uris: None,
+            resource_uris: None,
+            post_logout_redirect_uris: None,
+            access_scope: None,
+            fapi_profile: None,
+            jwks: None,
+            jwks_uri: None,
+        })
+        .expect("valid update");
+        assert_eq!(
+            validated.resource_uris, None,
+            "absent field preserves existing"
+        );
+
+        // An explicitly empty list clears (Some(vec![])) and stays empty after
+        // canonicalization — it is not a "preserve existing" signal.
+        let empty: Vec<String> = Vec::new();
+        let validated = validate_update_format(UpdateAppInput {
+            name: Some("App"),
+            description: None,
+            redirect_uris: None,
+            resource_uris: Some(&empty),
+            post_logout_redirect_uris: None,
+            access_scope: None,
+            fapi_profile: None,
+            jwks: None,
+            jwks_uri: None,
+        })
+        .expect("valid update");
+        assert_eq!(
+            validated.resource_uris,
+            Some(Vec::new()),
+            "Some(&[]) explicitly clears"
+        );
     }
 
     async fn fapi_test_client(state: &crate::AppState, email: &str) -> OAuthClient {
