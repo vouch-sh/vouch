@@ -1,0 +1,53 @@
+# Ships the journal to CloudWatch Logs as plain text, one event per log line.
+#
+# The agent's JSON "journald" collector cannot express this: it tails from the
+# moment the agent starts (start_at: end), so boot messages and a vouch-server
+# that fails before then never leave the instance, and it sends each entry as
+# the full journal record wrapped in JSON. start-amazon-cloudwatch-agent passes
+# every *.yaml in this directory to the agent as -otelconfig, after the JSON is
+# translated, so this pipeline runs alongside the JSON-defined metrics.
+receivers:
+  journald/vouch:
+    # The journal is volatile (journald.conf.d/10-vouch.conf), so "beginning"
+    # is the start of this boot.
+    start_at: beginning
+    priority: info
+    # Resume point across agent restarts; without it a restart resends the boot.
+    storage: file_storage/vouch
+    operators:
+      - type: move
+        from: body.MESSAGE
+        to: body
+
+processors:
+  # The exporter fills {InstanceId} from service.instance.id; the ec2 detector
+  # sets host.id from instance metadata.
+  resourcedetection/vouch:
+    detectors: [ec2]
+  resource/vouch:
+    attributes:
+      - key: service.instance.id
+        from_attribute: host.id
+        action: upsert
+  batch/vouch: {}
+
+exporters:
+  awscloudwatchlogs/vouch:
+    log_group_name: /vouch-server/vouch-server
+    log_stream_name: "{InstanceId}"
+    log_retention: 3
+    # Send the body string as-is instead of a {"body": ...} JSON wrapper.
+    raw_log: true
+
+extensions:
+  file_storage/vouch:
+    directory: /opt/aws/amazon-cloudwatch-agent/logs/state/journald
+    create_directory: true
+
+service:
+  extensions: [file_storage/vouch]
+  pipelines:
+    logs/vouch:
+      receivers: [journald/vouch]
+      processors: [resourcedetection/vouch, resource/vouch, batch/vouch]
+      exporters: [awscloudwatchlogs/vouch]
