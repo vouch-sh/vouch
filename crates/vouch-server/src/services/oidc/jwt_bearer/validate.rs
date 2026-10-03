@@ -5,7 +5,7 @@
 //! (Section 2.2) and JWT authorization grants (Section 2.1).
 
 use crate::crypto::alg::JwsAlgorithm;
-use crate::crypto::jwt::{HeaderAlg, Jws, JwsError};
+use crate::crypto::jwt::{HeaderAlg, Jws, JwsError, TemporalClaims};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use serde::{Deserialize, Serialize};
 
@@ -235,18 +235,20 @@ pub fn validate_jwt_assertion(
 
     let claims = token_data.claims;
 
-    // Validate expiration (RFC 7523 Section 3: MUST reject expired JWTs)
-    if claims.exp < now.saturating_sub(CLOCK_SKEW_SECONDS) {
+    // RFC 7523 §3: "The authorization server MUST reject any JWT with an
+    // expiration time that has passed, subject to allowable clock skew
+    // between systems."
+    let validity = TemporalClaims::new(Some(claims.exp), claims.nbf);
+    if validity.expired_at(now, CLOCK_SKEW_SECONDS) {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClient,
             "JWT assertion has expired",
         ));
     }
 
-    // Validate not-before if present
-    if let Some(nbf) = claims.nbf
-        && nbf > now.saturating_add(CLOCK_SKEW_SECONDS)
-    {
+    // RFC 7523 §3: the "nbf" claim "identifies the time before which the
+    // token MUST NOT be accepted for processing."
+    if validity.not_yet_valid_at(now, CLOCK_SKEW_SECONDS) {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClient,
             "JWT assertion is not yet valid (nbf claim)",
@@ -644,6 +646,34 @@ mod tests {
             desc.contains("expired"),
             "Error should mention expiry, got: {desc}"
         );
+    }
+
+    // RFC 7523 §3: "The authorization server MUST reject any JWT with an
+    // expiration time that has passed, subject to allowable clock skew
+    // between systems." At `exp == now - skew` the skewed clock has reached
+    // `exp` (RFC 7519 §4.1.4: the current time "MUST be before" it).
+    #[test]
+    fn test_validate_jwt_assertion_exp_boundary() {
+        let (enc, dec) = test_es256_keys();
+        let now = 1_700_000_000;
+        let validate = |exp: i64| {
+            let mut claims = valid_claims(now);
+            claims.iat = Some(now - 60);
+            claims.exp = exp;
+            let jwt = sign_test_jwt(&claims, &enc);
+            let header = parse_assertion_header(&jwt).expect("header should parse");
+            validate_jwt_assertion(
+                &jwt,
+                &header,
+                &dec,
+                jsonwebtoken::Algorithm::ES256,
+                TEST_AUDIENCES,
+                MAX_LIFETIME,
+                now,
+            )
+        };
+        assert!(validate(now - CLOCK_SKEW_SECONDS + 1).is_ok());
+        assert!(validate(now - CLOCK_SKEW_SECONDS).is_err());
     }
 
     // RFC 7523 §3: a bounded clock skew allowance is applied.

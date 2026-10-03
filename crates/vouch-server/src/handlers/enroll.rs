@@ -726,6 +726,7 @@ pub(crate) async fn oidc_callback(
         tokens.id_token.expose_secret(),
         client_id,
         &stored_state.nonce,
+        arrival,
     )
     .await
     {
