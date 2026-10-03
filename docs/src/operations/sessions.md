@@ -92,3 +92,8 @@ the external service it names. Registering `resource_uris` additionally
 restricts which values a client may request at all. That includes the default:
 an RFC 8693 exchange for an ID token with no `audience` gets `aud` set to the
 issuer, so a client with `resource_uris` must list the issuer to use it.
+`resource_uris` entries are compared as exact strings, because the value
+becomes the token's `aud` and RFC 7519 §2 compares those "as case-sensitive
+strings with no transformations or canonicalizations applied". Register the
+issuer exactly as `/.well-known/openid-configuration` publishes it, with no
+trailing slash: `https://vouch.example.com/` does not match.
