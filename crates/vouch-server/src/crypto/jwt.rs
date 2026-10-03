@@ -313,38 +313,89 @@ async fn kms_decode<T: DeserializeOwned>(
         .decode(payload_b64)
         .map_err(|e| StateTokenError::Validation(format!("Invalid payload encoding: {e}")))?;
 
-    // Require and validate exp claim (parity with Local path's jsonwebtoken)
     let raw: serde_json::Value = serde_json::from_slice(&payload_bytes)
         .map_err(|e| StateTokenError::Validation(format!("Invalid payload JSON: {e}")))?;
-    let exp = raw
-        .get("exp")
-        .and_then(|v| v.as_i64())
-        .ok_or_else(|| StateTokenError::Validation("Missing exp claim".to_string()))?;
-    check_state_token_not_expired(now, exp)?;
+    let validity = TemporalClaims::from_payload(&raw)
+        .ok_or_else(|| StateTokenError::Validation("Invalid exp or nbf claim".to_string()))?;
+    if !validity.accepts_own_token_at(now) {
+        return Err(StateTokenError::Validation("Token has expired".to_string()));
+    }
 
     serde_json::from_slice(&payload_bytes)
         .map_err(|e| StateTokenError::Validation(format!("Failed to deserialize claims: {e}")))
 }
 
-/// Check a KMS-backed state token's `exp` claim against `now`.
+/// The validity window of a JWT: its `exp` and `nbf` claims, judged against a
+/// caller-supplied `now` (Unix seconds) rather than a clock read here.
 ///
-/// Split out from [`kms_decode`] so the boundary condition is unit-testable
-/// without a real KMS client — the surrounding function makes live
-/// `GenerateMac`/`VerifyMac` calls that cannot run in a unit test.
-fn check_state_token_not_expired(now: i64, exp: i64) -> Result<(), StateTokenError> {
-    if is_expired(exp, now) {
-        return Err(StateTokenError::Validation("Token has expired".to_string()));
-    }
-    Ok(())
+/// Every JWT the server accepts is judged through this type, so the RFC 7519
+/// boundaries are written once. Each decoder supplies its own leeway, which
+/// RFC 7519 §4.1.4 and §4.1.5 both permit: "Implementers MAY provide for some
+/// small leeway, usually no more than a few minutes, to account for clock
+/// skew."
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TemporalClaims {
+    exp: Option<i64>,
+    nbf: Option<i64>,
 }
 
-/// Whether a JWT whose `exp` claim is `exp` is expired at `now` (Unix seconds).
-///
-/// RFC 7519 §4.1.4: "The processing of the "exp" claim requires that the
-/// current date/time MUST be before the expiration date/time listed in the
-/// "exp" claim." So `now == exp` is already expired.
-fn is_expired(exp: i64, now: i64) -> bool {
-    now >= exp
+impl TemporalClaims {
+    /// `nbf` leeway for tokens this server issued: one instance can mint a
+    /// token that another validates within the same second. The same tolerance
+    /// DPoP proofs get for client clocks. Vouch's own `exp` gets none.
+    const OWN_TOKEN_NBF_LEEWAY_SECS: i64 = 60;
+
+    /// The window of a claims struct that has already been deserialized.
+    pub(crate) fn new(exp: Option<i64>, nbf: Option<i64>) -> Self {
+        Self { exp, nbf }
+    }
+
+    /// Read the window from a compact JWS whose signature has already been
+    /// verified.
+    ///
+    /// `None` when the payload does not decode, or `exp` or `nbf` is present
+    /// but not an integer. RFC 7519 §4.1.4 and §4.1.5: each value "MUST be a
+    /// number containing a NumericDate value."
+    pub(crate) fn from_token(token: &str) -> Option<Self> {
+        let payload = decode_segment(token.split('.').nth(1)?)?;
+        Self::from_payload(&serde_json::from_slice(&payload).ok()?)
+    }
+
+    fn from_payload(payload: &serde_json::Value) -> Option<Self> {
+        let read = |name| match payload.get(name) {
+            Some(value) => value.as_i64().map(Some),
+            None => Some(None),
+        };
+        Some(Self {
+            exp: read("exp")?,
+            nbf: read("nbf")?,
+        })
+    }
+
+    /// RFC 7519 §4.1.4: "the current date/time MUST be before the expiration
+    /// date/time listed in the "exp" claim", so the token is expired once
+    /// `now - leeway` reaches `exp`. A token without `exp` never expires here;
+    /// callers for which `exp` is required check for it separately.
+    pub(crate) fn expired_at(&self, now: i64, leeway: i64) -> bool {
+        self.exp
+            .is_some_and(|exp| now.saturating_sub(leeway) >= exp)
+    }
+
+    /// RFC 7519 §4.1.5: "the current date/time MUST be after or equal to the
+    /// not-before date/time listed in the "nbf" claim", so the token is not
+    /// yet valid while `now + leeway` is before `nbf`.
+    pub(crate) fn not_yet_valid_at(&self, now: i64, leeway: i64) -> bool {
+        self.nbf.is_some_and(|nbf| now.saturating_add(leeway) < nbf)
+    }
+
+    /// Whether a token this server issued may be accepted at `now`: `exp` is
+    /// required and gets no leeway, `nbf` gets
+    /// [`Self::OWN_TOKEN_NBF_LEEWAY_SECS`].
+    fn accepts_own_token_at(&self, now: i64) -> bool {
+        self.exp.is_some()
+            && !self.expired_at(now, 0)
+            && !self.not_yet_valid_at(now, Self::OWN_TOKEN_NBF_LEEWAY_SECS)
+    }
 }
 
 // ============================================================================
@@ -680,7 +731,7 @@ pub(crate) fn decode_es256_token<C: DeserializeOwned>(
                 return None;
             }
 
-            if is_expired(payload_exp(token)?, now) {
+            if !TemporalClaims::from_token(token)?.accepts_own_token_at(now) {
                 return None;
             }
 
@@ -746,26 +797,13 @@ pub(crate) fn decode_state_token<T: DeserializeOwned>(
             jsonwebtoken::errors::ErrorKind::InvalidToken,
         ));
     }
-    let exp = payload_exp(token).ok_or_else(|| {
-        jsonwebtoken::errors::Error::from(jsonwebtoken::errors::ErrorKind::ExpiredSignature)
-    })?;
-    if is_expired(exp, now) {
+    let accepted = TemporalClaims::from_token(token).is_some_and(|v| v.accepts_own_token_at(now));
+    if !accepted {
         return Err(jsonwebtoken::errors::Error::from(
             jsonwebtoken::errors::ErrorKind::ExpiredSignature,
         ));
     }
     Ok(data.claims)
-}
-
-/// The `exp` claim of a compact JWS whose signature has already been verified.
-///
-/// `None` when the payload does not decode, is not a JSON object, or carries
-/// no integer `exp` — every one of which the caller treats as expired.
-fn payload_exp(token: &str) -> Option<i64> {
-    let payload_b64 = token.split('.').nth(1)?;
-    let payload = decode_segment(payload_b64)?;
-    let raw: serde_json::Value = serde_json::from_slice(&payload).ok()?;
-    raw.get("exp")?.as_i64()
 }
 
 #[cfg(test)]
@@ -870,6 +908,70 @@ mod tests {
         let token = key.sign_access_token_jwt(&claims).await.expect("sign");
         let decoded = decode_es256_token::<AccessTokenClaims>(&token, &ctx, TEST_NOW);
         assert!(decoded.is_none(), "Expired token should be rejected");
+    }
+
+    #[tokio::test]
+    async fn test_access_token_not_before_is_enforced_with_leeway() {
+        let key = make_test_oidc_key();
+        let ctx = make_ctx(&key);
+        let nbf = TEST_NOW;
+        let base = serde_json::to_value(AccessTokenClaims {
+            iss: TEST_ISSUER.to_string(),
+            sub: "user-123".to_string(),
+            aud: "client-abc".to_string(),
+            exp: 9_999_999_999,
+            iat: nbf,
+            nbf: None,
+            jti: "jti-1".to_string(),
+            client_id: "client-abc".to_string(),
+            scope: None,
+            email: None,
+            email_verified: None,
+            hardware_verified: false,
+            cnf: None,
+            auth_time: None,
+            act: None,
+            amr: None,
+            acr: None,
+        })
+        .expect("claims serialize");
+        let sign_with_nbf = |value: Option<serde_json::Value>| {
+            let mut claims = base.clone();
+            if let (Some(object), Some(value)) = (claims.as_object_mut(), value) {
+                object.insert("nbf".to_string(), value);
+            }
+            let key = &key;
+            async move { key.sign_access_token_jwt(&claims).await.expect("sign") }
+        };
+        let decodes =
+            |token: &str, now: i64| decode_es256_token::<AccessTokenClaims>(token, &ctx, now);
+
+        // RFC 7519 §4.1.5: "the current date/time MUST be after or equal to
+        // the not-before date/time ... Implementers MAY provide for some small
+        // leeway, usually no more than a few minutes, to account for clock
+        // skew."
+        let token = sign_with_nbf(Some(serde_json::json!(nbf))).await;
+        assert!(decodes(&token, nbf).is_some(), "now == nbf is accepted");
+        assert!(
+            decodes(&token, nbf - TemporalClaims::OWN_TOKEN_NBF_LEEWAY_SECS).is_some(),
+            "a server clock behind by the leeway still accepts the token"
+        );
+        assert!(
+            decodes(&token, nbf - TemporalClaims::OWN_TOKEN_NBF_LEEWAY_SECS - 1).is_none(),
+            "a token not yet valid beyond the leeway is refused"
+        );
+
+        let token = sign_with_nbf(None).await;
+        assert!(
+            decodes(&token, nbf - 3600).is_some(),
+            "nbf is optional (RFC 7519 §4.1.5): its absence imposes no bound"
+        );
+
+        let token = sign_with_nbf(Some(serde_json::json!("soon"))).await;
+        assert!(
+            decodes(&token, nbf).is_none(),
+            "RFC 7519 §4.1.5: nbf \"MUST be a number containing a NumericDate value\""
+        );
     }
 
     // RFC 7519 §4.1.4: "the current date/time MUST be before the expiration
@@ -1244,18 +1346,36 @@ mod tests {
     }
 
     // RFC 7519 §4.1.4: "the current date/time MUST be before the expiration
-    // date/time listed in the "exp" claim." One second before `exp` is valid.
+    // date/time listed in the "exp" claim." Covers the KMS state-token path,
+    // whose live `VerifyMac` call cannot run in a unit test.
     #[test]
-    fn test_check_state_token_not_expired_boundary_accepted() {
+    fn test_temporal_claims_exp_boundary() {
         let now = 1_700_000_000;
-        assert!(check_state_token_not_expired(now, now + 1).is_ok());
+        let claims = |exp| TemporalClaims::new(Some(exp), None);
+        assert!(
+            claims(now + 1).accepts_own_token_at(now),
+            "one second before exp"
+        );
+        assert!(!claims(now).accepts_own_token_at(now), "at exp");
+        assert!(!claims(now - 29).expired_at(now, 30), "inside the leeway");
+        assert!(claims(now - 30).expired_at(now, 30), "at exp + leeway");
+        assert!(
+            !TemporalClaims::new(None, None).accepts_own_token_at(now),
+            "this server's tokens always carry exp"
+        );
     }
 
-    // RFC 7519 §4.1.4: at `exp` the current time is no longer before it.
     #[test]
-    fn test_check_state_token_not_expired_boundary_rejected() {
-        let now = 1_700_000_000;
-        assert!(check_state_token_not_expired(now, now).is_err());
+    fn test_temporal_claims_from_payload() {
+        let read = |payload| TemporalClaims::from_payload(&payload);
+        assert!(read(serde_json::json!({"exp": 10})).is_some());
+        assert!(read(serde_json::json!({"exp": 10, "nbf": 5})).is_some());
+        assert!(read(serde_json::json!({})).is_some_and(|t| t.exp.is_none()));
+        assert!(read(serde_json::json!({"exp": "10"})).is_none());
+        assert!(
+            read(serde_json::json!({"exp": 10, "nbf": "5"})).is_none(),
+            "RFC 7519 §4.1.5: nbf \"MUST be a number containing a NumericDate value\""
+        );
     }
 
     /// Regression for #536: `decode_es256_token` must reject access tokens a

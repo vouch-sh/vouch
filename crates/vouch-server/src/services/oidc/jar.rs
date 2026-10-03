@@ -14,7 +14,7 @@
 
 use crate::AppState;
 use crate::arrival::ArrivalTime;
-use crate::crypto::jwt::{Jws, JwsError};
+use crate::crypto::jwt::{Jws, JwsError, TemporalClaims};
 use crate::db::{self, ClientKeys, OAuthClient};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use crate::infra::egress::{BodyError, read_capped_text};
@@ -646,9 +646,8 @@ fn validate_temporal_claims(
     is_fapi: bool,
     now: i64,
 ) -> ServiceResult<()> {
-    if let Some(exp) = claims.exp
-        && exp < now.saturating_sub(clock_skew)
-    {
+    let validity = TemporalClaims::new(claims.exp, claims.nbf);
+    if validity.expired_at(now, clock_skew) {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidRequestObject,
             "Request Object has expired",
@@ -656,7 +655,7 @@ fn validate_temporal_claims(
     }
 
     if let Some(nbf) = claims.nbf {
-        if nbf > now.saturating_add(clock_skew) {
+        if validity.not_yet_valid_at(now, clock_skew) {
             return Err(ServiceError::oauth(
                 OAuthErrorCode::InvalidRequestObject,
                 "Request Object is not yet valid (nbf claim)",
@@ -1206,26 +1205,28 @@ mod tests {
         );
     }
 
-    // FAPI 2.0 Message Signing §5.3.1: the exp boundary is exact.
+    // RFC 7519 §4.1.4: "the current date/time MUST be before the expiration
+    // date/time listed in the "exp" claim", with the clock skew the section
+    // permits. At `exp == now - skew` the skewed clock has reached `exp`.
     #[test]
     fn test_jar_temporal_exp_boundary() {
-        let at_edge = temporal_claims(serde_json::json!({"exp": TEMPORAL_NOW - TEMPORAL_SKEW}));
+        let inside = temporal_claims(serde_json::json!({"exp": TEMPORAL_NOW - TEMPORAL_SKEW + 1}));
         assert!(
-            validate_temporal_claims(&at_edge, TEMPORAL_SKEW, false, TEMPORAL_NOW).is_ok(),
-            "exp == now - skew must be accepted"
+            validate_temporal_claims(&inside, TEMPORAL_SKEW, false, TEMPORAL_NOW).is_ok(),
+            "exp == now - skew + 1 must be accepted"
         );
 
-        let past_edge =
-            temporal_claims(serde_json::json!({"exp": TEMPORAL_NOW - TEMPORAL_SKEW - 1}));
-        let err = validate_temporal_claims(&past_edge, TEMPORAL_SKEW, false, TEMPORAL_NOW)
-            .expect_err("exp == now - skew - 1 must be rejected");
+        let at_edge = temporal_claims(serde_json::json!({"exp": TEMPORAL_NOW - TEMPORAL_SKEW}));
+        let err = validate_temporal_claims(&at_edge, TEMPORAL_SKEW, false, TEMPORAL_NOW)
+            .expect_err("exp == now - skew must be rejected");
         assert_eq!(
             *oauth_error_code(&err),
             OAuthErrorCode::InvalidRequestObject
         );
     }
 
-    // FAPI 2.0 Message Signing §5.3.1: the nbf boundary is exact.
+    // RFC 7519 §4.1.5: "the current date/time MUST be after or equal to the
+    // not-before date/time listed in the "nbf" claim", with the permitted skew.
     #[test]
     fn test_jar_temporal_nbf_future_boundary() {
         let at_edge = temporal_claims(serde_json::json!({"nbf": TEMPORAL_NOW + TEMPORAL_SKEW}));

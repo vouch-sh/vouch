@@ -9,12 +9,17 @@ use serde::Deserialize;
 use url::Url;
 
 use super::IdentityResult;
+use crate::arrival::ArrivalTime;
 use crate::crypto;
-use crate::crypto::jwt::{Jws, JwsError};
+use crate::crypto::jwt::{Jws, JwsError, TemporalClaims};
 use crate::db::{Domain, UpstreamLogin};
 use crate::email::Email;
 use crate::infra::csp::CspOrigin;
 use crate::infra::egress::read_capped_json;
+
+/// Clock skew allowed on an upstream ID token's `exp` and `nbf`, which the
+/// IdP stamped on its own clock.
+const IDP_CLOCK_SKEW_SECS: i64 = 60;
 
 /// Maximum size of an upstream IdP's OIDC discovery document (256 KB).
 ///
@@ -376,6 +381,7 @@ pub(crate) async fn verify_id_token(
     id_token: &str,
     expected_client_id: &str,
     expected_nonce: &str,
+    arrival: ArrivalTime,
 ) -> Result<IdentityResult, anyhow::Error> {
     // RFC 7515 Section 4.1.11: "If any of the listed extension Header
     // Parameters are not understood and supported by the recipient, then the
@@ -439,9 +445,27 @@ pub(crate) async fn verify_id_token(
         validation.set_issuer(&[&provider.issuer]);
     }
     validation.set_audience(&[expected_client_id]);
+    // `exp` stays a required claim; it and `nbf` are judged below at the
+    // request's arrival rather than at `jsonwebtoken`'s own clock reading.
+    validation.validate_exp = false;
 
     let token_data = jsonwebtoken::decode::<IdTokenClaims>(id_token, &decoding_key, &validation)
         .map_err(|e| anyhow::anyhow!("ID token verification failed: {e}"))?;
+
+    // OIDC Core §2, `exp`: "The processing of this parameter requires that
+    // the current date/time MUST be before the expiration date/time listed in
+    // the value. Implementers MAY provide for some small leeway, usually no
+    // more than a few minutes, to account for clock skew." RFC 7519 §4.1.5
+    // gives `nbf` the same allowance.
+    let validity = TemporalClaims::from_token(id_token)
+        .ok_or_else(|| anyhow::anyhow!("ID token exp or nbf is not a NumericDate"))?;
+    let now = arrival.as_second();
+    if validity.expired_at(now, IDP_CLOCK_SKEW_SECS) {
+        anyhow::bail!("ID token has expired");
+    }
+    if validity.not_yet_valid_at(now, IDP_CLOCK_SKEW_SECS) {
+        anyhow::bail!("ID token is not yet valid (nbf claim)");
+    }
 
     let claims = token_data.claims;
 

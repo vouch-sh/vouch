@@ -10,6 +10,7 @@ use super::*;
 use crate::crypto::jwk::Jwk;
 use crate::crypto::keys::OidcSigningKey;
 use crate::db::Domain;
+use crate::test_utils::test_arrival;
 use jsonwebtoken::Algorithm;
 
 // ── Issuer host matching (#425) ────────────────────────────────────────
@@ -867,7 +868,7 @@ async fn verify_id_token_happy_path() {
     let provider = make_test_provider(&issuer);
     let client = reqwest::Client::new();
 
-    let result = verify_id_token(&client, &provider, &token, client_id, nonce)
+    let result = verify_id_token(&client, &provider, &token, client_id, nonce, test_arrival())
         .await
         .unwrap();
 
@@ -923,7 +924,8 @@ async fn verify_id_token_wrong_family_kid_duplicate_accepts_regardless_of_order(
         let token = sign_test_jwt(&ec_key, claims).await;
         let provider = make_test_provider(&issuer);
         let client = reqwest::Client::new();
-        let result = verify_id_token(&client, &provider, &token, client_id, nonce).await;
+        let result =
+            verify_id_token(&client, &provider, &token, client_id, nonce, test_arrival()).await;
         assert!(
             result.is_ok(),
             "wrong-family sibling first must not mask the EC key: {result:?}"
@@ -955,7 +957,7 @@ async fn verify_id_token_missing_sub_rejected() {
     let provider = make_test_provider(&issuer);
     let client = reqwest::Client::new();
 
-    let err = verify_id_token(&client, &provider, &token, client_id, nonce)
+    let err = verify_id_token(&client, &provider, &token, client_id, nonce, test_arrival())
         .await
         .unwrap_err();
     assert!(
@@ -985,9 +987,16 @@ async fn verify_id_token_nonce_mismatch() {
     let provider = make_test_provider(&issuer);
     let client = reqwest::Client::new();
 
-    let err = verify_id_token(&client, &provider, &token, client_id, "expected-nonce")
-        .await
-        .unwrap_err();
+    let err = verify_id_token(
+        &client,
+        &provider,
+        &token,
+        client_id,
+        "expected-nonce",
+        test_arrival(),
+    )
+    .await
+    .unwrap_err();
 
     assert!(
         err.to_string().contains("nonce mismatch"),
@@ -1015,9 +1024,16 @@ async fn verify_id_token_missing_nonce() {
     let provider = make_test_provider(&issuer);
     let client = reqwest::Client::new();
 
-    let err = verify_id_token(&client, &provider, &token, client_id, "expected-nonce")
-        .await
-        .unwrap_err();
+    let err = verify_id_token(
+        &client,
+        &provider,
+        &token,
+        client_id,
+        "expected-nonce",
+        test_arrival(),
+    )
+    .await
+    .unwrap_err();
 
     assert!(
         err.to_string().contains("missing nonce"),
@@ -1045,7 +1061,7 @@ async fn verify_id_token_empty_nonce_bypass() {
     let provider = make_test_provider(&issuer);
     let client = reqwest::Client::new();
 
-    let result = verify_id_token(&client, &provider, &token, client_id, "")
+    let result = verify_id_token(&client, &provider, &token, client_id, "", test_arrival())
         .await
         .unwrap();
 
@@ -1075,7 +1091,7 @@ async fn verify_id_token_email_not_verified() {
     let provider = make_test_provider(&issuer);
     let client = reqwest::Client::new();
 
-    let err = verify_id_token(&client, &provider, &token, client_id, nonce)
+    let err = verify_id_token(&client, &provider, &token, client_id, nonce, test_arrival())
         .await
         .unwrap_err();
 
@@ -1110,7 +1126,7 @@ async fn verify_id_token_domain_from_hd_claim() {
     provider.jwks_uri = url::Url::parse(&format!("{}/jwks", server.uri())).unwrap();
     let client = reqwest::Client::new();
 
-    let result = verify_id_token(&client, &provider, &token, client_id, nonce)
+    let result = verify_id_token(&client, &provider, &token, client_id, nonce, test_arrival())
         .await
         .unwrap();
 
@@ -1151,7 +1167,7 @@ async fn verify_id_token_rejects_malformed_hd_claim() {
     provider.jwks_uri = url::Url::parse(&format!("{}/jwks", server.uri())).unwrap();
     let client = reqwest::Client::new();
 
-    let err = verify_id_token(&client, &provider, &token, client_id, nonce)
+    let err = verify_id_token(&client, &provider, &token, client_id, nonce, test_arrival())
         .await
         .expect_err("a malformed hd claim must fail verification");
     assert!(
@@ -1184,7 +1200,7 @@ async fn verify_id_token_rejects_malformed_email_domain() {
     let provider = make_test_provider(&issuer);
     let client = reqwest::Client::new();
 
-    let err = verify_id_token(&client, &provider, &token, client_id, nonce)
+    let err = verify_id_token(&client, &provider, &token, client_id, nonce, test_arrival())
         .await
         .expect_err("a malformed email domain must fail verification");
     assert!(
@@ -1215,7 +1231,7 @@ async fn verify_id_token_no_hd_claim_non_google_falls_back_to_email() {
     let provider = make_test_provider(&issuer);
     let client = reqwest::Client::new();
 
-    let result = verify_id_token(&client, &provider, &token, client_id, nonce)
+    let result = verify_id_token(&client, &provider, &token, client_id, nonce, test_arrival())
         .await
         .unwrap();
 
@@ -1253,7 +1269,7 @@ async fn verify_id_token_lowercases_mixed_case_hd_claim() {
     provider.jwks_uri = url::Url::parse(&format!("{}/jwks", server.uri())).unwrap();
     let client = reqwest::Client::new();
 
-    let result = verify_id_token(&client, &provider, &token, client_id, nonce)
+    let result = verify_id_token(&client, &provider, &token, client_id, nonce, test_arrival())
         .await
         .unwrap();
 
@@ -1287,7 +1303,7 @@ async fn verify_id_token_lowercases_email_domain_fallback() {
     let provider = make_test_provider(&issuer);
     let client = reqwest::Client::new();
 
-    let result = verify_id_token(&client, &provider, &token, client_id, nonce)
+    let result = verify_id_token(&client, &provider, &token, client_id, nonce, test_arrival())
         .await
         .unwrap();
 
@@ -1322,7 +1338,7 @@ async fn verify_id_token_google_consumer_no_hd_returns_none() {
     provider.jwks_uri = url::Url::parse(&format!("{}/jwks", server.uri())).unwrap();
     let client = reqwest::Client::new();
 
-    let result = verify_id_token(&client, &provider, &token, client_id, nonce)
+    let result = verify_id_token(&client, &provider, &token, client_id, nonce, test_arrival())
         .await
         .unwrap();
 
@@ -1363,7 +1379,7 @@ async fn verify_id_token_entra_tid_mismatch_rejected() {
     provider.jwks_uri = url::Url::parse(&format!("{}/jwks", server.uri())).unwrap();
     let client = reqwest::Client::new();
 
-    let err = verify_id_token(&client, &provider, &token, client_id, nonce)
+    let err = verify_id_token(&client, &provider, &token, client_id, nonce, test_arrival())
         .await
         .unwrap_err();
 
@@ -1398,7 +1414,7 @@ async fn verify_id_token_entra_tid_matches_issuer_succeeds() {
     provider.jwks_uri = url::Url::parse(&format!("{}/jwks", server.uri())).unwrap();
     let client = reqwest::Client::new();
 
-    let result = verify_id_token(&client, &provider, &token, client_id, nonce)
+    let result = verify_id_token(&client, &provider, &token, client_id, nonce, test_arrival())
         .await
         .unwrap();
 
@@ -1449,7 +1465,7 @@ async fn verify_id_token_entra_tenant_template_with_per_tenant_token_succeeds() 
     provider.jwks_uri = url::Url::parse(&format!("{}/jwks", server.uri())).unwrap();
     let client = reqwest::Client::new();
 
-    let result = verify_id_token(&client, &provider, &token, client_id, nonce)
+    let result = verify_id_token(&client, &provider, &token, client_id, nonce, test_arrival())
         .await
         .unwrap();
 
@@ -1492,7 +1508,7 @@ async fn verify_id_token_entra_tenant_template_tid_mismatch_rejected() {
     provider.jwks_uri = url::Url::parse(&format!("{}/jwks", server.uri())).unwrap();
     let client = reqwest::Client::new();
 
-    let err = verify_id_token(&client, &provider, &token, client_id, nonce)
+    let err = verify_id_token(&client, &provider, &token, client_id, nonce, test_arrival())
         .await
         .unwrap_err();
 
@@ -1530,7 +1546,7 @@ async fn verify_id_token_entra_tenant_template_rejects_non_entra_issuer() {
     provider.jwks_uri = url::Url::parse(&format!("{}/jwks", server.uri())).unwrap();
     let client = reqwest::Client::new();
 
-    let err = verify_id_token(&client, &provider, &token, client_id, nonce)
+    let err = verify_id_token(&client, &provider, &token, client_id, nonce, test_arrival())
         .await
         .unwrap_err();
 
@@ -1594,7 +1610,7 @@ async fn verify_id_token_entra_xms_edov_true_accepted_without_email_verified() {
     provider.jwks_uri = url::Url::parse(&format!("{}/jwks", server.uri())).unwrap();
     let client = reqwest::Client::new();
 
-    let result = verify_id_token(&client, &provider, &token, client_id, nonce)
+    let result = verify_id_token(&client, &provider, &token, client_id, nonce, test_arrival())
         .await
         .unwrap();
 
@@ -1631,7 +1647,7 @@ async fn verify_id_token_entra_xms_edov_false_rejected_with_guidance() {
     provider.jwks_uri = url::Url::parse(&format!("{}/jwks", server.uri())).unwrap();
     let client = reqwest::Client::new();
 
-    let err = verify_id_token(&client, &provider, &token, client_id, nonce)
+    let err = verify_id_token(&client, &provider, &token, client_id, nonce, test_arrival())
         .await
         .unwrap_err();
 
@@ -1675,7 +1691,7 @@ async fn verify_id_token_entra_missing_xms_edov_rejected_with_guidance() {
     provider.jwks_uri = url::Url::parse(&format!("{}/jwks", server.uri())).unwrap();
     let client = reqwest::Client::new();
 
-    let err = verify_id_token(&client, &provider, &token, client_id, nonce)
+    let err = verify_id_token(&client, &provider, &token, client_id, nonce, test_arrival())
         .await
         .unwrap_err();
 
@@ -1714,7 +1730,7 @@ async fn verify_id_token_non_entra_xms_edov_does_not_override_email_verified() {
     let provider = make_test_provider(&issuer);
     let client = reqwest::Client::new();
 
-    let err = verify_id_token(&client, &provider, &token, client_id, nonce)
+    let err = verify_id_token(&client, &provider, &token, client_id, nonce, test_arrival())
         .await
         .unwrap_err();
 
@@ -1754,4 +1770,58 @@ fn is_entra_tenant_template_issuer_detects_post_discovery_form() {
     assert!(!is_entra_tenant_template_issuer(
         "https://evil.example.com/{tenantid}/v2.0"
     ));
+}
+
+// OIDC Core §2, `exp`: "the current date/time MUST be before the expiration
+// date/time listed in the value. Implementers MAY provide for some small
+// leeway, usually no more than a few minutes, to account for clock skew."
+// RFC 7519 §4.1.5 bounds `nbf` the same way. Both are judged at the request's
+// arrival: `exp` here is in the wall clock's past.
+#[tokio::test]
+async fn verify_id_token_time_window_is_judged_at_arrival_with_leeway() {
+    use crate::arrival::ArrivalTime;
+    use wiremock::MockServer;
+
+    let server = MockServer::start().await;
+    let issuer = server.uri();
+    let client_id = "test-client";
+    let key = OidcSigningKey::generate().unwrap();
+    mount_jwks(&server, &key).await;
+    let provider = make_test_provider(&issuer);
+    let client = reqwest::Client::new();
+    let mark = 1_600_000_000_i64;
+    let at = ArrivalTime::for_test_second;
+
+    let mut claims = base_claims(&issuer, client_id);
+    claims["exp"] = serde_json::json!(mark);
+    let token = sign_test_jwt(&key, claims).await;
+    let verify = |now| verify_id_token(&client, &provider, &token, client_id, "", at(now));
+    assert!(verify(mark).await.is_ok(), "at exp, inside the leeway");
+    assert!(verify(mark + IDP_CLOCK_SKEW_SECS - 1).await.is_ok());
+    let err = verify(mark + IDP_CLOCK_SKEW_SECS).await.unwrap_err();
+    assert!(
+        err.to_string().contains("expired"),
+        "at exp + leeway: {err}"
+    );
+
+    let mut claims = base_claims(&issuer, client_id);
+    claims["nbf"] = serde_json::json!(mark);
+    let token = sign_test_jwt(&key, claims).await;
+    let verify = |now| verify_id_token(&client, &provider, &token, client_id, "", at(now));
+    assert!(
+        verify(mark - IDP_CLOCK_SKEW_SECS).await.is_ok(),
+        "nbf inside the leeway"
+    );
+    let err = verify(mark - IDP_CLOCK_SKEW_SECS - 1).await.unwrap_err();
+    assert!(err.to_string().contains("not yet valid"), "{err}");
+
+    let mut claims = base_claims(&issuer, client_id);
+    claims["nbf"] = serde_json::json!("soon");
+    let token = sign_test_jwt(&key, claims).await;
+    assert!(
+        verify_id_token(&client, &provider, &token, client_id, "", at(mark))
+            .await
+            .is_err(),
+        "RFC 7519 §4.1.5: nbf \"MUST be a number containing a NumericDate value\""
+    );
 }
