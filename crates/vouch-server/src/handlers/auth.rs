@@ -377,9 +377,13 @@ mod tests {
             },
         )
         .await;
-        let DecodedToken::AccessToken(mut claims) =
-            decode_token(&real_token, &state.oidc_key, &state.config().base_url)
-                .expect("real token must decode");
+        let DecodedToken::AccessToken(mut claims) = decode_token(
+            &real_token,
+            &state.oidc_key,
+            &state.config().base_url,
+            test_arrival(),
+        )
+        .expect("real token must decode");
         let now = Timestamp::now().as_second();
         claims.exp = now;
         claims.jti = uuid::Uuid::now_v7().to_string();

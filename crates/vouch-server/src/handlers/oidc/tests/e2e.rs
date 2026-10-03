@@ -254,7 +254,7 @@ async fn test_session_spec_client_id_produces_client_bound_token() {
     .await;
 
     let config = state.config();
-    let decoded = decode_token(&token, &state.oidc_key, &config.base_url)
+    let decoded = decode_token(&token, &state.oidc_key, &config.base_url, test_arrival())
         .expect("Token must decode successfully");
 
     let DecodedToken::AccessToken(claims) = decoded;
@@ -287,7 +287,7 @@ async fn test_unified_token_hardware_verified_claim_always_set() {
     .await;
 
     let config = state.config();
-    let decoded = decode_token(&token, &state.oidc_key, &config.base_url)
+    let decoded = decode_token(&token, &state.oidc_key, &config.base_url, test_arrival())
         .expect("Token must decode successfully");
 
     let DecodedToken::AccessToken(claims) = decoded;
@@ -435,8 +435,8 @@ async fn test_decoded_token_enum_single_variant_destructuring() {
     .await;
 
     let config = state.config();
-    let decoded =
-        decode_token(&token, &state.oidc_key, &config.base_url).expect("Token must decode");
+    let decoded = decode_token(&token, &state.oidc_key, &config.base_url, test_arrival())
+        .expect("Token must decode");
 
     // Exhaustive destructuring of the single-variant enum — if a second variant
     // were added this would produce a compiler warning, keeping tests honest.

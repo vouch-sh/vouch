@@ -168,7 +168,7 @@ pub async fn introspect_token(
 ) -> ServiceResult<IntrospectionResult> {
     // Decode the token as an ES256 RFC 9068 access token
     let config = state.config();
-    let decoded = match decode_token(token, &state.oidc_key, &config.base_url) {
+    let decoded = match decode_token(token, &state.oidc_key, &config.base_url, arrival) {
         Some(d) => d,
         None => {
             return Ok(IntrospectionResult::inactive());
@@ -269,10 +269,11 @@ pub async fn revoke_token(
     _token_type_hint: Option<&str>,
     client_info: ClientInfo,
     caller_client_id: &str,
+    arrival: ArrivalTime,
 ) -> ServiceResult<RevocationResult> {
     // Try to decode to get email for audit logging
     let config = state.config();
-    let decoded = decode_token(token, &state.oidc_key, &config.base_url);
+    let decoded = decode_token(token, &state.oidc_key, &config.base_url, arrival);
 
     // RFC 7009 Section 2.1: Verify the token was issued to the calling client.
     // If not, return success but perform no revocation.

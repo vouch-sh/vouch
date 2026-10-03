@@ -317,19 +317,19 @@ pub(crate) async fn exchange_token(
     // Decode and validate the subject token (supports both HS256 and ES256)
     let config = state.config();
     let subject_token = params.subject.token.expose_secret();
-    let subject_decoded = decode_token(subject_token, &state.oidc_key, &config.base_url)
+    let subject_decoded = decode_token(subject_token, &state.oidc_key, &config.base_url, arrival)
         .ok_or_else(|| {
-            // RFC 8693 §2.2.2: "If the request itself is not valid or if
-            // either the 'subject_token' or 'actor_token' are invalid for any
-            // reason, or are unacceptable based on policy, the authorization
-            // server MUST construct an error response, as specified in
-            // Section 5.2 of [RFC6749]. The value of the 'error' parameter
-            // MUST be the 'invalid_request' error code."
-            ServiceError::oauth(
-                OAuthErrorCode::InvalidRequest,
-                "Invalid or expired subject token",
-            )
-        })?;
+        // RFC 8693 §2.2.2: "If the request itself is not valid or if
+        // either the 'subject_token' or 'actor_token' are invalid for any
+        // reason, or are unacceptable based on policy, the authorization
+        // server MUST construct an error response, as specified in
+        // Section 5.2 of [RFC6749]. The value of the 'error' parameter
+        // MUST be the 'invalid_request' error code."
+        ServiceError::oauth(
+            OAuthErrorCode::InvalidRequest,
+            "Invalid or expired subject token",
+        )
+    })?;
 
     // A sender-constrained subject token is accepted only from the holder of
     // its key, and the issued token stays bound to that key. Otherwise
@@ -445,10 +445,10 @@ pub(crate) async fn exchange_token(
         let actor_token = actor.token().expose_secret();
 
         // Decode actor token (supports both HS256 and ES256)
-        let actor_decoded = decode_token(actor_token, &state.oidc_key, &config.base_url)
+        let actor_decoded = decode_token(actor_token, &state.oidc_key, &config.base_url, arrival)
             .ok_or_else(|| {
-                ServiceError::oauth(OAuthErrorCode::InvalidRequest, "Invalid actor token")
-            })?;
+            ServiceError::oauth(OAuthErrorCode::InvalidRequest, "Invalid actor token")
+        })?;
         let actor_binding = actor_decoded
             .cnf()
             .map(|cnf| cnf.confirmed_binding(params.presented))

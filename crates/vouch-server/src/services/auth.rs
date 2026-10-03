@@ -1300,14 +1300,18 @@ pub(crate) struct ValidatedResourceToken {
 ///
 /// Validates `typ` and `iss` per RFC 8725.
 ///
+/// `exp` is judged at `arrival`, so every decode of a token serving one
+/// request agrees, however long the awaits between them take.
+///
 /// Returns `None` for invalid, expired, or unsupported tokens.
 pub(crate) fn decode_token(
     token: &str,
     oidc_key: &OidcSigningKey,
     expected_issuer: &str,
+    arrival: ArrivalTime,
 ) -> Option<DecodedToken> {
     let ctx = TokenValidationContext::new(oidc_key, expected_issuer);
-    let claims: AccessTokenClaims = jwt::decode_es256_token(token, &ctx)?;
+    let claims: AccessTokenClaims = jwt::decode_es256_token(token, &ctx, arrival.as_second())?;
     Some(DecodedToken::AccessToken(claims))
 }
 
@@ -1409,6 +1413,7 @@ where
 mod tests {
     use super::*;
     use crate::db;
+    use crate::test_utils::test_arrival;
 
     // WebAuthn L2 §7.2: the signCount check (step 21) runs only after the
     // signature verified (step 20), so a counter regression — and only a
@@ -1529,7 +1534,7 @@ mod tests {
         let key = make_test_oidc_key();
         let token = make_test_access_token(&key).await;
 
-        let decoded = decode_token(&token, &key, TEST_ISSUER);
+        let decoded = decode_token(&token, &key, TEST_ISSUER, test_arrival());
         assert!(decoded.is_some());
         match decoded.unwrap() {
             DecodedToken::AccessToken(c) => {
@@ -1569,16 +1574,16 @@ mod tests {
         // Sign as ID token (typ: "JWT", no "at+jwt")
         let token = key.sign_jwt(&claims).await.expect("sign");
 
-        let decoded = decode_token(&token, &key, TEST_ISSUER);
+        let decoded = decode_token(&token, &key, TEST_ISSUER, test_arrival());
         assert!(decoded.is_none(), "ID token should be rejected");
     }
 
     #[test]
     fn test_decode_token_rejects_garbage() {
         let key = make_test_oidc_key();
-        assert!(decode_token("not.a.jwt", &key, TEST_ISSUER).is_none());
-        assert!(decode_token("", &key, TEST_ISSUER).is_none());
-        assert!(decode_token("abc123", &key, TEST_ISSUER).is_none());
+        assert!(decode_token("not.a.jwt", &key, TEST_ISSUER, test_arrival()).is_none());
+        assert!(decode_token("", &key, TEST_ISSUER, test_arrival()).is_none());
+        assert!(decode_token("abc123", &key, TEST_ISSUER, test_arrival()).is_none());
     }
 
     #[tokio::test]
@@ -1606,7 +1611,7 @@ mod tests {
         };
 
         let token = key.sign_access_token_jwt(&claims).await.expect("sign");
-        let decoded = decode_token(&token, &key, TEST_ISSUER);
+        let decoded = decode_token(&token, &key, TEST_ISSUER, test_arrival());
         assert!(decoded.is_none(), "Expired token should be rejected");
     }
 
@@ -1614,7 +1619,7 @@ mod tests {
     async fn test_decoded_token_accessors() {
         let key = make_test_oidc_key();
         let token = make_test_access_token(&key).await;
-        let decoded = decode_token(&token, &key, TEST_ISSUER).unwrap();
+        let decoded = decode_token(&token, &key, TEST_ISSUER, test_arrival()).unwrap();
 
         assert_eq!(decoded.sub(), "user-123");
         assert_eq!(decoded.email(), Some("test@example.com"));

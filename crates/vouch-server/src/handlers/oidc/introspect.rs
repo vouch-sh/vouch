@@ -187,6 +187,7 @@ pub(crate) async fn revoke(
         params.token_type_hint.as_deref(),
         client_info,
         &caller_client_id,
+        arrival,
     )
     .await
     {
