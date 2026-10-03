@@ -18,7 +18,7 @@ use crate::client::VouchClient;
 use crate::exit_code::CliError;
 use crate::fido2::{self, FidoDevice, YubiKey};
 use crate::server_url::ServerUrl;
-use vouch_cli::{tr, tr_println};
+use vouch_cli::{tr, tr_args, tr_println};
 
 /// On macOS, Google Chrome claims YubiKeys at the USB device level the moment
 /// they enumerate (so its WebAuthn can respond instantly), which blocks every
@@ -122,6 +122,13 @@ pub(crate) async fn run(server: &ServerUrl, name: Option<&str>, timeout_secs: u6
     // the process-global stdout fd. They must not run on a tokio runtime thread.
     // `spawn_fido2` creates a dedicated `std::thread` with no tokio context.
     let rp_id = start_resp.rp_id.clone();
+    if !server.accepts_rp_id(&rp_id) {
+        anyhow::bail!(tr_args!(
+            "err-rp-id-not-for-server",
+            rp_id = rp_id.as_str(),
+            server = server.as_str()
+        ));
+    }
     let rp_name = start_resp.rp_name.clone();
     let challenge = start_resp.challenge.clone();
     let user_id = start_resp.user_id;

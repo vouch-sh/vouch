@@ -215,6 +215,13 @@ async fn run_fapi_login(
 
     // Step 4: FIDO2 assertion on a plain OS thread.
     let rp_id = challenge_resp.rp_id.clone();
+    if !server.accepts_rp_id(&rp_id) {
+        anyhow::bail!(tr_args!(
+            "err-rp-id-not-for-server",
+            rp_id = rp_id.as_str(),
+            server = server.as_str()
+        ));
+    }
     let challenge_b64 = challenge_resp.challenge.clone();
 
     // Decode the base64url challenge into raw bytes for the FIDO2 library.

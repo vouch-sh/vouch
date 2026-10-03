@@ -71,6 +71,38 @@ impl ServerUrl {
         raw.trim_end_matches('/') == self.url
     }
 
+    /// Whether `rp_id` is one this server may ask an authenticator to sign for.
+    ///
+    /// WebAuthn Level 2 §5.1.3 lets a relying party name its origin's effective
+    /// domain or a registrable domain suffix of it, so a server may name its own
+    /// host or a parent domain of it, and nothing else. A browser enforces that
+    /// against the page origin. The CLI has no page origin, so the comparison is
+    /// made against the server URL this invocation chose.
+    ///
+    /// Taking the `rp_id` from the challenge unchecked would let a server hand
+    /// back another deployment's `rp_id`: the authenticator would then produce an
+    /// assertion valid for that deployment, which is the relay this check closes.
+    pub fn accepts_rp_id(&self, rp_id: &str) -> bool {
+        if rp_id.is_empty() {
+            return false;
+        }
+        let Ok(parsed) = url::Url::parse(&self.url) else {
+            return false;
+        };
+        let Some(host) = parsed.host_str() else {
+            return false;
+        };
+        let host = host.to_ascii_lowercase();
+        let rp_id = rp_id.to_ascii_lowercase();
+        if host == rp_id {
+            return true;
+        }
+        // A parent domain only: the remainder must end at a label boundary, so
+        // `evil-vouch.sh` does not pass for an `rp_id` of `vouch.sh`.
+        host.strip_suffix(&rp_id)
+            .is_some_and(|rest| rest.ends_with('.'))
+    }
+
     /// Whether `url` is on this server: the same scheme, host, and port, and
     /// a path at or below this URL's path. Used before sending a credential
     /// to a URL the server returned earlier (RFC 7592 `registration_client_uri`).
@@ -327,5 +359,73 @@ mod tests {
         let url = ServerUrl::parse("https://example.com", false).unwrap();
         let s: &str = url.as_ref();
         assert_eq!(s, "https://example.com");
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "test code: panic on assertion failure is acceptable"
+)]
+mod rp_id_tests {
+    use super::ServerUrl;
+
+    fn server(url: &str) -> ServerUrl {
+        ServerUrl::parse(url, true).expect("valid test URL")
+    }
+
+    /// WebAuthn Level 2 §5.1.3: the relying party may name its origin's
+    /// effective domain.
+    #[test]
+    fn accepts_the_server_host_itself() {
+        assert!(server("https://us.vouch.sh").accepts_rp_id("us.vouch.sh"));
+    }
+
+    /// The same section permits a registrable domain suffix, so a parent
+    /// domain of the server host is legitimate.
+    #[test]
+    fn accepts_a_parent_domain() {
+        assert!(server("https://us.vouch.sh").accepts_rp_id("vouch.sh"));
+    }
+
+    /// The suffix must end on a label boundary. Without that check a
+    /// look-alike host would pass for the real registrable domain.
+    #[test]
+    fn rejects_a_suffix_that_is_not_a_label_boundary() {
+        assert!(!server("https://evil-vouch.sh").accepts_rp_id("vouch.sh"));
+    }
+
+    /// A child domain is the wrong direction: the authenticator would scope
+    /// the credential more narrowly than the origin.
+    #[test]
+    fn rejects_a_child_domain() {
+        assert!(!server("https://vouch.sh").accepts_rp_id("us.vouch.sh"));
+    }
+
+    /// An unrelated host is the relay this check exists to stop.
+    #[test]
+    fn rejects_an_unrelated_host() {
+        assert!(!server("https://attacker.example").accepts_rp_id("us.vouch.sh"));
+    }
+
+    /// Host names are case-insensitive.
+    #[test]
+    fn comparison_ignores_case() {
+        assert!(server("https://US.Vouch.SH").accepts_rp_id("us.vouch.sh"));
+        assert!(server("https://us.vouch.sh").accepts_rp_id("US.VOUCH.SH"));
+    }
+
+    /// An empty `rp_id` must not strip to a passing suffix.
+    #[test]
+    fn rejects_empty_rp_id() {
+        assert!(!server("https://us.vouch.sh").accepts_rp_id(""));
+    }
+
+    /// Local development: the loopback host is its own relying party, and the
+    /// port is not part of an `rp_id`.
+    #[test]
+    fn accepts_loopback_host_ignoring_port() {
+        assert!(server("http://localhost:8080").accepts_rp_id("localhost"));
+        assert!(!server("http://localhost:8080").accepts_rp_id("vouch.sh"));
     }
 }

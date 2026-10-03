@@ -554,6 +554,13 @@ async fn register_current_key(server: &ServerUrl, token: SecretString) -> Result
     tr_println!("enroll-registering-key");
 
     let rp_id = start_resp.rp_id.clone();
+    if !server.accepts_rp_id(&rp_id) {
+        anyhow::bail!(tr_args!(
+            "err-rp-id-not-for-server",
+            rp_id = rp_id.as_str(),
+            server = server.as_str()
+        ));
+    }
     let rp_name = start_resp.rp_name.clone();
     let challenge = start_resp.challenge.clone();
     let user_id = start_resp.user_id;

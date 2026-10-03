@@ -1749,6 +1749,7 @@ err-failed-assume-management-role = failed to assume management role
 err-failed-assume-management-role-idc-exchange = failed to assume management role for IdC exchange
 err-failed-assume-target-role-via-chaining = failed to assume target role via chaining
 err-failed-build-client-assertion = failed to build client assertion
+err-rp-id-not-for-server = server returned a relying-party ID ({ $rp_id }) that is not { $server } or a parent domain of it; refusing to sign
 err-failed-build-client-assertion-challenge-request = failed to build client assertion for challenge request
 err-failed-build-dpop-proof-challenge-request = failed to build DPoP proof for challenge request
 err-failed-build-dpop-proof-token-request = failed to build DPoP proof for token request
