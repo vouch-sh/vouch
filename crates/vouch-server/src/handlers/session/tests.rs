@@ -173,7 +173,7 @@ async fn test_mtls_bound_token_with_matching_cert_succeeds() {
         "mTLS-bound token with matching cert must succeed, got: {:?}",
         result.err()
     );
-    assert_eq!(result.expect("ok").sub, user.id);
+    assert_eq!(result.expect("ok").0.sub, user.id);
 }
 
 /// mTLS-bound token presented with the wrong client certificate must be rejected.
@@ -631,4 +631,224 @@ async fn test_dpop_scheme_undecodable_token_gets_one_dpop_challenge() {
             "{path}: {challenge}"
         );
     }
+}
+
+/// RFC 9449 Figure 16: the account-active check (`load_active_user`) runs
+/// after `extract_resource_token` returns `Ok`, so before the fix its
+/// scheme-blind `ServiceError::InactiveAccount` rendered as a bare 401 and
+/// the `resource_metadata` middleware answered a DPoP-scheme request with a
+/// `Bearer` challenge. A DPoP client whose account is deactivated now gets a
+/// `DPoP error="invalid_token"` challenge — the same form the token-level
+/// refusals in `extract_resource_token` produce — whichever check refused
+/// it. Exercises the `AuthenticatedToken` extractor on `/api/v1/applications`.
+#[tokio::test]
+async fn dpop_scheme_deactivated_account_gets_dpop_challenge() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "dpop-deactivated@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (key, jwk) = generate_dpop_key_pair();
+    let jkt = dpop_jkt(&jwk);
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Dpop(&jkt),
+            ..Default::default()
+        },
+    )
+    .await;
+    let resource_uri = format!("{}/api/v1/applications", state.config().base_url);
+
+    db::update_user_active_status(&state.store, &user.id, false)
+        .await
+        .expect("deactivate user");
+
+    let proof = create_dpop_proof(&key, &jwk, "GET", &resource_uri, None, Some(&token));
+    let auth = format!("DPoP {token}");
+    let response = http_get_full(
+        &app,
+        "/api/v1/applications",
+        &[("Authorization", &auth), ("DPoP", &proof)],
+    )
+    .await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::UNAUTHORIZED,
+        "deactivated account refusal: {}",
+        response.body
+    );
+    let challenges: Vec<_> = response
+        .headers
+        .get_all("www-authenticate")
+        .iter()
+        .collect();
+    assert_eq!(
+        challenges.len(),
+        1,
+        "one challenge, not two: {challenges:?}"
+    );
+    let challenge = challenges
+        .first()
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    assert!(
+        challenge.starts_with(r#"DPoP error="invalid_token""#),
+        "a DPoP-scheme deactivated-account refusal must answer with a DPoP \
+         challenge (RFC 9449 Figure 16); got: {challenge}"
+    );
+    assert!(
+        !challenge.starts_with("Bearer"),
+        "the resource_metadata middleware must not downgrade a DPoP refusal \
+         to a Bearer challenge; got: {challenge}"
+    );
+}
+
+/// Control for [`dpop_scheme_deactivated_account_gets_dpop_challenge`]: a
+/// Bearer-scheme deactivated-account refusal keeps answering in the Bearer
+/// scheme, so the fix does not swap schemes for Bearer clients. The body still
+/// carries the deactivated-account message.
+#[tokio::test]
+async fn bearer_scheme_deactivated_account_keeps_bearer_challenge() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "bearer-deactivated@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    db::update_user_active_status(&state.store, &user.id, false)
+        .await
+        .expect("deactivate user");
+
+    let auth = format!("Bearer {token}");
+    let response = http_get_full(&app, "/api/v1/applications", &[("Authorization", &auth)]).await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::UNAUTHORIZED,
+        "deactivated account refused: {}",
+        response.body
+    );
+    assert!(
+        response.body.contains("User account is deactivated"),
+        "deactivated-account message preserved: {}",
+        response.body
+    );
+    let challenges: Vec<_> = response
+        .headers
+        .get_all("www-authenticate")
+        .iter()
+        .collect();
+    assert_eq!(challenges.len(), 1, "one challenge: {challenges:?}");
+    let challenge = challenges
+        .first()
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    assert!(
+        challenge.starts_with("Bearer"),
+        "a Bearer-scheme refusal stays in the Bearer scheme; got: {challenge}"
+    );
+    assert!(
+        !challenge.starts_with("DPoP"),
+        "a Bearer-scheme refusal must not become a DPoP challenge; got: {challenge}"
+    );
+}
+
+/// RFC 9449 Figure 16 at the registration endpoint: `POST /oauth/register`
+/// takes an optional token via `OptionalAuthenticatedToken`. Before the fix a
+/// DPoP-scheme deactivated-account refusal was converted to a Bearer-style
+/// `invalid_token` error and `into_registration_response` answered with a
+/// `Bearer error="invalid_token"` challenge. The fix routes it through a
+/// `DPoP error="invalid_token"` challenge, so `into_registration_response`
+/// reattaches the DPoP challenge instead of adding a Bearer one.
+#[tokio::test]
+async fn dpop_scheme_deactivated_account_register_gets_dpop_challenge() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "dpop-register-deactivated@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (key, jwk) = generate_dpop_key_pair();
+    let jkt = dpop_jkt(&jwk);
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Dpop(&jkt),
+            ..Default::default()
+        },
+    )
+    .await;
+    let register_uri = format!("{}/oauth/register", state.config().base_url);
+
+    db::update_user_active_status(&state.store, &user.id, false)
+        .await
+        .expect("deactivate user");
+
+    let proof = create_dpop_proof(&key, &jwk, "POST", &register_uri, None, Some(&token));
+    let auth = format!("DPoP {token}");
+    let body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "DPoP Deactivated"
+    });
+    let response = http_request_full(
+        &app,
+        "POST",
+        "/oauth/register",
+        Some(body.to_string()),
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", &auth),
+            ("DPoP", &proof),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::UNAUTHORIZED,
+        "deactivated account must be refused: {}",
+        response.body
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(&response.body).expect("valid JSON error body");
+    assert_eq!(
+        json.get("error").and_then(|v| v.as_str()),
+        Some("invalid_token"),
+        "error code stays invalid_token (RFC 6750 §3.1): {json}"
+    );
+    let challenges: Vec<_> = response
+        .headers
+        .get_all("www-authenticate")
+        .iter()
+        .collect();
+    assert_eq!(
+        challenges.len(),
+        1,
+        "one challenge, not two: {challenges:?}"
+    );
+    let challenge = challenges
+        .first()
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    assert!(
+        challenge.starts_with(r#"DPoP error="invalid_token""#),
+        "a DPoP-scheme deactivated-account refusal at /oauth/register must \
+         answer with a DPoP challenge; got: {challenge}"
+    );
+    assert!(
+        !challenge.starts_with("Bearer"),
+        "into_registration_response must not add a Bearer challenge beside \
+         the DPoP one; got: {challenge}"
+    );
 }

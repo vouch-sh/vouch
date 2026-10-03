@@ -88,7 +88,7 @@ async fn extract_resource_token(
     uri: &str,
     client_cert: Option<&ClientCertificate>,
     arrival: ArrivalTime,
-) -> Result<ValidatedResourceToken, ServiceError> {
+) -> Result<(ValidatedResourceToken, AuthScheme), ServiceError> {
     // Track DPoP source claim (custom claim for MCP attribution)
     let mut dpop_source: Option<String> = None;
 
@@ -212,21 +212,24 @@ async fn extract_resource_token(
 
     // 5. Surface the session-time federation snapshot (avoids per-request DB
     //    lookups in handlers that need `hardware_aaguid` or `hd`).
-    Ok(ValidatedResourceToken {
-        sub: access_claims.sub,
-        email: access_claims.email,
-        client_id: access_claims.client_id,
-        aud: access_claims.aud,
-        scope: access_claims.scope,
-        authenticator_id: session.authenticator_id.clone(),
-        hardware_verified: access_claims.hardware_verified,
-        auth_time: access_claims.auth_time,
-        exp: access_claims.exp,
-        token_hash,
-        dpop_source,
-        hardware_aaguid: session.hardware_aaguid.clone(),
-        org_domain: session.org_domain.clone(),
-    })
+    Ok((
+        ValidatedResourceToken {
+            sub: access_claims.sub,
+            email: access_claims.email,
+            client_id: access_claims.client_id,
+            aud: access_claims.aud,
+            scope: access_claims.scope,
+            authenticator_id: session.authenticator_id.clone(),
+            hardware_verified: access_claims.hardware_verified,
+            auth_time: access_claims.auth_time,
+            exp: access_claims.exp,
+            token_hash,
+            dpop_source,
+            hardware_aaguid: session.hardware_aaguid.clone(),
+            org_domain: session.org_domain.clone(),
+        },
+        auth_scheme,
+    ))
 }
 
 // ============================================================================
@@ -293,7 +296,7 @@ pub(crate) struct SteppedUpToken {
 async fn extract_token_from_parts(
     parts: &mut http::request::Parts,
     state: &Arc<AppState>,
-) -> Result<ValidatedResourceToken, ServiceError> {
+) -> Result<(ValidatedResourceToken, AuthScheme), ServiceError> {
     let axum::extract::OriginalUri(uri) =
         axum::extract::OriginalUri::from_request_parts(parts, state)
             .await
@@ -335,8 +338,14 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for AuthenticatedToken {
         parts: &mut http::request::Parts,
         state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
-        let token = extract_token_from_parts(parts, state).await?;
-        let user = load_active_user(state, &token.sub).await?;
+        let (token, auth_scheme) = extract_token_from_parts(parts, state).await?;
+        let user = match load_active_user(state, &token.sub).await {
+            Ok(user) => user,
+            Err(ServiceError::InactiveAccount(reason)) => {
+                return Err(refuse_inactive_account(auth_scheme, reason));
+            }
+            Err(e) => return Err(e),
+        };
         Ok(Self { token, user })
     }
 }
@@ -377,7 +386,7 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for OptionalAuthenticatedTok
             .await
             .unwrap_or_else(|infallible| match infallible {});
         let arrival = arrival_from_parts(parts, state).await?;
-        let token = extract_resource_token(
+        let (token, auth_scheme) = extract_resource_token(
             state,
             &parts.headers,
             &CookieJar::default(),
@@ -390,11 +399,20 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for OptionalAuthenticatedTok
         let user = match load_active_user(state, &token.sub).await {
             Ok(user) => user,
             Err(ServiceError::InactiveAccount(reason)) => {
-                return Err(ServiceError::api(
-                    StatusCode::UNAUTHORIZED,
-                    "invalid_token",
-                    reason.to_string(),
-                ));
+                // A deactivated account's still-live token is refused as
+                // `invalid_token` (RFC 6750 §3.1). Under the DPoP scheme the
+                // refusal answers with a `DPoP` challenge — the same form
+                // `extract_resource_token`'s `refuse_token` produces for the
+                // token-level refusals — so a DPoP client gets a DPoP challenge
+                // (RFC 9449 Figure 16) whichever check refused it.
+                return Err(match auth_scheme {
+                    AuthScheme::DPoP => DpopChallenge::token(&reason.to_string()).into(),
+                    AuthScheme::Bearer | AuthScheme::Cookie => ServiceError::api(
+                        StatusCode::UNAUTHORIZED,
+                        "invalid_token",
+                        reason.to_string(),
+                    ),
+                });
             }
             Err(e) => return Err(e),
         };
@@ -409,7 +427,7 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for HardwareVerifiedToken {
         parts: &mut http::request::Parts,
         state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
-        let token = extract_token_from_parts(parts, state).await?;
+        let (token, auth_scheme) = extract_token_from_parts(parts, state).await?;
         if !token.hardware_verified {
             tracing::warn!(
                 target: "security",
@@ -422,7 +440,13 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for HardwareVerifiedToken {
                 "This credential requires a hardware-verified session - run 'vouch login' to authenticate with your security key",
             ));
         }
-        let user = load_active_user(state, &token.sub).await?;
+        let user = match load_active_user(state, &token.sub).await {
+            Ok(user) => user,
+            Err(ServiceError::InactiveAccount(reason)) => {
+                return Err(refuse_inactive_account(auth_scheme, reason));
+            }
+            Err(e) => return Err(e),
+        };
         Ok(Self { token, user })
     }
 }
@@ -434,10 +458,16 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for SteppedUpToken {
         parts: &mut http::request::Parts,
         state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
-        let token = extract_token_from_parts(parts, state).await?;
+        let (token, auth_scheme) = extract_token_from_parts(parts, state).await?;
         let arrival = arrival_from_parts(parts, state).await?;
         key_svc::require_recent_hardware_verification(&token, arrival)?;
-        let user = load_active_user(state, &token.sub).await?;
+        let user = match load_active_user(state, &token.sub).await {
+            Ok(user) => user,
+            Err(ServiceError::InactiveAccount(reason)) => {
+                return Err(refuse_inactive_account(auth_scheme, reason));
+            }
+            Err(e) => return Err(e),
+        };
         Ok(Self { token, user })
     }
 }
@@ -463,8 +493,15 @@ pub(crate) async fn extract_session_from_cookie(
     // are not used and can be empty strings. `arrival` still applies: the
     // session's `expires_at` is judged against it.
     let empty_headers = axum::http::HeaderMap::new();
-    let token = extract_resource_token(state, &empty_headers, jar, "", "", None, arrival).await?;
-    let user = load_active_user(state, &token.sub).await?;
+    let (token, auth_scheme) =
+        extract_resource_token(state, &empty_headers, jar, "", "", None, arrival).await?;
+    let user = match load_active_user(state, &token.sub).await {
+        Ok(user) => user,
+        Err(ServiceError::InactiveAccount(reason)) => {
+            return Err(refuse_inactive_account(auth_scheme, reason));
+        }
+        Err(e) => return Err(e),
+    };
     Ok(AuthenticatedToken { token, user })
 }
 
@@ -539,6 +576,29 @@ pub(crate) async fn load_active_user(
     Ok(user)
 }
 
+/// Answer an account-active refusal in the scheme the request arrived under.
+///
+/// `load_active_user` is a check that refuses the request, run by every
+/// extractor after `extract_resource_token` returns `Ok`. That function's
+/// `refuse_token` closure already answers its token-level refusals in the
+/// request's scheme — a DPoP client gets a DPoP challenge (RFC 9449 Figure 16)
+/// whichever check refused it — but the account-active check happens
+/// downstream of it, so this routes its `InactiveAccount` refusal through the
+/// same scheme-aware form rather than letting it render as a scheme-blind 401
+/// that the `resource_metadata` middleware would answer with a `Bearer`
+/// challenge for a DPoP request.
+///
+/// For `Bearer`/`Cookie` the typed `InactiveAccount` is preserved verbatim so
+/// every existing renderer and caller (notably the enroll handlers'
+/// `ServiceError::InactiveAccount(_) => inactive_account_refusal()` match on
+/// the cookie path) keeps its current behavior.
+fn refuse_inactive_account(auth_scheme: AuthScheme, reason: InactiveAccount) -> ServiceError {
+    match auth_scheme {
+        AuthScheme::DPoP => DpopChallenge::token(&reason.to_string()).into(),
+        AuthScheme::Bearer | AuthScheme::Cookie => ServiceError::InactiveAccount(reason),
+    }
+}
+
 /// Extract authenticated user and their org_id.
 ///
 /// Returns `(user, org_id)` or an error if not authenticated or no org.
@@ -551,9 +611,15 @@ pub(crate) async fn extract_user_with_org(
     client_cert: Option<&ClientCertificate>,
     arrival: ArrivalTime,
 ) -> Result<(db::User, String), ServiceError> {
-    let token =
+    let (token, auth_scheme) =
         extract_resource_token(state, headers, jar, method, uri, client_cert, arrival).await?;
-    let user = load_active_user(state, &token.sub).await?;
+    let user = match load_active_user(state, &token.sub).await {
+        Ok(user) => user,
+        Err(ServiceError::InactiveAccount(reason)) => {
+            return Err(refuse_inactive_account(auth_scheme, reason));
+        }
+        Err(e) => return Err(e),
+    };
 
     let org_id = user.org_id.clone().ok_or_else(|| {
         ServiceError::api(
