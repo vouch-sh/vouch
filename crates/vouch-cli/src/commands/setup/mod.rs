@@ -137,9 +137,15 @@ pub(crate) enum SetupCommands {
     /// Configure Cargo to use Vouch for private registry authentication.
     #[command(about = tr!("cmd-setup-cargo-about"))]
     Cargo {
-        /// Registry name to configure (if not specified, configures global provider).
+        /// Name of the Cargo registry to configure.
         #[arg(long, help = tr!("arg-setup-cargo-registry-help"))]
-        registry: Option<String>,
+        registry: String,
+        /// Audience the registry requires in the Vouch ID token.
+        #[arg(long, value_parser = cargo::parse_audience, help = tr!("arg-setup-cargo-audience-help"))]
+        audience: String,
+        /// Registry index URL, exactly as Cargo sends it.
+        #[arg(long, help = tr!("arg-setup-cargo-index-help"))]
+        index: Option<String>,
         /// Write the configuration (otherwise just show instructions).
         #[arg(long, help = tr!("arg-setup-cargo-configure-help"))]
         configure: bool,

@@ -125,7 +125,7 @@ vouch setup eks --cluster my-cluster               # kubectl for EKS via IAM
 vouch setup k8s --cluster my-cluster --server URL  # kubectl via OIDC
 vouch setup github --configure                     # Git credential helper for GitHub
 vouch setup docker --configure ghcr.io             # Docker registry auth
-vouch setup cargo --configure                      # Cargo registry auth
+vouch setup cargo --registry R --audience A        # Cargo registry auth
 vouch setup codecommit --configure                 # AWS CodeCommit Git credentials
 vouch setup ssm                                    # SSH via AWS Systems Manager
 vouch setup codeartifact --tool pip --repository R # Private package registry

@@ -156,7 +156,7 @@ fn configure_cargo_registry(registry_name: &str, index_url: &str, vouch_path: &s
     }
 
     // Set the credential provider and index URL for this registry
-    config.set_registry_provider(registry_name, &[vouch_path, "credential", "cargo", "--"]);
+    config.set_registry_provider(registry_name, &[vouch_path]);
     config.set_registry_index(registry_name, index_url);
 
     config.save()?;

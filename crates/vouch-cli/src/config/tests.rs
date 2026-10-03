@@ -1341,6 +1341,127 @@ fn modify_load_failure_reports_parse_error() {
     );
 }
 
+#[test]
+fn test_cargo_registry_audience_round_trip() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let cfg_path = tmp.path().join("vouch").join("config.json");
+
+    Config::modify_at(&cfg_path, |cfg| {
+        cfg.set_cargo_registry_audience("sparse+https://crates.example.com/", "crates-example");
+    })
+    .unwrap();
+
+    let reloaded = Config::load_from(&cfg_path).unwrap();
+    assert_eq!(
+        reloaded.cargo_registry_audience("sparse+https://crates.example.com/"),
+        Some("crates-example")
+    );
+    assert_eq!(
+        reloaded.cargo_registry_audience("sparse+https://index.crates.io/"),
+        None
+    );
+}
+
+#[test]
+fn test_config_without_cargo_registries_omits_cargo_key() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let cfg_path = tmp.path().join("vouch").join("config.json");
+
+    Config::default().save_to(&cfg_path).unwrap();
+
+    let saved: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&cfg_path).unwrap()).unwrap();
+    assert!(
+        saved.get("cargo").is_none(),
+        "unexpected cargo key: {saved}"
+    );
+}
+
+#[test]
+fn test_empty_cargo_registries_map_is_dropped_on_resave() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let cfg_path = tmp.path().join("config.json");
+    std::fs::write(&cfg_path, r#"{"cargo":{"registries":{}}}"#).unwrap();
+
+    let config = Config::load_from(&cfg_path).unwrap();
+    config.save_to(&cfg_path).unwrap();
+
+    let saved: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&cfg_path).unwrap()).unwrap();
+    assert!(
+        saved.get("cargo").is_none(),
+        "unexpected cargo key: {saved}"
+    );
+}
+
+#[test]
+fn test_cargo_registry_lookup_normalizes_the_index_url() {
+    let mut config = Config::default();
+    config.set_cargo_registry_audience("sparse+https://crates.example.com/", "crates-example");
+
+    for url in [
+        "sparse+https://CRATES.example.com/",
+        "sparse+https://crates.example.com",
+    ] {
+        assert_eq!(
+            config.cargo_registry_audience(url),
+            Some("crates-example"),
+            "{url}"
+        );
+    }
+    assert_eq!(config.cargo_registry_audience("not a url"), None);
+}
+
+#[test]
+fn test_cargo_setter_stores_the_normalized_key() {
+    let mut config = Config::default();
+    config.set_cargo_registry_audience("sparse+https://CRATES.example.com", "crates-example");
+
+    assert_eq!(
+        config.cargo_registry_audience("sparse+https://crates.example.com/"),
+        Some("crates-example")
+    );
+    let key = config
+        .cargo
+        .as_ref()
+        .unwrap()
+        .registries
+        .keys()
+        .next()
+        .unwrap();
+    assert_eq!(key, "sparse+https://crates.example.com/");
+}
+
+#[test]
+fn test_cargo_blank_stored_audience_is_absent() {
+    let mut config = Config::default();
+    config.set_cargo_registry_audience("sparse+https://crates.example.com/", "  ");
+    assert_eq!(
+        config.cargo_registry_audience("sparse+https://crates.example.com/"),
+        None
+    );
+}
+
+#[test]
+fn test_normalize_cargo_index() {
+    use super::CargoRegistriesConfig as C;
+    assert_eq!(
+        C::normalize_index("sparse+https://Crates.Example.COM").as_deref(),
+        Some("sparse+https://crates.example.com/")
+    );
+    // A git index has no `sparse+` prefix and keeps its path as written.
+    assert_eq!(
+        C::normalize_index("https://github.com/rust-lang/crates.io-index").as_deref(),
+        Some("https://github.com/rust-lang/crates.io-index")
+    );
+    assert_eq!(
+        C::normalize_index("sparse+https://crates.example.com/").as_deref(),
+        Some("sparse+https://crates.example.com/")
+    );
+    assert_eq!(C::normalize_index("sparse+"), None);
+    assert_eq!(C::normalize_index("nonsense"), None);
+}
+
 // -----------------------------------------------------------------
 // RFC 7592 §5 — client-side protection of the registration access token
 // -----------------------------------------------------------------

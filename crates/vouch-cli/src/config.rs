@@ -89,6 +89,8 @@ pub(crate) struct Config {
     codeartifact: Option<CodeArtifactConfig>,
     /// Container registry → AWS profile anchors.
     docker: Option<DockerRegistriesConfig>,
+    /// Cargo registry index URL → ID token audience.
+    cargo: Option<CargoRegistriesConfig>,
     /// AWS organizations configuration (role chaining + IdC).
     aws: Option<AwsOrgsConfig>,
     /// Global network configuration (DoH, …).
@@ -163,6 +165,33 @@ pub(crate) struct DockerRegistriesConfig {
     /// Registry host → AWS profile name in `~/.aws/config`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub registries: BTreeMap<String, String>,
+}
+
+/// Cargo registries that receive a Vouch ID token.
+///
+/// Cargo invokes the credential provider with only the registry's index URL, so
+/// the audience each registry validates is recorded here by `vouch setup cargo`.
+/// A registry absent from this map gets no credential from Vouch.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub(crate) struct CargoRegistriesConfig {
+    /// Registry index URL (as Cargo sends it) → ID token audience.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub registries: BTreeMap<String, String>,
+}
+
+impl CargoRegistriesConfig {
+    /// Canonical spelling of a registry index URL, so a stored value and the
+    /// one Cargo sends compare equal: an optional `sparse+` prefix, then the
+    /// URL as `url::Url` serializes it (lowercase host, trailing `/` on a bare
+    /// authority). Returns `None` when the URL does not parse.
+    pub(crate) fn normalize_index(index_url: &str) -> Option<String> {
+        let (prefix, rest) = match index_url.strip_prefix("sparse+") {
+            Some(rest) => ("sparse+", rest),
+            None => ("", index_url),
+        };
+        let url = url::Url::parse(rest).ok()?;
+        Some(format!("{prefix}{url}"))
+    }
 }
 
 // =========================================================================
@@ -250,6 +279,9 @@ struct ConfigFile {
     docker: Option<DockerRegistriesConfig>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    cargo: Option<CargoRegistriesConfig>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     aws: Option<AwsOrgsConfig>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -315,6 +347,7 @@ impl std::fmt::Debug for ConfigFile {
             .field("current_server", &self.current_server)
             .field("servers", &"[...]")
             .field("codeartifact", &self.codeartifact)
+            .field("cargo", &self.cargo)
             .field("aws", &self.aws)
             .field("network", &self.network)
             .field("ai", &self.ai)
@@ -328,6 +361,7 @@ impl std::fmt::Debug for Config {
             .field("current_server", &self.current_server)
             .field("servers", &self.servers.keys().collect::<Vec<_>>())
             .field("codeartifact", &self.codeartifact)
+            .field("cargo", &self.cargo)
             .field("aws", &self.aws)
             .field("network", &self.network)
             .field("ai", &self.ai)
@@ -617,6 +651,34 @@ impl Config {
             .insert(registry.to_string(), profile.to_string());
     }
 
+    /// Look up the ID token audience configured for a Cargo registry index URL.
+    ///
+    /// The lookup normalizes `index_url` (see [`CargoRegistriesConfig::normalize_index`]).
+    /// A blank stored audience counts as absent.
+    pub(crate) fn cargo_registry_audience(&self, index_url: &str) -> Option<&str> {
+        let index_url = CargoRegistriesConfig::normalize_index(index_url)?;
+        self.cargo
+            .as_ref()?
+            .registries
+            .get(&index_url)
+            .map(String::as_str)
+            .filter(|audience| !audience.trim().is_empty())
+    }
+
+    /// Configure the ID token audience for a Cargo registry (in memory; call `save()`).
+    ///
+    /// The key is stored normalized, so it always agrees with
+    /// [`Config::cargo_registry_audience`]. An index URL that does not parse is
+    /// stored as given and never matches a lookup.
+    pub(crate) fn set_cargo_registry_audience(&mut self, index_url: &str, audience: &str) {
+        let key = CargoRegistriesConfig::normalize_index(index_url)
+            .unwrap_or_else(|| index_url.to_string());
+        self.cargo
+            .get_or_insert_with(CargoRegistriesConfig::default)
+            .registries
+            .insert(key, audience.to_string());
+    }
+
     /// Add a CodeArtifact domain profile (in memory only, call `save()` to
     /// persist). If this is the first one, it becomes the default.
     pub(crate) fn set_codeartifact_profile(&mut self, name: &str, profile: CodeArtifactProfile) {
@@ -838,6 +900,7 @@ impl From<ConfigFile> for Config {
             servers,
             codeartifact: file.codeartifact.take(),
             docker: file.docker.take(),
+            cargo: file.cargo.take(),
             aws,
             network: file.network.take(),
             ai: file.ai.take(),
@@ -879,11 +942,15 @@ impl From<&Config> for ConfigFile {
         // Same guard: an empty registry map would serialize as `docker: {}`.
         let docker = config.docker.clone().filter(|d| !d.registries.is_empty());
 
+        // Same guard: an empty registry map would serialize as `cargo: {}`.
+        let cargo = config.cargo.clone().filter(|c| !c.registries.is_empty());
+
         Self {
             current_server: config.current_server.clone(),
             servers,
             codeartifact: config.codeartifact.clone(),
             docker,
+            cargo,
             aws,
             network: config.network.clone(),
             ai: config.ai.clone(),

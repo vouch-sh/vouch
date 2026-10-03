@@ -82,65 +82,50 @@ impl CargoConfig {
             .map(String::from)
     }
 
-    /// Find the first registry that uses vouch.
+    /// Names of the registries that use vouch, in config order.
     #[must_use]
-    pub(crate) fn find_vouch_registry(&self) -> Option<String> {
+    pub(crate) fn vouch_registries(&self) -> Vec<String> {
+        let mut names = Vec::new();
         if let Some(registries) = self.doc.get("registries").and_then(|r| r.as_table()) {
             for (name, config) in registries.iter() {
                 if let Some(provider) = config.get("credential-provider")
                     && Self::item_contains_vouch(provider)
                 {
-                    return Some(name.to_string());
+                    names.push(name.to_string());
                 }
             }
         }
-        None
+        names
     }
 
-    /// Set the global credential providers.
+    /// The `[registries.<name>]` table, created when absent.
     ///
-    /// This sets the `[registry].global-credential-providers` array.
-    pub(crate) fn set_global_provider(&mut self, command: &[&str]) {
-        // Ensure [registry] section exists
-        if self.doc.get("registry").is_none() {
-            self.doc.insert("registry", Item::Table(Table::new()));
+    /// The parent `[registries]` table is implicit, so only `[registries.<name>]`
+    /// headers are written.
+    fn registry_table_mut(&mut self, registry: &str) -> Option<&mut Table> {
+        if self.doc.get("registries").is_none() {
+            let mut registries = Table::new();
+            registries.set_implicit(true);
+            self.doc.insert("registries", Item::Table(registries));
         }
-
-        let array = Self::command_to_array(command);
-        if let Some(registry) = self.doc.get_mut("registry").and_then(|r| r.as_table_mut()) {
-            registry.insert(
-                "global-credential-providers",
-                Item::Value(Value::Array(array)),
-            );
+        let registries = self.doc.get_mut("registries")?.as_table_mut()?;
+        if registries.get(registry).is_none() {
+            registries.insert(registry, Item::Table(Table::new()));
         }
+        registries.get_mut(registry)?.as_table_mut()
     }
 
     /// Set the index URL for a specific registry.
     ///
     /// This sets `[registries.<name>].index`.
     pub(crate) fn set_registry_index(&mut self, registry: &str, index_url: &str) {
-        // Ensure [registries] section exists
-        if self.doc.get("registries").is_none() {
-            self.doc.insert("registries", Item::Table(Table::new()));
-        }
-
-        // Ensure [registries.<name>] section exists and set index
-        if let Some(registries) = self
-            .doc
-            .get_mut("registries")
-            .and_then(|r| r.as_table_mut())
-        {
-            if registries.get(registry).is_none() {
-                registries.insert(registry, Item::Table(Table::new()));
-            }
-            if let Some(reg_table) = registries.get_mut(registry).and_then(|r| r.as_table_mut()) {
-                reg_table.insert(
-                    "index",
-                    Item::Value(Value::String(toml_edit::Formatted::new(
-                        index_url.to_string(),
-                    ))),
-                );
-            }
+        if let Some(reg_table) = self.registry_table_mut(registry) {
+            reg_table.insert(
+                "index",
+                Item::Value(Value::String(toml_edit::Formatted::new(
+                    index_url.to_string(),
+                ))),
+            );
         }
     }
 
@@ -148,25 +133,27 @@ impl CargoConfig {
     ///
     /// This sets `[registries.<name>].credential-provider`.
     pub(crate) fn set_registry_provider(&mut self, registry: &str, command: &[&str]) {
-        // Ensure [registries] section exists
-        if self.doc.get("registries").is_none() {
-            self.doc.insert("registries", Item::Table(Table::new()));
+        if let Some(reg_table) = self.registry_table_mut(registry) {
+            let array = Self::command_to_array(command);
+            reg_table.insert("credential-provider", Item::Value(Value::Array(array)));
         }
+    }
 
-        // Ensure [registries.<name>] section exists and set credential-provider
-        if let Some(registries) = self
-            .doc
-            .get_mut("registries")
-            .and_then(|r| r.as_table_mut())
-        {
-            if registries.get(registry).is_none() {
-                registries.insert(registry, Item::Table(Table::new()));
-            }
-            if let Some(reg_table) = registries.get_mut(registry).and_then(|r| r.as_table_mut()) {
-                let array = Self::command_to_array(command);
-                reg_table.insert("credential-provider", Item::Value(Value::Array(array)));
-            }
-        }
+    /// Check whether a registry's `credential-provider` is exactly `command`.
+    #[must_use]
+    pub(crate) fn has_registry_provider(&self, registry: &str, command: &[&str]) -> bool {
+        self.doc
+            .get("registries")
+            .and_then(|r| r.get(registry))
+            .and_then(|r| r.get("credential-provider"))
+            .and_then(Item::as_array)
+            .is_some_and(|array| {
+                array.len() == command.len()
+                    && array
+                        .iter()
+                        .zip(command)
+                        .all(|(item, expected)| item.as_str() == Some(*expected))
+            })
     }
 
     /// Save the config to its file path.
@@ -203,7 +190,7 @@ impl CargoConfig {
     }
 
     /// Convert a command array to a TOML array.
-    fn command_to_array(command: &[&str]) -> Array {
+    pub(crate) fn command_to_array(command: &[&str]) -> Array {
         let mut array = Array::new();
         for part in command {
             array.push(*part);
@@ -270,7 +257,7 @@ mod tests {
         let config = CargoConfig::load_from(file.path().to_path_buf()).unwrap();
 
         assert!(!config.has_global_vouch());
-        assert!(config.find_vouch_registry().is_none());
+        assert!(config.vouch_registries().is_empty());
     }
 
     #[test]
@@ -298,10 +285,7 @@ credential-provider = ["/usr/local/bin/vouch", "credential", "cargo", "--"]
         assert!(!config.has_global_vouch());
         assert!(config.has_registry_vouch("my-registry"));
         assert!(!config.has_registry_vouch("other-registry"));
-        assert_eq!(
-            config.find_vouch_registry(),
-            Some("my-registry".to_string())
-        );
+        assert_eq!(config.vouch_registries(), vec!["my-registry".to_string()]);
     }
 
     #[test]
@@ -317,20 +301,7 @@ index = "sparse+https://index.crates.io/"
         let config = CargoConfig::load_from(file.path().to_path_buf()).unwrap();
 
         assert!(!config.has_global_vouch());
-        assert!(config.find_vouch_registry().is_none());
-    }
-
-    #[test]
-    fn test_set_global_provider() {
-        let file = create_temp_config("");
-        let mut config = CargoConfig::load_from(file.path().to_path_buf()).unwrap();
-
-        config.set_global_provider(&["/usr/local/bin/vouch", "credential", "cargo", "--"]);
-        config.save().unwrap();
-
-        // Reload and verify
-        let reloaded = CargoConfig::load_from(file.path().to_path_buf()).unwrap();
-        assert!(reloaded.has_global_vouch());
+        assert!(config.vouch_registries().is_empty());
     }
 
     #[test]
@@ -338,16 +309,19 @@ index = "sparse+https://index.crates.io/"
         let file = create_temp_config("");
         let mut config = CargoConfig::load_from(file.path().to_path_buf()).unwrap();
 
-        config.set_registry_provider(
-            "my-registry",
-            &["/usr/local/bin/vouch", "credential", "cargo", "--"],
-        );
+        config.set_registry_provider("my-registry", &["/usr/local/bin/vouch"]);
         config.save().unwrap();
 
         // Reload and verify
         let reloaded = CargoConfig::load_from(file.path().to_path_buf()).unwrap();
         assert!(reloaded.has_registry_vouch("my-registry"));
         assert!(!reloaded.has_global_vouch());
+
+        let written = std::fs::read_to_string(file.path()).unwrap();
+        assert!(
+            written.contains(r#"credential-provider = ["/usr/local/bin/vouch"]"#),
+            "{written}"
+        );
     }
 
     #[test]
@@ -368,7 +342,7 @@ git-fetch-with-cli = true
         let mut config = CargoConfig::load_from(file.path().to_path_buf()).unwrap();
 
         // Add vouch provider
-        config.set_global_provider(&["/usr/local/bin/vouch", "credential", "cargo", "--"]);
+        config.set_registry_provider("new-registry", &["/usr/local/bin/vouch"]);
         config.save().unwrap();
 
         // Reload and verify existing config is preserved
@@ -381,7 +355,7 @@ git-fetch-with-cli = true
 
         // And vouch is added
         let reloaded = CargoConfig::load_from(file.path().to_path_buf()).unwrap();
-        assert!(reloaded.has_global_vouch());
+        assert!(reloaded.has_registry_vouch("new-registry"));
     }
 
     #[test]
@@ -395,10 +369,7 @@ credential-provider = ["cargo:token"]
         let mut config = CargoConfig::load_from(file.path().to_path_buf()).unwrap();
 
         // Add a new registry with vouch
-        config.set_registry_provider(
-            "new-registry",
-            &["/usr/local/bin/vouch", "credential", "cargo", "--"],
-        );
+        config.set_registry_provider("new-registry", &["/usr/local/bin/vouch"]);
         config.save().unwrap();
 
         // Reload and verify
@@ -417,7 +388,7 @@ credential-provider = ["cargo:token"]
         let config = CargoConfig::load_from(path).unwrap();
 
         assert!(!config.has_global_vouch());
-        assert!(config.find_vouch_registry().is_none());
+        assert!(config.vouch_registries().is_empty());
     }
 
     #[test]
@@ -439,8 +410,62 @@ credential-provider = ["/usr/local/bin/vouch", "credential", "cargo", "--"]
         assert!(!config.has_registry_vouch("registry-b"));
         assert!(config.has_registry_vouch("registry-c"));
 
-        // find_vouch_registry returns first match
-        let found = config.find_vouch_registry().unwrap();
-        assert!(found == "registry-a" || found == "registry-c");
+        assert_eq!(
+            config.vouch_registries(),
+            vec!["registry-a".to_string(), "registry-c".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_fresh_config_writes_no_empty_registries_header() {
+        let file = create_temp_config("");
+        let mut config = CargoConfig::load_from(file.path().to_path_buf()).unwrap();
+
+        config.set_registry_index("my-registry", "sparse+https://crates.example.com/");
+        config.set_registry_provider("my-registry", &["/usr/local/bin/vouch"]);
+        config.save().unwrap();
+
+        let written = std::fs::read_to_string(file.path()).unwrap();
+        assert!(!written.contains("[registries]"), "{written}");
+        assert!(written.contains("[registries.my-registry]"), "{written}");
+    }
+
+    #[test]
+    fn test_has_registry_provider_requires_the_exact_command() {
+        let content = r#"
+[registries.my-registry]
+credential-provider = ["/usr/local/bin/vouch", "credential", "cargo", "--"]
+"#;
+        let file = create_temp_config(content);
+        let config = CargoConfig::load_from(file.path().to_path_buf()).unwrap();
+
+        assert!(config.has_registry_provider(
+            "my-registry",
+            &["/usr/local/bin/vouch", "credential", "cargo", "--"]
+        ));
+        assert!(!config.has_registry_provider("my-registry", &["/usr/local/bin/vouch"]));
+        assert!(!config.has_registry_provider("other", &["/usr/local/bin/vouch"]));
+    }
+
+    #[test]
+    fn test_command_array_escapes_backslashes_and_quotes() {
+        let path = r#"C:\Program Files\vouch "x".exe"#;
+        let rendered = CargoConfig::command_to_array(&[path]).to_string();
+
+        let doc: DocumentMut = format!("p = {rendered}").parse().unwrap();
+        let parsed = doc
+            .get("p")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .get(0)
+            .unwrap()
+            .as_str();
+        assert_eq!(parsed, Some(path), "{rendered}");
+
+        assert_eq!(
+            CargoConfig::command_to_array(&["/usr/local/bin/vouch"]).to_string(),
+            r#"["/usr/local/bin/vouch"]"#
+        );
     }
 }

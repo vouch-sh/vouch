@@ -268,11 +268,6 @@ cmd-credential-docker-long-about =
 arg-credential-docker-operation-help = Docker credential operation (get, store, erase, list).
 arg-credential-docker-profile-help = AWS profile in ~/.aws/config whose role mints ECR credentials.
 
-cmd-credential-cargo-about = Cargo credential provider for private registries
-cmd-credential-cargo-long-about =
-    This implements Cargo's credential provider protocol. Users should not call
-    this directly. Instead, use `{ -cmd } setup cargo` to configure Cargo.
-
 cmd-credential-codecommit-about = Git credential helper for AWS CodeCommit
 cmd-credential-codecommit-long-about =
     This is used by git as a credential helper. Users should not call this
@@ -916,18 +911,18 @@ credential-github-err-fetch-token = vouch: failed to get { -github } token: { $e
 
 ## credential/cargo
 
-# Emitted when cargo invokes the credential helper for an unsupported login
-# action ({ -cmd } manages auth, not `cargo login`).
 # Full block when cargo asks the helper to log in (which vouch doesn't
 # support — auth happens via `{ -cmd } login`). The shell snippet lives in
 # the message so translators see the "do this instead" instruction
 # together.
 credential-cargo-login-needed =
-    To authenticate with registry '{ $registry }', run:
-
-        { -cmd } login
-
-credential-cargo-login-hint = use '{ -cmd } login' to authenticate
+    { -product } does not use `cargo login` for registry '{ $registry }'.
+    To authenticate, run: { -cmd } login
+# Errors Cargo shows the user when the credential provider fails.
+cargo-err-unsupported-version = unsupported protocol version { $version }, expected { $expected }
+cargo-err-not-enrolled = not configured - run '{ -cmd } enroll' first
+cargo-err-codeartifact = CodeArtifact authentication failed
+cargo-err-id-token = failed to obtain a { -product } ID token for the registry
 credential-cargo-logout =
     Note: 'cargo logout' does not affect your { -product } session for registry '{ $registry }'.
     To fully log out, run: { -cmd } logout
@@ -1004,7 +999,10 @@ arg-setup-docker-profile-help = AWS profile in ~/.aws/config whose role mints EC
 arg-setup-docker-configure-help = Automatically configure Docker (otherwise just show instructions).
 
 # setup/cargo arg help
-arg-setup-cargo-registry-help = Registry name to configure (if not specified, configures global provider).
+arg-setup-cargo-registry-help = Name of the Cargo registry to configure.
+arg-setup-cargo-audience-blank = the audience must not be empty
+arg-setup-cargo-audience-help = Audience (`aud`) the registry requires in the { -product } ID token.
+arg-setup-cargo-index-help = Registry index URL, exactly as Cargo sends it (default: `index` of the registry in the Cargo config).
 arg-setup-cargo-configure-help = Write the configuration (otherwise just show instructions).
 
 # setup/codecommit arg help
@@ -1241,11 +1239,17 @@ setup-anthropic-success-block =
 setup-cargo-header =
     Cargo Credential Provider Setup
     ================================
-setup-cargo-already-registry = { -product } is already configured for registry '{ $name }'
-setup-cargo-already-global = { -product } is already configured as global credential provider
+setup-cargo-already-registry = { -product } is already configured for registry '{ $name }' with audience '{ $audience }'
 setup-cargo-config-file = Configuration file: { $path }
 setup-cargo-configured-registry = Cargo configured for registry '{ $name }'
-setup-cargo-configured-global = Cargo configured with global credential provider
+setup-cargo-audience-recorded = Recorded audience '{ $audience }' for { $index } in the { -product } config
+setup-cargo-invalid-index = '{ $index }' is not a valid registry index URL
+setup-cargo-index-conflict =
+    Registry '{ $registry }' already has index '{ $existing }' in the Cargo config, but --index is '{ $given }'.
+    Edit the Cargo config or pass the existing index.
+setup-cargo-no-index =
+    No index URL found for registry '{ $registry }'. Pass --index <url>, or set
+    the `index` key of `registries.{ $registry }` in { $path }.
 setup-cargo-config-added = Configuration added to: { $path }
 # Full "show me what to add" block for a specific registry. The TOML stanza
 # is part of the message so translators see (and can adjust spacing of) the
@@ -1256,25 +1260,12 @@ setup-cargo-instructions-specific =
     Add to ~/.cargo/config.toml:
 
     {""}[registries.{ $registry }]
+    index = "{ $index }"
     credential-provider = { $command }
 
-    Or run: { -cmd } setup cargo --configure
-
-# Full block for global credential-providers configuration. Same shape as
-# `setup-cargo-instructions-specific`; the per-registry commented example
-# lives inside the message so translators can rephrase the "Or for a
-# specific registry" hint without coordinating with a sibling key.
-setup-cargo-instructions-global =
-    Add to ~/.cargo/config.toml:
-
-    {""}[registry]
-    global-credential-providers = { $command }
-
-    {""}# Or for a specific registry:
-    {""}# [registries.my-private-registry]
-    {""}# credential-provider = { $command }
-
-    Or run: { -cmd } setup cargo --configure
+    { -product } only answers for registries listed in its own config. Run
+    { -cmd } setup cargo --registry { $registry } --audience { $audience } --configure
+    to write the Cargo config and record the audience '{ $audience }' for { $index }.
 setup-cargo-more-info =
     For more information, see:
       https://doc.rust-lang.org/cargo/reference/registry-authentication.html

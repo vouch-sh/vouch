@@ -122,17 +122,6 @@ pub(crate) enum CredentialCommands {
         #[arg(long, help = tr!("arg-credential-docker-profile-help"))]
         profile: Option<String>,
     },
-    /// Cargo credential provider. Invoked by Cargo, not by users.
-    #[command(
-        hide = true,
-        about = tr!("cmd-credential-cargo-about"),
-        long_about = tr!("cmd-credential-cargo-long-about"),
-    )]
-    Cargo {
-        /// Cargo plugin marker (always passed by Cargo). Hidden, so no help text.
-        #[arg(long = "cargo-plugin", hide = true)]
-        _cargo_plugin: bool,
-    },
     /// Git credential helper for CodeCommit. Invoked by git, not by users.
     #[command(
         hide = true,

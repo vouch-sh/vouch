@@ -159,10 +159,9 @@ fn belongs_to(server: &ServerUrl, stored: &str) -> Result<()> {
 /// Resolve the current authentication token, whichever server it belongs
 /// to.
 ///
-/// Only for handing the token to something outside the CLI's own requests:
-/// printing it (`vouch credential token`), or a cargo registry that asked
-/// for it. A request the CLI sends to a server takes its token from
-/// [`token_for`], which checks the session belongs to that server.
+/// Only for printing the token (`vouch credential token`, debug output). A
+/// request the CLI sends to a server takes its token from [`token_for`], which
+/// checks the session belongs to that server.
 ///
 /// Tries multiple sources in order:
 /// 1. Agent (Unix only) - most reliable, always up-to-date

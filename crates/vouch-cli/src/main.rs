@@ -52,6 +52,15 @@ fn is_docker_credential_argv0(argv0: &str) -> bool {
     argv0.ends_with("docker-credential-vouch") || argv0.ends_with("docker-credential-vouch.exe")
 }
 
+/// Test if argv1 is the marker Cargo passes to a credential provider.
+///
+/// Cargo runs `<provider> --cargo-plugin` and delivers the remaining
+/// `credential-provider` entries in the request JSON, not on the command line.
+/// https://doc.rust-lang.org/cargo/reference/credential-provider-protocol.html
+fn is_cargo_plugin_argv1(argv1: Option<&str>) -> bool {
+    argv1 == Some("--cargo-plugin")
+}
+
 /// Test if argv0 indicates invocation as `git-remote-codecommit`.
 fn is_git_remote_codecommit_argv0(argv0: &str) -> bool {
     argv0.ends_with("git-remote-codecommit") || argv0.ends_with("git-remote-codecommit.exe")
@@ -90,6 +99,22 @@ async fn check_docker_credential_invocation(argv0: &str) -> Result<bool> {
     }
 
     Ok(false)
+}
+
+/// Check if invoked by Cargo as a credential provider and handle accordingly.
+/// Returns `Ok(true)` if this was a Cargo credential provider invocation (handled),
+/// `Ok(false)` if not, or an error if the provider failed.
+async fn check_cargo_plugin_invocation() -> Result<bool> {
+    let argv1 = std::env::args().nth(1);
+    if !is_cargo_plugin_argv1(argv1.as_deref()) {
+        return Ok(false);
+    }
+
+    // The provider speaks JSON on stdout, so it returns before clap parses and
+    // takes no flags; `VOUCH_ALLOW_INSECURE` is the only opt-in.
+    i18n::init(i18n::preresolve_lang_from_argv_and_env())?;
+    commands::credential::cargo::run(InsecureOptIn::Env).await?;
+    Ok(true)
 }
 
 /// Whether this invocation should be treated as a `git-remote-codecommit`
@@ -559,6 +584,9 @@ async fn init_and_dispatch_helper_binaries(config: Option<&config::Config>) -> R
     if check_docker_credential_invocation(&argv0).await? {
         return Ok(true);
     }
+    if check_cargo_plugin_invocation().await? {
+        return Ok(true);
+    }
     if check_git_remote_codecommit_invocation(&argv0).await? {
         return Ok(true);
     }
@@ -726,7 +754,6 @@ async fn run() -> Result<()> {
             CredentialCommands::Docker { operation, profile } => {
                 commands::credential::docker::run(&operation, profile.as_deref(), opt_in).await
             }
-            CredentialCommands::Cargo { .. } => commands::credential::cargo::run(opt_in).await,
             CredentialCommands::Codecommit { operation, profile } => {
                 commands::credential::codecommit::run(&operation, profile.as_deref(), opt_in).await
             }
@@ -893,8 +920,12 @@ async fn run() -> Result<()> {
             } => commands::setup::docker::run(&registries, configure, profile.as_deref()).await,
             SetupCommands::Cargo {
                 registry,
+                audience,
+                index,
                 configure,
-            } => commands::setup::cargo::run(registry.as_deref(), configure).await,
+            } => {
+                commands::setup::cargo::run(&registry, &audience, index.as_deref(), configure).await
+            }
             SetupCommands::Codecommit {
                 region,
                 profile,
@@ -1138,6 +1169,16 @@ mod tests {
         assert!(!is_docker_credential_argv0("vouch"));
         assert!(!is_docker_credential_argv0("docker-credential-ecr"));
         assert!(!is_docker_credential_argv0(""));
+    }
+
+    // -- cargo credential provider --
+
+    #[test]
+    fn test_cargo_plugin_argv1() {
+        assert!(is_cargo_plugin_argv1(Some("--cargo-plugin")));
+        assert!(!is_cargo_plugin_argv1(Some("--cargo-plugin=1")));
+        assert!(!is_cargo_plugin_argv1(Some("credential")));
+        assert!(!is_cargo_plugin_argv1(None));
     }
 
     // -- git-remote-codecommit --
