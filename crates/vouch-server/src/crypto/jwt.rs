@@ -14,6 +14,7 @@
 use crate::crypto::alg::JwsAlgorithm;
 use crate::crypto::jwk::Jwk;
 use crate::crypto::keys::OidcSigningKey;
+use crate::crypto::validity::ValidityWindow;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation};
@@ -83,7 +84,9 @@ pub enum StateTokenError {
     Jwt(jsonwebtoken::errors::Error),
     /// KMS or JWT construction error (KMS variant).
     Internal(String),
-    /// Token validation failed (expired, wrong type, etc.).
+    /// The token is outside its validity window (RFC 7519 §4.1.4/§4.1.5).
+    Expired,
+    /// Token validation failed (wrong type, bad MAC, etc.).
     Validation(String),
 }
 
@@ -92,6 +95,7 @@ impl fmt::Display for StateTokenError {
         match self {
             Self::Jwt(e) => write!(f, "{e}"),
             Self::Internal(msg) => write!(f, "{msg}"),
+            Self::Expired => write!(f, "Token has expired"),
             Self::Validation(msg) => write!(f, "{msg}"),
         }
     }
@@ -101,7 +105,10 @@ impl std::error::Error for StateTokenError {}
 
 impl From<jsonwebtoken::errors::Error> for StateTokenError {
     fn from(e: jsonwebtoken::errors::Error) -> Self {
-        Self::Jwt(e)
+        match e.kind() {
+            jsonwebtoken::errors::ErrorKind::ExpiredSignature => Self::Expired,
+            _ => Self::Jwt(e),
+        }
     }
 }
 
@@ -173,7 +180,7 @@ impl StateTokenSigner {
     ) -> Result<T, StateTokenError> {
         match self {
             Self::Local { secret } => {
-                decode_state_token(token, jwt_type, secret, now).map_err(StateTokenError::Jwt)
+                decode_state_token(token, jwt_type, secret, now).map_err(StateTokenError::from)
             }
             Self::Kms { kms_client, key_id } => {
                 kms_decode(kms_client, key_id, token, jwt_type, now).await
@@ -315,87 +322,14 @@ async fn kms_decode<T: DeserializeOwned>(
 
     let raw: serde_json::Value = serde_json::from_slice(&payload_bytes)
         .map_err(|e| StateTokenError::Validation(format!("Invalid payload JSON: {e}")))?;
-    let validity = TemporalClaims::from_payload(&raw)
+    let validity = ValidityWindow::from_payload(&raw)
         .ok_or_else(|| StateTokenError::Validation("Invalid exp or nbf claim".to_string()))?;
     if !validity.accepts_own_token_at(now) {
-        return Err(StateTokenError::Validation("Token has expired".to_string()));
+        return Err(StateTokenError::Expired);
     }
 
     serde_json::from_slice(&payload_bytes)
         .map_err(|e| StateTokenError::Validation(format!("Failed to deserialize claims: {e}")))
-}
-
-/// The validity window of a JWT: its `exp` and `nbf` claims, judged against a
-/// caller-supplied `now` (Unix seconds) rather than a clock read here.
-///
-/// Every JWT the server accepts is judged through this type, so the RFC 7519
-/// boundaries are written once. Each decoder supplies its own leeway, which
-/// RFC 7519 §4.1.4 and §4.1.5 both permit: "Implementers MAY provide for some
-/// small leeway, usually no more than a few minutes, to account for clock
-/// skew."
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct TemporalClaims {
-    exp: Option<i64>,
-    nbf: Option<i64>,
-}
-
-impl TemporalClaims {
-    /// `nbf` leeway for tokens this server issued: one instance can mint a
-    /// token that another validates within the same second. The same tolerance
-    /// DPoP proofs get for client clocks. Vouch's own `exp` gets none.
-    const OWN_TOKEN_NBF_LEEWAY_SECS: i64 = 60;
-
-    /// The window of a claims struct that has already been deserialized.
-    pub(crate) fn new(exp: Option<i64>, nbf: Option<i64>) -> Self {
-        Self { exp, nbf }
-    }
-
-    /// Read the window from a compact JWS whose signature has already been
-    /// verified.
-    ///
-    /// `None` when the payload does not decode, or `exp` or `nbf` is present
-    /// but not an integer. RFC 7519 §4.1.4 and §4.1.5: each value "MUST be a
-    /// number containing a NumericDate value."
-    pub(crate) fn from_token(token: &str) -> Option<Self> {
-        let payload = decode_segment(token.split('.').nth(1)?)?;
-        Self::from_payload(&serde_json::from_slice(&payload).ok()?)
-    }
-
-    fn from_payload(payload: &serde_json::Value) -> Option<Self> {
-        let read = |name| match payload.get(name) {
-            Some(value) => value.as_i64().map(Some),
-            None => Some(None),
-        };
-        Some(Self {
-            exp: read("exp")?,
-            nbf: read("nbf")?,
-        })
-    }
-
-    /// RFC 7519 §4.1.4: "the current date/time MUST be before the expiration
-    /// date/time listed in the "exp" claim", so the token is expired once
-    /// `now - leeway` reaches `exp`. A token without `exp` never expires here;
-    /// callers for which `exp` is required check for it separately.
-    pub(crate) fn expired_at(&self, now: i64, leeway: i64) -> bool {
-        self.exp
-            .is_some_and(|exp| now.saturating_sub(leeway) >= exp)
-    }
-
-    /// RFC 7519 §4.1.5: "the current date/time MUST be after or equal to the
-    /// not-before date/time listed in the "nbf" claim", so the token is not
-    /// yet valid while `now + leeway` is before `nbf`.
-    pub(crate) fn not_yet_valid_at(&self, now: i64, leeway: i64) -> bool {
-        self.nbf.is_some_and(|nbf| now.saturating_add(leeway) < nbf)
-    }
-
-    /// Whether a token this server issued may be accepted at `now`: `exp` is
-    /// required and gets no leeway, `nbf` gets
-    /// [`Self::OWN_TOKEN_NBF_LEEWAY_SECS`].
-    fn accepts_own_token_at(&self, now: i64) -> bool {
-        self.exp.is_some()
-            && !self.expired_at(now, 0)
-            && !self.not_yet_valid_at(now, Self::OWN_TOKEN_NBF_LEEWAY_SECS)
-    }
 }
 
 // ============================================================================
@@ -640,7 +574,7 @@ impl Jws {
 /// before this type existed, and tightening that is a separate decision from
 /// fixing `crit`. Leniency here cannot smuggle anything past the header checks,
 /// which run on whatever this returns.
-fn decode_segment(segment: &str) -> Option<Vec<u8>> {
+pub(super) fn decode_segment(segment: &str) -> Option<Vec<u8>> {
     URL_SAFE_NO_PAD
         .decode(segment)
         .or_else(|_| base64::engine::general_purpose::STANDARD.decode(segment))
@@ -700,6 +634,10 @@ impl<'a> TokenValidationContext<'a> {
 /// within a request reaches the same verdict.
 ///
 /// Returns `None` for invalid, expired, or unsupported tokens.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "`exp` and `nbf` are judged by `ValidityWindow` at the caller's `now`"
+)]
 pub(crate) fn decode_es256_token<C: DeserializeOwned>(
     token: &str,
     ctx: &TokenValidationContext<'_>,
@@ -731,7 +669,7 @@ pub(crate) fn decode_es256_token<C: DeserializeOwned>(
                 return None;
             }
 
-            if !TemporalClaims::from_token(token)?.accepts_own_token_at(now) {
+            if !ValidityWindow::from_token(token)?.accepts_own_token_at(now) {
                 return None;
             }
 
@@ -774,6 +712,10 @@ pub(crate) fn encode_state_token<T: Serialize>(
 /// There is no leeway: state tokens are server-issued and server-validated, so
 /// clock skew is zero. A grace period would allow replaying an expired token
 /// after its single-use marker has been cleaned up.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "`exp` is judged by `ValidityWindow` at the caller's `now`"
+)]
 pub(crate) fn decode_state_token<T: DeserializeOwned>(
     token: &str,
     jwt_type: JwtType,
@@ -797,7 +739,7 @@ pub(crate) fn decode_state_token<T: DeserializeOwned>(
             jsonwebtoken::errors::ErrorKind::InvalidToken,
         ));
     }
-    let accepted = TemporalClaims::from_token(token).is_some_and(|v| v.accepts_own_token_at(now));
+    let accepted = ValidityWindow::from_token(token).is_some_and(|v| v.accepts_own_token_at(now));
     if !accepted {
         return Err(jsonwebtoken::errors::Error::from(
             jsonwebtoken::errors::ErrorKind::ExpiredSignature,
@@ -953,11 +895,11 @@ mod tests {
         let token = sign_with_nbf(Some(serde_json::json!(nbf))).await;
         assert!(decodes(&token, nbf).is_some(), "now == nbf is accepted");
         assert!(
-            decodes(&token, nbf - TemporalClaims::OWN_TOKEN_NBF_LEEWAY_SECS).is_some(),
+            decodes(&token, nbf - ValidityWindow::OWN_TOKEN_NBF_LEEWAY_SECS).is_some(),
             "a server clock behind by the leeway still accepts the token"
         );
         assert!(
-            decodes(&token, nbf - TemporalClaims::OWN_TOKEN_NBF_LEEWAY_SECS - 1).is_none(),
+            decodes(&token, nbf - ValidityWindow::OWN_TOKEN_NBF_LEEWAY_SECS - 1).is_none(),
             "a token not yet valid beyond the leeway is refused"
         );
 
@@ -1342,39 +1284,6 @@ mod tests {
         assert!(
             result.is_err(),
             "State token 5s past exp must be rejected with zero leeway"
-        );
-    }
-
-    // RFC 7519 §4.1.4: "the current date/time MUST be before the expiration
-    // date/time listed in the "exp" claim." Covers the KMS state-token path,
-    // whose live `VerifyMac` call cannot run in a unit test.
-    #[test]
-    fn test_temporal_claims_exp_boundary() {
-        let now = 1_700_000_000;
-        let claims = |exp| TemporalClaims::new(Some(exp), None);
-        assert!(
-            claims(now + 1).accepts_own_token_at(now),
-            "one second before exp"
-        );
-        assert!(!claims(now).accepts_own_token_at(now), "at exp");
-        assert!(!claims(now - 29).expired_at(now, 30), "inside the leeway");
-        assert!(claims(now - 30).expired_at(now, 30), "at exp + leeway");
-        assert!(
-            !TemporalClaims::new(None, None).accepts_own_token_at(now),
-            "this server's tokens always carry exp"
-        );
-    }
-
-    #[test]
-    fn test_temporal_claims_from_payload() {
-        let read = |payload| TemporalClaims::from_payload(&payload);
-        assert!(read(serde_json::json!({"exp": 10})).is_some());
-        assert!(read(serde_json::json!({"exp": 10, "nbf": 5})).is_some());
-        assert!(read(serde_json::json!({})).is_some_and(|t| t.exp.is_none()));
-        assert!(read(serde_json::json!({"exp": "10"})).is_none());
-        assert!(
-            read(serde_json::json!({"exp": 10, "nbf": "5"})).is_none(),
-            "RFC 7519 §4.1.5: nbf \"MUST be a number containing a NumericDate value\""
         );
     }
 

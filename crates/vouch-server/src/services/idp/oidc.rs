@@ -11,7 +11,8 @@ use url::Url;
 use super::IdentityResult;
 use crate::arrival::ArrivalTime;
 use crate::crypto;
-use crate::crypto::jwt::{Jws, JwsError, TemporalClaims};
+use crate::crypto::jwt::{Jws, JwsError};
+use crate::crypto::validity::ValidityWindow;
 use crate::db::{Domain, UpstreamLogin};
 use crate::email::Email;
 use crate::infra::csp::CspOrigin;
@@ -375,6 +376,10 @@ pub(crate) async fn fetch_discovery(
 /// Returns error if JWKS fetch fails, no matching key is found,
 /// signature is invalid, claims validation fails, nonce mismatches,
 /// or the email is not verified.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "`exp` and `nbf` are judged by `ValidityWindow` at arrival"
+)]
 pub(crate) async fn verify_id_token(
     http_client: &reqwest::Client,
     provider: &OidcProvider,
@@ -457,7 +462,7 @@ pub(crate) async fn verify_id_token(
     // the value. Implementers MAY provide for some small leeway, usually no
     // more than a few minutes, to account for clock skew." RFC 7519 §4.1.5
     // gives `nbf` the same allowance.
-    let validity = TemporalClaims::from_token(id_token)
+    let validity = ValidityWindow::from_token(id_token)
         .ok_or_else(|| anyhow::anyhow!("ID token exp or nbf is not a NumericDate"))?;
     let now = arrival.as_second();
     if validity.expired_at(now, IDP_CLOCK_SKEW_SECS) {

@@ -1041,16 +1041,6 @@ pub async fn decode_authorization_code(
         )
     })?;
 
-    // Check expiration against the request's arrival, so this gate and the
-    // issued token's lifetime downstream are measured from one instant.
-    let now = arrival.as_second();
-    if auth_code.exp < now {
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidGrant,
-            "Authorization code has expired",
-        ));
-    }
-
     Ok(auth_code)
 }
 

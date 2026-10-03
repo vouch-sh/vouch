@@ -357,7 +357,7 @@ async fn test_delete_expired_dpop_jtis() {
 // `validate_dpop_common` passes covers the skew-extended proof-validity
 // window so cleanup never reopens a replay gap — lives in
 // `services/oidc/dpop.rs::tests` (the `services` layer can import both
-// `RecencyWindow`/`PROOF_SKEW_SECONDS` and these DB primitives; the `db`
+// `ValidityWindow`/`PROOF_SKEW_SECONDS` and these DB primitives; the `db`
 // layer may not import `services`).
 //
 // Deterministic: a negative `validity_seconds` puts `expires_at` in the

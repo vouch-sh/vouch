@@ -14,7 +14,8 @@
 
 use crate::AppState;
 use crate::arrival::ArrivalTime;
-use crate::crypto::jwt::{Jws, JwsError, TemporalClaims};
+use crate::crypto::jwt::{Jws, JwsError};
+use crate::crypto::validity::ValidityWindow;
 use crate::db::{self, ClientKeys, OAuthClient};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use crate::infra::egress::{BodyError, read_capped_text};
@@ -323,6 +324,10 @@ fn parse_request_object_header(jwt: &str) -> ServiceResult<(Option<String>, JwtA
 /// (`client_id`, `response_type`, `scope`) match between query and JWT
 /// (FAPI 2.0 Section 5.3.2).
 #[expect(clippy::too_many_lines, reason = "single-pass RFC 9101 JAR validation")]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "`exp` and `nbf` are judged by `ValidityWindow` in `validate_temporal_claims` at arrival"
+)]
 pub async fn validate_request_object(
     state: &Arc<AppState>,
     request_jwt: &str,
@@ -646,7 +651,7 @@ fn validate_temporal_claims(
     is_fapi: bool,
     now: i64,
 ) -> ServiceResult<()> {
-    let validity = TemporalClaims::new(claims.exp, claims.nbf);
+    let validity = ValidityWindow::from_claims(claims.exp, claims.nbf);
     if validity.expired_at(now, clock_skew) {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidRequestObject,
@@ -670,9 +675,8 @@ fn validate_temporal_claims(
         }
     }
 
-    if let Some(iat) = claims.iat
-        && iat > now.saturating_add(clock_skew)
-    {
+    // An `iat` after `now` describes a token not issued yet.
+    if ValidityWindow::from_claims(None, claims.iat).not_yet_valid_at(now, clock_skew) {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidRequestObject,
             "Request Object iat claim is in the future",

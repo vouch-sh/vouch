@@ -7,13 +7,13 @@
 
 use crate::arrival::ArrivalTime;
 use crate::assurance::ACR_AAL3;
+use crate::crypto::validity::ValidityWindow;
 use crate::db::documents::authenticator::AuthenticatorDoc;
 use crate::db::documents::session::SessionDoc;
 use crate::db::documents::user::UserDoc;
 use crate::db::{self, store::DocumentStore};
 use crate::error::ServiceError;
 use crate::infra::i18n::Tr;
-use crate::services::RecencyWindow;
 use crate::services::auth::ValidatedResourceToken;
 use vouch_common::{KeyInfo, ResourceLabel, lookup_device_model};
 
@@ -117,19 +117,19 @@ pub(crate) fn require_recent_hardware_verification(
 ///
 /// A step-up ceremony dated after `now` is impossible, so no clock skew is
 /// tolerated: both a too-old and a future-dated timestamp fail closed. The
-/// bounds check is the [`crate::services::RecencyWindow`] shared with the DPoP
-/// proof-age gate, and `now` is the request's arrival instant.
+/// bounds check is the [`ValidityWindow`] every time window goes through, and
+/// `now` is the request's arrival instant.
 ///
 /// # Errors
 ///
-/// Returns `ServiceError::StepUpRequired` when `issued_at` is older than
-/// `max_age_secs` or is later than now (a future-dated timestamp).
+/// Returns `ServiceError::StepUpRequired` when `issued_at` is at least
+/// `max_age_secs` old, or is later than now (a future-dated timestamp).
 pub(crate) fn require_fresh_timestamp(
     issued_at: i64,
     max_age_secs: i64,
     now: i64,
 ) -> Result<(), ServiceError> {
-    if RecencyWindow::no_skew(max_age_secs).accepts_at(now, issued_at) {
+    if ValidityWindow::issued_at(issued_at, max_age_secs).accepts_at(now, 0, 0) {
         return Ok(());
     }
     Err(ServiceError::StepUpRequired {
@@ -428,11 +428,13 @@ mod tests {
         );
     }
 
+    // The window lasts `max_age` seconds from the ceremony: one second
+    // inside it passes, and at exactly `max_age` it has closed.
     #[test]
     fn test_require_fresh_timestamp_boundary_exactly_at_max_age() {
-        let iat = make_iat(60); // Exactly 60 seconds old
-        // Session age == max_age is NOT > max_age, so it should pass
-        assert!(require_fresh_timestamp(iat, 60, jiff::Timestamp::now().as_second()).is_ok());
+        let now = 1_700_000_000;
+        assert!(require_fresh_timestamp(now - 59, 60, now).is_ok());
+        assert!(require_fresh_timestamp(now - 60, 60, now).is_err());
     }
 
     #[test]

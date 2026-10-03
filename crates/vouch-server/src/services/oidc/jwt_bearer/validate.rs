@@ -5,7 +5,8 @@
 //! (Section 2.2) and JWT authorization grants (Section 2.1).
 
 use crate::crypto::alg::JwsAlgorithm;
-use crate::crypto::jwt::{HeaderAlg, Jws, JwsError, TemporalClaims};
+use crate::crypto::jwt::{HeaderAlg, Jws, JwsError};
+use crate::crypto::validity::ValidityWindow;
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use serde::{Deserialize, Serialize};
 
@@ -205,6 +206,10 @@ pub fn validate_client_assertion_algorithm(
 ///
 /// # Returns
 /// The validated assertion claims.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "`exp` and `nbf` are judged by `ValidityWindow` at the caller's `now`"
+)]
 pub fn validate_jwt_assertion(
     assertion: &str,
     header: &JwtAssertionHeader,
@@ -238,7 +243,7 @@ pub fn validate_jwt_assertion(
     // RFC 7523 §3: "The authorization server MUST reject any JWT with an
     // expiration time that has passed, subject to allowable clock skew
     // between systems."
-    let validity = TemporalClaims::new(Some(claims.exp), claims.nbf);
+    let validity = ValidityWindow::from_claims(Some(claims.exp), claims.nbf);
     if validity.expired_at(now, CLOCK_SKEW_SECONDS) {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClient,
@@ -255,10 +260,8 @@ pub fn validate_jwt_assertion(
         ));
     }
 
-    // Validate iat if present
-    if let Some(iat) = claims.iat
-        && iat > now.saturating_add(CLOCK_SKEW_SECONDS)
-    {
+    // An `iat` after `now` describes a token not issued yet.
+    if ValidityWindow::from_claims(None, claims.iat).not_yet_valid_at(now, CLOCK_SKEW_SECONDS) {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClient,
             "JWT assertion iat claim is in the future",

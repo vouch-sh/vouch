@@ -24,10 +24,10 @@ use crate::arrival::ArrivalTime;
 use crate::crypto::alg::JwsAlgorithm;
 use crate::crypto::jwk::Jwk;
 use crate::crypto::jwt::{HeaderAlg, Jws, JwsError};
+use crate::crypto::validity::ValidityWindow;
 use crate::db::{self, store::DocumentStore};
 use crate::error::{OAuthErrorCode, OAuthErrorResponse, ServiceError};
 use crate::http;
-use crate::services::RecencyWindow;
 use crate::services::oidc::claims::PossessionError;
 use axum::http::StatusCode;
 
@@ -456,6 +456,10 @@ fn parse_dpop_header(proof: &str) -> Result<DpopHeader, DpopError> {
 ///    and claims extraction (avoiding a redundant second parse).
 ///
 /// Returns the parsed header and verified claims.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a DPoP proof carries no `exp`; its `iat` is judged by `ValidityWindow` at arrival"
+)]
 fn parse_and_verify_dpop_proof(proof: &str) -> Result<(DpopHeader, DpopClaims), DpopError> {
     let header = parse_dpop_header(proof)?;
 
@@ -545,17 +549,17 @@ pub fn validate_dpop_claims(
         return Err(DpopError::UriMismatch);
     }
 
-    // Not too old, and not more than 60 seconds into the future — RFC 9449
-    // permits limited clock skew. Same bounds check the key-deletion step-up
-    // gate uses (there with no skew); `now` is the single instant the caller
-    // stamped at the entry point and shared with the JTI retention commit.
-    // `PROOF_SKEW_SECONDS` is the same constant `validate_dpop_common` adds
-    // to `max_age_seconds` for JTI retention, and `validate_dpop_common`
-    // rounds the JTI's `expires_at` up to the next integer second
-    // (`floor(now) + 1 + max_age + skew`), so the replay record outlives
-    // every second at which this floor-truncated freshness check would
-    // still accept the proof (RFC 9449 §11.1's acceptance window).
-    if !RecencyWindow::with_skew(max_age_seconds, PROOF_SKEW_SECONDS).accepts_at(now, claims.iat) {
+    // RFC 9449 §4.3: the `iat` must be "within an acceptable window". The
+    // proof is accepted for `max_age_seconds` from its `iat`, and up to
+    // `PROOF_SKEW_SECONDS` before it when the client clock runs ahead. `now`
+    // is the single instant the caller stamped at the entry point and shared
+    // with the JTI retention commit, which holds the JTI for `max_age + skew`
+    // so the replay record covers every second this check accepts.
+    if !ValidityWindow::issued_at(claims.iat, max_age_seconds).accepts_at(
+        now,
+        0,
+        PROOF_SKEW_SECONDS,
+    ) {
         return Err(DpopError::Expired);
     }
 
@@ -712,8 +716,7 @@ async fn validate_dpop_common(
     // Read separately — with the DB insert's `await` between them — retention
     // would be anchored earlier than freshness, and the JTI row could be
     // retired while its proof was still accepted (RFC 9449 §11.1). The
-    // request's arrival stamp is that one instant; the `+1` round-up below
-    // covers the remaining `as_second()` floor-truncation.
+    // request's arrival stamp is that one instant.
     let now = arrival.timestamp();
 
     // Check for replay (JTI must be unique) — atomic INSERT on PRIMARY KEY.
@@ -725,22 +728,17 @@ async fn validate_dpop_common(
     // for the time window in which the respective DPoP proof JWT would be
     // accepted" — this server retains the JTI for that whole window so the
     // single-use check holds. `validate_dpop_claims` accepts an `iat` up to
-    // `PROOF_SKEW_SECONDS` into the future and uses `now.as_second()`
-    // (floor-truncated), so a forward-skewed proof with `iat =
-    // floor(now) + skew` stays freshness-accepted until the first second
-    // at which `floor(T_replay) > iat + max_age`, i.e. until `floor(now) +
-    // skew + max_age + 1`. Committing for `config_max_age +
-    // PROOF_SKEW_SECONDS` from a `now_second` of `floor(now) + 1` makes
-    // `expires_at = floor(now) + 1 + max_age + skew` — exactly the first
-    // second at which the freshness check rejects the proof — so a cleanup
-    // tick can never retire the row while the proof is still fresh. The `+1`
-    // is the round-up over `as_second()` floor-truncation; without it a
-    // `1 − frac(now)`-second gap remains even on a single clock.
-    // `saturating_add` is panic-free and cannot saturate in practice —
-    // jiff's representable second range is far below `i64::MAX` — and if it
-    // ever did, `Timestamp::from_second` inside the DB helper returns `Err`
-    // and surfaces as `ClaimError::Database` rather than a panic.
-    let now_second = now.as_second().saturating_add(1);
+    // `PROOF_SKEW_SECONDS` ahead of `floor(now)` and rejects from
+    // `iat + max_age` on, so the last proof it accepts is refused from
+    // `floor(now) + skew + max_age`. Committing for `config_max_age +
+    // PROOF_SKEW_SECONDS` from `floor(now)` sets `expires_at` to exactly that
+    // second, and cleanup deletes only rows whose `expires_at` is before the
+    // current time, so the row outlives every second the proof is accepted.
+    // `saturating_add` cannot saturate in practice — jiff's representable
+    // second range is far below `i64::MAX` — and if it ever did,
+    // `Timestamp::from_second` inside the DB helper returns `Err` and
+    // surfaces as `ClaimError::Database` rather than a panic.
+    let now_second = now.as_second();
     let jti_retention = config_max_age.saturating_add(PROOF_SKEW_SECONDS);
     let jti_claim =
         match db::check_and_store_dpop_jti_at_second(store, &claims.jti, now_second, jti_retention)
@@ -1302,8 +1300,8 @@ mod tests {
         assert!(matches!(result, Err(DpopError::Expired)));
     }
 
-    /// `age == max_age_seconds` is exactly at the proof-age boundary and
-    /// must be accepted (`age > max_age_seconds` is strict).
+    /// The proof is accepted for `max_age_seconds` from its `iat`: at age
+    /// `max_age_seconds - 1` it is still fresh.
     #[test]
     fn test_validate_dpop_claims_max_age_boundary_accepted() {
         let fixed_now = 1_700_000_000;
@@ -1311,7 +1309,7 @@ mod tests {
         let claims = make_claims(
             "POST",
             "https://example.com/token",
-            fixed_now - max_age_seconds,
+            fixed_now - (max_age_seconds - 1),
         );
         let uris = ["https://example.com/token".to_string()];
         let result = validate_dpop_claims(
@@ -1323,12 +1321,11 @@ mod tests {
         );
         assert!(
             result.is_ok(),
-            "age == max_age_seconds must be accepted: {result:?}"
+            "age == max_age_seconds - 1 must be accepted: {result:?}"
         );
     }
 
-    /// `age == max_age_seconds + 1` is one second past the proof-age
-    /// boundary and must be rejected.
+    /// At age `max_age_seconds` the window has closed.
     #[test]
     fn test_validate_dpop_claims_max_age_boundary_rejected() {
         let fixed_now = 1_700_000_000;
@@ -1336,7 +1333,7 @@ mod tests {
         let claims = make_claims(
             "POST",
             "https://example.com/token",
-            fixed_now - (max_age_seconds + 1),
+            fixed_now - max_age_seconds,
         );
         let uris = ["https://example.com/token".to_string()];
         let result = validate_dpop_claims(
@@ -1741,13 +1738,13 @@ mod tests {
     //
     // These two tests live in the `services` layer (not `db/tests/jti_replay.rs`)
     // because they reason about the *relationship* between two things the
-    // `services` layer owns (`RecencyWindow`/`PROOF_SKEW_SECONDS` freshness)
+    // `services` layer owns (`ValidityWindow`/`PROOF_SKEW_SECONDS` freshness)
     // and one thing the `db` layer owns (`check_and_store_dpop_jti_at_second` /
     // `delete_expired_dpop_jtis` retention + cleanup). The `db` layer may not
     // import `services`, so the cross-layer invariant is anchored here, where
     // both sides are in scope. They use negative/positive `validity_seconds`
     // to advance the row's `expires_at` deterministically — no real time, no
-    // signatures — and assert the freshness check through `RecencyWindow` at
+    // signatures — and assert the freshness check through `ValidityWindow` at
     // the moments that matter.
     // ========================================================================
 
@@ -1758,9 +1755,9 @@ mod tests {
     /// retire the row.
     #[tokio::test]
     async fn test_dpop_jti_retention_covers_skew_extended_freshness_window() {
+        use crate::crypto::validity::ValidityWindow;
         use crate::db::claim::ClaimError;
         use crate::db::{check_and_store_dpop_jti_at_second, delete_expired_dpop_jtis};
-        use crate::services::RecencyWindow;
 
         let store = resource_test_store().await;
 
@@ -1817,7 +1814,7 @@ mod tests {
         // this replay moment.
         let replay_now = t0 + elapsed_within;
         assert!(
-            RecencyWindow::with_skew(config_max_age, skew).accepts_at(replay_now, edge_iat),
+            ValidityWindow::issued_at(edge_iat, config_max_age).accepts_at(replay_now, 0, skew),
             "proof iat = T0+skew must still be fresh at T0 + max_age + 30"
         );
 
@@ -1844,7 +1841,11 @@ mod tests {
 
         let after_validity = t0 + elapsed_past;
         assert!(
-            !RecencyWindow::with_skew(config_max_age, skew).accepts_at(after_validity, edge_iat),
+            !ValidityWindow::issued_at(edge_iat, config_max_age).accepts_at(
+                after_validity,
+                0,
+                skew
+            ),
             "proof must be stale one second past max_age + skew"
         );
     }
@@ -1859,9 +1860,9 @@ mod tests {
     /// cleanup. The fix (`max_age + PROOF_SKEW_SECONDS`) closes the gap.
     #[tokio::test]
     async fn test_dpop_jti_old_retention_leaves_replay_gap_after_cleanup() {
+        use crate::crypto::validity::ValidityWindow;
         use crate::db::claim::ClaimError;
         use crate::db::{check_and_store_dpop_jti_at_second, delete_expired_dpop_jtis};
-        use crate::services::RecencyWindow;
 
         let store = resource_test_store().await;
 
@@ -1929,14 +1930,18 @@ mod tests {
         // fix closes by retaining for `max_age + skew`.
         let replay_now = t0 + config_max_age + 30;
         assert!(
-            RecencyWindow::with_skew(config_max_age, skew).accepts_at(replay_now, edge_iat),
+            ValidityWindow::issued_at(edge_iat, config_max_age).accepts_at(replay_now, 0, skew),
             "proof iat = T0+skew must still be fresh at T0 + max_age + 30 (within max_age + skew)"
         );
 
         // Anchor the edge: one second past max_age + skew must be rejected.
         let after_validity = t0 + config_max_age + skew + 1;
         assert!(
-            !RecencyWindow::with_skew(config_max_age, skew).accepts_at(after_validity, edge_iat),
+            !ValidityWindow::issued_at(edge_iat, config_max_age).accepts_at(
+                after_validity,
+                0,
+                skew
+            ),
             "proof must be stale one second past max_age + skew"
         );
     }
@@ -2000,27 +2005,14 @@ mod tests {
         format!("{signing_input}.{sig_b64}")
     }
 
-    /// `validate_dpop_at_resource` must commit the JTI such that the replay
-    /// record outlives every second at which the freshness check would still
-    /// accept the proof (RFC 9449 §11.1). After the fix,
-    /// `validate_dpop_common` stamps `now` once, rounds up to
-    /// `floor(now) + 1`, and commits `expires_at = floor(now) + 1 +
-    /// max_age + skew`. The freshness check (using `floor(now)`,
-    /// truncation-truncated) accepts a worst-case forward-skewed proof
-    /// (`iat = floor(now) + skew`) until the first second `floor(now) +
-    /// skew + max_age + 1` — exactly `expires_at` — so a cleanup tick can
-    /// never delete the row while the proof is still fresh.
-    ///
-    /// Reading the stored `expires_at` back pins the call site. The lower
-    /// bound `expires_at >= now_before + max_age + skew + 1` fails under
-    /// BOTH the pre-03203125 bug (`max_age`-only retention — short by
-    /// `skew + 1 ≈ 61s`) AND the residual `Δ + floor-slack` bug the present
-    /// fix closes (a second `Timestamp::now()` restamped mid-function with
-    /// no `+1` round-up — short by ~1s in the common same-second case).
-    /// The `Δ`-specific half is anchored deterministically by
-    /// [`test_dpop_jti_at_second_retention_outlives_freshness_floor_slack`];
-    /// this test anchors the end-to-end call site through the real
-    /// `validate_dpop_at_resource`.
+    /// `validate_dpop_at_resource` must commit the JTI so the replay record
+    /// lasts until the freshness check stops accepting the proof (RFC 9449
+    /// §11.1). It commits `expires_at = floor(now) + max_age + skew`; the most
+    /// forward-skewed proof accepted (`iat = floor(now) + skew`) is refused
+    /// from exactly that second. Reading the stored `expires_at` back pins the
+    /// call site: reverting retention to `max_age` alone fails the lower bound
+    /// by `skew` seconds. [`test_dpop_jti_retention_covers_the_freshness_window`]
+    /// pins the same arithmetic deterministically.
     #[tokio::test]
     async fn test_dpop_at_resource_jti_retention_covers_skew_window() {
         const CONFIG_MAX_AGE: i64 = 300;
@@ -2063,32 +2055,21 @@ mod tests {
 
         let expires_at = doc.data.expires_at.as_second();
 
-        // Lower bound: with the fix, `expires_at = floor(now_call) + 1 +
-        // max_age + skew` where `floor(now_call) >= now_before`, so
-        // `expires_at >= now_before + max_age + skew + 1`. The `+1` is the
-        // round-up over `as_second()` floor-truncation; it is what makes
-        // this assertion distinguish the fix from the `Δ + floor-slack`
-        // bug. Without the round-up (or with a second restamped `now`),
-        // `expires_at` lands at `now_before + max_age + skew` in the common
-        // same-second case and this assertion fails by 1s; reverting
-        // retention to `max_age` only fails it by `skew + 1` seconds.
+        // `expires_at = floor(now_call) + max_age + skew`, and
+        // `now_before <= floor(now_call) <= now_after`.
         let lower = now_before
             .saturating_add(CONFIG_MAX_AGE)
-            .saturating_add(skew)
-            .saturating_add(1);
+            .saturating_add(skew);
         assert!(
             expires_at >= lower,
-            "JTI retention must outlive the floor-slack-extended freshness window: \
+            "JTI retention must cover the freshness window: \
              expires_at={expires_at}, expected >= {lower} (now_before={now_before}, \
              max_age={CONFIG_MAX_AGE}, skew={skew})"
         );
 
-        // Sanity upper bound: `floor(now_call) <= now_after`, so
-        // `expires_at <= now_after + max_age + skew + 1`.
         let upper = now_after
             .saturating_add(CONFIG_MAX_AGE)
-            .saturating_add(skew)
-            .saturating_add(1);
+            .saturating_add(skew);
         assert!(
             expires_at <= upper,
             "JTI retention sanity upper bound exceeded: expires_at={expires_at}, \
@@ -2113,147 +2094,60 @@ mod tests {
     }
 
     // ========================================================================
-    // Deterministic, clock-injected proof that the JTI retention outlives
-    // the `as_second()` floor-slack of the freshness window.
-    //
-    // `validate_dpop_common` now stamps a single `now`, passes
-    // `now.as_second() + 1` to `check_and_store_dpop_jti_at_second` (the
-    // round-up), and `now.as_second()` to `validate_dpop_claims`. This test
-    // pins that arithmetic directly against `RecencyWindow::accepts_at`,
-    // with no signatures and no real clock — the `Δ` (dual-stamp) half of
-    // the bug cannot manifest here by construction, so this isolates the
-    // floor-slack half and proves the `+1` round-up is load-bearing. It
-    // fails if `validate_dpop_common` ever reverts to passing
-    // `now.as_second()` (no round-up): the negative case below pins that
-    // the un-rounded `expires_at` lands strictly inside the freshness
-    // window, leaving the last accepting second unguarded.
+    // The JTI retention `validate_dpop_common` commits (from `floor(now)`, for
+    // `max_age + skew`) ends exactly at the first second the freshness check
+    // refuses the most forward-skewed proof it accepts, so no cleanup tick can
+    // retire the row while that proof is still fresh (RFC 9449 §11.1).
     // ========================================================================
     #[tokio::test]
-    async fn test_dpop_jti_at_second_retention_outlives_freshness_floor_slack() {
+    async fn test_dpop_jti_retention_covers_the_freshness_window() {
+        use crate::crypto::validity::ValidityWindow;
         use crate::db::check_and_store_dpop_jti_at_second;
-        use crate::services::RecencyWindow;
+        use crate::db::claim::ClaimError;
 
         let store = resource_test_store().await;
-
         let config_max_age: i64 = 300;
         let skew: i64 = PROOF_SKEW_SECONDS;
         let retention = config_max_age.saturating_add(skew);
-
-        // A single caller-stamped instant, in integer seconds — exactly
-        // what `validate_dpop_common` stamps (a real `now` would land here
-        // too; picking a fixed value removes wall-clock nondeterminism).
         let now_sec: i64 = 1_700_000_000;
 
-        // Worst-case forward-skewed proof the validator would accept at
-        // `now_sec`: `iat = now_sec + skew` (age = -skew, the inclusive
-        // forward-skew bound in `RecencyWindow::accepts_at`).
+        // The most forward-skewed proof accepted at `now_sec`.
         let iat = now_sec.saturating_add(skew);
+        let window = ValidityWindow::issued_at(iat, config_max_age);
+        assert!(window.accepts_at(now_sec, 0, skew));
+        assert!(!ValidityWindow::issued_at(iat + 1, config_max_age).accepts_at(now_sec, 0, skew));
+
+        let first_reject = iat.saturating_add(config_max_age);
         assert!(
-            RecencyWindow::with_skew(config_max_age, skew).accepts_at(now_sec, iat),
-            "forward-skewed proof at the skew boundary must be accepted at now_sec"
+            window.accepts_at(first_reject - 1, 0, skew),
+            "last accepting second"
+        );
+        assert!(
+            !window.accepts_at(first_reject, 0, skew),
+            "first refusing second"
         );
 
-        // The last second at which the freshness check still accepts the
-        // proof, and the first second at which it rejects it. Because the
-        // freshness check floors `now` to an integer second, a replay
-        // submitted at any wall-clock whose `as_second() == last_accept`
-        // is still accepted — the floor-slack is the gap between
-        // `last_accept` (inclusive) and `first_reject` (exclusive).
-        let last_accept = iat.saturating_add(config_max_age);
-        let first_reject = last_accept.saturating_add(1);
-        assert!(
-            RecencyWindow::with_skew(config_max_age, skew).accepts_at(last_accept, iat),
-            "proof must still be fresh at the last accepting second {last_accept}"
-        );
-        assert!(
-            !RecencyWindow::with_skew(config_max_age, skew).accepts_at(first_reject, iat),
-            "proof must be stale at the first rejecting second {first_reject}"
-        );
-
-        // --- The fix's arithmetic: round up to the next second. ---
-        // `validate_dpop_common` passes `now_sec + 1` and `retention =
-        // max_age + skew`, yielding `expires_at = now_sec + 1 + max_age +
-        // skew`. That equals `first_reject` — the JTI becomes
-        // cleanup-eligible exactly when the freshness check first rejects
-        // the proof, so no cleanup tick can retire the row while the proof
-        // is still fresh.
-        let now_second_rounded_up = now_sec.saturating_add(1);
-        let _claim = check_and_store_dpop_jti_at_second(
-            &store,
-            "floor-slack-rounded",
-            now_second_rounded_up,
-            retention,
-        )
-        .await
-        .expect("rounded-up JTI commit succeeds");
-        let id = dpop::deterministic_dpop_jti_id("floor-slack-rounded");
-        let rounded_expires_at = store
-            .get::<DpopJtiDoc>(&id)
+        let _claim = check_and_store_dpop_jti_at_second(&store, "retention", now_sec, retention)
+            .await
+            .expect("JTI commit succeeds");
+        let expires_at = store
+            .get::<DpopJtiDoc>(&dpop::deterministic_dpop_jti_id("retention"))
             .await
             .expect("read back JTI")
-            .expect("rounded-up JTI must be committed")
+            .expect("JTI must be committed")
             .data
             .expires_at
             .as_second();
         assert_eq!(
-            rounded_expires_at,
-            now_sec.saturating_add(1).saturating_add(retention),
-            "round-up arithmetic: expires_at must be floor(now)+1+max_age+skew"
-        );
-        assert!(
-            rounded_expires_at >= first_reject,
-            "FIX: rounded-up JTI outlives the last freshness-accepting second — \
-             expires_at={rounded_expires_at}, first_reject={first_reject} \
-             (the row becomes cleanup-eligible only when the proof is stale)"
+            expires_at, first_reject,
+            "the row expires exactly when the proof stops being accepted"
         );
 
-        // --- Negative: without the `+1` round-up, the gap reopens. ---
-        // Committing from `now_sec` (no round-up) yields `expires_at =
-        // now_sec + max_age + skew = last_accept`, which is strictly less
-        // than `first_reject`. The row would be cleanup-eligible while the
-        // proof is still freshness-accepted at `last_accept` — the
-        // floor-slack gap. This assertion pins that the `+1` round-up
-        // (not just the `max_age + skew` retention) is load-bearing.
-        let _no_roundup =
-            check_and_store_dpop_jti_at_second(&store, "floor-slack-unrounded", now_sec, retention)
-                .await
-                .expect("un-rounded JTI commit succeeds");
-        let id = dpop::deterministic_dpop_jti_id("floor-slack-unrounded");
-        let unrounded_expires_at = store
-            .get::<DpopJtiDoc>(&id)
-            .await
-            .expect("read back JTI")
-            .expect("un-rounded JTI must be committed")
-            .data
-            .expires_at
-            .as_second();
-        assert_eq!(
-            unrounded_expires_at,
-            now_sec.saturating_add(retention),
-            "un-rounded arithmetic: expires_at must be floor(now)+max_age+skew"
-        );
-        assert!(
-            unrounded_expires_at < first_reject,
-            "NEGATIVE: without the +1 round-up the JTI expires at the last \
-             freshness-accepting second {last_accept} (expires_at=\
-             {unrounded_expires_at}), strictly before the first rejecting \
-             second {first_reject} — the floor-slack gap the fix closes"
-        );
-
-        // The rounded-up row must still block a verbatim replay (PRIMARY
-        // KEY collision), confirming the commit is real, not just an
-        // arithmetic claim.
-        use crate::db::claim::ClaimError;
-        let blocked = check_and_store_dpop_jti_at_second(
-            &store,
-            "floor-slack-rounded",
-            now_second_rounded_up,
-            retention,
-        )
-        .await;
+        let blocked =
+            check_and_store_dpop_jti_at_second(&store, "retention", now_sec, retention).await;
         assert!(
             matches!(blocked, Err(ClaimError::AlreadyConsumed)),
-            "rounded-up JTI must block a verbatim replay: got {blocked:?}"
+            "the committed JTI blocks a verbatim replay: got {blocked:?}"
         );
     }
 }
