@@ -173,20 +173,20 @@ pub async fn fetch_request_object(
     allow_loopback: bool,
     http_client: &reqwest::Client,
 ) -> ServiceResult<String> {
-    if !uri.starts_with("https://") {
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidRequestUri,
-            "request_uri must use HTTPS",
-        ));
-    }
-
-    // Validate URL structure to catch malformed URIs early.
     let parsed = url::Url::parse(uri).map_err(|_| {
         ServiceError::oauth(
             OAuthErrorCode::InvalidRequestUri,
             "request_uri is not a valid URL",
         )
     })?;
+    // RFC 3986 §3.1: "Although schemes are case-insensitive, the canonical
+    // form is lowercase"; `Url::parse` lowercases it.
+    if parsed.scheme() != "https" {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidRequestUri,
+            "request_uri must use HTTPS",
+        ));
+    }
     if parsed.host_str().is_none() {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidRequestUri,

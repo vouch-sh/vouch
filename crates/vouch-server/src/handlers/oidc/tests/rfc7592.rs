@@ -3309,6 +3309,48 @@ async fn test_rfc7592_put_rejects_non_https_request_uri() {
     );
 }
 
+/// RFC 3986 §3.1: "Although schemes are case-insensitive, the canonical form
+/// is lowercase". An `HTTPS://` (any-case-scheme) `request_uri` must be admitted
+/// by `validate_request_uris` on the PUT path the same way it is on POST — the
+/// case-sensitive `starts_with("https://")` gate previously rejected it with
+/// `invalid_client_metadata`, while the lowercase equivalent was accepted.
+#[tokio::test]
+async fn test_rfc7592_put_accepts_uppercase_scheme_request_uri() {
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_dynamic_client(&app).await;
+
+    let upper_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "request_uris": ["HTTPS://example.com/request.jwt"]
+    });
+    let (status_upper, body_upper) = http_request(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(upper_body.to_string()),
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(
+        status_upper,
+        StatusCode::OK,
+        "RFC 3986 §3.1: an HTTPS:// request_uri in PUT must be admitted: {body_upper}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body_upper).expect("Valid JSON");
+    let uris = json["request_uris"]
+        .as_array()
+        .expect("request_uris must be a JSON array in PUT response");
+    assert_eq!(uris.len(), 1, "must store exactly one request_uri: {json}");
+    assert_eq!(
+        uris[0].as_str(),
+        Some("HTTPS://example.com/request.jwt"),
+        "the uppercase-scheme request_uri must be echoed: {json}"
+    );
+}
+
 #[tokio::test]
 async fn test_rfc7592_put_rejects_invalid_userinfo_signing_alg() {
     // RFC 7592 Section 2.2: Invalid userinfo_signed_response_alg must return 400.

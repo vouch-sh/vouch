@@ -218,6 +218,43 @@ async fn spawn_request_object_server(jwt: String) -> String {
     format!("https://127.0.0.1:{port}/ro.jwt")
 }
 
+/// Like [`spawn_request_object_server`], but the Request Object JWT is supplied
+/// *after* the URL is known, via a [`tokio::sync::oneshot`] receiver.
+///
+/// This breaks the registration chicken-and-egg where the JWT's `iss` (the
+/// `client_id`) is only known after registering, while the `request_uris`
+/// allowlist registered with that POST must already contain the mock's URL.
+/// The URL — and so the listener port — is fixed up front; the awaited JWT
+/// arrives before the single connection is accepted. The mock still accepts
+/// exactly one connection: the single authorize fetch the test performs.
+async fn spawn_request_object_server_late(rx: tokio::sync::oneshot::Receiver<String>) -> String {
+    use tokio::io::AsyncWriteExt;
+    let acceptor = tls_acceptor();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback listener");
+    let port = listener.local_addr().expect("local_addr").port();
+    tokio::spawn(async move {
+        let jwt = rx.await.expect("receive request object jwt");
+        let (stream, _peer) = listener.accept().await.expect("accept connection");
+        let mut tls = acceptor.accept(stream).await.expect("TLS handshake");
+        let response = format!(
+            "HTTP/1.1 200 OK\r\n\
+             Content-Type: application/oauth-authz-req+jwt\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\
+             \r\n\
+             {jwt}",
+            jwt.len()
+        );
+        if tls.write_all(response.as_bytes()).await.is_err() {
+            return;
+        }
+        let _shutdown = tls.shutdown().await;
+    });
+    format!("https://127.0.0.1:{port}/ro.jwt")
+}
+
 // ========================================================================
 // RFC 9101 — Discovery Metadata
 // ========================================================================
@@ -3102,4 +3139,186 @@ async fn test_rfc9101_request_uri_rejects_client_not_registered_for_code() {
     .await;
 
     assert_unauthorized_client_redirect(&response);
+}
+
+// ========================================================================
+// RFC 9101 + RFC 3986 §3.1 — case-insensitive `request_uri` scheme
+// ========================================================================
+//
+// OIDC Core §6.2 / RFC 9101: a `request_uri` is an HTTPS URL, and RFC 3986
+// §3.1 makes the scheme case-insensitive ("the canonical form is lowercase").
+// The authorize router previously required an exact lowercase `https://`
+// prefix, so an `HTTPS://` (or mixed-case) `request_uri` fell through to the
+// `authorize-denied-request-uri-scheme` denied template instead of fetching
+// the Request Object — inconsistent with the case-insensitive `jwks_uri`
+// scheme check shipped for RFC 3986 §3.1. These tests pin the
+// case-insensitive behaviour end-to-end.
+
+/// An `HTTPS://` `request_uri` routes to the JAR fetch path. Mirrors
+/// `test_rfc9101_request_uri_error_redirect_echoes_request_object_state` but
+/// upper-cases the scheme: the same Request Object must still be fetched,
+/// signature-verified, and then denied at value validation (`prompt` is
+/// unsupported), producing an `error=invalid_request` redirect that echoes
+/// the Request Object's `state`. A pre-fix run falls through to the denied
+/// template (`200 OK`, no `Location`) instead.
+#[tokio::test]
+async fn test_rfc9101_uppercase_scheme_request_uri_dispatches_to_fetch() {
+    let http_client = https_client_trusting_any_cert();
+    let (app, state) = test_app_with_http_client(http_client).await;
+
+    let user = create_test_user(&state.store, "jar-requri-uc@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+    // No allowlist (TestClientSpec default) → any HTTPS request_uri is accepted.
+    let (client, pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
+
+    let issuer = &state.config().base_url;
+    let ro_state = "ro-uppercase-scheme-state";
+    let request_jwt = build_request_object_with_unsupported_prompt(
+        &client.client_id,
+        issuer,
+        &pkcs8_bytes,
+        ro_state,
+    );
+    let lowercase_uri = spawn_request_object_server(request_jwt).await;
+    // Upper-case the scheme prefix only; the rest of the URL is identical.
+    let uppercase_uri = lowercase_uri.replacen("https://", "HTTPS://", 1);
+
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?client_id={}&request_uri={}",
+            client.client_id,
+            urlencoding::encode(&uppercase_uri)
+        ),
+        &[],
+    )
+    .await;
+
+    assert!(
+        response.status == StatusCode::FOUND || response.status == StatusCode::SEE_OTHER,
+        "uppercase HTTPS:// request_uri must dispatch to the JAR fetch and redirect, got: \
+         {} body: {}",
+        response.status,
+        response.body,
+    );
+    let location = response
+        .headers
+        .get("Location")
+        .expect("dispatched request has a Location header")
+        .to_str()
+        .expect("Location is ASCII");
+    assert!(
+        location.contains("error=invalid_request"),
+        "a fetched Request Object failing value validation should redirect with \
+         error=invalid_request, got: {location}"
+    );
+    assert_eq!(
+        location_state(location).as_deref(),
+        Some(ro_state),
+        "error redirect must echo the Request Object's `state` ({ro_state}); got: {location}",
+    );
+}
+
+/// A registered `https://` `request_uris` allowlist entry must match an
+/// `HTTPS://` query parameter, the way the scheme-insensitive registration and
+/// fetch checks already do. End-to-end: register inline JWKS plus a
+/// lowercase-scheme allowlist via POST `/oauth/register`, then authorize with
+/// the upper-cased scheme of the *same* mock URL. The router gate admits the
+/// URI, the allowlist comparison matches it to the lowercase registered entry,
+/// and the JAR fetch fetches and signature-verifies the Request Object —
+/// producing the `error=invalid_request` redirect (unsupported `prompt`) that
+/// proves the request reached JAR value validation, not a denied template.
+///
+/// Without the allowlist normalization, gates 1–3 would admit the URI but the
+/// byte-exact `u == request_uri` comparison would reject it as
+/// `authorize-denied-request-uri-unregistered`.
+#[tokio::test]
+async fn test_rfc9101_uppercase_scheme_request_uri_matches_registered_allowlist() {
+    let http_client = https_client_trusting_any_cert();
+    let (app, state) = test_app_with_http_client(http_client).await;
+    let issuer = state.config().base_url.clone();
+
+    // Signing keys: the public half is registered inline, the private half
+    // signs the Request Object built below.
+    let (pkcs8_bytes, jwk) = generate_es256_signing_key();
+
+    // Spawn the one-shot mock with a deferred JWT (see helper): the URL is
+    // known now for the allowlist, but the JWT is supplied once the client_id
+    // (its `iss`) is known after registration. The mock accepts exactly the
+    // single fetch the authorize below performs.
+    let (jwt_tx, jwt_rx) = tokio::sync::oneshot::channel();
+    let lowercase_uri = spawn_request_object_server_late(jwt_rx).await;
+
+    // Register a client with inline JWKS and a lowercase-scheme allowlist.
+    let (status, body) = http_post_json(
+        &app,
+        "/oauth/register",
+        &serde_json::json!({
+            "redirect_uris": ["https://example.com/callback"],
+            "client_name": "JAR Uppercase Allowlist",
+            "token_endpoint_auth_method": "private_key_jwt",
+            "jwks": { "keys": [jwk] },
+            "request_uris": [lowercase_uri]
+        })
+        .to_string(),
+        &[],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "registration must succeed: {body}"
+    );
+    let client_id =
+        serde_json::from_str::<serde_json::Value>(&body).expect("Valid JSON")["client_id"]
+            .as_str()
+            .expect("client_id")
+            .to_string();
+
+    // Build and serve the Request Object: an unsupported `prompt` passes
+    // `validate_request_object` but fails `validate_authorize_request`, so the
+    // dispatch reaches the error-redirect path that echoes `state`.
+    let ro_state = "ro-allowlist-uc-state";
+    let request_jwt =
+        build_request_object_with_unsupported_prompt(&client_id, &issuer, &pkcs8_bytes, ro_state);
+    jwt_tx.send(request_jwt).expect("serve request object");
+
+    // Upper-case the scheme prefix only; the rest of the URL is identical to
+    // the registered (lowercase-scheme) allowlist entry.
+    let uppercase_uri = lowercase_uri.replacen("https://", "HTTPS://", 1);
+
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?client_id={}&request_uri={}",
+            client_id,
+            urlencoding::encode(&uppercase_uri)
+        ),
+        &[],
+    )
+    .await;
+
+    assert!(
+        response.status == StatusCode::FOUND || response.status == StatusCode::SEE_OTHER,
+        "uppercase HTTPS:// must match the lowercase-scheme allowlist and dispatch to the JAR \
+         fetch (got {}): {}",
+        response.status,
+        response.body,
+    );
+    let location = response
+        .headers
+        .get("Location")
+        .expect("dispatched request has a Location header")
+        .to_str()
+        .expect("Location is ASCII");
+    assert!(
+        location.contains("error=invalid_request"),
+        "a fetched Request Object failing value validation should redirect with \
+         error=invalid_request, got: {location}"
+    );
+    assert_eq!(
+        location_state(location).as_deref(),
+        Some(ro_state),
+        "error redirect must echo the Request Object's `state` ({ro_state}); got: {location}",
+    );
 }

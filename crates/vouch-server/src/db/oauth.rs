@@ -175,6 +175,30 @@ impl OAuthClient {
         })
     }
 
+    /// Whether `uri` is one of the client's registered `request_uris`, or the
+    /// client registered none.
+    ///
+    /// OIDC Registration §2 defines `request_uris` without a comparison rule,
+    /// unlike `redirect_uris`. A registered URI matches any URI RFC 3986 calls
+    /// equivalent to it — §6.2.2.1: "the scheme and host are case-insensitive
+    /// and therefore should be normalized to lowercase" — since both name the
+    /// document that is fetched. `Url` serialization applies those rules and
+    /// leaves the path and query case-sensitive. A value that does not parse
+    /// matches only itself.
+    #[must_use]
+    pub fn is_valid_request_uri(&self, uri: &str) -> bool {
+        let Some(registered) = self.request_uris.as_deref() else {
+            return true;
+        };
+        let requested = url::Url::parse(uri).ok();
+        registered.iter().any(|candidate| {
+            candidate == uri
+                || requested.as_ref().is_some_and(|requested| {
+                    url::Url::parse(candidate).is_ok_and(|candidate| &candidate == requested)
+                })
+        })
+    }
+
     #[must_use]
     pub fn is_valid_resource_uri(&self, uri: &str) -> bool {
         if self.resource_uris.is_empty() {
@@ -2479,6 +2503,33 @@ mod tests {
             !client.is_authorized_for_grant("authorization_code"),
             "an explicitly empty list authorizes nothing — it is not the absent case"
         );
+    }
+
+    // RFC 3986 §6.2.2.1: "the scheme and host are case-insensitive ... The
+    // other generic syntax components are assumed to be case-sensitive".
+    #[tokio::test]
+    async fn test_is_valid_request_uri_matches_rfc3986_equivalents() {
+        let store = test_store().await;
+        let (mut client, _secret, _hash) = create_client_and_secret(&store).await;
+
+        client.request_uris = None;
+        assert!(client.is_valid_request_uri("https://rp.example.com/ro.jwt"));
+
+        client.request_uris = Some(vec!["https://rp.example.com/ro.jwt".to_string()]);
+        assert!(client.is_valid_request_uri("https://rp.example.com/ro.jwt"));
+        assert!(client.is_valid_request_uri("HTTPS://RP.example.COM/ro.jwt"));
+        assert!(
+            client.is_valid_request_uri("https://rp.example.com:443/ro.jwt"),
+            "RFC 3986 §6.2.3: the default port is equivalent to none"
+        );
+        assert!(!client.is_valid_request_uri("https://rp.example.com/RO.jwt"));
+        assert!(!client.is_valid_request_uri("https://rp.example.com/ro.jwt?x=1"));
+        assert!(!client.is_valid_request_uri("http://rp.example.com/ro.jwt"));
+        assert!(!client.is_valid_request_uri("https://other.example.com/ro.jwt"));
+        assert!(!client.is_valid_request_uri("not a url"));
+
+        client.request_uris = Some(vec!["HTTPS://RP.example.com/ro.jwt".to_string()]);
+        assert!(client.is_valid_request_uri("https://rp.example.com/ro.jwt"));
     }
 
     #[test]

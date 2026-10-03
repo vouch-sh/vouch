@@ -604,8 +604,9 @@ async fn authorize_inner(
             .await;
         }
 
-        if request_uri.starts_with("https://") {
-            // OIDC Core Section 6.2: HTTPS URL — fetch the Request Object JWT.
+        // OIDC Core Section 6.2: HTTPS URL — fetch the Request Object JWT. The
+        // scheme is case-insensitive (RFC 3986 §3.1).
+        if url::Url::parse(request_uri).is_ok_and(|parsed| parsed.scheme() == "https") {
             return handle_request_uri_fetch(
                 &state,
                 request_uri,
@@ -1112,9 +1113,7 @@ async fn fetch_and_resolve_request_uri(
     }
 
     // Step 3: allowlist check.
-    if let Some(ref allowed) = oauth_client.request_uris
-        && !allowed.iter().any(|u| u == request_uri)
-    {
+    if !oauth_client.is_valid_request_uri(request_uri) {
         return Err(AuthorizeDeniedTemplate {
             client_name: oauth_client.name,
             error_message: Tr::new("authorize-denied-request-uri-unregistered"),
