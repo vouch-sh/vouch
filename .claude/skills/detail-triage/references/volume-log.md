@@ -38,6 +38,7 @@ judgement columns come from the batch's record in `.local/`.
 | 2026-09-29 | 1 | 1 | 1 | 1 | 1 | 1 of 1 | #1603–#1605 (Doc Drift, blamed on #1584/#1585/#1586) and #1606 (Dead Code, non-persisted agent struct) merged as-is; #1609 superseded by #1610: per-connection exemption by peer provenance replaces a second per-IP map | 1 of 1 (09-28 port-80 residue) | 0 (type-level guardrail: `Peer::Tcp`/`Peer::Header`) |
 | 2026-10-01 | 5 | 5 | 0 | 0 | 5 | 5 of 5 | #1686 closed (empty JWKS is valid, fails closed); #1689 superseded by #1690 (per-fork gate audience); #1688 superseded by #1691 (typed inactive-account refusal, translated); #1685 amended (FIDO2 grant success row after issuance, shared fixtures); #1687 superseded by the DPoP challenge class fix | 0 | 0 (type-level: `DpopChallenge`, `ServiceError::InactiveAccount`) |
 | 2026-10-02 | 25 | 25 | 0 | 4 | 3 | 22 of 25 | 3 merged as-is (#1729, #1735, #1746); 11 amended (#1721, #1722, #1724, #1725, #1726, #1732, #1737, #1742, #1743, #1744, #1745); 8 superseded by class fixes #1747–#1752; 3 closed (#1720, #1730, #1741) | 0 exact; #1733/#1734 in the 10-01 DPoP residue's class | 5 requested (`rcr_3ee858dd…`, `rcr_47c80cbd…`, `rcr_b099c70a…`, `rcr_0a472081…`, `rcr_1145b9ef…`), not synced |
+| 2026-10-03 | 4 | 4 | 0 | 1 | 4 | 4 of 4 | 3 superseded by class fixes #1777 (access-token clock), #1778 (inactive-account refusal scheme), #1779 (request_uri scheme + allowlist); #1776 closed, #1772 wontfix + docs #1780 (RFC 7519 §2 exact `aud`) | 0 exact; all 4 are siblings of 10-02 class fixes #1750, #1725, #1751 | 0 (type-level: `decode_token` takes `ArrivalTime`; one refusal site in `extract_resource_token`) |
 
 Batches before 2026-08-20 have no record, so only their counted columns exist:
 run the script. `escape-unaware-delimiter-normalization` exists on Detail's side
@@ -904,3 +905,27 @@ as not defects.
   step-up challenge stays Bearer until a CLI that accepts DPoP has shipped.
 - Pushing to a queued Detail branch drops it from the merge queue; re-enqueue
   after its checks pass.
+
+## 2026-10-03
+
+Four issues, every one blamed on a 10-02 class fix (#1750 twice, #1725, #1751);
+PR≤3d 4 of 4, Detail PR 1. October so far: n 34, median age 87d, `<30d` 14 —
+the rise is this batch, so it is fix-generated, not backlog.
+
+Each was a sibling the class fix did not hunt. #1725 fixed one of four
+`starts_with("https://")` checks. #1750 made token refusals scheme-aware but
+left the account check outside them. The ArrivalTime work covered every JWT
+decoder except access tokens, whose `exp` `jsonwebtoken` judged on its own
+clock — a gap the `Timestamp::now` lint cannot see. #1772 was not a defect:
+RFC 7519 §2 compares `aud` with no canonicalization, so `resource_uris` stays
+exact.
+
+### Process
+
+- Before merging a class fix, grep for the idiom it replaces and for every
+  caller of the function it changed, not only the reported site.
+- Before normalizing a comparison, find the spec's comparison rule for that
+  field. `request_uris` has none, so equivalence is a choice; `aud` has one,
+  and it forbids normalization.
+- Spec-coverage linkage is section-level: citing RFC 7519 §4.1.4 marked the
+  §4.1.5 `nbf` statement covered, though `nbf` is not checked.
