@@ -142,11 +142,25 @@ jobs:
           tar xzf "vouch-server-v${VERSION}-${SERVER_TARGET}.tar.gz"
           cp "vouch-server-v${VERSION}-${SERVER_TARGET}/vouch-server" ../artifacts/
 
+      # nfpm builds and signs every .deb and .rpm this job publishes, so it is
+      # installed from a pinned release and checksum-verified. The previous
+      # `deb [trusted=yes]` apt source accepted the repository index and the
+      # package with no signature check of any kind.
       - name: Install nfpm
+        env:
+          NFPM_VERSION: 2.47.0
+          NFPM_SHA256: 3f1cf344bd0b57373ca55636a78c08b0491f7293d609a456a9ac3b0b150fda97
         run: |
-          echo 'deb [trusted=yes] https://repo.goreleaser.com/apt/ /' | sudo tee /etc/apt/sources.list.d/goreleaser.list
-          sudo apt-get update
-          sudo apt-get install -y nfpm
+          set -euo pipefail
+          # The runner is always x86_64. matrix.nfpm_arch is the package target,
+          # not the host, so the tool itself is always the amd64 build.
+          deb="nfpm_${NFPM_VERSION}_amd64.deb"
+          curl --fail --silent --show-error --location \
+            --output "/tmp/${deb}" \
+            "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/${deb}"
+          echo "${NFPM_SHA256}  /tmp/${deb}" | sha256sum --check --strict -
+          sudo dpkg --install "/tmp/${deb}"
+          nfpm --version
 
       - name: Import GPG key for RPM signing
         env:

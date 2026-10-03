@@ -60,6 +60,33 @@ RPM_URL="https://github.com/vouch-sh/vouch/releases/download/v${VERSION}/${RPM_N
 curl -sfL "$RPM_URL" -o "/tmp/${RPM_NAME}"
 echo "Downloaded ${RPM_NAME}"
 
+# Verify the RPM is signed by the Vouch packages key before trusting its
+# contents. This instance holds the Secure Boot signing key and the image it
+# builds is what the PCR measurements attest, so an unverified download here
+# would be the weakest link in that chain.
+#
+# The fingerprint is the trust anchor: the key is fetched over the network, so
+# pinning the fingerprint is what makes a substituted key useless.
+VOUCH_GPG_FPR="E43BAE80FF24FBA161CC580966761B8F3EC7055B"
+curl -sfL "https://raw.githubusercontent.com/vouch-sh/packages/main/gpg/vouch.asc" \
+  -o /tmp/vouch-packages.asc
+FETCHED_FPR=$(gpg --show-keys --with-colons /tmp/vouch-packages.asc | awk -F: '/^fpr:/{print $10; exit}')
+if [ "$FETCHED_FPR" != "$VOUCH_GPG_FPR" ]; then
+  echo "FATAL: packages key fingerprint is ${FETCHED_FPR:-none}, expected $VOUCH_GPG_FPR" >&2
+  exit 1
+fi
+rpm --import /tmp/vouch-packages.asc
+
+# `rpm --checksig` exits 0 for an unsigned package whose digests are intact, so
+# the presence of a PGP signature is asserted separately.
+RPM_SIG=$(rpm --query --queryformat '%{SIGPGP:pgpsig}' --package "/tmp/${RPM_NAME}")
+if [ -z "$RPM_SIG" ] || [ "$RPM_SIG" = "(none)" ]; then
+  echo "FATAL: ${RPM_NAME} carries no PGP signature" >&2
+  exit 1
+fi
+rpm --checksig "/tmp/${RPM_NAME}"
+echo "Verified ${RPM_NAME}: signed by $VOUCH_GPG_FPR ($RPM_SIG)"
+
 # Extract binary from RPM into KIWI overlay
 mkdir -p /tmp/ami-build/root/usr/bin /tmp/rpm-extract
 cd /tmp/rpm-extract
@@ -134,7 +161,24 @@ ls -lh "$RAW_IMAGE"
 echo "=== Installing coldsnap ==="
 COLDSNAP_VERSION="v0.9.1"
 ARCH=$(uname -m)
-curl -sL "https://github.com/jplock/coldsnap/releases/download/${COLDSNAP_VERSION}/coldsnap-${COLDSNAP_VERSION}-${ARCH}-unknown-linux-musl.tar.gz" | tar -xzf - -C /usr/local/bin
+# Piping the tarball straight into tar left no opportunity to verify it.
+case "$ARCH" in
+  x86_64)
+    COLDSNAP_SHA256="7b78ad69dfaddf61e3a1819f794ea123d859705dcb5bfacdefeff2b1f92d713d"
+    ;;
+  aarch64)
+    COLDSNAP_SHA256="0faec00abeb085da165b6a0d8944eeb2f0ac2227047c5556cf03b81128636ad9"
+    ;;
+  *)
+    echo "FATAL: no pinned coldsnap checksum for architecture $ARCH" >&2
+    exit 1
+    ;;
+esac
+curl -sfL "https://github.com/jplock/coldsnap/releases/download/${COLDSNAP_VERSION}/coldsnap-${COLDSNAP_VERSION}-${ARCH}-unknown-linux-musl.tar.gz" \
+  -o /tmp/coldsnap.tar.gz
+echo "${COLDSNAP_SHA256}  /tmp/coldsnap.tar.gz" | sha256sum --check --strict -
+tar -xzf /tmp/coldsnap.tar.gz -C /usr/local/bin
+rm -f /tmp/coldsnap.tar.gz
 chmod +x /usr/local/bin/coldsnap
 echo "Coldsnap installed: $(which coldsnap)"
 
