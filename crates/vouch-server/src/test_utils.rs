@@ -1759,9 +1759,13 @@ async fn forge_auth_time(
 ) -> String {
     use crate::services::auth::{DecodedToken, decode_token};
 
-    let DecodedToken::AccessToken(mut claims) =
-        decode_token(base, &state.oidc_key, &state.config().base_url)
-            .expect("the token this deployment just minted must decode");
+    let DecodedToken::AccessToken(mut claims) = decode_token(
+        base,
+        &state.oidc_key,
+        &state.config().base_url,
+        test_arrival(),
+    )
+    .expect("the token this deployment just minted must decode");
 
     assert!(
         !claims.hardware_verified,
@@ -1843,9 +1847,13 @@ pub async fn forge_short_lived_access_token(
         "exp_seconds_from_now must be positive so the forged subject token is still valid"
     );
 
-    let DecodedToken::AccessToken(mut claims) =
-        decode_token(base, &state.oidc_key, &state.config().base_url)
-            .expect("the token this deployment just minted must decode");
+    let DecodedToken::AccessToken(mut claims) = decode_token(
+        base,
+        &state.oidc_key,
+        &state.config().base_url,
+        test_arrival(),
+    )
+    .expect("the token this deployment just minted must decode");
 
     let now = jiff::Timestamp::now().as_second();
     claims.exp = now

@@ -8,12 +8,11 @@
 
 use crate::arrival::ArrivalTime;
 use crate::crypto::alg::JwsAlgorithm;
-use crate::crypto::keys::OidcSigningKey;
 use crate::db::{self};
 use crate::error::OAuthErrorCode;
 use crate::error::OAuthErrorResponse;
 use crate::handlers::extractors::OptionalClientCert;
-use crate::services::auth::decode_token;
+use crate::services::auth::{DecodedToken, decode_token};
 use crate::services::oidc::OAuthScope;
 use crate::services::oidc::claims::PossessionError;
 use crate::services::oidc::dpop::{self, DpopChallenge};
@@ -141,7 +140,7 @@ pub(crate) async fn userinfo(
     // The audience is not checked: the userinfo endpoint receives tokens from
     // any client (aud = client_id per RFC 9068).
     let config = state.config();
-    let Some(decoded) = decode_token(&token, &state.oidc_key, &config.base_url) else {
+    let Some(decoded) = decode_token(&token, &state.oidc_key, &config.base_url, arrival) else {
         return refuse_token("Invalid or expired token");
     };
 
@@ -204,8 +203,7 @@ pub(crate) async fn userinfo(
     }
 
     // RFC 8705 Section 3: Verify mTLS certificate binding.
-    if let Err(resp) = verify_mtls_binding(&token, &state.oidc_key, &config.base_url, &client_cert)
-    {
+    if let Err(resp) = verify_mtls_binding(&decoded, &client_cert) {
         return *resp;
     }
 
@@ -334,18 +332,9 @@ async fn build_signed_userinfo_response(
 ///
 /// The `Response` is boxed to satisfy `clippy::result_large_err`.
 fn verify_mtls_binding(
-    token: &str,
-    oidc_key: &OidcSigningKey,
-    issuer: &str,
+    decoded: &DecodedToken,
     client_cert: &OptionalClientCert,
 ) -> Result<(), Box<Response>> {
-    // Decode the token to check for a cnf claim. If decoding fails here,
-    // the token is invalid — validate_session_token will reject it shortly.
-    let decoded = match decode_token(token, oidc_key, issuer) {
-        Some(d) => d,
-        None => return Ok(()),
-    };
-
     // Only a token carrying an x5t#S256 certificate binding needs checking.
     let Some(cnf) = decoded.cnf().filter(|cnf| cnf.x5t_s256.is_some()) else {
         return Ok(());

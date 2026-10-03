@@ -203,6 +203,7 @@ mod tests {
             result.access_token.expose_secret(),
             &state.oidc_key,
             &config.base_url,
+            test_arrival(),
         )
         .expect("decode access token");
 

@@ -328,14 +328,23 @@ async fn kms_decode<T: DeserializeOwned>(
 
 /// Check a KMS-backed state token's `exp` claim against `now`.
 ///
-/// Split out from [`kms_decode`] so the boundary condition (`now > exp`) is
-/// unit-testable without a real KMS client — the surrounding function makes
-/// live `GenerateMac`/`VerifyMac` calls that cannot run in a unit test.
+/// Split out from [`kms_decode`] so the boundary condition is unit-testable
+/// without a real KMS client — the surrounding function makes live
+/// `GenerateMac`/`VerifyMac` calls that cannot run in a unit test.
 fn check_state_token_not_expired(now: i64, exp: i64) -> Result<(), StateTokenError> {
-    if now > exp {
+    if is_expired(exp, now) {
         return Err(StateTokenError::Validation("Token has expired".to_string()));
     }
     Ok(())
+}
+
+/// Whether a JWT whose `exp` claim is `exp` is expired at `now` (Unix seconds).
+///
+/// RFC 7519 §4.1.4: "The processing of the "exp" claim requires that the
+/// current date/time MUST be before the expiration date/time listed in the
+/// "exp" claim." So `now == exp` is already expired.
+fn is_expired(exp: i64, now: i64) -> bool {
+    now >= exp
 }
 
 // ============================================================================
@@ -634,10 +643,16 @@ impl<'a> TokenValidationContext<'a> {
 /// `C` is owned by the caller (`services::auth::AccessTokenClaims` for the
 /// OAuth access-token path).
 ///
+/// `exp` is judged against `now` (Unix seconds), not `SystemTime::now()` read
+/// inside `jsonwebtoken`, for the reason [`decode_state_token`] gives: callers
+/// on the request path pass the arrival instant, so every decode of one token
+/// within a request reaches the same verdict.
+///
 /// Returns `None` for invalid, expired, or unsupported tokens.
 pub(crate) fn decode_es256_token<C: DeserializeOwned>(
     token: &str,
     ctx: &TokenValidationContext<'_>,
+    now: i64,
 ) -> Option<C> {
     // Peek at the header to determine the algorithm
     let header = jsonwebtoken::decode_header(token).ok()?;
@@ -651,6 +666,8 @@ pub(crate) fn decode_es256_token<C: DeserializeOwned>(
             // the same clock (DPoP-bound, short-lived). A 60s grace window
             // would let replayed tokens slip through during single-use cleanup.
             validation.leeway = 0;
+            // `exp` stays a required claim; it is checked below against `now`.
+            validation.validate_exp = false;
             validation.validate_aud = false;
             // RFC 8725 §3.8: Validate issuer
             validation.set_issuer(&[ctx.expected_issuer]);
@@ -660,6 +677,10 @@ pub(crate) fn decode_es256_token<C: DeserializeOwned>(
             // RFC 9068 Section 2.1: Verify typ is "at+jwt" to prevent
             // ID tokens from being accepted as access tokens (same signing key).
             if token_data.header.typ.as_deref() != Some(JwtType::AccessToken.as_header_str()) {
+                return None;
+            }
+
+            if is_expired(payload_exp(token)?, now) {
                 return None;
             }
 
@@ -691,14 +712,13 @@ pub(crate) fn encode_state_token<T: Serialize>(
 ///
 /// This is a generic helper for the state token types. It verifies the
 /// signature, validates that the `typ` header matches the expected
-/// [`JwtType`], and rejects a token whose `exp` has passed at `now`.
+/// [`JwtType`], and rejects a token that is expired at `now`.
 ///
 /// `exp` is checked here rather than by `jsonwebtoken` so the instant is the
 /// caller's, not `SystemTime::now()` read inside the library: a state token
 /// accepted here and then acted on against a second clock reading is the
 /// two-clock gap [`crate::arrival::ArrivalTime`] exists to close. `exp` stays
-/// mandatory, matching both `jsonwebtoken`'s `validate_exp` behavior and the
-/// KMS branch in [`kms_decode`].
+/// mandatory, as in the KMS branch in [`kms_decode`].
 ///
 /// There is no leeway: state tokens are server-issued and server-validated, so
 /// clock skew is zero. A grace period would allow replaying an expired token
@@ -726,10 +746,10 @@ pub(crate) fn decode_state_token<T: DeserializeOwned>(
             jsonwebtoken::errors::ErrorKind::InvalidToken,
         ));
     }
-    let exp = state_token_exp(token).ok_or_else(|| {
+    let exp = payload_exp(token).ok_or_else(|| {
         jsonwebtoken::errors::Error::from(jsonwebtoken::errors::ErrorKind::ExpiredSignature)
     })?;
-    if now > exp {
+    if is_expired(exp, now) {
         return Err(jsonwebtoken::errors::Error::from(
             jsonwebtoken::errors::ErrorKind::ExpiredSignature,
         ));
@@ -741,7 +761,7 @@ pub(crate) fn decode_state_token<T: DeserializeOwned>(
 ///
 /// `None` when the payload does not decode, is not a JSON object, or carries
 /// no integer `exp` — every one of which the caller treats as expired.
-fn state_token_exp(token: &str) -> Option<i64> {
+fn payload_exp(token: &str) -> Option<i64> {
     let payload_b64 = token.split('.').nth(1)?;
     let payload = decode_segment(payload_b64)?;
     let raw: serde_json::Value = serde_json::from_slice(&payload).ok()?;
@@ -775,7 +795,7 @@ mod tests {
         let ctx = make_ctx(&key);
         let token = make_test_access_token(&key).await;
 
-        let c = decode_es256_token::<AccessTokenClaims>(&token, &ctx)
+        let c = decode_es256_token::<AccessTokenClaims>(&token, &ctx, TEST_NOW)
             .expect("ES256 at+jwt must decode");
         assert_eq!(c.sub, "user-123");
         assert_eq!(c.client_id, "client-abc");
@@ -809,7 +829,7 @@ mod tests {
 
         // Sign as ID token (typ: "JWT", no "at+jwt")
         let token = key.sign_jwt(&claims).await.expect("sign");
-        let decoded = decode_es256_token::<AccessTokenClaims>(&token, &ctx);
+        let decoded = decode_es256_token::<AccessTokenClaims>(&token, &ctx, TEST_NOW);
         assert!(decoded.is_none(), "ID token should be rejected");
     }
 
@@ -817,9 +837,9 @@ mod tests {
     fn test_decode_token_rejects_garbage() {
         let key = make_test_oidc_key();
         let ctx = make_ctx(&key);
-        assert!(decode_es256_token::<AccessTokenClaims>("not.a.jwt", &ctx).is_none());
-        assert!(decode_es256_token::<AccessTokenClaims>("", &ctx).is_none());
-        assert!(decode_es256_token::<AccessTokenClaims>("abc123", &ctx).is_none());
+        assert!(decode_es256_token::<AccessTokenClaims>("not.a.jwt", &ctx, TEST_NOW).is_none());
+        assert!(decode_es256_token::<AccessTokenClaims>("", &ctx, TEST_NOW).is_none());
+        assert!(decode_es256_token::<AccessTokenClaims>("abc123", &ctx, TEST_NOW).is_none());
     }
 
     #[tokio::test]
@@ -848,8 +868,48 @@ mod tests {
         };
 
         let token = key.sign_access_token_jwt(&claims).await.expect("sign");
-        let decoded = decode_es256_token::<AccessTokenClaims>(&token, &ctx);
+        let decoded = decode_es256_token::<AccessTokenClaims>(&token, &ctx, TEST_NOW);
         assert!(decoded.is_none(), "Expired token should be rejected");
+    }
+
+    // RFC 7519 §4.1.4: "the current date/time MUST be before the expiration
+    // date/time listed in the "exp" claim." `exp` sits in the wall clock's
+    // past, so the token decodes only if expiry is judged at the caller's
+    // `now` rather than at `SystemTime::now()` inside `jsonwebtoken`.
+    #[tokio::test]
+    async fn test_access_token_expiry_is_judged_at_the_caller_clock() {
+        let key = make_test_oidc_key();
+        let ctx = make_ctx(&key);
+        let exp = 1_600_000_000;
+        let claims = AccessTokenClaims {
+            iss: TEST_ISSUER.to_string(),
+            sub: "user-123".to_string(),
+            aud: "client-abc".to_string(),
+            exp,
+            iat: exp - 3600,
+            nbf: None,
+            jti: "jti-1".to_string(),
+            client_id: "client-abc".to_string(),
+            scope: None,
+            email: None,
+            email_verified: None,
+            hardware_verified: false,
+            cnf: None,
+            auth_time: None,
+            act: None,
+            amr: None,
+            acr: None,
+        };
+        let token = key.sign_access_token_jwt(&claims).await.expect("sign");
+
+        assert!(
+            decode_es256_token::<AccessTokenClaims>(&token, &ctx, exp - 1).is_some(),
+            "one second before exp the token is valid"
+        );
+        assert!(
+            decode_es256_token::<AccessTokenClaims>(&token, &ctx, exp).is_none(),
+            "at exp the current time is no longer before it"
+        );
     }
 
     #[tokio::test]
@@ -859,7 +919,7 @@ mod tests {
 
         // Use a different expected issuer
         let ctx = TokenValidationContext::new(&key, "https://wrong-issuer.com");
-        let decoded = decode_es256_token::<AccessTokenClaims>(&token, &ctx);
+        let decoded = decode_es256_token::<AccessTokenClaims>(&token, &ctx, TEST_NOW);
         assert!(
             decoded.is_none(),
             "Token with wrong issuer should be rejected"
@@ -892,7 +952,7 @@ mod tests {
 
         let token = key.sign_access_token_jwt(&claims).await.expect("sign");
         let ctx = make_ctx(&key);
-        let decoded = decode_es256_token::<AccessTokenClaims>(&token, &ctx);
+        let decoded = decode_es256_token::<AccessTokenClaims>(&token, &ctx, TEST_NOW);
         assert!(
             decoded.is_none(),
             "Access token with wrong issuer should be rejected"
@@ -933,22 +993,14 @@ mod tests {
         );
         assert!(fresh.is_ok(), "a token one second from expiry must decode");
 
-        // At expiry: still accepted — the rule is `now > exp`, matching the
-        // KMS branch in `kms_decode`.
-        let boundary: Result<TestState, _> = decode_state_token(
-            &token,
-            JwtType::RegistrationState,
-            TEST_JWT_SECRET,
-            1_000_000_060,
-        );
-        assert!(boundary.is_ok(), "exp == now is not yet expired");
-
-        // One second past expiry: rejected, with no leeway.
+        // At expiry: rejected, with no leeway. RFC 7519 §4.1.4: "the current
+        // date/time MUST be before the expiration date/time listed in the
+        // "exp" claim."
         let stale: Result<TestState, _> = decode_state_token(
             &token,
             JwtType::RegistrationState,
             TEST_JWT_SECRET,
-            1_000_000_061,
+            1_000_000_060,
         );
         assert!(
             matches!(
@@ -1191,19 +1243,19 @@ mod tests {
         );
     }
 
-    /// `exp == now` is exactly at the KMS state-token boundary and must be
-    /// accepted — the check is the strict `now > exp`, not `>=`.
+    // RFC 7519 §4.1.4: "the current date/time MUST be before the expiration
+    // date/time listed in the "exp" claim." One second before `exp` is valid.
     #[test]
     fn test_check_state_token_not_expired_boundary_accepted() {
         let now = 1_700_000_000;
-        assert!(check_state_token_not_expired(now, now).is_ok());
+        assert!(check_state_token_not_expired(now, now + 1).is_ok());
     }
 
-    /// `exp == now - 1` is one second past the boundary and must be rejected.
+    // RFC 7519 §4.1.4: at `exp` the current time is no longer before it.
     #[test]
     fn test_check_state_token_not_expired_boundary_rejected() {
         let now = 1_700_000_000;
-        assert!(check_state_token_not_expired(now, now - 1).is_err());
+        assert!(check_state_token_not_expired(now, now).is_err());
     }
 
     /// Regression for #536: `decode_es256_token` must reject access tokens a
@@ -1238,7 +1290,7 @@ mod tests {
         };
 
         let token = key.sign_access_token_jwt(&claims).await.expect("sign");
-        let decoded = decode_es256_token::<AccessTokenClaims>(&token, &ctx);
+        let decoded = decode_es256_token::<AccessTokenClaims>(&token, &ctx, now);
         assert!(
             decoded.is_none(),
             "Recently expired access token must be rejected with zero leeway"
@@ -1272,7 +1324,7 @@ mod tests {
         )
         .expect("encode");
 
-        let decoded = decode_es256_token::<AccessTokenClaims>(&token, &ctx);
+        let decoded = decode_es256_token::<AccessTokenClaims>(&token, &ctx, TEST_NOW);
         assert!(decoded.is_none(), "HS256 tokens must be rejected");
     }
 
@@ -1317,7 +1369,7 @@ mod tests {
             }),
         );
 
-        let decoded = decode_es256_token::<AccessTokenClaims>(&token, &ctx);
+        let decoded = decode_es256_token::<AccessTokenClaims>(&token, &ctx, TEST_NOW);
         assert!(
             decoded.is_none(),
             "an Unsecured JWS must never be accepted as an access token"
@@ -1348,7 +1400,7 @@ mod tests {
         // Same token, but with a non-empty signature segment appended.
         let forged = format!("{unsecured}{}", URL_SAFE_NO_PAD.encode(b"not-a-signature"));
 
-        let decoded = decode_es256_token::<AccessTokenClaims>(&forged, &ctx);
+        let decoded = decode_es256_token::<AccessTokenClaims>(&forged, &ctx, TEST_NOW);
         assert!(
             decoded.is_none(),
             "alg=none with a non-empty signature must be rejected too"

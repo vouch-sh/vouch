@@ -109,7 +109,7 @@ async fn extract_resource_token(
 
     // 2. Decode as ES256 at+jwt using the OIDC signing key
     let config = state.config();
-    let decoded = auth::decode_token(&token, &state.oidc_key, &config.base_url)
+    let decoded = auth::decode_token(&token, &state.oidc_key, &config.base_url, arrival)
         .ok_or_else(|| refuse_token("Invalid or expired access token"))?;
 
     let DecodedToken::AccessToken(access_claims) = decoded;

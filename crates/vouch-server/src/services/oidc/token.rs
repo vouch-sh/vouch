@@ -1370,7 +1370,7 @@ pub async fn validate_session_token(
 ) -> ServiceResult<Option<OidcValidatedSession>> {
     // Decode the token as an ES256 RFC 9068 access token
     let config = state.config();
-    let decoded = match decode_token(token, &state.oidc_key, &config.base_url) {
+    let decoded = match decode_token(token, &state.oidc_key, &config.base_url, arrival) {
         Some(d) => d,
         None => return Ok(None),
     };

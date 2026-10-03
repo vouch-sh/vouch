@@ -1654,17 +1654,6 @@ rfc7518#9#93f16134	SHOULD	It is RECOMMENDED that applications perform the steps 
 rfc7519#10.1.1#a9558b3f	SHOULD	Because a core goal of this specification is for the resulting representations to be compact, it is RECOMMENDED that the name be short -- that is, not to exceed
 rfc7519#12#ac4cd509	MUST	When this is the case, measures MUST be taken to prevent disclosure of this information to unintended parties.
 rfc7519#2#f494d010	MUST	StringOrURI A JSON string value, with the additional requirement that while arbitrary string values MAY be used, any value containing a ":" character MUST be a 
-rfc7519#4#23b0edc1	MUST	The Claim Names within a JWT Claims Set MUST be unique; JWT parsers MUST either reject JWTs with duplicate Claim Names or use a JSON parser that returns only th
-rfc7519#4#b3364240	MUST	However, in the absence of such requirements, all claims that are not understood by implementations MUST be ignored.
-rfc7519#4.1#201cd6ca	MUST	If the principal processing the claim does not identify itself with a value in the "aud" claim when this claim is present, then the JWT MUST be rejected.
-rfc7519#4.1#69d6a04e	MUST NOT	The "nbf" (not before) claim identifies the time before which the JWT MUST NOT be accepted for processing.
-rfc7519#4.1#780edf38	MUST	The identifier value MUST be assigned in a manner that ensures that there is a negligible probability that the same value will be accidentally assigned to a dif
-rfc7519#4.1#7fff2d07	MUST	Each principal intended to process the JWT MUST identify itself with a value in the audience claim.
-rfc7519#4.1#80121470	MUST	Its value MUST be a number containing a NumericDate value.
-rfc7519#4.1#b57258ba	MUST	The subject value MUST either be scoped to be locally unique in the context of the issuer or be globally unique.
-rfc7519#4.1#c262f06e	MUST	The processing of the "exp" claim requires that the current date/time MUST be before the expiration date/time listed in the "exp" claim.
-rfc7519#4.1#c3f64158	MUST	The processing of the "nbf" claim requires that the current date/time MUST be after or equal to the not-before date/time listed in the "nbf" claim.
-rfc7519#4.1#ecf7f519	MUST NOT	The "exp" (expiration time) claim identifies the expiration time on or after which the JWT MUST NOT be accepted for processing.
 rfc7519#5#47e18618	SHOULD	If present, it is RECOMMENDED that its value be "JWT" to indicate that this object is a JWT.
 rfc7519#5#af9463fc	MUST	In the case that nested signing or encryption is employed, this Header Parameter MUST be present; in this case, the value MUST be "JWT", to indicate that a Nest
 rfc7519#5#d41f3bb8	SHOULD	While media type names are not case sensitive, it is RECOMMENDED that "JWT" always be spelled using uppercase characters for compatibility with legacy implement
