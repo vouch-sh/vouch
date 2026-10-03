@@ -239,18 +239,18 @@ impl LoginCompletion {
         let auth_state =
             BrowserAuthenticationState::decode(req.state.as_str(), &state.state_signer, arrival)
                 .await
-                .map_err(|e| {
-                    ServiceError::api(StatusCode::BAD_REQUEST, "invalid_state", e.to_string())
+                .map_err(|e| match e {
+                    StateTokenError::Expired => ServiceError::api(
+                        StatusCode::BAD_REQUEST,
+                        "expired",
+                        Tr::new("login-error-session-expired").to_string(),
+                    ),
+                    StateTokenError::Jwt(_)
+                    | StateTokenError::Internal(_)
+                    | StateTokenError::Validation(_) => {
+                        ServiceError::api(StatusCode::BAD_REQUEST, "invalid_state", e.to_string())
+                    }
                 })?;
-
-        let now = arrival.as_second();
-        if now > auth_state.exp {
-            return Err(ServiceError::api(
-                StatusCode::BAD_REQUEST,
-                "expired",
-                Tr::new("login-error-session-expired").to_string(),
-            ));
-        }
 
         let expires_at =
             Timestamp::from_second(auth_state.exp).unwrap_or_else(|_| arrival.timestamp());
@@ -1013,6 +1013,35 @@ mod tests {
         assert_eq!(decoded.challenge, vec![1, 2, 3, 4]);
         assert_eq!(decoded.rp_id, "example.com");
         assert_eq!(decoded.pending_auth, Some("pending-123".to_string()));
+    }
+
+    // RFC 7519 §4.1.4: at `exp` the state is no longer accepted, and the
+    // refusal is the typed `Expired` the handler answers with the translated
+    // "session expired" message rather than `invalid_state`.
+    #[tokio::test]
+    async fn test_browser_auth_state_at_exp_is_expired() {
+        let signer = StateTokenSigner::local(b"test-secret".to_vec());
+        let exp = 1_700_000_300;
+        let state = BrowserAuthenticationState {
+            challenge: vec![1, 2, 3, 4],
+            rp_id: "example.com".to_string(),
+            created_at: exp - 300,
+            exp,
+            pending_auth: None,
+        };
+        let encoded = state.encode(&signer).await.expect("encode");
+
+        let at = ArrivalTime::for_test_second;
+        assert!(
+            BrowserAuthenticationState::decode(&encoded, &signer, at(exp - 1))
+                .await
+                .is_ok()
+        );
+        let err = BrowserAuthenticationState::decode(&encoded, &signer, at(exp))
+            .await
+            .map(|_| ())
+            .expect_err("state at exp must be refused");
+        assert!(matches!(err, StateTokenError::Expired), "got {err}");
     }
 
     // ========================================================================

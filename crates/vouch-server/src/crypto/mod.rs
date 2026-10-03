@@ -19,6 +19,7 @@ pub(crate) mod oid;
 pub(crate) mod pem;
 pub(crate) mod ssh_ca;
 pub(crate) mod tpm_decrypt;
+pub(crate) mod validity;
 pub mod webauthn_verify;
 
 pub use hash::{generate_challenge, generate_random_bytes, hash_token};

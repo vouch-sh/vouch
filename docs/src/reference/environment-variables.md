@@ -111,7 +111,7 @@ OIDC IdPs auto-discover authorization, token, and JWKS endpoints from `{issuer}/
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `VOUCH_DPOP_MAX_AGE` | No | `300` | Maximum age of DPoP proofs in seconds. Proofs older than this are rejected. |
+| `VOUCH_DPOP_MAX_AGE` | No | `300` | Maximum age of DPoP proofs in seconds. A proof is rejected once its age reaches this value. |
 
 ## Cleanup & Retention
 

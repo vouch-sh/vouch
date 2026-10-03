@@ -191,6 +191,10 @@ fn hint_validation(alg: jsonwebtoken::Algorithm) -> Validation {
 ///
 /// Returns `Some(claims)` if the signature is valid and `iss` matches this
 /// server's `base_url`. Returns `None` for any failure.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "RP-Initiated Logout 1.0 §2: the OP \"SHOULD accept ID Tokens ... even when the \"exp\" time has passed\"; Vouch ID tokens carry no `nbf`"
+)]
 fn verify_id_token_hint(state: &AppState, hint: &str) -> Option<IdTokenHintClaims> {
     let config = state.config();
 
