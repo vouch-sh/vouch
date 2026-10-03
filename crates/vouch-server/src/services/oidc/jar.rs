@@ -173,20 +173,23 @@ pub async fn fetch_request_object(
     allow_loopback: bool,
     http_client: &reqwest::Client,
 ) -> ServiceResult<String> {
-    if !uri.starts_with("https://") {
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidRequestUri,
-            "request_uri must use HTTPS",
-        ));
-    }
-
-    // Validate URL structure to catch malformed URIs early.
+    // HTTPS-only. RFC 3986 §3.1: "Although schemes are case-insensitive, the
+    // canonical form is lowercase". `Url::parse` lowercases the scheme, so an
+    // `HTTPS://` `request_uri` is admitted the way an `HTTPS://` `jwks_uri` is
+    // in `infra::jwks::fetch_jwks`. Parsing also validates the URL structure
+    // the same line in `jwks.rs` does, before the shared SSRF egress guard.
     let parsed = url::Url::parse(uri).map_err(|_| {
         ServiceError::oauth(
             OAuthErrorCode::InvalidRequestUri,
             "request_uri is not a valid URL",
         )
     })?;
+    if parsed.scheme() != "https" {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidRequestUri,
+            "request_uri must use HTTPS",
+        ));
+    }
     if parsed.host_str().is_none() {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidRequestUri,

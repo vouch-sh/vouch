@@ -1080,6 +1080,13 @@ fn validate_request_object_signing(
 /// Validate `request_uris` — each must be HTTPS, max 10 entries.
 ///
 /// Returns the validated list, or `None` if the field is absent.
+///
+/// The HTTPS check parses the URI (mirroring `validate_jwks_shape` and
+/// `validate_https_uri`): `Url::parse` lowercases the scheme, so an
+/// `HTTPS://` URI is admitted the way an `HTTPS://` `jwks_uri` is, per
+/// RFC 3986 §3.1 ("schemes are case-insensitive, the canonical form is
+/// lowercase"). The original casing is stored verbatim; the authorize-time
+/// allowlist comparison normalizes both sides for matching.
 fn validate_request_uris(uris: Option<&[String]>) -> Result<Option<Vec<String>>, ServiceError> {
     let Some(uris) = uris else { return Ok(None) };
     // An empty allowlist is the same state as no allowlist, so it is not
@@ -1095,11 +1102,14 @@ fn validate_request_uris(uris: Option<&[String]>) -> Result<Option<Vec<String>>,
         ));
     }
     for uri in uris {
-        if !uri.starts_with("https://") {
-            return Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidClientMetadata,
-                format!("request_uri '{uri}' must use HTTPS"),
-            ));
+        match url::Url::parse(uri) {
+            Ok(parsed) if parsed.scheme() == "https" => {}
+            _ => {
+                return Err(ServiceError::oauth(
+                    OAuthErrorCode::InvalidClientMetadata,
+                    format!("request_uri '{uri}' must use HTTPS"),
+                ));
+            }
         }
     }
     Ok(Some(uris.to_vec()))

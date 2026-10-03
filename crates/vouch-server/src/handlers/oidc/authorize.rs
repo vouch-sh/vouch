@@ -604,7 +604,13 @@ async fn authorize_inner(
             .await;
         }
 
-        if request_uri.starts_with("https://") {
+        // OIDC Core Section 6.2 / RFC 3986 §3.1: an HTTPS `request_uri` — the
+        // scheme is case-insensitive (the canonical form is lowercase), so an
+        // `HTTPS://` URI is admitted the way an `HTTPS://` `jwks_uri` is.
+        // Parsing (rather than `starts_with("https://")`) lowercases the scheme
+        // while the original string is still passed to the fetch, mirroring
+        // `infra::jwks::fetch_jwks` and `validate_request_uris`.
+        if request_uri_is_https(request_uri) {
             // OIDC Core Section 6.2: HTTPS URL — fetch the Request Object JWT.
             return handle_request_uri_fetch(
                 &state,
@@ -1020,6 +1026,39 @@ async fn handle_par_request(
     .await
 }
 
+/// Whether `request_uri` carries an HTTPS scheme, case-insensitively.
+///
+/// RFC 3986 §3.1: "Although schemes are case-insensitive, the canonical form
+/// is lowercase". `Url::parse` lowercases the scheme, so an `HTTPS://` URI
+/// passes here the same way an `HTTPS://` `jwks_uri` passes the scheme check
+/// in `infra::jwks::fetch_jwks` — this is the `request_uri` analogue of that
+/// check. The original string is still passed downstream (to the fetch and
+/// the allowlist); only the *routing* decision uses the parsed scheme.
+fn request_uri_is_https(request_uri: &str) -> bool {
+    url::Url::parse(request_uri).is_ok_and(|parsed| parsed.scheme() == "https")
+}
+
+/// Whether an incoming `request_uri` matches one of a client's registered
+/// `request_uris` (OIDC Core Section 6.2 allowlist).
+///
+/// The byte-equal fast path keeps the common, already-canonical case cheap
+/// and unchanged from before. When the strings differ, both are parsed and
+/// compared by their normalized serialization, which lowercases the scheme
+/// (and host) per RFC 3986 §3.1 — so an `HTTPS://host/x` query parameter
+/// matches a registered `https://host/x` the way the scheme-insensitive
+/// registration and fetch checks already do. The case-sensitive path and
+/// query are left untouched, so two URIs that differ only in path are still
+/// distinct. A pair that is byte-equal is never re-matched by the slow path,
+/// and a pair that is byte-unequal but parse-equal was previously rejected,
+/// so this only ever *admits* previously-rejected spec-equivalent URIs.
+fn request_uri_matches_registered(allowed: &[String], request_uri: &str) -> bool {
+    allowed.iter().any(|registered| {
+        registered == request_uri
+            || url::Url::parse(registered)
+                .is_ok_and(|a| url::Url::parse(request_uri).is_ok_and(|b| a.as_str() == b.as_str()))
+    })
+}
+
 /// Handle an authorization request using an OIDC Core Section 6.2 `request_uri` URL.
 ///
 /// Phase A: lookup_and_check_active → FAPI check → allowlist → fetch+validate JWT
@@ -1113,7 +1152,7 @@ async fn fetch_and_resolve_request_uri(
 
     // Step 3: allowlist check.
     if let Some(ref allowed) = oauth_client.request_uris
-        && !allowed.iter().any(|u| u == request_uri)
+        && !request_uri_matches_registered(allowed, request_uri)
     {
         return Err(AuthorizeDeniedTemplate {
             client_name: oauth_client.name,
@@ -2267,5 +2306,104 @@ mod tests {
             !body.contains("opaque-state") && !body.contains("access_denied"),
             "must not leak the response parameters outside a signed JWT: {body}"
         );
+    }
+
+    // ====================================================================
+    // request_uri scheme gating + allowlist matching (RFC 3986 §3.1)
+    // ====================================================================
+
+    /// RFC 3986 §3.1: "Although schemes are case-insensitive, the canonical
+    /// form is lowercase". The authorize router must admit an `HTTPS://`
+    /// `request_uri` the same way `infra::jwks::fetch_jwks` admits an
+    /// `HTTPS://` `jwks_uri`.
+    #[test]
+    fn request_uri_is_https_admits_lowercase_canonical_scheme() {
+        assert!(request_uri_is_https("https://example.com/ro.jwt"));
+    }
+
+    #[test]
+    fn request_uri_is_https_admits_uppercase_scheme() {
+        assert!(
+            request_uri_is_https("HTTPS://example.com/ro.jwt"),
+            "upper-case HTTPS:// must be admitted (regression for case-sensitive starts_with gate)"
+        );
+    }
+
+    #[test]
+    fn request_uri_is_https_admits_mixed_case_scheme() {
+        assert!(request_uri_is_https("HtTpS://example.com/ro.jwt"));
+    }
+
+    #[test]
+    fn request_uri_is_https_rejects_non_https_and_malformed() {
+        for uri in [
+            "http://example.com/ro.jwt",
+            "HTTP://example.com/ro.jwt",
+            "ftp://example.com/ro.jwt",
+            "urn:ietf:params:oauth:request_uri:abc",
+            "",
+            "not a url",
+            "://no-scheme",
+        ] {
+            assert!(
+                !request_uri_is_https(uri),
+                "non-https / malformed request_uri must not route to the fetch: {uri:?}"
+            );
+        }
+    }
+
+    /// RFC 3986 §3.1 + OIDC Core §6.2: a registered `https://` allowlist entry
+    /// must match an incoming `HTTPS://` query parameter (and vice versa), the
+    /// way the scheme-insensitive registration and fetch checks already do.
+    #[test]
+    fn request_uri_matches_registered_byte_equal_fast_path() {
+        let allowed = vec!["https://example.com/ro.jwt".to_string()];
+        assert!(request_uri_matches_registered(
+            &allowed,
+            "https://example.com/ro.jwt"
+        ));
+    }
+
+    #[test]
+    fn request_uri_matches_registered_uppercase_incoming_to_lowercase_registered() {
+        let allowed = vec!["https://example.com/ro.jwt".to_string()];
+        assert!(
+            request_uri_matches_registered(&allowed, "HTTPS://example.com/ro.jwt"),
+            "an HTTPS:// query parameter must match the registered https:// entry"
+        );
+    }
+
+    #[test]
+    fn request_uri_matches_registered_uppercase_registered_to_lowercase_incoming() {
+        let allowed = vec!["HTTPS://example.com/ro.jwt".to_string()];
+        assert!(
+            request_uri_matches_registered(&allowed, "https://example.com/ro.jwt"),
+            "a registered HTTPS:// entry must match an https:// query parameter"
+        );
+    }
+
+    #[test]
+    fn request_uri_matches_registered_rejects_unregistered_uri() {
+        let allowed = vec!["https://example.com/ro.jwt".to_string()];
+        assert!(!request_uri_matches_registered(
+            &allowed,
+            "https://attacker.com/ro.jwt"
+        ));
+        assert!(!request_uri_matches_registered(
+            &allowed,
+            "https://example.com/other.jwt"
+        ));
+        assert!(
+            !request_uri_matches_registered(&allowed, "http://example.com/ro.jwt"),
+            "an http:// query parameter is a different URI, not a case variant"
+        );
+    }
+
+    #[test]
+    fn request_uri_matches_registered_empty_allowlist_matches_nothing() {
+        assert!(!request_uri_matches_registered(
+            &[],
+            "https://example.com/ro.jwt"
+        ));
     }
 }

@@ -2000,3 +2000,101 @@ fn test_validate_userinfo_signed_response_alg_allows_es256_for_fapi() {
     let alg = result.expect("ES256 must be accepted for FAPI userinfo");
     assert_eq!(alg, Some(JwsAlgorithm::Es256));
 }
+
+// =========================================================================
+// request_uris scheme validation — RFC 3986 §3.1 / OIDC Core Section 6.2
+// =========================================================================
+//
+// RFC 3986 §3.1: "Although schemes are case-insensitive, the canonical form
+// is lowercase". `validate_request_uris` admits an `HTTPS://` request_uri the
+// same way `validate_jwks_shape` admits an `HTTPS://` jwks_uri: both parse the
+// URI and compare the (lowercased) scheme, rather than `starts_with("https://")`.
+
+// RFC 7591 §2: a lowercase `https://` request_uri is admitted (baseline).
+#[test]
+fn test_validate_request_uris_accepts_lowercase_https() {
+    let uris = vec!["https://example.com/req.jwt".to_string()];
+    let validated =
+        validate_request_uris(Some(uris.as_slice())).expect("lowercase https:// must be admitted");
+    assert_eq!(
+        validated,
+        Some(vec!["https://example.com/req.jwt".to_string()])
+    );
+}
+
+// RFC 3986 §3.1: an `HTTPS://` scheme is the same URI as `https://`.
+#[test]
+fn test_validate_request_uris_accepts_uppercase_scheme() {
+    let uris = vec!["HTTPS://example.com/req.jwt".to_string()];
+    let validated = validate_request_uris(Some(uris.as_slice()))
+        .expect("uppercase HTTPS:// must be admitted (regression for case-sensitive gate)");
+    // Storage preserves the registered casing; only the admission check is
+    // case-insensitive. The authorize-time allowlist comparison normalizes
+    // both sides for matching, so the stored form need not be canonical.
+    assert_eq!(
+        validated,
+        Some(vec!["HTTPS://example.com/req.jwt".to_string()])
+    );
+}
+
+// RFC 3986 §3.1: any mixed-case scheme is still `https` after lowercasing.
+#[test]
+fn test_validate_request_uris_accepts_mixed_case_scheme() {
+    let uris = vec!["HtTpS://example.com/req.jwt".to_string()];
+    let validated =
+        validate_request_uris(Some(uris.as_slice())).expect("mixed-case scheme must be admitted");
+    assert_eq!(
+        validated,
+        Some(vec!["HtTpS://example.com/req.jwt".to_string()])
+    );
+}
+
+// RFC 3986 §3.1: an `http` scheme (any case) is not `https` and is rejected.
+#[test]
+fn test_validate_request_uris_rejects_http_scheme_any_case() {
+    for uri in [
+        "http://example.com/req.jwt",
+        "HTTP://example.com/req.jwt",
+        "HtTp://example.com/req.jwt",
+    ] {
+        let uris = vec![uri.to_string()];
+        let result = validate_request_uris(Some(uris.as_slice()));
+        assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
+    }
+}
+
+// RFC 7591 §2: a non-https scheme is rejected as invalid_client_metadata.
+#[test]
+fn test_validate_request_uris_rejects_non_https_scheme() {
+    let uris = vec!["ftp://example.com/req.jwt".to_string()];
+    let result = validate_request_uris(Some(uris.as_slice()));
+    assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
+}
+
+// RFC 7591 §2: an empty or unparseable request_uri is rejected.
+#[test]
+fn test_validate_request_uris_rejects_empty_and_malformed() {
+    for uri in ["", "not a url", "://no-scheme"] {
+        let uris = vec![uri.to_string()];
+        let result = validate_request_uris(Some(uris.as_slice()));
+        assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
+    }
+}
+
+// RFC 7591 §2: an absent or empty request_uris list is stored as `None`.
+#[test]
+fn test_validate_request_uris_none_and_empty_yield_none() {
+    assert_eq!(validate_request_uris(None).unwrap(), None);
+    let empty: Vec<String> = vec![];
+    assert_eq!(validate_request_uris(Some(empty.as_slice())).unwrap(), None);
+}
+
+// RFC 7591 §2: more than ten request_uris is rejected.
+#[test]
+fn test_validate_request_uris_rejects_more_than_ten() {
+    let uris: Vec<String> = (0..11)
+        .map(|i| format!("https://example.com/req{i}.jwt"))
+        .collect();
+    let result = validate_request_uris(Some(uris.as_slice()));
+    assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
+}
