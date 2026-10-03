@@ -1958,6 +1958,94 @@ async fn test_rfc7591_rejects_empty_array_members() {
     }
 }
 
+/// RFC 3986 §3.1: "Although schemes are case-insensitive, the canonical form
+/// is lowercase". A `request_uris` entry whose scheme is `HTTPS://` (or any
+/// mixed case) is admitted the same way an `HTTPS://` `jwks_uri` is — the
+/// case-sensitive `starts_with("https://")` gate previously rejected it with
+/// `invalid_client_metadata`.
+#[tokio::test]
+async fn test_rfc7591_accepts_uppercase_scheme_request_uri() {
+    let (app, state) = test_app().await;
+
+    // An uppercase-scheme request_uri must be admitted (the bug: rejected).
+    let (status_upper, body_upper) = http_post_json(
+        &app,
+        "/oauth/register",
+        &serde_json::json!({
+            "redirect_uris": ["https://example.com/callback"],
+            "client_name": "Uppercase Scheme Request URI",
+            "request_uris": ["HTTPS://example.com/req.jwt"]
+        })
+        .to_string(),
+        &[],
+    )
+    .await;
+    assert_eq!(
+        status_upper,
+        StatusCode::CREATED,
+        "RFC 3986 §3.1: an HTTPS:// request_uri must be admitted: {body_upper}"
+    );
+
+    let client_id =
+        serde_json::from_str::<serde_json::Value>(&body_upper).expect("Valid JSON")["client_id"]
+            .as_str()
+            .expect("client_id")
+            .to_string();
+
+    // The admitted entry is stored verbatim (registered casing preserved),
+    // exactly like a lowercase entry — only the admission check is
+    // case-insensitive; the authorize-time allowlist normalizes for matching.
+    let stored = db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup ok")
+        .expect("client exists");
+    assert_eq!(
+        stored.request_uris.as_deref(),
+        Some(["HTTPS://example.com/req.jwt".to_string()].as_slice()),
+        "the uppercase-scheme request_uri must be stored: {stored:?}"
+    );
+
+    // A lowercase `https://` baseline is admitted (control).
+    let (status_lower, body_lower) = http_post_json(
+        &app,
+        "/oauth/register",
+        &serde_json::json!({
+            "redirect_uris": ["https://example.com/callback"],
+            "client_name": "Lowercase Scheme Request URI",
+            "request_uris": ["https://example.com/req.jwt"]
+        })
+        .to_string(),
+        &[],
+    )
+    .await;
+    assert_eq!(
+        status_lower,
+        StatusCode::CREATED,
+        "lowercase https:// baseline must be admitted: {body_lower}"
+    );
+
+    // An `HTTP://` (non-https) scheme is still rejected, regardless of case.
+    let (status_http, body_http) = http_post_json(
+        &app,
+        "/oauth/register",
+        &serde_json::json!({
+            "redirect_uris": ["https://example.com/callback"],
+            "client_name": "HTTP Scheme Request URI",
+            "request_uris": ["HTTP://example.com/req.jwt"]
+        })
+        .to_string(),
+        &[],
+    )
+    .await;
+    assert_eq!(
+        status_http,
+        StatusCode::BAD_REQUEST,
+        "an HTTP:// (non-https) scheme must be rejected: {body_http}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body_http).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_client_metadata");
+}
+
 /// The five RFC 8705 §2.1.2 certificate-subject parameters, each of which must
 /// carry the empty-is-absent rule.
 const IDENTITY_FIELDS: [&str; 5] = [

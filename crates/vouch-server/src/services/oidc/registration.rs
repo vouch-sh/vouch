@@ -1095,12 +1095,7 @@ fn validate_request_uris(uris: Option<&[String]>) -> Result<Option<Vec<String>>,
         ));
     }
     for uri in uris {
-        if !uri.starts_with("https://") {
-            return Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidClientMetadata,
-                format!("request_uri '{uri}' must use HTTPS"),
-            ));
-        }
+        validate_https_uri("request_uri", Some(uri))?;
     }
     Ok(Some(uris.to_vec()))
 }
