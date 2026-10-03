@@ -113,7 +113,7 @@ pub(super) fn run_command(program: &str, args: &[&str]) -> Option<String> {
         return None;
     }
 
-    Some(String::from_utf8_lossy(&output.stdout).into_owned())
+    Some(String::from_utf8_lossy_owned(output.stdout))
 }
 
 #[cfg(test)]
