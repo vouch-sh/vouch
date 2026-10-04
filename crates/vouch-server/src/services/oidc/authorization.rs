@@ -8,10 +8,11 @@
 use crate::AppState;
 use crate::arrival::ArrivalTime;
 use crate::crypto::jwt::JwtType;
+use crate::crypto::validity::numeric_date;
 use crate::db::{AccessScope, Authenticator, OAuthClient, ParConsumptionProof, ResponseMode, User};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use crate::services::oidc::ScopeSet;
-use jiff::{Span, Timestamp};
+use jiff::{SignedDuration, Timestamp};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::Arc;
@@ -575,8 +576,10 @@ pub struct AuthorizationCode {
     /// presented at token exchange uses the same key (RFC 9449 Section 10).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dpop_jkt: Option<String>,
-    pub iat: i64,
-    pub exp: i64,
+    #[serde(with = "numeric_date")]
+    pub iat: Timestamp,
+    #[serde(with = "numeric_date")]
+    pub exp: Timestamp,
     /// OIDC Core Section 2: Time when the End-User authentication occurred,
     /// at full precision. The token endpoint copies this original ceremony
     /// instant onto the session row it mints — it never stamps its own.
@@ -947,17 +950,14 @@ pub async fn issue_authorization_code(
 ) -> ServiceResult<String> {
     tracing::debug!(par = ?params.par, "PAR consumption proof consumed");
 
-    let now = Timestamp::now();
+    let now = numeric_date::whole_second(Timestamp::now());
     // Use the caller-supplied lifetime (FAPI 2.0 uses 60s, standard uses 300s).
-    // Fallback to the supplied value if Span arithmetic overflows (shouldn't happen
-    // for reasonable lifetime values).
+    // A lifetime that leaves jiff's range yields a code that is born expired
+    // rather than endless.
     let lifetime_secs = params.auth_code_lifetime_seconds;
     let exp = now
-        .checked_add(Span::new().seconds(lifetime_secs))
-        .map_or_else(
-            |_| now.as_second().saturating_add(lifetime_secs),
-            |t| t.as_second(),
-        );
+        .checked_add(SignedDuration::from_secs(lifetime_secs))
+        .unwrap_or(now);
 
     let auth_code = AuthorizationCode {
         iss: state.config().base_url.to_string(),
@@ -975,7 +975,7 @@ pub async fn issue_authorization_code(
         resource: params.resource.map(String::from),
         acr_values: params.acr_values.map(String::from),
         dpop_jkt: params.dpop_jkt.map(String::from),
-        iat: now.as_second(),
+        iat: now,
         exp,
         authenticated_at: params.authenticated_at,
     };
@@ -987,7 +987,7 @@ pub async fn issue_authorization_code(
 
     // RFC 6749 Section 10.5: Store code hash for single-use enforcement.
     let code_hash = crypto::hash_token(&code);
-    let expires_at = Timestamp::from_second(exp).unwrap_or(now);
+    let expires_at = exp;
 
     if let Err(e) = db::store_authorization_code(
         &state.store,
@@ -1126,7 +1126,7 @@ mod tests {
     use crate::crypto::alg::JwsAlgorithm;
     use crate::crypto::jwt::{StateTokenError, StateTokenSigner};
     use crate::db::{FapiProfile, OAuthClientType, TokenEndpointAuthMethod};
-    use crate::test_utils::{TEST_JWT_SECRET, test_arrival};
+    use crate::test_utils::{TEST_JWT_SECRET, at_second, test_arrival};
 
     fn assert_oauth_error<T: std::fmt::Debug>(
         result: Result<T, ServiceError>,
@@ -1292,8 +1292,8 @@ mod tests {
             resource: None,
             acr_values: None,
             dpop_jkt: None,
-            iat: 1_000_000_000,
-            exp: 9_999_999_999,
+            iat: at_second(1_000_000_000),
+            exp: at_second(9_999_999_999),
             authenticated_at: None,
         }
     }

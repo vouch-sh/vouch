@@ -24,6 +24,7 @@ use crate::AppState;
 use crate::arrival::ArrivalTime;
 use crate::assurance::HardwareVerification;
 use crate::crypto::jwt::JwtType;
+use crate::crypto::validity::numeric_date;
 use crate::db::{self, AuthEventParams, AuthEventType, ClientInfo, Principal};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use crate::services::auth::{
@@ -38,6 +39,7 @@ use crate::services::oidc::validated_client::ValidatedOAuthClient;
 use crate::services::policy;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -81,9 +83,11 @@ pub(crate) struct Fido2ChallengeState {
     /// RFC 7519 §4.1.6: Issued at time. Not validated on decode — the token
     /// is minted and consumed by this server on one clock, so `exp` alone
     /// bounds its lifetime.
-    pub(crate) iat: i64,
+    #[serde(with = "numeric_date")]
+    pub(crate) iat: Timestamp,
     /// RFC 7519 §4.1.4: Expiration time (5 minutes), enforced on decode.
-    pub(crate) exp: i64,
+    #[serde(with = "numeric_date")]
+    pub(crate) exp: Timestamp,
 }
 
 /// Parsed FIDO2 assertion payload from the `assertion` form parameter.
@@ -184,12 +188,10 @@ impl AssertionGrant {
                 )
             })?;
 
-        // A malformed `exp` is a security-relevant signal — a captured token
-        // with garbage `exp` must not be silently accepted with a "now"
-        // fallback that would extend its validity.
-        let expires_at = jiff::Timestamp::from_second(challenge_state.exp).map_err(|_| {
-            ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Invalid challenge state exp")
-        })?;
+        // `exp` is read by `numeric_date`, which refuses anything that is not
+        // an instant, so a captured token with a garbage `exp` fails to decode
+        // rather than being accepted with a "now" fallback.
+        let expires_at = challenge_state.exp;
 
         let user_id = Uuid::from_slice(payload.user_handle.as_bytes()).map_err(|_| {
             ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Invalid user_handle format")

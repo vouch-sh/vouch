@@ -26,6 +26,7 @@ use crate::config::NonEmptySecret;
 use crate::crypto::generate_challenge;
 use crate::crypto::hash_token;
 use crate::crypto::jwt::{JwtType, StateTokenError, StateTokenSigner};
+use crate::crypto::validity::numeric_date;
 use crate::crypto::webauthn_verify::AuthTime;
 use crate::db::ClientInfo;
 use crate::db::{self, AuthEventParams, AuthEventType};
@@ -126,9 +127,11 @@ struct BrowserAuthenticationState {
     /// Relying Party ID.
     rp_id: String,
     /// When this challenge was created.
-    created_at: i64,
+    #[serde(with = "numeric_date")]
+    created_at: Timestamp,
     /// When this challenge expires.
-    exp: i64,
+    #[serde(with = "numeric_date")]
+    exp: Timestamp,
     /// Pending OAuth authorization ID (if any).
     pending_auth: Option<String>,
 }
@@ -252,8 +255,7 @@ impl LoginCompletion {
                     }
                 })?;
 
-        let expires_at =
-            Timestamp::from_second(auth_state.exp).unwrap_or_else(|_| arrival.timestamp());
+        let expires_at = auth_state.exp;
 
         Ok(Self {
             req,
@@ -498,23 +500,20 @@ pub(crate) async fn browser_login_start(
             Tr::new("login-error-challenge-failed").to_string(),
         )
     })?;
-    let now = Timestamp::now();
-    let exp = now
-        .checked_add(Span::new().minutes(5))
-        .map_err(|_| {
-            ServiceError::api(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "time_error",
-                Tr::new("login-error-time-overflow").to_string(),
-            )
-        })?
-        .as_second();
+    let now = numeric_date::whole_second(Timestamp::now());
+    let exp = now.checked_add(Span::new().minutes(5)).map_err(|_| {
+        ServiceError::api(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "time_error",
+            Tr::new("login-error-time-overflow").to_string(),
+        )
+    })?;
 
     // Create state token
     let auth_state = BrowserAuthenticationState {
         challenge: challenge.clone(),
         rp_id: state.config().rp_id.clone(),
-        created_at: now.as_second(),
+        created_at: now,
         exp,
         pending_auth: req.pending_auth,
     };
@@ -989,18 +988,21 @@ mod tests {
     use crate::crypto::webauthn_verify::AuthTime;
     use crate::db::{self, AuditEventFilter, CreatePendingOAuthParams};
     use crate::test_utils::{
-        self, TestPendingAuthSpec, TestSessionSpec, TestVerification, test_arrival,
+        self, TestPendingAuthSpec, TestSessionSpec, TestVerification, at_second, test_arrival,
     };
+    use jiff::SignedDuration;
 
     #[tokio::test]
     async fn test_browser_auth_state_encode_decode() {
         let signer = StateTokenSigner::local(b"test-secret".to_vec());
-        let now = jiff::Timestamp::now().as_second();
+        let now = jiff::Timestamp::now();
         let state = BrowserAuthenticationState {
             challenge: vec![1, 2, 3, 4],
             rp_id: "example.com".to_string(),
             created_at: now,
-            exp: now + 300,
+            exp: now
+                .checked_add(SignedDuration::from_secs(300))
+                .expect("exp in range"),
             pending_auth: Some("pending-123".to_string()),
         };
 
@@ -1020,21 +1022,27 @@ mod tests {
     #[tokio::test]
     async fn test_browser_auth_state_at_exp_is_expired() {
         let signer = StateTokenSigner::local(b"test-secret".to_vec());
-        let exp = 1_700_000_300;
+        let exp = at_second(1_700_000_300);
         let state = BrowserAuthenticationState {
             challenge: vec![1, 2, 3, 4],
             rp_id: "example.com".to_string(),
-            created_at: exp - 300,
+            created_at: at_second(1_700_000_000),
             exp,
             pending_auth: None,
         };
         let encoded = state.encode(&signer).await.expect("encode");
 
-        let at = ArrivalTime::for_test_second;
+        let at = ArrivalTime::for_test;
         assert!(
-            BrowserAuthenticationState::decode(&encoded, &signer, at(exp - 1))
-                .await
-                .is_ok()
+            BrowserAuthenticationState::decode(
+                &encoded,
+                &signer,
+                at(exp
+                    .checked_sub(SignedDuration::from_secs(1))
+                    .expect("in range"))
+            )
+            .await
+            .is_ok()
         );
         let err = BrowserAuthenticationState::decode(&encoded, &signer, at(exp))
             .await
@@ -1604,12 +1612,14 @@ mod tests {
     async fn test_browser_auth_state_decode_wrong_secret() {
         let signer = StateTokenSigner::local(b"correct-secret".to_vec());
         let wrong_signer = StateTokenSigner::local(b"wrong-secret".to_vec());
-        let now = jiff::Timestamp::now().as_second();
+        let now = jiff::Timestamp::now();
         let state = BrowserAuthenticationState {
             challenge: vec![1, 2, 3, 4],
             rp_id: "example.com".to_string(),
             created_at: now,
-            exp: now + 300,
+            exp: now
+                .checked_add(SignedDuration::from_secs(300))
+                .expect("exp in range"),
             pending_auth: None,
         };
 
@@ -1633,11 +1643,13 @@ mod tests {
         // Build a valid BrowserAuthenticationState JWT signed by the test
         // signer, with a far-future expiry.
         let now = jiff::Timestamp::now();
-        let exp = now.as_second().saturating_add(300);
+        let exp = now
+            .checked_add(SignedDuration::from_secs(300))
+            .expect("exp in range");
         let auth_state = BrowserAuthenticationState {
             challenge: vec![0u8; 32],
             rp_id: state.config().rp_id.clone(),
-            created_at: now.as_second(),
+            created_at: now,
             exp,
             pending_auth: None,
         };
@@ -1647,7 +1659,7 @@ mod tests {
             .expect("encode auth state");
 
         // Pre-consume the state JWT to simulate a prior successful login.
-        let expires_at = jiff::Timestamp::from_second(exp).expect("valid exp");
+        let expires_at = exp;
         let _claim = db::consume_challenge_state_for_test(&state.store, &state_jwt, expires_at)
             .await
             .expect("pre-consume must succeed");
@@ -1703,11 +1715,13 @@ mod tests {
         let (app, state) = test_utils::test_app().await;
 
         let now = jiff::Timestamp::now();
-        let exp = now.as_second().saturating_add(300);
+        let exp = now
+            .checked_add(SignedDuration::from_secs(300))
+            .expect("exp in range");
         let auth_state = BrowserAuthenticationState {
             challenge: vec![0u8; 32],
             rp_id: state.config().rp_id.clone(),
-            created_at: now.as_second(),
+            created_at: now,
             exp,
             pending_auth: None,
         };
@@ -1741,7 +1755,7 @@ mod tests {
             "expected '{expected_code}' in rejection body, got: {resp_body}"
         );
 
-        let expires_at = jiff::Timestamp::from_second(exp).expect("valid exp");
+        let expires_at = exp;
         let consume =
             db::consume_challenge_state_for_test(&state.store, &state_jwt, expires_at).await;
         assert!(
@@ -1813,8 +1827,10 @@ mod tests {
         let auth_state = BrowserAuthenticationState {
             challenge: vec![0u8; 32],
             rp_id: state.config().rp_id.clone(),
-            created_at: now.as_second(),
-            exp: now.as_second().saturating_add(300),
+            created_at: now,
+            exp: now
+                .checked_add(SignedDuration::from_secs(300))
+                .expect("exp in range"),
             pending_auth: None,
         };
         let state_jwt = auth_state
@@ -2307,8 +2323,10 @@ mod tests {
         let auth_state = BrowserAuthenticationState {
             challenge: challenge.clone(),
             rp_id: state.config().rp_id.clone(),
-            created_at: now.as_second(),
-            exp: now.as_second().saturating_add(300),
+            created_at: now,
+            exp: now
+                .checked_add(SignedDuration::from_secs(300))
+                .expect("exp in range"),
             pending_auth: None,
         };
         let state_jwt = auth_state

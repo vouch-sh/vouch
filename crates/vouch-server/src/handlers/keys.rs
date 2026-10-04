@@ -3,6 +3,7 @@
 
 use crate::AppState;
 use crate::arrival::ArrivalTime;
+use crate::crypto::validity::numeric_date;
 use crate::db::{self};
 use crate::error::ServiceError;
 use crate::redact_email;
@@ -13,7 +14,7 @@ use axum::{
     http::StatusCode,
 };
 use base64::Engine;
-use jiff::Timestamp;
+use jiff::{SignedDuration, Timestamp};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -46,9 +47,11 @@ struct RegistrationState {
     /// RFC 7519 §4.1.6: Issued at time. Not validated on decode — the token
     /// is minted and consumed by this server on one clock, so `exp` alone
     /// bounds its lifetime.
-    iat: i64,
+    #[serde(with = "numeric_date")]
+    iat: Timestamp,
     /// RFC 7519 §4.1.4: Expiration time (5 minutes), enforced on decode.
-    exp: i64,
+    #[serde(with = "numeric_date")]
+    exp: Timestamp,
 }
 
 impl RegistrationState {
@@ -114,8 +117,7 @@ impl RegistrationCompletion {
                 ServiceError::api(StatusCode::BAD_REQUEST, "invalid_state", e.to_string())
             })?;
 
-        let expires_at =
-            Timestamp::from_second(reg_state.exp).unwrap_or_else(|_| arrival.timestamp());
+        let expires_at = reg_state.exp;
 
         Ok(Self {
             req,
@@ -183,10 +185,12 @@ pub(crate) async fn register_start(
 
     // Create state token
     let challenge: Challenge<Raw> = challenge.into();
-    let now = Timestamp::now();
+    let now = numeric_date::whole_second(Timestamp::now());
+    // A five-minute window cannot leave jiff's range; should it, the state is
+    // born expired rather than endless.
     let exp = now
-        .checked_add(jiff::Span::new().minutes(5))
-        .map_or(now.as_second().saturating_add(300), |t| t.as_second());
+        .checked_add(SignedDuration::from_secs(300))
+        .unwrap_or(now);
     // Validate the user-supplied key name at the entry point. Storing it into
     // a `ResourceLabel` field is what forces this parse; the rename path and
     // the enrollment form apply the same 1..=100-character contract.
@@ -203,7 +207,7 @@ pub(crate) async fn register_start(
         device_name,
         challenge: challenge.clone(),
         rp_id: state.config().rp_id.clone(),
-        iat: now.as_second(),
+        iat: now,
         exp,
     };
 
@@ -541,8 +545,8 @@ mod tests {
             device_name: ResourceLabel::parse("test-device").expect("valid label"),
             challenge,
             rp_id: "test.example.com".to_string(),
-            iat: 1_000_000_000,
-            exp: 9_999_999_999,
+            iat: at_second(1_000_000_000),
+            exp: at_second(9_999_999_999),
         };
 
         let token = state.encode(&signer).await.expect("encode");
@@ -567,8 +571,8 @@ mod tests {
             device_name: ResourceLabel::parse("dev").expect("valid label"),
             challenge: Challenge::from(vec![1u8; 32]),
             rp_id: "test.example.com".to_string(),
-            iat: 1_000_000_000,
-            exp: 9_999_999_999,
+            iat: at_second(1_000_000_000),
+            exp: at_second(9_999_999_999),
         };
 
         let token = state.encode(&signer_a).await.expect("encode");
@@ -585,8 +589,8 @@ mod tests {
             device_name: ResourceLabel::parse("dev").expect("valid label"),
             challenge: Challenge::from(vec![1u8; 32]),
             rp_id: "test.example.com".to_string(),
-            iat: 1_000_000_000,
-            exp: 9_999_999_999,
+            iat: at_second(1_000_000_000),
+            exp: at_second(9_999_999_999),
         };
 
         let token = state.encode(&signer).await.expect("encode");
@@ -826,18 +830,18 @@ mod tests {
 
     /// Mint a valid `RegistrationState` JWT for `user`, returning it with its
     /// expiry so a caller can check afterwards whether it was consumed.
-    async fn make_reg_state(state: &AppState, user: &User) -> (String, i64) {
+    async fn make_reg_state(state: &AppState, user: &User) -> (String, Timestamp) {
         let now = jiff::Timestamp::now();
         let exp = now
-            .checked_add(jiff::Span::new().minutes(5))
-            .map_or(now.as_second().saturating_add(300), |t| t.as_second());
+            .checked_add(SignedDuration::from_secs(300))
+            .expect("exp in range");
         let reg_state = RegistrationState {
             user_id: Uuid::parse_str(&user.id).expect("user id is a uuid"),
             user_name: user.email.clone(),
             device_name: ResourceLabel::parse("Test Device").expect("valid label"),
             challenge: Challenge::from(vec![7u8; 32]),
             rp_id: "localhost".to_string(),
-            iat: now.as_second(),
+            iat: now,
             exp,
         };
         let jwt = reg_state
@@ -853,7 +857,7 @@ mod tests {
         email: &str,
         attestation_object: serde_json::Value,
         client_data_json: serde_json::Value,
-    ) -> (Arc<AppState>, String, i64, StatusCode, String) {
+    ) -> (Arc<AppState>, String, Timestamp, StatusCode, String) {
         let (app, state) = test_app().await;
         let user = create_test_user(&state.store, email).await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
@@ -888,8 +892,8 @@ mod tests {
     }
 
     /// Assert the registration state is still unconsumed by spending it directly.
-    async fn assert_state_unconsumed(state: &AppState, state_jwt: &str, exp: i64) {
-        let expires_at = jiff::Timestamp::from_second(exp).expect("valid exp");
+    async fn assert_state_unconsumed(state: &AppState, state_jwt: &str, exp: Timestamp) {
+        let expires_at = exp;
         let consume =
             db::consume_challenge_state_for_test(&state.store, state_jwt, expires_at).await;
         assert!(
@@ -1031,21 +1035,21 @@ mod tests {
         let challenge = Challenge::from(vec![2u8; 32]);
         let now = jiff::Timestamp::now();
         let exp = now
-            .checked_add(jiff::Span::new().minutes(5))
-            .map_or(now.as_second().saturating_add(300), |t| t.as_second());
+            .checked_add(SignedDuration::from_secs(300))
+            .expect("exp in range");
         let reg_state = RegistrationState {
             user_id: user_uuid,
             user_name: user.email.clone(),
             device_name: ResourceLabel::parse("Test Device").expect("valid label"),
             challenge,
             rp_id: "localhost".to_string(),
-            iat: now.as_second(),
+            iat: now,
             exp,
         };
         let state_jwt = reg_state.encode(signer).await.expect("encode state");
 
         // Pre-consume the state token to simulate prior use.
-        let expires_at = jiff::Timestamp::from_second(exp).expect("valid exp");
+        let expires_at = exp;
         let _claim = db::consume_challenge_state_for_test(&state.store, &state_jwt, expires_at)
             .await
             .expect("pre-consume must succeed");
@@ -1105,15 +1109,15 @@ mod tests {
         let challenge = Challenge::from(vec![3u8; 32]);
         let now = jiff::Timestamp::now();
         let exp = now
-            .checked_add(jiff::Span::new().minutes(5))
-            .map_or(now.as_second().saturating_add(300), |t| t.as_second());
+            .checked_add(SignedDuration::from_secs(300))
+            .expect("exp in range");
         let reg_state = RegistrationState {
             user_id: user_uuid,
             user_name: user.email.clone(),
             device_name: ResourceLabel::parse("Test Device").expect("valid label"),
             challenge,
             rp_id: "localhost".to_string(),
-            iat: now.as_second(),
+            iat: now,
             exp,
         };
         let state_jwt = reg_state.encode(signer).await.expect("encode state");
@@ -1179,15 +1183,15 @@ mod tests {
         let challenge = Challenge::from(vec![4u8; 32]);
         let now = jiff::Timestamp::now();
         let exp = now
-            .checked_add(jiff::Span::new().minutes(5))
-            .map_or(now.as_second().saturating_add(300), |t| t.as_second());
+            .checked_add(SignedDuration::from_secs(300))
+            .expect("exp in range");
         let reg_state = RegistrationState {
             user_id: user_uuid,
             user_name: user.email.clone(),
             device_name: ResourceLabel::parse("Test Device").expect("valid label"),
             challenge,
             rp_id: "localhost".to_string(),
-            iat: now.as_second(),
+            iat: now,
             exp,
         };
         let state_jwt = reg_state.encode(signer).await.expect("encode state");
@@ -1294,15 +1298,15 @@ mod tests {
         let challenge = Challenge::from(vec![5u8; 32]);
         let now = jiff::Timestamp::now();
         let exp = now
-            .checked_add(jiff::Span::new().minutes(5))
-            .map_or(now.as_second().saturating_add(300), |t| t.as_second());
+            .checked_add(SignedDuration::from_secs(300))
+            .expect("exp in range");
         let reg_state = RegistrationState {
             user_id: user_uuid,
             user_name: user.email.clone(),
             device_name: ResourceLabel::parse("Test Device").expect("valid label"),
             challenge,
             rp_id: "localhost".to_string(),
-            iat: now.as_second(),
+            iat: now,
             exp,
         };
         let state_jwt = reg_state.encode(signer).await.expect("encode state");
@@ -1393,18 +1397,18 @@ mod tests {
     }
 
     /// Mint a valid `RegistrationState` JWT bound to `user_id`.
-    async fn register_state_for(state: &AppState, user: &User) -> (String, i64) {
+    async fn register_state_for(state: &AppState, user: &User) -> (String, Timestamp) {
         let now = jiff::Timestamp::now();
         let exp = now
-            .checked_add(jiff::Span::new().minutes(5))
-            .map_or(now.as_second().saturating_add(300), |t| t.as_second());
+            .checked_add(SignedDuration::from_secs(300))
+            .expect("exp in range");
         let reg_state = RegistrationState {
             user_id: Uuid::parse_str(&user.id).expect("user id is a uuid"),
             user_name: user.email.clone(),
             device_name: ResourceLabel::parse("Test Device").expect("valid label"),
             challenge: Challenge::from(vec![7u8; 32]),
             rp_id: "localhost".to_string(),
-            iat: now.as_second(),
+            iat: now,
             exp,
         };
         let jwt = reg_state
@@ -1463,7 +1467,7 @@ mod tests {
         // into the single-use store, so this assertion consumes the token as
         // a side-effect — that's why the legitimate retry below uses a
         // *fresh* state JWT.
-        let expires_at = jiff::Timestamp::from_second(exp).expect("valid exp");
+        let expires_at = exp;
         let consume =
             db::consume_challenge_state_for_test(&state.store, &state_jwt, expires_at).await;
         assert!(

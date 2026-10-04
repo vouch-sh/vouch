@@ -4,6 +4,7 @@
 use crate::AppState;
 use crate::arrival::ArrivalTime;
 use crate::assurance::HardwareVerification;
+use crate::crypto::validity::numeric_date;
 use crate::crypto::webauthn_verify::{self, AuthTime};
 use crate::db::ClientInfo;
 use crate::db::{self, AuthEventParams, AuthEventType, Domain};
@@ -18,7 +19,7 @@ use axum::{
     response::{IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
-use jiff::{Span, Timestamp};
+use jiff::{SignedDuration, Span, Timestamp};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -228,9 +229,11 @@ struct BrowserRegistrationState {
     /// RFC 7519 §4.1.6: Issued at time. Not validated on decode — the token
     /// is minted and consumed by this server on one clock, so `exp` alone
     /// bounds its lifetime.
-    iat: i64,
+    #[serde(with = "numeric_date")]
+    iat: Timestamp,
     /// RFC 7519 §4.1.4: Expiration time (5 minutes), enforced on decode.
-    exp: i64,
+    #[serde(with = "numeric_date")]
+    exp: Timestamp,
 }
 
 impl BrowserRegistrationState {
@@ -338,8 +341,7 @@ impl RegistrationCompletion {
                     ServiceError::api(StatusCode::BAD_REQUEST, "invalid_state", e.to_string())
                 })?;
 
-        let expires_at =
-            Timestamp::from_second(reg_state.exp).unwrap_or_else(|_| arrival.timestamp());
+        let expires_at = reg_state.exp;
 
         Ok(Self {
             req,
@@ -1424,16 +1426,18 @@ pub(crate) async fn browser_register_start(
     ]);
 
     // Create registration state with webauthn verification state
-    let now = jiff::Timestamp::now();
+    let now = numeric_date::whole_second(jiff::Timestamp::now());
+    // A five-minute window cannot leave jiff's range; should it, the state is
+    // born expired rather than endless.
     let reg_exp = now
-        .checked_add(jiff::Span::new().minutes(5))
-        .map_or(now.as_second().saturating_add(300), |t| t.as_second());
+        .checked_add(SignedDuration::from_secs(300))
+        .unwrap_or(now);
     let reg_state = BrowserRegistrationState {
         device_auth_id,
         user_id,
         user_email: user_email.clone(),
         webauthn_state,
-        iat: now.as_second(),
+        iat: now,
         exp: reg_exp,
     };
 

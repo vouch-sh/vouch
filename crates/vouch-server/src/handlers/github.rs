@@ -13,6 +13,7 @@ use crate::arrival::ArrivalTime;
 use crate::client_info::ClientInfo;
 use crate::config::ServerConfig;
 use crate::crypto::jwt::{JwtType, StateTokenError, StateTokenSigner};
+use crate::crypto::validity::numeric_date;
 use crate::error::ServiceError;
 use crate::handlers::session::{
     AuthContext, AuthenticatedToken, extract_session_from_cookie, get_auth_context,
@@ -32,7 +33,7 @@ use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::cookie::CookieJar;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use jiff::Timestamp;
+use jiff::{SignedDuration, Timestamp};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -194,9 +195,11 @@ struct GitHubStateToken {
     /// User ID initiating the connection.
     user_id: String,
     /// Issued at timestamp (Unix seconds).
-    iat: i64,
+    #[serde(with = "numeric_date")]
+    iat: Timestamp,
     /// Expiration timestamp (Unix seconds).
-    exp: i64,
+    #[serde(with = "numeric_date")]
+    exp: Timestamp,
     /// Random nonce for replay protection.
     nonce: String,
     /// Flow type (install or link).
@@ -245,13 +248,16 @@ impl GitHubStateToken {
         session_binding: &str,
         flow_type: GitHubStateFlowType,
     ) -> Result<Self, aws_lc_rs::error::Unspecified> {
-        let now = Timestamp::now().as_second();
+        let now = numeric_date::whole_second(Timestamp::now());
         let nonce = URL_SAFE_NO_PAD.encode(crypto::generate_random_bytes(16)?);
         Ok(Self {
             org_id: org_id.to_string(),
             user_id: user_id.to_string(),
             iat: now,
-            exp: now.saturating_add(600), // 10 minutes
+            // Ten minutes; a window that cannot leave jiff's range.
+            exp: now
+                .checked_add(SignedDuration::from_secs(600))
+                .unwrap_or(now),
             nonce,
             flow_type,
             session_binding: session_binding.to_string(),
@@ -1657,8 +1663,8 @@ mod tests {
         let token = GitHubStateToken::new_for_install("org-1", "user-1", "test-binding")
             .expect("create token");
         assert_eq!(
-            token.exp - token.iat,
-            600,
+            token.exp.duration_since(token.iat),
+            SignedDuration::from_secs(600),
             "Token expiry should be exactly 600 seconds (10 minutes)"
         );
     }

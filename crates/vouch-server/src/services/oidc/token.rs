@@ -1486,8 +1486,8 @@ mod tests {
             resource: None,
             acr_values: None,
             dpop_jkt: None,
-            iat: 0,
-            exp: i64::MAX,
+            iat: Timestamp::UNIX_EPOCH,
+            exp: Timestamp::MAX,
             authenticated_at: None,
         }
     }
@@ -1662,8 +1662,8 @@ mod tests {
             resource: None,
             acr_values: None,
             dpop_jkt: None,
-            iat: 0,
-            exp: i64::MAX,
+            iat: Timestamp::UNIX_EPOCH,
+            exp: Timestamp::MAX,
             authenticated_at: None,
         };
 
@@ -1690,8 +1690,8 @@ mod tests {
             resource: None,
             acr_values: None,
             dpop_jkt: None,
-            iat: 0,
-            exp: i64::MAX,
+            iat: Timestamp::UNIX_EPOCH,
+            exp: Timestamp::MAX,
             authenticated_at: None,
         };
 
@@ -1718,8 +1718,8 @@ mod tests {
             resource: None,
             acr_values: None,
             dpop_jkt: None,
-            iat: 0,
-            exp: i64::MAX,
+            iat: Timestamp::UNIX_EPOCH,
+            exp: Timestamp::MAX,
             authenticated_at: None,
         };
 
@@ -1749,8 +1749,8 @@ mod tests {
             resource: None,
             acr_values: None,
             dpop_jkt: None,
-            iat: 0,
-            exp: i64::MAX,
+            iat: Timestamp::UNIX_EPOCH,
+            exp: Timestamp::MAX,
             authenticated_at: None,
         };
 
