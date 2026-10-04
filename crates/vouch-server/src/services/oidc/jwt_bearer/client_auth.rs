@@ -294,7 +294,7 @@ pub async fn authenticate_client_jwt(
     let jti_claim = PendingJti {
         jti: validated.claims.jti.clone(),
         client_id: client.client_id.clone(),
-        assertion_exp: validated.claims.exp,
+        assertion_exp: i64::from(validated.claims.exp),
     }
     .commit(state)
     .await?;
@@ -729,7 +729,7 @@ mod tests {
             iss: iss.to_string(),
             sub: sub.to_string(),
             aud: JwtAudience::Single("https://test.example.com".to_string()),
-            exp: i64::MAX,
+            exp: i64::MAX.into(),
             iat: None,
             nbf: None,
             jti: None,

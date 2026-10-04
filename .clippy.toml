@@ -15,8 +15,8 @@ disallowed-methods = [
     { path = "jiff::Timestamp::now", reason = "request-path comparisons take `crate::arrival::ArrivalTime`; see `arrival.rs` for the sanctioned ambient-stamping cases" },
     # `jsonwebtoken::decode` judges `exp` on its own clock unless told not to.
     # Each decoder states, in an `#[expect]`, how its temporal claims are judged
-    # instead (normally `crypto::jwt::TemporalClaims` at the request's arrival).
-    { path = "jsonwebtoken::decode", reason = "judge `exp`/`nbf` with `crypto::jwt::TemporalClaims` at `ArrivalTime`, then add an `#[expect]` naming how" },
+    # instead (normally `crypto::validity::ValidityWindow` at the request's arrival).
+    { path = "jsonwebtoken::decode", reason = "judge `exp`/`nbf` with `crypto::validity::ValidityWindow` at `ArrivalTime`, then add an `#[expect]` naming how" },
 ]
 
 # Items from our own crates are brought in with `use`, not spelled inline as

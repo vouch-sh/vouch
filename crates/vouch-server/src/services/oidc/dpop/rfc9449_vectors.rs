@@ -102,7 +102,7 @@ fn figure_2_proof_signature_verifies() {
     assert_eq!(claims.jti, "-BwC3ESc6acc2lTc");
     assert_eq!(claims.htm, "POST");
     assert_eq!(claims.htu, "https://server.example.com/token");
-    assert_eq!(claims.iat, 1_562_262_616);
+    assert_eq!(i64::from(claims.iat), 1_562_262_616);
     assert_eq!(claims.ath, None);
     assert_eq!(claims.nonce, None);
 }
@@ -128,7 +128,7 @@ fn figure_13_proof_signature_verifies() {
     assert_eq!(claims.jti, "e1j3V_bKic8-LAEB");
     assert_eq!(claims.htm, "GET");
     assert_eq!(claims.htu, "https://resource.example.org/protectedresource");
-    assert_eq!(claims.iat, 1_562_262_618);
+    assert_eq!(i64::from(claims.iat), 1_562_262_618);
     assert_eq!(claims.ath.as_deref(), Some(FIGURE_14_ATH));
 }
 

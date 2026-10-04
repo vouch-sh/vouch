@@ -15,7 +15,7 @@
 use crate::AppState;
 use crate::arrival::ArrivalTime;
 use crate::crypto::jwt::{Jws, JwsError};
-use crate::crypto::validity::ValidityWindow;
+use crate::crypto::validity::{NumericDate, ValidityWindow};
 use crate::db::{self, ClientKeys, OAuthClient};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use crate::infra::egress::{BodyError, read_capped_text};
@@ -45,13 +45,13 @@ struct RequestObjectClaims {
     aud: Option<JwtAudience>,
     /// Expiration time (optional but validated if present).
     #[serde(default)]
-    exp: Option<i64>,
+    exp: Option<NumericDate>,
     /// Issued at time.
     #[serde(default)]
-    iat: Option<i64>,
+    iat: Option<NumericDate>,
     /// Not before time.
     #[serde(default)]
-    nbf: Option<i64>,
+    nbf: Option<NumericDate>,
     /// JWT ID (optional).
     #[serde(default)]
     #[expect(dead_code, reason = "reserved for serde DTO conformance / future use")]
@@ -522,7 +522,7 @@ pub async fn validate_request_object(
         // FAPI 2.0 Message Signing: exp must not be more than 60 minutes
         // after nbf (prevents long-lived request objects).
         if let (Some(exp), Some(nbf)) = (claims.exp, claims.nbf) {
-            let window = exp.saturating_sub(nbf);
+            let window = i64::from(exp).saturating_sub(i64::from(nbf));
             if window > 3600 {
                 return Err(ServiceError::oauth(
                     OAuthErrorCode::InvalidRequestObject,
@@ -651,7 +651,8 @@ fn validate_temporal_claims(
     is_fapi: bool,
     now: i64,
 ) -> ServiceResult<()> {
-    let validity = ValidityWindow::from_claims(claims.exp, claims.nbf);
+    let validity =
+        ValidityWindow::from_claims(claims.exp.map(i64::from), claims.nbf.map(i64::from));
     if validity.expired_at(now, clock_skew) {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidRequestObject,
@@ -659,7 +660,7 @@ fn validate_temporal_claims(
         ));
     }
 
-    if let Some(nbf) = claims.nbf {
+    if let Some(nbf) = claims.nbf.map(i64::from) {
         if validity.not_yet_valid_at(now, clock_skew) {
             return Err(ServiceError::oauth(
                 OAuthErrorCode::InvalidRequestObject,
@@ -676,7 +677,9 @@ fn validate_temporal_claims(
     }
 
     // An `iat` after `now` describes a token not issued yet.
-    if ValidityWindow::from_claims(None, claims.iat).not_yet_valid_at(now, clock_skew) {
+    if ValidityWindow::from_claims(None, claims.iat.map(i64::from))
+        .not_yet_valid_at(now, clock_skew)
+    {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidRequestObject,
             "Request Object iat claim is in the future",
@@ -1052,7 +1055,7 @@ mod tests {
             jsonwebtoken::decode::<RequestObjectClaims>(&jwt, &dec, &validation).unwrap();
 
         // Manually check expiration (as validate_request_object would)
-        let exp = token_data.claims.exp.unwrap();
+        let exp = i64::from(token_data.claims.exp.unwrap());
         assert!(
             exp < now - STANDARD_CLOCK_SKEW_SECONDS,
             "Expired token should be detected"
@@ -1206,6 +1209,28 @@ mod tests {
         assert!(
             validate_temporal_claims(&claims, TEMPORAL_SKEW, false, TEMPORAL_NOW).is_ok(),
             "absent temporal claims must be accepted"
+        );
+    }
+
+    // RFC 7519 §2: a NumericDate is "A JSON numeric value", and "non-integer
+    // values can be represented". A Request Object whose time claims carry a
+    // fraction is judged by the window, not refused by the parser.
+    #[test]
+    fn test_jar_temporal_fractional_claims_judged() {
+        let now_f = 1_700_000_000.0_f64;
+        let inside = temporal_claims(serde_json::json!({
+            "exp": now_f + 300.5,
+            "nbf": now_f - 100.5,
+            "iat": now_f - 100.5,
+        }));
+        assert!(
+            validate_temporal_claims(&inside, TEMPORAL_SKEW, true, TEMPORAL_NOW).is_ok(),
+            "fractional exp, nbf, and iat inside the window must be accepted"
+        );
+        let expired = temporal_claims(serde_json::json!({"exp": now_f - 100.5}));
+        assert!(
+            validate_temporal_claims(&expired, TEMPORAL_SKEW, false, TEMPORAL_NOW).is_err(),
+            "a fractional exp in the past is judged expired"
         );
     }
 

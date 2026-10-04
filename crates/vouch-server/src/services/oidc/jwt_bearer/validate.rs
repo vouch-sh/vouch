@@ -6,7 +6,7 @@
 
 use crate::crypto::alg::JwsAlgorithm;
 use crate::crypto::jwt::{HeaderAlg, Jws, JwsError};
-use crate::crypto::validity::ValidityWindow;
+use crate::crypto::validity::{NumericDate, ValidityWindow};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use serde::{Deserialize, Serialize};
 
@@ -33,14 +33,15 @@ pub struct JwtAssertionClaims {
     pub sub: String,
     /// Audience — the authorization server's token endpoint URL.
     pub aud: JwtAudience,
-    /// Expiration time.
-    pub exp: i64,
+    /// Expiration time. RFC 7523 §3 item 4: "The JWT MUST contain an "exp"
+    /// (expiration time) claim", a NumericDate the client serializes.
+    pub exp: NumericDate,
     /// Issued at time (optional per RFC but we require it).
     #[serde(default)]
-    pub iat: Option<i64>,
+    pub iat: Option<NumericDate>,
     /// Not before time (optional).
     #[serde(default)]
-    pub nbf: Option<i64>,
+    pub nbf: Option<NumericDate>,
     /// JWT ID — unique identifier for replay prevention.
     #[serde(default)]
     pub jti: Option<String>,
@@ -243,7 +244,8 @@ pub fn validate_jwt_assertion(
     // RFC 7523 §3: "The authorization server MUST reject any JWT with an
     // expiration time that has passed, subject to allowable clock skew
     // between systems."
-    let validity = ValidityWindow::from_claims(Some(claims.exp), claims.nbf);
+    let validity =
+        ValidityWindow::from_claims(Some(i64::from(claims.exp)), claims.nbf.map(i64::from));
     if validity.expired_at(now, CLOCK_SKEW_SECONDS) {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClient,
@@ -261,7 +263,8 @@ pub fn validate_jwt_assertion(
     }
 
     // An `iat` after `now` describes a token not issued yet.
-    if ValidityWindow::from_claims(None, claims.iat).not_yet_valid_at(now, CLOCK_SKEW_SECONDS) {
+    let iat = claims.iat.map(i64::from);
+    if ValidityWindow::from_claims(None, iat).not_yet_valid_at(now, CLOCK_SKEW_SECONDS) {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClient,
             "JWT assertion iat claim is in the future",
@@ -269,8 +272,8 @@ pub fn validate_jwt_assertion(
     }
 
     // Validate max lifetime: exp - iat (or exp - now if no iat)
-    let effective_iat = claims.iat.unwrap_or(now);
-    let lifetime = claims.exp.saturating_sub(effective_iat);
+    let effective_iat = iat.unwrap_or(now);
+    let lifetime = i64::from(claims.exp).saturating_sub(effective_iat);
     if lifetime > max_lifetime_seconds {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClient,
@@ -577,8 +580,8 @@ mod tests {
             iss: "https://client.example.com".to_string(),
             sub: "https://client.example.com".to_string(),
             aud: JwtAudience::Single("https://auth.example.com/oauth/token".to_string()),
-            exp: now + 300,
-            iat: Some(now),
+            exp: (now + 300).into(),
+            iat: Some(now.into()),
             nbf: None,
             jti: Some("unique-jti-123".to_string()),
         }
@@ -619,6 +622,46 @@ mod tests {
         assert_eq!(validated.alg, JwsAlgorithm::Es256);
     }
 
+    // RFC 7523 §3 item 4: "The JWT MUST contain an "exp" (expiration time)
+    // claim", and RFC 7519 §2 says of a NumericDate that "non-integer values
+    // can be represented". A client that writes fractions is judged by the
+    // window, not refused by the parser.
+    #[test]
+    fn test_validate_jwt_assertion_reads_fractional_numeric_dates() {
+        let (enc, dec) = test_es256_keys();
+        let now = 1_700_000_000_i64;
+        let now_f = 1_700_000_000.0_f64;
+        let claims = serde_json::json!({
+            "iss": "https://client.example.com",
+            "sub": "https://client.example.com",
+            "aud": "https://auth.example.com/oauth/token",
+            "exp": now_f + 300.5,
+            "iat": now_f - 0.5,
+            "nbf": now_f - 0.5,
+            "jti": "fractional-jti",
+        });
+        let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
+        let jwt = jsonwebtoken::encode(&header, &claims, &enc).expect("JWT signing must succeed");
+        let header = parse_assertion_header(&jwt).expect("header should parse");
+
+        let validated = validate_jwt_assertion(
+            &jwt,
+            &header,
+            &dec,
+            jsonwebtoken::Algorithm::ES256,
+            TEST_AUDIENCES,
+            MAX_LIFETIME,
+            now,
+        )
+        .expect("fractional exp, iat, and nbf inside the window must pass");
+        assert_eq!(i64::from(validated.claims.exp), now + 301, "ceil of exp");
+        assert_eq!(
+            validated.claims.iat.map(i64::from),
+            Some(now),
+            "ceil of iat"
+        );
+    }
+
     // RFC 7523 §3: an assertion past its exp is rejected.
     #[test]
     fn test_validate_jwt_assertion_rejects_expired() {
@@ -626,8 +669,8 @@ mod tests {
         let now = Timestamp::now().as_second();
         // Expired 1 hour ago — well beyond 30s clock skew tolerance.
         let mut claims = valid_claims(now);
-        claims.iat = Some(now - 7200);
-        claims.exp = now - 3600;
+        claims.iat = Some((now - 7200).into());
+        claims.exp = (now - 3600).into();
 
         let jwt = sign_test_jwt(&claims, &enc);
         let header = parse_assertion_header(&jwt).expect("header should parse");
@@ -661,8 +704,8 @@ mod tests {
         let now = 1_700_000_000;
         let validate = |exp: i64| {
             let mut claims = valid_claims(now);
-            claims.iat = Some(now - 60);
-            claims.exp = exp;
+            claims.iat = Some((now - 60).into());
+            claims.exp = exp.into();
             let jwt = sign_test_jwt(&claims, &enc);
             let header = parse_assertion_header(&jwt).expect("header should parse");
             validate_jwt_assertion(
@@ -686,8 +729,8 @@ mod tests {
         let now = Timestamp::now().as_second();
         // exp is 5 seconds in the past — within the 10s clock skew window.
         let mut claims = valid_claims(now);
-        claims.iat = Some(now - 300);
-        claims.exp = now - 5;
+        claims.iat = Some((now - 300).into());
+        claims.exp = (now - 5).into();
 
         let jwt = sign_test_jwt(&claims, &enc);
         let header = parse_assertion_header(&jwt).expect("header should parse");
@@ -716,7 +759,7 @@ mod tests {
         let now = Timestamp::now().as_second();
         let mut claims = valid_claims(now);
         // nbf 1 hour in the future — well beyond clock skew.
-        claims.nbf = Some(now + 3600);
+        claims.nbf = Some((now + 3600).into());
 
         let jwt = sign_test_jwt(&claims, &enc);
         let header = parse_assertion_header(&jwt).expect("header should parse");
@@ -747,7 +790,7 @@ mod tests {
         let now = Timestamp::now().as_second();
         let mut claims = valid_claims(now);
         // nbf 5 seconds in the future — within 10s clock skew.
-        claims.nbf = Some(now + 5);
+        claims.nbf = Some((now + 5).into());
 
         let jwt = sign_test_jwt(&claims, &enc);
         let header = parse_assertion_header(&jwt).expect("header should parse");
@@ -776,8 +819,8 @@ mod tests {
         let now = Timestamp::now().as_second();
         let mut claims = valid_claims(now);
         // iat 1 hour in the future.
-        claims.iat = Some(now + 3600);
-        claims.exp = now + 7200;
+        claims.iat = Some((now + 3600).into());
+        claims.exp = (now + 7200).into();
 
         let jwt = sign_test_jwt(&claims, &enc);
         let header = parse_assertion_header(&jwt).expect("header should parse");
@@ -808,8 +851,8 @@ mod tests {
         let now = Timestamp::now().as_second();
         let mut claims = valid_claims(now);
         // exp - iat = 600s but max_lifetime = 300s.
-        claims.iat = Some(now);
-        claims.exp = now + 600;
+        claims.iat = Some(now.into());
+        claims.exp = (now + 600).into();
         let max_lifetime = 300;
 
         let jwt = sign_test_jwt(&claims, &enc);
@@ -841,8 +884,8 @@ mod tests {
         let now = Timestamp::now().as_second();
         let mut claims = valid_claims(now);
         // exp - iat = 300s exactly, max_lifetime = 300s — should pass.
-        claims.iat = Some(now);
-        claims.exp = now + 300;
+        claims.iat = Some(now.into());
+        claims.exp = (now + 300).into();
         let max_lifetime = 300;
 
         let jwt = sign_test_jwt(&claims, &enc);
@@ -1049,8 +1092,8 @@ mod tests {
             iss: "https://my-app.example.com".to_string(),
             sub: "service-account-42".to_string(),
             aud: JwtAudience::Single("https://auth.example.com/oauth/token".to_string()),
-            exp: now + 300,
-            iat: Some(now),
+            exp: (now + 300).into(),
+            iat: Some(now.into()),
             nbf: None,
             jti: Some("jti-abc".to_string()),
         };
@@ -1062,7 +1105,7 @@ mod tests {
         assert_eq!(decoded.iss, "https://my-app.example.com");
         assert_eq!(decoded.sub, "service-account-42");
         assert_eq!(decoded.exp, claims.exp);
-        assert_eq!(decoded.iat, Some(now));
+        assert_eq!(decoded.iat, Some(now.into()));
         assert_eq!(decoded.jti.as_deref(), Some("jti-abc"));
     }
 

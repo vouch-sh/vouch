@@ -24,7 +24,7 @@ use crate::arrival::ArrivalTime;
 use crate::crypto::alg::JwsAlgorithm;
 use crate::crypto::jwk::Jwk;
 use crate::crypto::jwt::{HeaderAlg, Jws, JwsError};
-use crate::crypto::validity::ValidityWindow;
+use crate::crypto::validity::{NumericDate, ValidityWindow};
 use crate::db::{self, store::DocumentStore};
 use crate::error::{OAuthErrorCode, OAuthErrorResponse, ServiceError};
 use crate::http;
@@ -99,8 +99,9 @@ pub struct DpopClaims {
     pub htm: String,
     /// HTTP URI of the request (without query/fragment).
     pub htu: String,
-    /// Issued at timestamp (seconds since epoch).
-    pub iat: i64,
+    /// Issued at timestamp. RFC 9449 §4.2: "Creation timestamp of the JWT
+    /// (Section 4.1.6 of [RFC7519])", a NumericDate the client serializes.
+    pub iat: NumericDate,
     /// Server-provided nonce (if required).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nonce: Option<String>,
@@ -555,7 +556,7 @@ pub fn validate_dpop_claims(
     // is the single instant the caller stamped at the entry point and shared
     // with the JTI retention commit, which holds the JTI for `max_age + skew`
     // so the replay record covers every second this check accepts.
-    if !ValidityWindow::issued_at(claims.iat, max_age_seconds).accepts_at(
+    if !ValidityWindow::issued_at(i64::from(claims.iat), max_age_seconds).accepts_at(
         now,
         0,
         PROOF_SKEW_SECONDS,
@@ -1126,7 +1127,7 @@ mod tests {
             jti: "test-jti".to_string(),
             htm: htm.to_string(),
             htu: htu.to_string(),
-            iat,
+            iat: iat.into(),
             nonce: None,
             ath: None,
             source: None,
@@ -1206,6 +1207,32 @@ mod tests {
             },
         );
         assert!(matches!(result, Err(DpopError::Expired)));
+    }
+
+    // RFC 9449 §4.2: `iat` is a "Creation timestamp of the JWT (Section 4.1.6
+    // of [RFC7519])", and RFC 7519 §2 says of a NumericDate that "non-integer
+    // values can be represented". A client that writes a fraction is judged by
+    // the freshness window, not refused by the parser.
+    #[test]
+    fn test_dpop_claims_read_fractional_iat() {
+        const NOW: i64 = 1_700_000_000;
+        let claims: DpopClaims = serde_json::from_value(serde_json::json!({
+            "jti": "test-jti",
+            "htm": "POST",
+            "htu": "https://example.com/token",
+            "iat": 1_699_999_999.5_f64,
+        }))
+        .expect("a fractional iat is a NumericDate");
+        assert_eq!(i64::from(claims.iat), NOW);
+        let uris = ["https://example.com/token".to_string()];
+        let result = validate_dpop_claims(
+            &claims,
+            &DpopClaimsValidation {
+                accepted_uris: &uris,
+                ..validation_params(NOW, 60)
+            },
+        );
+        assert!(result.is_ok(), "{result:?}");
     }
 
     #[test]
