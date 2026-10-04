@@ -111,17 +111,6 @@ pub(crate) struct ValidityWindow {
     expires: Option<Timestamp>,
 }
 
-/// `at` moved by `secs`, clamped to the instants jiff represents: a window
-/// bound that overflows is one that never opens or never closes.
-fn shifted(at: Timestamp, secs: i64) -> Timestamp {
-    at.checked_add(SignedDuration::from_secs(secs))
-        .unwrap_or(if secs < 0 {
-            Timestamp::MIN
-        } else {
-            Timestamp::MAX
-        })
-}
-
 impl ValidityWindow {
     /// `nbf` leeway for tokens this server issued: one instance can mint a
     /// token that another validates within the same second. The same
@@ -138,10 +127,13 @@ impl ValidityWindow {
     }
 
     /// A window that opens at `issued_at` and lasts `max_age_secs` seconds.
+    /// An end past the last instant jiff represents is no end at all.
     pub(crate) fn issued_at(issued_at: Timestamp, max_age_secs: i64) -> Self {
         Self {
             not_before: Some(issued_at),
-            expires: Some(shifted(issued_at, max_age_secs)),
+            expires: issued_at
+                .checked_add(SignedDuration::from_secs(max_age_secs))
+                .ok(),
         }
     }
 
@@ -170,16 +162,20 @@ impl ValidityWindow {
     /// `now - leeway` reaches `expires`. A window without an end never closes
     /// here; callers for which `exp` is required check for it separately.
     pub(crate) fn expired_at(&self, now: Timestamp, leeway_secs: i64) -> bool {
-        self.expires
-            .is_some_and(|expires| shifted(now, leeway_secs.saturating_neg()) >= expires)
+        self.expires.is_some_and(|expires| {
+            now.checked_sub(SignedDuration::from_secs(leeway_secs))
+                .is_ok_and(|skewed| skewed >= expires)
+        })
     }
 
     /// RFC 7519 §4.1.5: "the current date/time MUST be after or equal to the
     /// not-before date/time listed in the "nbf" claim", so the window has not
     /// opened while `now + leeway` is before `not_before`.
     pub(crate) fn not_yet_valid_at(&self, now: Timestamp, leeway_secs: i64) -> bool {
-        self.not_before
-            .is_some_and(|not_before| shifted(now, leeway_secs) < not_before)
+        self.not_before.is_some_and(|not_before| {
+            now.checked_add(SignedDuration::from_secs(leeway_secs))
+                .is_ok_and(|skewed| skewed < not_before)
+        })
     }
 
     /// Whether `now` falls inside the window, with `exp_leeway_secs` past its
@@ -401,7 +397,7 @@ mod tests {
     }
 
     #[test]
-    fn saturating_arithmetic_does_not_overflow_at_bounds() {
+    fn arithmetic_at_the_bounds_fails_closed() {
         assert!(!ValidityWindow::issued_at(Timestamp::MIN, 60).accepts_at(Timestamp::MAX, 0, 0));
         assert!(!ValidityWindow::issued_at(Timestamp::MAX, 60).accepts_at(Timestamp::MIN, 0, 0));
         assert!(
