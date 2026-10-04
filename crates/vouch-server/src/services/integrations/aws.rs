@@ -152,11 +152,23 @@ impl std::fmt::Debug for AwsTokenResult {
 /// Build the AWS session tags embedded in the `https://aws.amazon.com/tags`
 /// claim for ABAC and CloudTrail attribution.
 ///
-/// `vouch:Email` is always present (and transitive). `vouch:Domain` is added
-/// when the org domain (`hd`) is known. When an AI coding agent is detected
-/// (`source`, set by the CLI via env-var sniffing and carried tamperproof in
-/// the DPoP proof), `vouch:AccessType=ai` and `vouch:Agent=<source>` are added.
-/// All tags are transitive so they propagate through role chains.
+/// Two provenances meet here, and they carry different weight.
+///
+/// `vouch:Email` and `vouch:Domain` come from server-side session state, so
+/// they state what Vouch established. `vouch:AccessType` and `vouch:Agent`
+/// come from the `source` claim the client puts in its own DPoP proof. The
+/// proof's signature shows the client sent that value; it does not show the
+/// value is true. A client may name any agent, or omit the claim and be
+/// tagged as neither.
+///
+/// That asymmetry is deliberate: claiming agent-hood only narrows the caller,
+/// since it also attaches the `ReadOnlyAccess` session policy. It does mean
+/// the two agent tags are attribution, not an authorization input — an IAM
+/// condition that grants on them is trusting the caller's own assertion.
+///
+/// `vouch:Email` is always present. `vouch:Domain` is added when the org
+/// domain (`hd`) is known. All tags are transitive, so they propagate through
+/// role chains and carry their provenance with them.
 fn build_aws_session_tags(
     user_email: &str,
     hd: Option<&str>,
