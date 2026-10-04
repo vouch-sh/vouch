@@ -534,7 +534,6 @@ pub(crate) async fn exchange_fido2_assertion(
                 hardware_verification: HardwareVerification::Verified {
                     auth_time: Some(assertion_result.verified_at.instant()),
                 },
-                session_purpose: db::SessionPurpose::OAuthAccessToken,
                 authorization_details: ad_value.as_ref(),
                 hardware_aaguid: authenticator.aaguid.as_deref(),
                 org_domain: org_domain.as_deref(),

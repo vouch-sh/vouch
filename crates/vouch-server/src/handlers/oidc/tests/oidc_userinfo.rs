@@ -118,14 +118,13 @@ async fn test_userinfo_no_email_when_scope_is_none() {
             hardware_verification: HardwareVerification::Verified {
                 auth_time: Some(jiff::Timestamp::now()),
             },
-            session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
             hardware_aaguid: None,
             org_domain: None,
             source_code_hash: None,
         },
         TokenIssuanceProof {
-            grant: GrantProof::TestingOnly,
+            grant: GrantProof::TestingOnly(db::SessionPurpose::OAuthAccessToken),
             client_auth: ClientAuthProof::NoAuth(NoClientAuth::internal_endpoint()),
             sender_constraint: SenderConstraintProof::no_registered_client(),
         },

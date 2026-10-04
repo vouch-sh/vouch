@@ -390,7 +390,19 @@ async fn test_exchange_narrowed_token_enforced() {
     )
     .await;
 
-    let (subject_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
+    // A command-line login session: exchange passes its purpose on, so the
+    // exchanged token is accepted at Vouch's own endpoints.
+    let subject_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            client_id: Some(&client.client_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let base_url = state.config().base_url.clone();
     let resource_uri = format!("{base_url}/v1/keys");

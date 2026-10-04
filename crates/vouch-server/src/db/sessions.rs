@@ -241,7 +241,7 @@ pub(super) async fn delete_sessions_for_code_replay(
         .await?;
     let mut token_hashes = Vec::with_capacity(sessions.len());
     for session in &sessions {
-        if session.data.session_type == SessionPurpose::OAuthAccessToken {
+        if session.data.session_type != SessionPurpose::M2MAccessToken {
             if let Err(e) = store.delete(&session.id).await {
                 tracing::error!(
                     target: "security",

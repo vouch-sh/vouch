@@ -32,7 +32,6 @@ use secrecy::{ExposeSecret, SecretString};
 use std::sync::Arc;
 use vouch_common::{DeviceCodeRequest, DeviceCodeResponse, DeviceTokenResponse, OAuthError};
 
-use crate::db::SessionPurpose;
 use crate::error::{OAuthErrorCode, ServiceError};
 use crate::{crypto, redact_email};
 
@@ -578,7 +577,6 @@ pub(crate) async fn device_token(
                     // it by up to the device code's lifetime and would
                     // overstate freshness to the key-deletion step-up gate.
                     hardware_verification: verification,
-                    session_purpose: SessionPurpose::OAuthAccessToken,
                     authorization_details: None,
                     hardware_aaguid: hardware_aaguid.as_deref(),
                     org_domain: org_domain.as_deref(),

@@ -345,6 +345,8 @@ mod tests {
         org_domain: Option<String>,
         dpop_source: Option<String>,
     ) -> super::ValidatedResourceToken {
+        use crate::db::SessionPurpose;
+
         super::ValidatedResourceToken {
             sub: "user-id".to_string(),
             email: None,
@@ -353,6 +355,7 @@ mod tests {
             scope: None,
             authenticator_id: None,
             hardware_verified: true,
+            session_purpose: SessionPurpose::CredentialIssuance,
             auth_time: None,
             exp: 0,
             token_hash: String::new(),

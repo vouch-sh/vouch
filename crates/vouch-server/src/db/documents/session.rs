@@ -10,11 +10,31 @@ use crate::db::document_type::{DocumentType, IndexEntry};
 /// Session purpose / grant type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SessionPurpose {
+    /// A user's access token that cannot obtain credentials: a browser
+    /// session, or a token a client redeemed through the
+    /// `authorization_code` grant. The key ceremony behind it, if any, was
+    /// performed for Vouch's own sign-in and not for the client holding the
+    /// token.
     #[serde(rename = "oauth_access_token")]
     OAuthAccessToken,
     /// Machine-to-machine access token issued via `client_credentials` grant.
     #[serde(rename = "m2m_access_token")]
     M2MAccessToken,
+    /// A user's access token that can obtain credentials. The user performed
+    /// the key ceremony for the client holding the token: the FIDO2 assertion
+    /// grant or an approved device authorization. RFC 8693 exchange passes
+    /// this purpose from the subject token's session to the issued one.
+    #[serde(rename = "credential_issuance")]
+    CredentialIssuance,
+}
+
+impl SessionPurpose {
+    /// Whether a token backed by this session may obtain SSH, AWS, and GitHub
+    /// credentials and federation ID tokens.
+    #[must_use]
+    pub fn issues_credentials(self) -> bool {
+        matches!(self, Self::CredentialIssuance)
+    }
 }
 
 /// An authenticated session (DPoP-bound access token).

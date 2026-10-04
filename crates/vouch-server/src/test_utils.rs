@@ -1634,6 +1634,10 @@ pub struct TestSessionSpec<'a> {
     /// Granted scope. Default: `None`, meaning every scope. A scope without
     /// `email` mints a token with no `email` claim.
     pub scope: Option<ScopeSet>,
+    /// Purpose recorded on the session row. Default:
+    /// [`SessionPurpose::CredentialIssuance`], the session of a
+    /// command-line login, which may obtain credentials.
+    pub purpose: SessionPurpose,
 }
 
 impl Default for TestSessionSpec<'_> {
@@ -1653,6 +1657,7 @@ impl Default for TestSessionSpec<'_> {
                 auth_time: Some(jiff::Timestamp::now()),
             },
             scope: Option::None,
+            purpose: SessionPurpose::CredentialIssuance,
         }
     }
 }
@@ -1721,14 +1726,13 @@ pub async fn create_test_session_with(state: &AppState, spec: TestSessionSpec<'_
             audience: spec.audience,
             max_lifetime_secs: Option::None,
             hardware_verification,
-            session_purpose: SessionPurpose::OAuthAccessToken,
             authorization_details: Option::None,
             hardware_aaguid: hardware_aaguid.as_deref(),
             org_domain: org_domain.as_deref(),
             source_code_hash: Option::None,
         },
         TokenIssuanceProof {
-            grant: GrantProof::TestingOnly,
+            grant: GrantProof::TestingOnly(spec.purpose),
             client_auth: ClientAuthProof::NoAuth(NoClientAuth::internal_endpoint()),
             sender_constraint: SenderConstraintProof::no_registered_client(),
         },

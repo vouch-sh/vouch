@@ -198,7 +198,6 @@ pub(crate) async fn complete_login(
             hardware_verification: HardwareVerification::Verified {
                 auth_time: Some(Timestamp::now()),
             },
-            session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
             // Cert user has no org and the cert authenticator AAGUID isn't
             // exercised by conformance suites; omit both.

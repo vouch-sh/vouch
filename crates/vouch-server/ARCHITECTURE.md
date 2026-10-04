@@ -435,10 +435,25 @@ token's account through `load_active_user` and hands it to the handler with the 
 so a missing or deactivated account is refused before any handler runs, including in
 the window between deactivation and session deletion, which commit separately.
 
+`extract_resource_token` accepts only a session established with Vouch: a browser
+session, or a command-line login. A token an application obtained through "Sign in
+with Vouch" (the `authorization_code` grant) authenticates the user to that
+application. It is accepted at `/oauth/userinfo` and refused here with 403
+`first_party_session_required`, so it cannot register or delete keys, call the
+organization or application APIs, or obtain credentials. The check sits in the one
+function every extractor calls, so a new route is covered without naming it.
+
 - `AuthenticatedToken`: the token validated. An enrollment bootstrap session satisfies
   it. `/v1/credentials/github/status` is a public read route and names it.
-- `HardwareVerifiedToken`: additionally requires `hardware_verified == true`, and
-  returns 403 otherwise. All three credential-issuance endpoints name it.
+- `HardwareVerifiedToken`: additionally requires `hardware_verified == true` and a
+  session whose purpose issues credentials, and returns 403 otherwise. All three
+  credential-issuance endpoints name it. The purpose is recorded on the session row
+  by `create_oauth_access_token`, which derives it from the grant: the FIDO2
+  assertion and device grants issue credential sessions, because the user performed
+  the key ceremony for the client holding the token. A browser session does not,
+  so the website cannot obtain credentials. RFC 8693 exchange passes the subject
+  session's purpose to the issued one, and the ID-token exchange applies the same
+  requirement to its subject token.
 - `SteppedUpToken`: additionally requires a FIDO2 assertion within the last 60 s
   (`KEY_DELETE_MAX_AGE_SECS`). A destructive action rests on a touch from the last
   minute rather than on a session that lives 8 hours by default. It rejects with
@@ -459,7 +474,9 @@ flowchart TB
   e1 --> e2["decode_token<br/>ES256 at+jwt, RFC 9068"]
   e2 --> e3["enforce_audience_coverage"]
   e3 --> e4[("session lookup by token hash")]
-  e4 --> bind{"cnf claim present?"}
+  e4 --> fp{"browser session or<br/>command-line login?"}
+  fp -- "no" --> r403a["403 first_party_session_required"]
+  fp -- "yes" --> bind{"cnf claim present?"}
   bind -- "cnf.jkt" --> dpop["validate_dpop_at_resource<br/>ath binds proof to this token"]
   dpop --> jkt{"jkt equals cnf.jkt?<br/>constant-time"}
   jkt -- "no" --> r401["401 invalid_token"]
@@ -467,8 +484,8 @@ flowchart TB
   mtls --> hw
   jkt -- "yes" --> hw
   bind -- "none" --> hw
-  hw{"hardware_verified claim"} -- "false" --> r403["403 hardware_required"]
-  hw -- "true" --> active{"load_active_user"}
+  hw{"hardware_verified claim and<br/>credential session purpose"} -- "either missing" --> r403["403 hardware_required"]
+  hw -- "both" --> active{"load_active_user"}
   active -- "missing or deactivated" --> r401u["401 unauthorized"]
   active -- "active" --> tokty["HardwareVerifiedToken<br/>token + user"]
   tokty --> h["handler"]

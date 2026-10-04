@@ -445,3 +445,255 @@ async fn test_decoded_token_enum_single_variant_destructuring() {
     assert!(!claims.iss.is_empty(), "iss must be populated");
     assert!(!claims.jti.is_empty(), "jti must be populated");
 }
+
+// ========================================================================
+// Credential issuance is reserved for command-line logins
+// ========================================================================
+
+const ACCESS_TOKEN_TYPE: &str = "urn:ietf:params:oauth:token-type:access_token";
+const ID_TOKEN_TYPE: &str = "urn:ietf:params:oauth:token-type:id_token";
+
+/// A client that registered its own request-signing key, as any dynamically
+/// registered client can, so its tokens clear the `/v1` signature requirement.
+async fn signing_client(state: &crate::AppState, owner_id: &str) -> TestOAuthClient {
+    create_test_client(
+        &state.store,
+        owner_id,
+        TestClientSpec {
+            jwks: TestJwks::Shared,
+            ..Default::default()
+        },
+    )
+    .await
+}
+
+/// Assert that every credential endpoint refuses `token` as an application's.
+async fn assert_credentials_refused(app: &axum::Router, token: &str) {
+    let auth = format!("Bearer {token}");
+
+    let (status, body) = http_get(
+        app,
+        "/v1/credentials/aws/token",
+        &[("Authorization", &auth)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "aws: {body}");
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["code"], "first_party_session_required");
+
+    let (status, body) = http_post_json(
+        app,
+        "/v1/credentials/ssh",
+        r#"{"public_key":"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA test"}"#,
+        &[("Authorization", &auth)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "ssh: {body}");
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["code"], "first_party_session_required");
+
+    let (status, body) = http_post_json(
+        app,
+        "/v1/credentials/github/token",
+        r#"{"repositories":["owner/repo"]}"#,
+        &[("Authorization", &auth)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "github: {body}");
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["code"], "first_party_session_required");
+}
+
+/// The authorization-code grant issues from a browser session whose key
+/// ceremony the user performed for Vouch, not for the client redeeming the
+/// code. The token says a key was touched, and still cannot obtain credentials.
+#[tokio::test]
+async fn test_authorization_code_token_cannot_reach_credentials() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "code-credentials@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = signing_client(&state, &user.id).await;
+
+    let (access_token, _id_token) =
+        issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
+
+    assert_eq!(
+        decode_jwt_payload(&access_token)["hardware_verified"],
+        true,
+        "the token still tells the relying party a key was touched"
+    );
+    assert_credentials_refused(&app, &access_token).await;
+}
+
+/// Token exchange passes the subject session's purpose along, so exchanging an
+/// authorization-code token does not turn it into one that obtains credentials.
+#[tokio::test]
+async fn test_token_exchanged_from_authorization_code_token_cannot_reach_credentials() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "code-exchange@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = signing_client(&state, &user.id).await;
+
+    let (subject_token, _id_token) =
+        issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={subject_token}\
+             &subject_token_type={ACCESS_TOKEN_TYPE}"
+        ),
+        &[("Authorization", &client.basic_auth_header())],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "exchange should succeed: {body}");
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let exchanged = response["access_token"].as_str().expect("access_token");
+
+    assert_credentials_refused(&app, exchanged).await;
+}
+
+/// The ID token an exchange mints is a federation credential, so the subject
+/// token must come from a command-line login like any other credential request.
+#[tokio::test]
+async fn test_authorization_code_token_cannot_exchange_for_id_token() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "code-id-token@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = signing_client(&state, &user.id).await;
+
+    let (subject_token, _id_token) =
+        issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={subject_token}\
+             &subject_token_type={ACCESS_TOKEN_TYPE}\
+             &requested_token_type={ID_TOKEN_TYPE}"
+        ),
+        &[("Authorization", &client.basic_auth_header())],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["error"], "invalid_request");
+}
+
+/// An application's token authenticates the user to that application. Vouch's
+/// own endpoints refuse it, so it cannot manage the account it names.
+#[tokio::test]
+async fn test_authorization_code_token_cannot_manage_keys() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "code-keys@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let other_key = create_test_authenticator(&state.store, &user.id).await;
+    let client = signing_client(&state, &user.id).await;
+
+    let (access_token, _id_token) =
+        issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
+    let auth = format!("Bearer {access_token}");
+
+    let (status, body) = http_post_json(
+        &app,
+        "/v1/keys/register/start",
+        r#"{"name":"another key"}"#,
+        &[("Authorization", &auth)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "register: {body}");
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["code"], "first_party_session_required");
+
+    let (status, body) = http_delete(
+        &app,
+        &format!("/v1/keys/{other_key}"),
+        &[("Authorization", &auth)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "delete: {body}");
+    assert!(
+        db::get_authenticator_by_id(&state.store, &other_key)
+            .await
+            .expect("lookup")
+            .is_some(),
+        "the key must survive"
+    );
+
+    let (status, body) = http_get(&app, "/v1/keys", &[("Authorization", &auth)]).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "list: {body}");
+}
+
+/// The same refusal covers the organization admin and application APIs.
+#[tokio::test]
+async fn test_authorization_code_token_cannot_reach_admin_apis() {
+    let (app, state) = test_app().await;
+
+    let org = create_test_org(&state.store, "code-admin.example").await;
+    let admin =
+        create_test_user_in_org(&state.store, "admin@code-admin.example", &org.id, true).await;
+    let auth_id = create_test_authenticator(&state.store, &admin.id).await;
+    let client = signing_client(&state, &admin.id).await;
+
+    let (access_token, _id_token) =
+        issue_oauth_access_token(&app, &state, &admin, &auth_id, &client).await;
+    let auth = format!("Bearer {access_token}");
+
+    let (status, body) = http_post_json(
+        &app,
+        "/api/v1/org/scim-tokens",
+        r#"{"description":"token","expires_in_days":365,"audit_read":true}"#,
+        &[("Authorization", &auth)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "scim-tokens: {body}");
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["code"], "first_party_session_required");
+
+    let (status, body) = http_get(&app, "/api/v1/applications", &[("Authorization", &auth)]).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "applications: {body}");
+}
+
+/// A browser session is accepted at Vouch's endpoints and still cannot obtain
+/// credentials: those go to a command-line login.
+#[tokio::test]
+async fn test_browser_session_cannot_reach_credentials() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "browser-credentials@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            purpose: db::SessionPurpose::OAuthAccessToken,
+            ..Default::default()
+        },
+    )
+    .await;
+    let auth = format!("Bearer {token}");
+
+    let (status, body) = http_get(&app, "/v1/keys", &[("Authorization", &auth)]).await;
+    assert_eq!(status, StatusCode::OK, "keys: {body}");
+
+    let (status, body) = http_get(
+        &app,
+        "/v1/credentials/aws/token",
+        &[("Authorization", &auth)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "aws: {body}");
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["code"], "hardware_required");
+}

@@ -7,15 +7,16 @@
 use crate::AppState;
 use crate::arrival::ArrivalTime;
 use crate::crypto::hash_token;
+use crate::db;
 use crate::db::OAuthClient;
-use crate::db::{self, SessionPurpose};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use crate::infra::metrics;
 use crate::redact_email;
 use crate::services::auth::ValidatedSession;
 use crate::services::auth::{
-    ActorClaim, CreateOAuthTokenParams, DecodedToken, MAX_DELEGATION_DEPTH, TokenBinding,
-    TokenIssuanceProof, create_oauth_access_token, decode_token,
+    ActorClaim, ClientAuthProof, CreateOAuthTokenParams, CredentialSession, DecodedToken,
+    GrantProof, MAX_DELEGATION_DEPTH, SenderConstraintProof, TokenBinding, TokenIssuanceProof,
+    create_oauth_access_token, decode_token,
 };
 use crate::services::oidc::ScopeSet;
 use crate::services::oidc::authorization_details::AuthorizationDetails;
@@ -300,7 +301,8 @@ impl std::fmt::Debug for TokenExchangeResult {
 pub(crate) async fn exchange_token(
     state: &Arc<AppState>,
     params: TokenExchangeParams<'_>,
-    proof: TokenIssuanceProof,
+    client_auth: ClientAuthProof,
+    sender_constraint: SenderConstraintProof,
     arrival: ArrivalTime,
 ) -> ServiceResult<TokenExchangeResult> {
     // Reject `actor_token` with `requested_token_type=id_token`. The ID-token
@@ -358,15 +360,15 @@ pub(crate) async fn exchange_token(
 
     // The subject token's session must be live (its security key not deleted)
     let subject_token_hash = hash_token(subject_token);
-    let subject_session = ValidatedSession::lookup(state, &subject_token_hash, arrival)
+    let subject = ValidatedSession::lookup(state, &subject_token_hash, arrival)
         .await?
-        .map(|live| live.session)
         .ok_or_else(|| {
             ServiceError::oauth(
                 OAuthErrorCode::InvalidRequest,
                 "Subject token session not found",
             )
         })?;
+    let subject_session = &subject.session;
 
     // Look up the user to get the email for the exchanged token. For access
     // tokens, the email may not be in the JWT (e.g., when only "openid" scope
@@ -645,16 +647,24 @@ pub(crate) async fn exchange_token(
                 "ID token exchange requires a hardware-verified subject token",
             ));
         }
+        // The ID token is a federation credential, so the subject token must
+        // be one that can obtain credentials: `hardware_verified` alone also
+        // describes an `authorization_code` token issued from a browser
+        // session to a client the ceremony was not performed for.
+        let credential_subject = subject.for_credentials().ok_or_else(|| {
+            ServiceError::oauth(
+                OAuthErrorCode::InvalidRequest,
+                "ID token exchange requires a subject token from 'vouch login'",
+            )
+        })?;
         return issue_id_token(
             state,
             IdTokenContext {
-                user_id: &subject_session.user_id,
+                subject: credential_subject,
                 email: subject_email,
                 subject_token_hash: &subject_token_hash,
                 audience,
                 expires_in,
-                hardware_aaguid: subject_session.hardware_aaguid.as_deref(),
-                org_domain: subject_session.org_domain.as_deref(),
                 client: params.client,
                 client_info: params.client_info,
             },
@@ -722,7 +732,6 @@ pub(crate) async fn exchange_token(
             // hardware-verified tokens via exchange. The reconstruction drops
             // `auth_time` — the exchange runs no ceremony of its own.
             hardware_verification: subject_decoded.hardware_verification(),
-            session_purpose: SessionPurpose::OAuthAccessToken,
             authorization_details: effective_ad_value.as_ref(),
             // Propagate the subject session's federation snapshot so the
             // exchanged session reports the original authenticator/org even
@@ -737,7 +746,11 @@ pub(crate) async fn exchange_token(
             // linked back to the code that started it.
             source_code_hash: subject_session.source_code_hash.as_deref(),
         },
-        proof,
+        TokenIssuanceProof {
+            grant: GrantProof::TokenExchange(subject_session.session_type),
+            client_auth,
+            sender_constraint,
+        },
         arrival,
     )
     .await?;
@@ -803,8 +816,10 @@ pub(crate) async fn exchange_token(
 
 /// Inputs for issuing an exchanged OIDC ID token ([`issue_id_token`]).
 struct IdTokenContext<'a> {
-    /// Subject user's ID, for the token-exchange audit record.
-    user_id: &'a str,
+    /// The subject token's session. Supplies the user ID for the audit record
+    /// and the `hardware_aaguid` / `hd` claim snapshots. The type admits only
+    /// a session that may obtain credentials.
+    subject: CredentialSession<'a>,
     /// Subject user's canonical email (`sub`/`email` claims).
     email: &'a str,
     /// Hash of the subject token, for the audit record.
@@ -813,10 +828,6 @@ struct IdTokenContext<'a> {
     audience: Option<&'a str>,
     /// Lifetime ceiling in seconds, already capped by subject TTL and policy.
     expires_in: u64,
-    /// AAGUID snapshot from the subject session (`hardware_aaguid` claim).
-    hardware_aaguid: Option<&'a str>,
-    /// Organization domain snapshot from the subject session (`hd` claim).
-    org_domain: Option<&'a str>,
     /// OAuth client performing the exchange: its registered resources bound
     /// the default audience, and its id goes in the audit event.
     client: &'a OAuthClient,
@@ -845,12 +856,13 @@ async fn issue_id_token(
     arrival: ArrivalTime,
 ) -> ServiceResult<TokenExchangeResult> {
     let config = state.config();
+    let subject_session = ctx.subject.session();
 
     // Resolve the caller's org so the exchanged token uses the org's issuer and
     // its own signing key when a subdomain is claimed — giving every OIDC
     // federation consumer (GCP/Azure workload identity, Kubernetes, Vault, any
     // RP) the same per-tenant isolation as the AWS path.
-    let user = db::get_user_by_id(&state.store, ctx.user_id)
+    let user = db::get_user_by_id(&state.store, &subject_session.user_id)
         .await
         .map_err(|e| ServiceError::Internal(format!("load user for token exchange: {e}")))?;
     let org = match user.and_then(|u| u.org_id) {
@@ -884,8 +896,8 @@ async fn issue_id_token(
     // authenticator/org state at session creation and survive later rotations
     // of the user's keys or organization membership.
     let claims = OidcIdTokenClaimsBuilder::for_audience(&issuer, ctx.email, audience)
-        .hardware_aaguid(ctx.hardware_aaguid.map(String::from))
-        .hd(ctx.org_domain.map(String::from))
+        .hardware_aaguid(subject_session.hardware_aaguid.clone())
+        .hd(subject_session.org_domain.clone())
         .valid_for_seconds(expires_in)
         .issued_at(now)
         .build()
@@ -922,7 +934,7 @@ async fn issue_id_token(
     if let Err(e) = db::insert_token_exchange(
         &state.store,
         &db::InsertTokenExchangeParams {
-            subject_user_id: ctx.user_id,
+            subject_user_id: &subject_session.user_id,
             subject_token_hash: ctx.subject_token_hash,
             // Always None: actor_token with requested_token_type=id_token is
             // rejected before this path is reached.
@@ -941,7 +953,7 @@ async fn issue_id_token(
     state
         .audit
         .log_credential_event(
-            ctx.user_id,
+            &subject_session.user_id,
             ctx.email,
             db::CredentialAuditEnvelope {
                 ..db::CredentialAuditEnvelope::succeeded(db::TOKEN_ISSUED, ctx.client_info)
@@ -1443,6 +1455,30 @@ mod tests {
             .expect("client exists")
     }
 
+    /// The live session of a command-line login by `user`, as an exchange
+    /// would find it for the subject token.
+    async fn command_line_subject(state: &AppState, user: &db::User) -> ValidatedSession {
+        use crate::test_utils::{TestSessionSpec, create_test_session_with};
+
+        let token = create_test_session_with(
+            state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                ..Default::default()
+            },
+        )
+        .await;
+        ValidatedSession::lookup(
+            state,
+            &hash_token(&token),
+            ArrivalTime::for_test_second(1_700_000_000),
+        )
+        .await
+        .expect("session lookup")
+        .expect("session is live")
+    }
+
     /// An ID-token exchange with no `audience` defaults `aud` to the issuer,
     /// and a client that registered `resource_uris` must list it: omitting the
     /// parameter cannot step around the allowlist the request would face if it
@@ -1461,17 +1497,16 @@ mod tests {
         let issuer_listed = exchange_client(&state, &user.id, vec![issuer]).await;
 
         let client_info = ClientInfo::default();
+        let subject = command_line_subject(&state, &user).await;
         let issue = |client| {
             issue_id_token(
                 &state,
                 IdTokenContext {
-                    user_id: &user.id,
+                    subject: subject.for_credentials().expect("credential session"),
                     email: &user.email,
                     subject_token_hash: "subject-token-hash-test",
                     audience: None,
                     expires_in: 60,
-                    hardware_aaguid: None,
-                    org_domain: None,
                     client,
                     client_info: &client_info,
                 },
@@ -1515,16 +1550,15 @@ mod tests {
         let arrival_seconds: i64 = 1_700_000_000;
         let arrival = ArrivalTime::for_test_second(arrival_seconds);
 
+        let subject = command_line_subject(&state, &user).await;
         let result = issue_id_token(
             &state,
             IdTokenContext {
-                user_id: &user.id,
+                subject: subject.for_credentials().expect("credential session"),
                 email: &user.email,
                 subject_token_hash: "subject-token-hash-test",
                 audience: None,
                 expires_in,
-                hardware_aaguid: None,
-                org_domain: None,
                 client: &client,
                 client_info: &ClientInfo::default(),
             },

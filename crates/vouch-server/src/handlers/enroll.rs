@@ -1060,7 +1060,6 @@ pub(crate) async fn complete_enrollment_after_identity(
             audience: None,
             max_lifetime_secs: None,
             hardware_verification: HardwareVerification::NotVerified,
-            session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
             hardware_aaguid: hardware_aaguid.as_deref(),
             org_domain: org_domain.as_deref(),
@@ -1755,7 +1754,6 @@ pub(crate) async fn browser_register_complete(
             hardware_verification: HardwareVerification::Verified {
                 auth_time: Some(auth_now.instant()),
             },
-            session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
             hardware_aaguid: validated.aaguid.as_deref(),
             org_domain: org_domain.as_deref(),

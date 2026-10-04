@@ -679,7 +679,19 @@ async fn test_revoked_token_cannot_access_resources() {
     )
     .await;
 
-    let (access_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
+    // A command-line login session: Vouch's own endpoints refuse a token an
+    // application obtained through the authorization-code grant.
+    let access_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            client_id: Some(&client.client_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     // Verify token works before revocation
     let (status, _) = http_get(

@@ -11,7 +11,6 @@
 use crate::AppState;
 use crate::arrival::ArrivalTime;
 use crate::assurance::HardwareVerification;
-use crate::db::SessionPurpose;
 use crate::error::ServiceResult;
 use crate::services::auth::{
     CreateOAuthTokenParams, TokenBinding, TokenIssuanceProof, create_oauth_access_token,
@@ -71,7 +70,6 @@ pub(crate) async fn exchange_client_credentials(
             audience: None,
             max_lifetime_secs: None,
             hardware_verification: HardwareVerification::NotVerified,
-            session_purpose: SessionPurpose::M2MAccessToken,
             authorization_details: None,
             hardware_aaguid: None,
             org_domain: None,

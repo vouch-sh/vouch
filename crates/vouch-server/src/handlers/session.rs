@@ -135,6 +135,30 @@ async fn extract_resource_token(
         .ok_or_else(|| refuse_token("Session not found or revoked"))?
         .session;
 
+    // 3b. Only a session established with Vouch acts on Vouch's own
+    //     endpoints: a browser session, or a command-line login. A token an
+    //     application obtained through "Sign in with Vouch" authenticates the
+    //     user to that application and is accepted at `/oauth/userinfo`, which
+    //     does not come through here. Refusing it at this one point covers
+    //     every route that takes a token extractor, including ones added
+    //     later.
+    if !session.session_type.issues_credentials()
+        && !access_claims.is_browser_session(&config.base_url)
+    {
+        tracing::warn!(
+            target: "security",
+            client_id = %access_claims.client_id,
+            path = %uri,
+            "Refusing an application's token at a Vouch endpoint"
+        );
+        return Err(ServiceError::api(
+            StatusCode::FORBIDDEN,
+            "first_party_session_required",
+            "This endpoint requires a session from 'vouch login' or the Vouch website. \
+             A token issued to an application only authenticates the user to that application.",
+        ));
+    }
+
     // 4. The scheme the token arrived under must fit what the token is. A
     //    cookie holds only a browser session. The DPoP scheme is for a
     //    DPoP-bound token, whose proof RFC 9449 §7.1 requires; the RFC is
@@ -234,6 +258,7 @@ async fn extract_resource_token(
         scope: access_claims.scope,
         authenticator_id: session.authenticator_id.clone(),
         hardware_verified: access_claims.hardware_verified,
+        session_purpose: session.session_type,
         auth_time: access_claims.auth_time,
         exp: access_claims.exp,
         token_hash,
@@ -268,11 +293,17 @@ pub(crate) struct AuthenticatedToken {
     pub(crate) user: db::User,
 }
 
-/// An access token whose session proved possession of the user's security key.
+/// An access token whose session proved possession of the user's security key
+/// to the client holding the token.
 ///
 /// The only constructor is the extractor below, which rejects the request when
-/// the `hardware_verified` claim is false. A handler naming this type cannot
-/// run without the proof.
+/// the `hardware_verified` claim is false or the session's purpose does not
+/// issue credentials. A handler naming this type cannot run without the proof.
+///
+/// The purpose check keeps a browser session out: credentials go to a
+/// command-line login, where the user performed the key ceremony for the
+/// client holding the token. An application's `authorization_code` token never
+/// reaches this extractor; `extract_resource_token` refuses it first.
 ///
 /// The gate is on `hardware_verified` rather than `authenticator_id`: the latter
 /// only means the user has a key on record, which an enrollment session carries
@@ -420,11 +451,13 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for HardwareVerifiedToken {
         state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
         let AuthenticatedToken { token, user } = extract_token_from_parts(parts, state).await?;
-        if !token.hardware_verified {
+        if !token.hardware_verified || !token.session_purpose.issues_credentials() {
             tracing::warn!(
                 target: "security",
                 path = %parts.uri.path(),
-                "Refusing a session that is not hardware-verified"
+                hardware_verified = token.hardware_verified,
+                session_purpose = ?token.session_purpose,
+                "Refusing a session that cannot obtain credentials"
             );
             return Err(ServiceError::api(
                 StatusCode::FORBIDDEN,

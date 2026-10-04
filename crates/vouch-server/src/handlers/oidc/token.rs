@@ -1281,13 +1281,15 @@ async fn handle_token_exchange_grant(
         Ok(proof) => proof,
         Err(resp) => return resp,
     };
-    let proof = TokenIssuanceProof {
-        grant: GrantProof::TokenExchange,
+    match exchange_token(
+        &state,
+        exchange_params,
         client_auth,
         sender_constraint,
-    };
-
-    match exchange_token(&state, exchange_params, proof, arrival).await {
+        arrival,
+    )
+    .await
+    {
         Ok(result) => token_success_response(TokenExchangeResponse {
             access_token: result.access_token,
             issued_token_type: result.issued_token_type,

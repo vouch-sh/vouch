@@ -95,6 +95,25 @@ impl ValidatedSession {
             authenticator,
         }))
     }
+
+    /// This session as one that may obtain credentials, or `None` when its
+    /// purpose does not allow it.
+    pub(crate) fn for_credentials(&self) -> Option<CredentialSession<'_>> {
+        self.session
+            .session_type
+            .issues_credentials()
+            .then_some(CredentialSession(&self.session))
+    }
+}
+
+/// A live session whose purpose allows obtaining credentials. The field is
+/// private, so the only source is [`ValidatedSession::for_credentials`].
+pub(crate) struct CredentialSession<'a>(&'a db::Session);
+
+impl CredentialSession<'_> {
+    pub(crate) fn session(&self) -> &db::Session {
+        self.0
+    }
 }
 
 /// Parameters for verifying authenticator ownership.
@@ -503,8 +522,9 @@ pub(crate) enum GrantProof {
 
     /// `urn:ietf:params:oauth:grant-type:token-exchange` — RFC 8693 does not
     /// require single-use of the subject token; replay protection is via
-    /// [`ClientAuthProof`].
-    TokenExchange,
+    /// [`ClientAuthProof`]. Carries the subject session's purpose, which the
+    /// issued session inherits.
+    TokenExchange(SessionPurpose),
 
     /// FIDO2 assertion grant. Carries a [`crate::db::ChallengeStateClaim`]
     /// witness — proof that the challenge state JWT was atomically marked
@@ -546,7 +566,31 @@ pub(crate) enum GrantProof {
     /// the same `cfg` as the `test_utils` module so it cannot appear in
     /// production builds.
     #[cfg(any(test, feature = "test-utils"))]
-    TestingOnly,
+    TestingOnly(SessionPurpose),
+}
+
+impl GrantProof {
+    /// The purpose of the session this grant issues.
+    ///
+    /// A session can obtain credentials only when the user performed the key
+    /// ceremony for the client that holds the token. The FIDO2 assertion and
+    /// device grants are that ceremony. The `authorization_code` grant is not:
+    /// it issues from a browser session, to whichever client the browser was
+    /// sent to. The match has no wildcard arm so a new grant must choose.
+    fn session_purpose(&self) -> SessionPurpose {
+        match self {
+            Self::Fido2Assertion(_) | Self::DeviceCode(_) => SessionPurpose::CredentialIssuance,
+            Self::AuthorizationCode(_)
+            | Self::EnrollmentBootstrap(_)
+            | Self::EnrollmentComplete(_)
+            | Self::BrowserLogin(_)
+            | Self::CertificationBypass => SessionPurpose::OAuthAccessToken,
+            Self::ClientCredentials => SessionPurpose::M2MAccessToken,
+            Self::TokenExchange(purpose) => *purpose,
+            #[cfg(any(test, feature = "test-utils"))]
+            Self::TestingOnly(purpose) => *purpose,
+        }
+    }
 }
 
 /// Witness bundle for a `private_key_jwt` (RFC 7523) client authentication.
@@ -910,8 +954,6 @@ pub(crate) struct CreateOAuthTokenParams<'a> {
     /// The `auth_time` claim is derived from this field, so a token issued
     /// without a FIDO2 assertion cannot claim one.
     pub hardware_verification: HardwareVerification,
-    /// Session purpose for the database record.
-    pub session_purpose: SessionPurpose,
     /// RFC 9396: Rich authorization details (JSON array, stored in session).
     pub authorization_details: Option<&'a serde_json::Value>,
     /// AAGUID of the authenticator establishing this session (snapshot for
@@ -1059,6 +1101,7 @@ pub(crate) async fn create_oauth_access_token(
         ?sender_constraint,
         "token issuance proof consumed"
     );
+    let session_type = grant.session_purpose();
 
     // The issued `exp` is measured from the request's arrival, the same
     // instant any caller-supplied `max_lifetime_secs` was computed against.
@@ -1138,7 +1181,7 @@ pub(crate) async fn create_oauth_access_token(
             token_hash: &token_hash,
             authenticator_id: params.authenticator_id,
             expires_at: expires,
-            session_type: params.session_purpose,
+            session_type,
             authorization_details: params.authorization_details,
             hardware_aaguid: params.hardware_aaguid,
             org_domain: params.org_domain,
@@ -1277,6 +1320,9 @@ pub(crate) struct ValidatedResourceToken {
     /// bootstrap/enrollment sessions. Used to gate credential issuance
     /// that asserts hardware verification downstream (e.g. AWS WIF).
     pub hardware_verified: bool,
+    /// Purpose of the server-side session record (not in the JWT). Credential
+    /// issuance gates on [`SessionPurpose::issues_credentials`].
+    pub session_purpose: SessionPurpose,
     /// Authentication time (`auth_time` claim).
     pub auth_time: Option<i64>,
     /// RFC 7519 §4.1.4 expiration time (`exp` claim), Unix seconds.

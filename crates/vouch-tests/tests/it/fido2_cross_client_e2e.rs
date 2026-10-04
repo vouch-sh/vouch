@@ -38,8 +38,10 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use vouch_server::crypto::hash_token;
 use vouch_server::db::{self, CreateAuthenticatorParams, TokenEndpointAuthMethod};
 use vouch_server::test_utils::TestHarness;
+use vouch_server::test_utils::test_arrival;
 use vouch_server::test_utils::{
     self, TestClientSpec, TestJwks, TestOAuthClient, build_client_assertion,
 };
@@ -432,6 +434,17 @@ async fn test_fido2_same_client_grant_still_succeeds() {
         claims["hardware_verified"], true,
         "hardware_verified must be true: {claims}"
     );
+
+    // The user asserted for this client, so its session may obtain credentials.
+    let session = db::get_session_by_token_hash(
+        &harness.state.store,
+        &hash_token(access_token),
+        test_arrival().timestamp(),
+    )
+    .await
+    .expect("session lookup")
+    .expect("session row");
+    assert_eq!(session.session_type, db::SessionPurpose::CredentialIssuance);
 }
 
 /// A challenge issued to the victim's client cannot be redeemed by a client

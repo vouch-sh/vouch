@@ -393,7 +393,6 @@ pub(crate) async fn exchange_authorization_code(
             hardware_verification: HardwareVerification::Verified {
                 auth_time: auth_code.authenticated_at,
             },
-            session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: grants.authorization_details_value.as_ref(),
             hardware_aaguid: auth_code.aaguid.as_deref(),
             org_domain: org_domain.as_deref(),

@@ -1427,12 +1427,23 @@ async fn test_dpop_resource_endpoint_post_json_without_nonce() {
     )
     .await;
 
-    // Step 1: Get a DPoP-bound access token
+    // Step 1: Get a DPoP-bound access token. The subject is a command-line
+    // login session: exchange passes its purpose on, so the exchanged token
+    // may obtain credentials.
     let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
     let token_uri = format!("{}/oauth/token", state.config().base_url);
 
-    let (subject_token, _id_token) =
-        issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
+    let subject_token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            client_id: Some(&client.client_id),
+            ..Default::default()
+        },
+    )
+    .await;
 
     let nonce = acquire_dpop_nonce(&app, &dpop_key, &dpop_jwk, "POST", &token_uri).await;
 
