@@ -1825,3 +1825,145 @@ async fn verify_id_token_time_window_is_judged_at_arrival_with_leeway() {
         "RFC 7519 §4.1.5: nbf \"MUST be a number containing a NumericDate value\""
     );
 }
+
+// RFC 7519 §2: NumericDate is "a JSON numeric value" whose fractional seconds
+// "MAY be represented by a decimal fraction", so an OP may serialize `exp`
+// and `nbf` as JSON floats (e.g. `1700000000.0`, `1700000000.5`). Regression
+// for commit 41c39593: the `ValidityWindow::from_payload` reader it
+// introduced used `serde_json::Value::as_i64()` alone, which returns `None`
+// for every JSON float — so a validly signed ID token with a float `exp` or
+// `nbf` was rejected with "ID token exp or nbf is not a NumericDate" even
+// though such values are RFC-7519-conformant and were accepted before the
+// refactor (when `jsonwebtoken`'s own float-tolerant `exp` validation ran).
+#[tokio::test]
+async fn verify_id_token_accepts_float_numeric_date() {
+    use crate::arrival::ArrivalTime;
+    use wiremock::MockServer;
+
+    let server = MockServer::start().await;
+    let issuer = server.uri();
+    let client_id = "test-client";
+    let key = OidcSigningKey::generate().unwrap();
+    mount_jwks(&server, &key).await;
+    let provider = make_test_provider(&issuer);
+    let client = reqwest::Client::new();
+    let mark = 1_600_000_000_i64;
+    let mark_f: f64 = 1_600_000_000.0;
+    let at = ArrivalTime::for_test_second;
+
+    // Far-future fractional float `exp` — the exact shape `as_i64()` rejected.
+    let mut claims = base_claims(&issuer, client_id);
+    claims["exp"] = serde_json::json!(mark_f + 300.5);
+    let token = sign_test_jwt(&key, claims).await;
+    let result = verify_id_token(&client, &provider, &token, client_id, "", at(mark))
+        .await
+        .expect("float exp far in the future is a NumericDate and must verify");
+    assert_eq!(result.email, "alice@example.com");
+
+    // Whole-valued float `exp` — `serde_json` stores this as `N::Float`, the
+    // case `as_i64()` silently refused even though the value is integral.
+    let mut claims = base_claims(&issuer, client_id);
+    claims["exp"] = serde_json::json!(mark_f + 300.0);
+    let token = sign_test_jwt(&key, claims).await;
+    assert!(
+        verify_id_token(&client, &provider, &token, client_id, "", at(mark))
+            .await
+            .is_ok(),
+        "whole-valued float exp (N::Float) must verify"
+    );
+
+    // A past fractional float `nbf` — the window has opened, must verify.
+    let mut claims = base_claims(&issuer, client_id);
+    claims["nbf"] = serde_json::json!(mark_f - 100.5);
+    let token = sign_test_jwt(&key, claims).await;
+    assert!(
+        verify_id_token(&client, &provider, &token, client_id, "", at(mark))
+            .await
+            .is_ok(),
+        "float nbf in the past is a NumericDate and must verify"
+    );
+
+    // A non-number `nbf` is still rejected — the float tolerance does not
+    // loosen RFC 7519 §4.1.5's "MUST be a number" requirement.
+    let mut claims = base_claims(&issuer, client_id);
+    claims["nbf"] = serde_json::json!("soon");
+    let token = sign_test_jwt(&key, claims).await;
+    let err = verify_id_token(&client, &provider, &token, client_id, "", at(mark))
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("is not a NumericDate"),
+        "a string nbf must still be rejected as not a NumericDate, got: {err}"
+    );
+
+    // A non-number `exp` is still rejected. `exp` stays in `jsonwebtoken`'s
+    // `required_spec_claims` (the default, not cleared), so its numeric
+    // deserializer refuses a string before `ValidityWindow` reads it — the
+    // float tolerance does not loosen fail-closed behavior for non-numeric
+    // `exp`.
+    let mut claims = base_claims(&issuer, client_id);
+    claims["exp"] = serde_json::json!("later");
+    let token = sign_test_jwt(&key, claims).await;
+    let err = verify_id_token(&client, &provider, &token, client_id, "", at(mark))
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("ID token verification failed"),
+        "a string exp must be rejected by jsonwebtoken's required-claim check, got: {err}"
+    );
+}
+
+// RFC 7519 §2 NumericDate floats must be judged by the window check, not
+// rejected by the parser: a float `exp` in the past fails as "expired" and a
+// float `nbf` in the future fails as "not yet valid" — neither surfaces the
+// "is not a NumericDate" parser error the reader raised before the fix.
+#[tokio::test]
+async fn verify_id_token_float_time_window_fails_at_the_window_not_the_parser() {
+    use crate::arrival::ArrivalTime;
+    use wiremock::MockServer;
+
+    let server = MockServer::start().await;
+    let issuer = server.uri();
+    let client_id = "test-client";
+    let key = OidcSigningKey::generate().unwrap();
+    mount_jwks(&server, &key).await;
+    let provider = make_test_provider(&issuer);
+    let client = reqwest::Client::new();
+    let mark = 1_600_000_000_i64;
+    let mark_f: f64 = 1_600_000_000.0;
+    let at = ArrivalTime::for_test_second;
+
+    // Float `exp` well past the leeway window → "expired", not "is not a
+    // NumericDate".
+    let mut claims = base_claims(&issuer, client_id);
+    claims["exp"] = serde_json::json!(mark_f - 100.0);
+    let token = sign_test_jwt(&key, claims).await;
+    let err = verify_id_token(&client, &provider, &token, client_id, "", at(mark))
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("expired"),
+        "float exp in the past must be rejected as expired, got: {err}"
+    );
+    assert!(
+        !err.to_string().contains("NumericDate"),
+        "a float exp must not trigger the parser's not-a-NumericDate error: {err}"
+    );
+
+    // Float `nbf` well past the leeway window → "not yet valid", not "is not
+    // a NumericDate".
+    let mut claims = base_claims(&issuer, client_id);
+    claims["nbf"] = serde_json::json!(mark_f + 300.0);
+    let token = sign_test_jwt(&key, claims).await;
+    let err = verify_id_token(&client, &provider, &token, client_id, "", at(mark))
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("not yet valid"),
+        "float nbf in the future must be rejected as not yet valid, got: {err}"
+    );
+    assert!(
+        !err.to_string().contains("NumericDate"),
+        "a float nbf must not trigger the parser's not-a-NumericDate error: {err}"
+    );
+}

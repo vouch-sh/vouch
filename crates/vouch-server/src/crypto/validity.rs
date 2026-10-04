@@ -47,8 +47,10 @@ impl ValidityWindow {
     /// verified.
     ///
     /// `None` when the payload does not decode, or `exp` or `nbf` is present
-    /// but not an integer. RFC 7519 §4.1.4 and §4.1.5: each value "MUST be a
-    /// number containing a NumericDate value."
+    /// but not a NumericDate. RFC 7519 §4.1.4 and §4.1.5: each value "MUST be
+    /// a number containing a NumericDate value", and §2 defines NumericDate
+    /// as "a JSON numeric value" whose fractional seconds "MAY be
+    /// represented by a decimal fraction" — so a float is accepted.
     pub(crate) fn from_token(token: &str) -> Option<Self> {
         let payload = super::jwt::decode_segment(token.split('.').nth(1)?)?;
         Self::from_payload(&serde_json::from_slice(&payload).ok()?)
@@ -57,7 +59,7 @@ impl ValidityWindow {
     /// Read the window from a decoded JWT payload; see [`Self::from_token`].
     pub(crate) fn from_payload(payload: &serde_json::Value) -> Option<Self> {
         let read = |name| match payload.get(name) {
-            Some(value) => value.as_i64().map(Some),
+            Some(value) => numeric_date(value).map(Some),
             None => Some(None),
         };
         Some(Self::from_claims(read("exp")?, read("nbf")?))
@@ -92,6 +94,35 @@ impl ValidityWindow {
     pub(crate) fn accepts_own_token_at(&self, now: i64) -> bool {
         self.expires.is_some() && self.accepts_at(now, 0, Self::OWN_TOKEN_NBF_LEEWAY_SECS)
     }
+}
+
+/// Read a JWT `exp`/`nbf` (or any RFC 7519 time) claim as a NumericDate.
+///
+/// RFC 7519 §2: `NumericDate` is "a JSON numeric value" whose fractional
+/// seconds "MAY be represented by a decimal fraction", so an OP may
+/// serialize `exp`/`nbf` as a JSON float (e.g. `1700000000.0` or
+/// `1700000000.5`). `serde_json::Value::as_i64()` returns `None` for every
+/// float — even a whole-valued one — so reading the claim through `as_i64`
+/// alone rejects RFC-7519-conformant tokens. Read it as a JSON number,
+/// taking an integer directly and rounding a float to whole seconds the way
+/// `jsonwebtoken`'s own `visit_f64` deserializer does
+/// (`value.round() as u64`). Returns `None` for any non-number value, since
+/// RFC 7519 §4.1.4 and §4.1.5 each require "a number containing a
+/// NumericDate value".
+fn numeric_date(value: &serde_json::Value) -> Option<i64> {
+    let n = value.as_number()?;
+    if let Some(i) = n.as_i64() {
+        return Some(i);
+    }
+    let f = n.as_f64()?;
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "NumericDate is seconds since epoch; a finite f64 that \
+                  `round()`ed into i64 matches `jsonwebtoken`'s `visit_f64` \
+                  (`value.round() as u64`). Out-of-range saturation and NaN→0 \
+                  are non-conformant inputs that fail closed at the window check"
+    )]
+    Some(f.round() as i64)
 }
 
 #[cfg(test)]
@@ -140,6 +171,53 @@ mod tests {
         assert!(
             read(serde_json::json!({"exp": 10, "nbf": "5"})).is_none(),
             "RFC 7519 §4.1.5: nbf \"MUST be a number containing a NumericDate value\""
+        );
+    }
+
+    // RFC 7519 §2: NumericDate is "a JSON numeric value" whose fractional
+    // seconds "MAY be represented by a decimal fraction", so a JSON float is
+    // a conformant `exp`/`nbf` and must be accepted — even a whole-valued one
+    // (`1700000000.0`), which `serde_json` stores as `N::Float` and which
+    // `Value::as_i64()` rejects. Regression for the float-rejection bug
+    // introduced by commit 41c39593: that reader used `as_i64()` alone, which
+    // returns `None` for every JSON float and made `from_payload` reject
+    // RFC-7519-conformant tokens.
+    #[test]
+    fn from_payload_accepts_float_numeric_date() {
+        let read = |payload| ValidityWindow::from_payload(&payload);
+
+        // Whole-valued float — the exact shape that `as_i64()` rejected.
+        assert!(
+            read(serde_json::json!({"exp": 1700000000.0_f64}))
+                .is_some_and(|w| w.expires == Some(1700000000)),
+            "whole-valued float exp must round to the same integer"
+        );
+
+        // Fractional float — rounds half away from zero, matching
+        // `jsonwebtoken`'s `visit_f64` (`value.round() as u64`).
+        assert!(
+            read(serde_json::json!({"exp": 1700000000.5_f64, "nbf": 1699999999.5_f64}))
+                .is_some_and(|w| w.expires == Some(1700000001) && w.not_before == Some(1700000000)),
+            "fractional floats must round half away from zero"
+        );
+
+        // Down-rounding for a fractional part below 0.5.
+        assert!(
+            read(serde_json::json!({"exp": 1700000000.4_f64}))
+                .is_some_and(|w| w.expires == Some(1700000000)),
+            "1700000000.4 must round down"
+        );
+
+        // Float `nbf` alone (no `exp`).
+        assert!(
+            read(serde_json::json!({"nbf": 100.0_f64})).is_some_and(|w| w.not_before == Some(100)),
+            "float nbf is a NumericDate"
+        );
+
+        // Integer values are unaffected by the float fallback.
+        assert!(
+            read(serde_json::json!({"exp": 10, "nbf": 5})).is_some_and(|w| w.accepts_at(7, 0, 0)),
+            "integer claims parse and the window opens as before"
         );
     }
 
