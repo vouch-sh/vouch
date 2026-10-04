@@ -149,7 +149,7 @@ impl BrowserAuthenticationState {
             .decode_state_token(
                 token,
                 JwtType::BrowserAuthenticationState,
-                arrival.as_second(),
+                arrival.timestamp(),
             )
             .await
     }

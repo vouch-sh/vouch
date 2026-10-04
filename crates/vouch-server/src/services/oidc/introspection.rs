@@ -234,8 +234,8 @@ pub async fn introspect_token(
         client_id: Some(claims.client_id.clone()),
         username: claims.email.clone(),
         token_type: Some(token_type.to_string()),
-        exp: Some(claims.exp),
-        iat: Some(claims.iat),
+        exp: Some(claims.exp.as_second()),
+        iat: Some(claims.iat.as_second()),
         sub: Some(claims.sub.clone()),
         aud: Some(claims.aud.clone()),
         iss: Some(claims.iss.clone()),
@@ -491,6 +491,7 @@ pub async fn revoke_token(
 )]
 mod tests {
     use super::*;
+    use crate::test_utils::at_second;
     use crate::test_utils::test_arrival;
 
     #[test]
@@ -607,8 +608,8 @@ mod tests {
             iss: state.config().base_url.to_string(),
             sub: "user-123".to_string(),
             aud: "client-abc".to_string(),
-            exp: now + 3600,
-            iat: now,
+            exp: at_second(now + 3600),
+            iat: at_second(now),
             nbf: None,
             jti: "jti-540".to_string(),
             client_id: "client-abc".to_string(),

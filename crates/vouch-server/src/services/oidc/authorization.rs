@@ -603,7 +603,7 @@ impl AuthorizationCode {
         arrival: ArrivalTime,
     ) -> Result<Self, StateTokenError> {
         let claims: Self = signer
-            .decode_state_token(token, JwtType::AuthorizationCode, arrival.as_second())
+            .decode_state_token(token, JwtType::AuthorizationCode, arrival.timestamp())
             .await?;
 
         // RFC 8725 §3.8: Validate issuer

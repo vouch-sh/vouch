@@ -295,7 +295,7 @@ pub async fn authenticate_client_jwt(
     let jti_claim = PendingJti {
         jti: validated.claims.jti.clone(),
         client_id: client.client_id.clone(),
-        assertion_exp: validated.claims.exp.timestamp(),
+        assertion_exp: validated.claims.exp,
     }
     .commit(state)
     .await?;
@@ -443,7 +443,6 @@ mod tests {
     use crate::crypto::alg::JwsAlgorithm;
     use crate::crypto::document_crypto::{DocumentCrypto, PlaintextDocumentCrypto};
     use crate::crypto::keys::OidcSigningKey;
-    use crate::crypto::validity::NumericDate;
     use crate::db::documents::jwks_cache::JwksCacheDoc;
     use crate::db::store::DocumentStore;
     use crate::db::{self, ClientKeys, Pool};
@@ -731,7 +730,7 @@ mod tests {
             iss: iss.to_string(),
             sub: sub.to_string(),
             aud: JwtAudience::Single("https://test.example.com".to_string()),
-            exp: NumericDate::from(Timestamp::MAX),
+            exp: Timestamp::MAX,
             iat: None,
             nbf: None,
             jti: None,

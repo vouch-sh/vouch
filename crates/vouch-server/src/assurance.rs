@@ -11,6 +11,7 @@
 //! device authorization approvals, and the services layer expands it into
 //! token claims.
 
+use crate::crypto::validity::numeric_date;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 
@@ -124,8 +125,8 @@ impl HardwareVerification {
     /// RFC 9068 Section 2.2.1 / OIDC Core Section 2: when the End-User
     /// authentication occurred. Absent unless FIDO2 ran.
     #[must_use]
-    pub(crate) fn auth_time(&self) -> Option<i64> {
-        self.authenticated_at().map(jiff::Timestamp::as_second)
+    pub(crate) fn auth_time(&self) -> Option<jiff::Timestamp> {
+        self.authenticated_at().map(numeric_date::whole_second)
     }
 
     /// The ceremony instant at full precision, recorded on the session row.

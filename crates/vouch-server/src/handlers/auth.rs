@@ -14,6 +14,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
+use jiff::Timestamp;
 use std::sync::Arc;
 use vouch_common::{SessionStatus, protocol};
 
@@ -91,14 +92,14 @@ pub(crate) async fn status(
 /// carries no "if authenticated" qualifier in the contract and is returned
 /// unconditionally.
 fn build_status(
-    exp: i64,
+    exp: Timestamp,
     email: Option<String>,
     device_name: Option<String>,
     arrival: ArrivalTime,
 ) -> SessionStatus {
-    let now = arrival.as_second();
+    let now = arrival.timestamp();
     let expires_in = if exp > now {
-        u64::try_from(exp.saturating_sub(now)).ok()
+        u64::try_from(exp.duration_since(now).as_secs()).ok()
     } else {
         None
     };
@@ -290,7 +291,7 @@ mod tests {
     #[test]
     fn build_status_email_is_none_at_exp_boundary() {
         let status = super::build_status(
-            FIXED,
+            at_second(FIXED),
             Some("user@example.com".to_string()),
             None,
             ArrivalTime::for_test_second(FIXED),
@@ -310,7 +311,7 @@ mod tests {
     #[test]
     fn build_status_email_is_some_when_authenticated() {
         let status = super::build_status(
-            FIXED.saturating_add(3600),
+            at_second(FIXED.saturating_add(3600)),
             Some("user@example.com".to_string()),
             None,
             ArrivalTime::for_test_second(FIXED),
@@ -323,7 +324,7 @@ mod tests {
     #[test]
     fn build_status_device_name_returned_regardless_of_auth() {
         let live = super::build_status(
-            FIXED.saturating_add(3600),
+            at_second(FIXED.saturating_add(3600)),
             Some("user@example.com".to_string()),
             Some("YubiKey 5C".to_string()),
             ArrivalTime::for_test_second(FIXED),
@@ -332,7 +333,7 @@ mod tests {
         assert_eq!(live.device_name.as_deref(), Some("YubiKey 5C"));
 
         let expired = super::build_status(
-            FIXED.saturating_sub(3600),
+            at_second(FIXED.saturating_sub(3600)),
             Some("user@example.com".to_string()),
             Some("YubiKey 5C".to_string()),
             ArrivalTime::for_test_second(FIXED),
@@ -385,7 +386,7 @@ mod tests {
         )
         .expect("real token must decode");
         let now = Timestamp::now().as_second();
-        claims.exp = now;
+        claims.exp = at_second(now);
         claims.jti = uuid::Uuid::now_v7().to_string();
         let forged = state
             .oidc_key

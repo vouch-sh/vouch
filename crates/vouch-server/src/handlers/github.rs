@@ -270,7 +270,7 @@ impl GitHubStateToken {
         arrival: ArrivalTime,
     ) -> Result<Self, StateTokenError> {
         signer
-            .decode_state_token(token, JwtType::GitHubState, arrival.as_second())
+            .decode_state_token(token, JwtType::GitHubState, arrival.timestamp())
             .await
     }
 }
@@ -946,7 +946,7 @@ mod tests {
             .decode_state_token(
                 &encoded,
                 JwtType::RegistrationState,
-                test_arrival().as_second(),
+                test_arrival().timestamp(),
             )
             .await;
         assert!(result.is_err(), "Wrong JWT type should be rejected");

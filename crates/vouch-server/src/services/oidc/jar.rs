@@ -15,7 +15,7 @@
 use crate::AppState;
 use crate::arrival::ArrivalTime;
 use crate::crypto::jwt::{Jws, JwsError};
-use crate::crypto::validity::{NumericDate, ValidityWindow};
+use crate::crypto::validity::{ValidityWindow, numeric_date};
 use crate::db::{self, ClientKeys, OAuthClient};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use crate::infra::egress::{BodyError, read_capped_text};
@@ -45,14 +45,14 @@ struct RequestObjectClaims {
     #[serde(default)]
     aud: Option<JwtAudience>,
     /// Expiration time (optional but validated if present).
-    #[serde(default)]
-    exp: Option<NumericDate>,
+    #[serde(default, with = "numeric_date::option")]
+    exp: Option<Timestamp>,
     /// Issued at time.
-    #[serde(default)]
-    iat: Option<NumericDate>,
+    #[serde(default, with = "numeric_date::option")]
+    iat: Option<Timestamp>,
     /// Not before time.
-    #[serde(default)]
-    nbf: Option<NumericDate>,
+    #[serde(default, with = "numeric_date::option")]
+    nbf: Option<Timestamp>,
     /// JWT ID (optional).
     #[serde(default)]
     #[expect(dead_code, reason = "reserved for serde DTO conformance / future use")]
@@ -523,7 +523,7 @@ pub async fn validate_request_object(
         // FAPI 2.0 Message Signing: exp must not be more than 60 minutes
         // after nbf (prevents long-lived request objects).
         if let (Some(exp), Some(nbf)) = (claims.exp, claims.nbf) {
-            let window = exp.timestamp().duration_since(nbf.timestamp());
+            let window = exp.duration_since(nbf);
             if window > SignedDuration::from_secs(3600) {
                 return Err(ServiceError::oauth(
                     OAuthErrorCode::InvalidRequestObject,
@@ -660,7 +660,7 @@ fn validate_temporal_claims(
         ));
     }
 
-    if let Some(nbf) = claims.nbf.map(NumericDate::timestamp) {
+    if let Some(nbf) = claims.nbf {
         if validity.not_yet_valid_at(now, clock_skew) {
             return Err(ServiceError::oauth(
                 OAuthErrorCode::InvalidRequestObject,
@@ -1056,7 +1056,7 @@ mod tests {
             jsonwebtoken::decode::<RequestObjectClaims>(&jwt, &dec, &validation).unwrap();
 
         // Manually check expiration (as validate_request_object would)
-        let exp = token_data.claims.exp.unwrap().timestamp();
+        let exp = token_data.claims.exp.unwrap();
         assert!(
             exp < at_second(now - STANDARD_CLOCK_SKEW_SECONDS),
             "Expired token should be detected"

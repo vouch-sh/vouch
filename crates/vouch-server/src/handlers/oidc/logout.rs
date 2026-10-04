@@ -531,7 +531,7 @@ mod tests {
     use crate::db::{self, AuditEvent, AuditEventFilter, AuditEventKind, SessionPurpose};
     use crate::services::oidc::token::IdTokenClaims;
     use crate::test_utils::{
-        TestClientSpec, TestSessionSpec, create_test_authenticator, create_test_client,
+        TestClientSpec, TestSessionSpec, at_second, create_test_authenticator, create_test_client,
         create_test_expired_session_row, create_test_session_with, create_test_user, http_get,
         http_post_form, http_post_form_full, test_app, test_app_state, test_app_state_with_rsa_key,
     };
@@ -542,8 +542,8 @@ mod tests {
             iss: iss.to_string(),
             sub: sub.to_string(),
             aud: aud.to_string(),
-            exp,
-            iat: 0,
+            exp: at_second(exp),
+            iat: at_second(0),
             auth_time: None,
             nonce: None,
             email: None,

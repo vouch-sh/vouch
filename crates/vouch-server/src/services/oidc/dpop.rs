@@ -25,7 +25,7 @@ use crate::arrival::ArrivalTime;
 use crate::crypto::alg::JwsAlgorithm;
 use crate::crypto::jwk::Jwk;
 use crate::crypto::jwt::{HeaderAlg, Jws, JwsError};
-use crate::crypto::validity::{NumericDate, ValidityWindow};
+use crate::crypto::validity::{ValidityWindow, numeric_date};
 use crate::db::{self, store::DocumentStore};
 use crate::error::{OAuthErrorCode, OAuthErrorResponse, ServiceError};
 use crate::http;
@@ -102,7 +102,8 @@ pub struct DpopClaims {
     pub htu: String,
     /// Issued at timestamp. RFC 9449 §4.2: "Creation timestamp of the JWT
     /// (Section 4.1.6 of [RFC7519])", a NumericDate the client serializes.
-    pub iat: NumericDate,
+    #[serde(with = "numeric_date")]
+    pub iat: Timestamp,
     /// Server-provided nonce (if required).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nonce: Option<String>,
@@ -557,7 +558,7 @@ pub fn validate_dpop_claims(
     // is the single instant the caller stamped at the entry point and shared
     // with the JTI retention commit, which holds the JTI for `max_age + skew`
     // so the replay record covers every second this check accepts.
-    if !ValidityWindow::issued_at(claims.iat.timestamp(), max_age_seconds).accepts_at(
+    if !ValidityWindow::issued_at(claims.iat, max_age_seconds).accepts_at(
         now,
         0,
         PROOF_SKEW_SECONDS,
@@ -942,7 +943,7 @@ mod tests {
     use crate::db::documents::dpop::DpopJtiDoc;
     use crate::db::dpop;
     use crate::db::store::DocumentStore;
-    use crate::test_utils::{at_second, numeric_date, test_arrival};
+    use crate::test_utils::{at_second, test_arrival};
     use jiff::Timestamp;
 
     fn dpop_headers(values: &[&[u8]]) -> HeaderMap {
@@ -1131,7 +1132,7 @@ mod tests {
             jti: "test-jti".to_string(),
             htm: htm.to_string(),
             htu: htu.to_string(),
-            iat: numeric_date(iat),
+            iat: at_second(iat),
             nonce: None,
             ath: None,
             source: None,
@@ -1228,7 +1229,7 @@ mod tests {
         }))
         .expect("a fractional iat is a NumericDate");
         assert_eq!(
-            claims.iat.timestamp(),
+            claims.iat,
             at_second(NOW - 1)
                 .checked_add(jiff::SignedDuration::from_millis(500))
                 .unwrap(),

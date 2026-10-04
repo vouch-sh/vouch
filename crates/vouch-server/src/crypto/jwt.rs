@@ -169,7 +169,7 @@ impl StateTokenSigner {
 
     /// Decode and verify a state token JWT, judging `exp` against `now`.
     ///
-    /// `now` is Unix seconds — the crypto layer takes the primitive rather
+    /// `now` is a [`Timestamp`] — the crypto layer takes the instant rather
     /// than [`crate::arrival::ArrivalTime`], which lives above it. Callers on
     /// the request path pass the request's arrival instant, so this check and
     /// whatever the caller does with the decoded state read one clock.
@@ -177,7 +177,7 @@ impl StateTokenSigner {
         &self,
         token: &str,
         jwt_type: JwtType,
-        now: i64,
+        now: Timestamp,
     ) -> Result<T, StateTokenError> {
         match self {
             Self::Local { secret } => {
@@ -252,7 +252,7 @@ async fn kms_decode<T: DeserializeOwned>(
     key_id: &str,
     token: &str,
     jwt_type: JwtType,
-    now: i64,
+    now: Timestamp,
 ) -> Result<T, StateTokenError> {
     // Split into header.payload.signature
     let parts: Vec<&str> = token.splitn(3, '.').collect();
@@ -325,7 +325,7 @@ async fn kms_decode<T: DeserializeOwned>(
         .map_err(|e| StateTokenError::Validation(format!("Invalid payload JSON: {e}")))?;
     let validity = ValidityWindow::from_payload(&raw)
         .ok_or_else(|| StateTokenError::Validation("Invalid exp or nbf claim".to_string()))?;
-    if !Timestamp::from_second(now).is_ok_and(|now| validity.accepts_own_token_at(now)) {
+    if !validity.accepts_own_token_at(now) {
         return Err(StateTokenError::Expired);
     }
 
@@ -642,7 +642,7 @@ impl<'a> TokenValidationContext<'a> {
 pub(crate) fn decode_es256_token<C: DeserializeOwned>(
     token: &str,
     ctx: &TokenValidationContext<'_>,
-    now: i64,
+    now: Timestamp,
 ) -> Option<C> {
     // Peek at the header to determine the algorithm
     let header = jsonwebtoken::decode_header(token).ok()?;
@@ -670,7 +670,6 @@ pub(crate) fn decode_es256_token<C: DeserializeOwned>(
                 return None;
             }
 
-            let now = Timestamp::from_second(now).ok()?;
             if !ValidityWindow::from_token(token)?.accepts_own_token_at(now) {
                 return None;
             }
@@ -722,7 +721,7 @@ pub(crate) fn decode_state_token<T: DeserializeOwned>(
     token: &str,
     jwt_type: JwtType,
     secret: &[u8],
-    now: i64,
+    now: Timestamp,
 ) -> Result<T, jsonwebtoken::errors::Error> {
     let validation = Validation {
         leeway: 0,
@@ -741,9 +740,7 @@ pub(crate) fn decode_state_token<T: DeserializeOwned>(
             jsonwebtoken::errors::ErrorKind::InvalidToken,
         ));
     }
-    let accepted = Timestamp::from_second(now).is_ok_and(|now| {
-        ValidityWindow::from_token(token).is_some_and(|v| v.accepts_own_token_at(now))
-    });
+    let accepted = ValidityWindow::from_token(token).is_some_and(|v| v.accepts_own_token_at(now));
     if !accepted {
         return Err(jsonwebtoken::errors::Error::from(
             jsonwebtoken::errors::ErrorKind::ExpiredSignature,
@@ -762,7 +759,7 @@ mod tests {
     use crate::crypto::keys::OidcSigningKey;
     use crate::services::auth::AccessTokenClaims;
     use crate::test_utils::{
-        TEST_ISSUER, TEST_JWT_SECRET, make_test_access_token, make_test_oidc_key,
+        TEST_ISSUER, TEST_JWT_SECRET, at_second, make_test_access_token, make_test_oidc_key,
     };
 
     /// A fixed instant between the test fixtures' `iat` (1_000_000_000) and
@@ -779,7 +776,7 @@ mod tests {
         let ctx = make_ctx(&key);
         let token = make_test_access_token(&key).await;
 
-        let c = decode_es256_token::<AccessTokenClaims>(&token, &ctx, TEST_NOW)
+        let c = decode_es256_token::<AccessTokenClaims>(&token, &ctx, at_second(TEST_NOW))
             .expect("ES256 at+jwt must decode");
         assert_eq!(c.sub, "user-123");
         assert_eq!(c.client_id, "client-abc");
@@ -795,8 +792,8 @@ mod tests {
             iss: TEST_ISSUER.to_string(),
             sub: "user-123".to_string(),
             aud: "client-abc".to_string(),
-            exp: 9_999_999_999,
-            iat: 1_000_000_000,
+            exp: at_second(9_999_999_999),
+            iat: at_second(1_000_000_000),
             nbf: None,
             jti: "jti-1".to_string(),
             client_id: "client-abc".to_string(),
@@ -813,7 +810,7 @@ mod tests {
 
         // Sign as ID token (typ: "JWT", no "at+jwt")
         let token = key.sign_jwt(&claims).await.expect("sign");
-        let decoded = decode_es256_token::<AccessTokenClaims>(&token, &ctx, TEST_NOW);
+        let decoded = decode_es256_token::<AccessTokenClaims>(&token, &ctx, at_second(TEST_NOW));
         assert!(decoded.is_none(), "ID token should be rejected");
     }
 
@@ -821,9 +818,14 @@ mod tests {
     fn test_decode_token_rejects_garbage() {
         let key = make_test_oidc_key();
         let ctx = make_ctx(&key);
-        assert!(decode_es256_token::<AccessTokenClaims>("not.a.jwt", &ctx, TEST_NOW).is_none());
-        assert!(decode_es256_token::<AccessTokenClaims>("", &ctx, TEST_NOW).is_none());
-        assert!(decode_es256_token::<AccessTokenClaims>("abc123", &ctx, TEST_NOW).is_none());
+        assert!(
+            decode_es256_token::<AccessTokenClaims>("not.a.jwt", &ctx, at_second(TEST_NOW))
+                .is_none()
+        );
+        assert!(decode_es256_token::<AccessTokenClaims>("", &ctx, at_second(TEST_NOW)).is_none());
+        assert!(
+            decode_es256_token::<AccessTokenClaims>("abc123", &ctx, at_second(TEST_NOW)).is_none()
+        );
     }
 
     #[tokio::test]
@@ -835,8 +837,8 @@ mod tests {
             iss: TEST_ISSUER.to_string(),
             sub: "user-123".to_string(),
             aud: "client-abc".to_string(),
-            exp: 1, // Expired in 1970
-            iat: 0,
+            exp: at_second(1), // Expired in 1970
+            iat: at_second(0),
             nbf: None,
             jti: "jti-1".to_string(),
             client_id: "client-abc".to_string(),
@@ -852,7 +854,7 @@ mod tests {
         };
 
         let token = key.sign_access_token_jwt(&claims).await.expect("sign");
-        let decoded = decode_es256_token::<AccessTokenClaims>(&token, &ctx, TEST_NOW);
+        let decoded = decode_es256_token::<AccessTokenClaims>(&token, &ctx, at_second(TEST_NOW));
         assert!(decoded.is_none(), "Expired token should be rejected");
     }
 
@@ -865,8 +867,8 @@ mod tests {
             iss: TEST_ISSUER.to_string(),
             sub: "user-123".to_string(),
             aud: "client-abc".to_string(),
-            exp: 9_999_999_999,
-            iat: nbf,
+            exp: at_second(9_999_999_999),
+            iat: at_second(nbf),
             nbf: None,
             jti: "jti-1".to_string(),
             client_id: "client-abc".to_string(),
@@ -889,8 +891,9 @@ mod tests {
             let key = &key;
             async move { key.sign_access_token_jwt(&claims).await.expect("sign") }
         };
-        let decodes =
-            |token: &str, now: i64| decode_es256_token::<AccessTokenClaims>(token, &ctx, now);
+        let decodes = |token: &str, now: i64| {
+            decode_es256_token::<AccessTokenClaims>(token, &ctx, at_second(now))
+        };
 
         // RFC 7519 §4.1.5: "the current date/time MUST be after or equal to
         // the not-before date/time ... Implementers MAY provide for some small
@@ -933,8 +936,8 @@ mod tests {
             iss: TEST_ISSUER.to_string(),
             sub: "user-123".to_string(),
             aud: "client-abc".to_string(),
-            exp,
-            iat: exp - 3600,
+            exp: at_second(exp),
+            iat: at_second(exp - 3600),
             nbf: None,
             jti: "jti-1".to_string(),
             client_id: "client-abc".to_string(),
@@ -951,11 +954,11 @@ mod tests {
         let token = key.sign_access_token_jwt(&claims).await.expect("sign");
 
         assert!(
-            decode_es256_token::<AccessTokenClaims>(&token, &ctx, exp - 1).is_some(),
+            decode_es256_token::<AccessTokenClaims>(&token, &ctx, at_second(exp - 1)).is_some(),
             "one second before exp the token is valid"
         );
         assert!(
-            decode_es256_token::<AccessTokenClaims>(&token, &ctx, exp).is_none(),
+            decode_es256_token::<AccessTokenClaims>(&token, &ctx, at_second(exp)).is_none(),
             "at exp the current time is no longer before it"
         );
     }
@@ -967,7 +970,7 @@ mod tests {
 
         // Use a different expected issuer
         let ctx = TokenValidationContext::new(&key, "https://wrong-issuer.com");
-        let decoded = decode_es256_token::<AccessTokenClaims>(&token, &ctx, TEST_NOW);
+        let decoded = decode_es256_token::<AccessTokenClaims>(&token, &ctx, at_second(TEST_NOW));
         assert!(
             decoded.is_none(),
             "Token with wrong issuer should be rejected"
@@ -982,8 +985,8 @@ mod tests {
             iss: "https://wrong-issuer.com".to_string(),
             sub: "user-123".to_string(),
             aud: "client-abc".to_string(),
-            exp: 9_999_999_999,
-            iat: 1_000_000_000,
+            exp: at_second(9_999_999_999),
+            iat: at_second(1_000_000_000),
             nbf: None,
             jti: "jti-1".to_string(),
             client_id: "client-abc".to_string(),
@@ -1000,7 +1003,7 @@ mod tests {
 
         let token = key.sign_access_token_jwt(&claims).await.expect("sign");
         let ctx = make_ctx(&key);
-        let decoded = decode_es256_token::<AccessTokenClaims>(&token, &ctx, TEST_NOW);
+        let decoded = decode_es256_token::<AccessTokenClaims>(&token, &ctx, at_second(TEST_NOW));
         assert!(
             decoded.is_none(),
             "Access token with wrong issuer should be rejected"
@@ -1037,7 +1040,7 @@ mod tests {
             &token,
             JwtType::RegistrationState,
             TEST_JWT_SECRET,
-            1_000_000_059,
+            at_second(1_000_000_059),
         );
         assert!(fresh.is_ok(), "a token one second from expiry must decode");
 
@@ -1048,7 +1051,7 @@ mod tests {
             &token,
             JwtType::RegistrationState,
             TEST_JWT_SECRET,
-            1_000_000_060,
+            at_second(1_000_000_060),
         );
         assert!(
             matches!(
@@ -1081,7 +1084,7 @@ mod tests {
             &token,
             JwtType::RegistrationState,
             TEST_JWT_SECRET,
-            TEST_NOW,
+            at_second(TEST_NOW),
         );
         assert!(
             result.is_err(),
@@ -1102,7 +1105,7 @@ mod tests {
             &token,
             JwtType::RegistrationState,
             TEST_JWT_SECRET,
-            TEST_NOW,
+            at_second(TEST_NOW),
         )
         .expect("decode");
         assert_eq!(decoded, state);
@@ -1122,7 +1125,7 @@ mod tests {
             &token,
             JwtType::BrowserRegistrationState,
             TEST_JWT_SECRET,
-            TEST_NOW,
+            at_second(TEST_NOW),
         );
         assert!(result.is_err(), "Wrong type should be rejected");
     }
@@ -1136,8 +1139,12 @@ mod tests {
         };
         let token =
             encode_state_token(&state, JwtType::GitHubState, TEST_JWT_SECRET).expect("encode");
-        let result: Result<TestState, _> =
-            decode_state_token(&token, JwtType::GitHubState, b"wrong-secret", TEST_NOW);
+        let result: Result<TestState, _> = decode_state_token(
+            &token,
+            JwtType::GitHubState,
+            b"wrong-secret",
+            at_second(TEST_NOW),
+        );
         assert!(result.is_err(), "Wrong secret should be rejected");
     }
 
@@ -1159,7 +1166,7 @@ mod tests {
             .await
             .expect("encode");
         let decoded: TestState = signer
-            .decode_state_token(&token, JwtType::Fido2ChallengeState, TEST_NOW)
+            .decode_state_token(&token, JwtType::Fido2ChallengeState, at_second(TEST_NOW))
             .await
             .expect("decode");
         assert_eq!(decoded, state);
@@ -1179,7 +1186,7 @@ mod tests {
             .await
             .expect("encode");
         let result: Result<TestState, _> = signer
-            .decode_state_token(&token, JwtType::RegistrationState, TEST_NOW)
+            .decode_state_token(&token, JwtType::RegistrationState, at_second(TEST_NOW))
             .await;
         assert!(result.is_err(), "Wrong type should be rejected");
     }
@@ -1200,7 +1207,7 @@ mod tests {
             .await
             .expect("encode");
         let result: Result<TestState, _> = signer_b
-            .decode_state_token(&token, JwtType::AuthorizationCode, TEST_NOW)
+            .decode_state_token(&token, JwtType::AuthorizationCode, at_second(TEST_NOW))
             .await;
         assert!(result.is_err(), "Wrong secret should be rejected");
     }
@@ -1229,7 +1236,7 @@ mod tests {
                 .await
                 .expect("encode");
             let decoded: TestState = signer
-                .decode_state_token(&token, jwt_type, TEST_NOW)
+                .decode_state_token(&token, jwt_type, at_second(TEST_NOW))
                 .await
                 .expect("decode");
             assert_eq!(decoded, state, "Roundtrip failed for {:?}", jwt_type);
@@ -1250,7 +1257,7 @@ mod tests {
             .await
             .expect("encode");
         let result: Result<TestState, _> = signer
-            .decode_state_token(&token, JwtType::RegistrationState, TEST_NOW)
+            .decode_state_token(&token, JwtType::RegistrationState, at_second(TEST_NOW))
             .await;
         assert!(result.is_err(), "Expired token should be rejected");
     }
@@ -1283,8 +1290,12 @@ mod tests {
         };
         let token = encode_state_token(&state, JwtType::Fido2ChallengeState, TEST_JWT_SECRET)
             .expect("encode");
-        let result: Result<TestState, _> =
-            decode_state_token(&token, JwtType::Fido2ChallengeState, TEST_JWT_SECRET, now);
+        let result: Result<TestState, _> = decode_state_token(
+            &token,
+            JwtType::Fido2ChallengeState,
+            TEST_JWT_SECRET,
+            at_second(now),
+        );
         assert!(
             result.is_err(),
             "State token 5s past exp must be rejected with zero leeway"
@@ -1306,8 +1317,8 @@ mod tests {
             iss: TEST_ISSUER.to_string(),
             sub: "user-123".to_string(),
             aud: "client-abc".to_string(),
-            exp: now - 5, // inside the default 60s leeway window, but past exp
-            iat: now - 3600,
+            exp: at_second(now - 5), // inside the default 60s leeway window, but past exp
+            iat: at_second(now - 3600),
             nbf: None,
             jti: "jti-1".to_string(),
             client_id: "client-abc".to_string(),
@@ -1323,7 +1334,7 @@ mod tests {
         };
 
         let token = key.sign_access_token_jwt(&claims).await.expect("sign");
-        let decoded = decode_es256_token::<AccessTokenClaims>(&token, &ctx, now);
+        let decoded = decode_es256_token::<AccessTokenClaims>(&token, &ctx, at_second(now));
         assert!(
             decoded.is_none(),
             "Recently expired access token must be rejected with zero leeway"
@@ -1357,7 +1368,7 @@ mod tests {
         )
         .expect("encode");
 
-        let decoded = decode_es256_token::<AccessTokenClaims>(&token, &ctx, TEST_NOW);
+        let decoded = decode_es256_token::<AccessTokenClaims>(&token, &ctx, at_second(TEST_NOW));
         assert!(decoded.is_none(), "HS256 tokens must be rejected");
     }
 
@@ -1402,7 +1413,7 @@ mod tests {
             }),
         );
 
-        let decoded = decode_es256_token::<AccessTokenClaims>(&token, &ctx, TEST_NOW);
+        let decoded = decode_es256_token::<AccessTokenClaims>(&token, &ctx, at_second(TEST_NOW));
         assert!(
             decoded.is_none(),
             "an Unsecured JWS must never be accepted as an access token"
@@ -1433,7 +1444,7 @@ mod tests {
         // Same token, but with a non-empty signature segment appended.
         let forged = format!("{unsecured}{}", URL_SAFE_NO_PAD.encode(b"not-a-signature"));
 
-        let decoded = decode_es256_token::<AccessTokenClaims>(&forged, &ctx, TEST_NOW);
+        let decoded = decode_es256_token::<AccessTokenClaims>(&forged, &ctx, at_second(TEST_NOW));
         assert!(
             decoded.is_none(),
             "alg=none with a non-empty signature must be rejected too"
@@ -1461,7 +1472,7 @@ mod tests {
             &token,
             JwtType::RegistrationState,
             TEST_JWT_SECRET,
-            TEST_NOW,
+            at_second(TEST_NOW),
         );
         assert!(
             decoded.is_err(),

@@ -107,7 +107,7 @@ pub(crate) fn require_recent_hardware_verification(
     // A hardware-verified session always records when. Epoch is the
     // fail-closed reading for a token that somehow lacks it.
     require_fresh_timestamp(
-        token.auth_time.unwrap_or(0),
+        token.auth_time.unwrap_or(Timestamp::UNIX_EPOCH),
         KEY_DELETE_MAX_AGE_SECS,
         arrival.timestamp(),
     )
@@ -126,13 +126,11 @@ pub(crate) fn require_recent_hardware_verification(
 /// Returns `ServiceError::StepUpRequired` when `issued_at` is at least
 /// `max_age_secs` old, or is later than now (a future-dated timestamp).
 pub(crate) fn require_fresh_timestamp(
-    issued_at: i64,
+    issued_at: Timestamp,
     max_age_secs: i64,
     now: Timestamp,
 ) -> Result<(), ServiceError> {
-    if Timestamp::from_second(issued_at).is_ok_and(|issued_at| {
-        ValidityWindow::issued_at(issued_at, max_age_secs).accepts_at(now, 0, 0)
-    }) {
+    if ValidityWindow::issued_at(issued_at, max_age_secs).accepts_at(now, 0, 0) {
         return Ok(());
     }
     Err(ServiceError::StepUpRequired {
@@ -407,8 +405,8 @@ mod tests {
 
     use crate::{db, test_utils};
 
-    fn make_iat(seconds_ago: i64) -> i64 {
-        jiff::Timestamp::now().as_second() - seconds_ago
+    fn make_iat(seconds_ago: i64) -> Timestamp {
+        at_second(jiff::Timestamp::now().as_second() - seconds_ago)
     }
 
     #[test]
@@ -438,8 +436,8 @@ mod tests {
     #[test]
     fn test_require_fresh_timestamp_boundary_exactly_at_max_age() {
         let now = 1_700_000_000;
-        assert!(require_fresh_timestamp(now - 59, 60, at_second(now)).is_ok());
-        assert!(require_fresh_timestamp(now - 60, 60, at_second(now)).is_err());
+        assert!(require_fresh_timestamp(at_second(now - 59), 60, at_second(now)).is_ok());
+        assert!(require_fresh_timestamp(at_second(now - 60), 60, at_second(now)).is_err());
     }
 
     #[test]
@@ -568,8 +566,12 @@ mod tests {
     /// as freshly authenticated.
     #[test]
     fn test_require_fresh_timestamp_epoch_is_rejected() {
-        let err = require_fresh_timestamp(0, KEY_DELETE_MAX_AGE_SECS, jiff::Timestamp::now())
-            .unwrap_err();
+        let err = require_fresh_timestamp(
+            Timestamp::UNIX_EPOCH,
+            KEY_DELETE_MAX_AGE_SECS,
+            jiff::Timestamp::now(),
+        )
+        .unwrap_err();
         assert!(
             matches!(
                 err,
@@ -594,9 +596,12 @@ mod tests {
     #[test]
     fn test_require_fresh_timestamp_future_is_rejected() {
         let future_iat = jiff::Timestamp::now().as_second() + 3600; // 1 h ahead
-        let err =
-            require_fresh_timestamp(future_iat, KEY_DELETE_MAX_AGE_SECS, jiff::Timestamp::now())
-                .unwrap_err();
+        let err = require_fresh_timestamp(
+            at_second(future_iat),
+            KEY_DELETE_MAX_AGE_SECS,
+            jiff::Timestamp::now(),
+        )
+        .unwrap_err();
         assert!(
             matches!(
                 err,
@@ -616,7 +621,12 @@ mod tests {
     fn test_require_fresh_timestamp_now_passes() {
         let now = jiff::Timestamp::now().as_second();
         assert!(
-            require_fresh_timestamp(now, KEY_DELETE_MAX_AGE_SECS, jiff::Timestamp::now()).is_ok()
+            require_fresh_timestamp(
+                at_second(now),
+                KEY_DELETE_MAX_AGE_SECS,
+                jiff::Timestamp::now()
+            )
+            .is_ok()
         );
     }
 }

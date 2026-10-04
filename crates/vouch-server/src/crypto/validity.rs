@@ -1,89 +1,130 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! The window of time in which a token or a timestamped event is accepted,
-//! and the RFC 7519 `NumericDate` the window's bounds are read from.
+//! and the RFC 7519 NumericDate serde the window's bounds are read through.
 
 use jiff::{SignedDuration, Timestamp};
-use serde::de::{self, Visitor};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::fmt;
 
-/// A JWT time claim (`exp`, `nbf`, `iat`) as another party serialized it.
+/// Serde for a JWT time claim (`exp`, `nbf`, `iat`) held as a [`Timestamp`]:
+/// `#[serde(with = "numeric_date")]`, or `numeric_date::option` for an
+/// optional claim.
 ///
 /// RFC 7519 §2: a NumericDate is "A JSON numeric value representing the
 /// number of seconds from 1970-01-01T00:00:00Z UTC until the specified UTC
 /// date/time, ignoring leap seconds", and the same definition says
-/// "non-integer values can be represented". Every time claim read from a JWT
-/// that another party minted (an upstream IdP's ID token, a DPoP proof, a
-/// Request Object, a client assertion) has this type, and the value is kept
-/// as the instant it names: an integer through [`Timestamp::from_second`], a
+/// "non-integer values can be represented". jiff's own serde for `Timestamp`
+/// is an RFC 3339 string, and its `fmt::serde::timestamp::second` helpers
+/// read integers only, so every time claim read from a JWT that another
+/// party minted (an upstream IdP's ID token, a DPoP proof, a Request Object,
+/// a client assertion) goes through this module, and the value is kept as
+/// the instant it names: an integer through [`Timestamp::from_second`], a
 /// fraction through [`SignedDuration::try_from_secs_f64`]. Both are checked
 /// conversions, so a non-finite float or a value outside jiff's range fails
 /// to deserialize and the token fails closed. A producer that writes
 /// `1700000000.5` is then judged at that exact instant by [`ValidityWindow`].
 ///
-/// Tokens this server mints carry whole seconds and keep `i64` claim fields;
-/// [`ValidityWindow::from_payload`] reads them through this type as well.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct NumericDate(Timestamp);
+/// Tokens this server mints carry whole seconds (see
+/// [`numeric_date::whole_second`]) and serialize as the integers every
+/// consumer already reads.
+pub mod numeric_date {
+    use jiff::{SignedDuration, Timestamp};
+    use serde::de::{self, Visitor};
+    use serde::{Deserializer, Serializer};
+    use std::fmt;
 
-impl NumericDate {
-    /// The instant this claim names.
+    /// `at` truncated to the whole second, for the claims this server mints.
     #[must_use]
-    pub fn timestamp(self) -> Timestamp {
-        self.0
+    pub fn whole_second(at: Timestamp) -> Timestamp {
+        Timestamp::from_second(at.as_second()).unwrap_or(at)
     }
-}
 
-impl From<Timestamp> for NumericDate {
-    fn from(at: Timestamp) -> Self {
-        Self(at)
-    }
-}
-
-impl Serialize for NumericDate {
     /// A whole second serializes as the JSON integer every consumer reads; a
     /// fraction serializes as the JSON number RFC 7519 §2 permits.
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        if self.0.subsec_nanosecond() == 0 {
-            serializer.serialize_i64(self.0.as_second())
+    pub fn serialize<S: Serializer>(at: &Timestamp, serializer: S) -> Result<S::Ok, S::Error> {
+        if at.subsec_nanosecond() == 0 {
+            serializer.serialize_i64(at.as_second())
         } else {
-            serializer.serialize_f64(self.0.duration_since(Timestamp::UNIX_EPOCH).as_secs_f64())
+            serializer.serialize_f64(at.duration_since(Timestamp::UNIX_EPOCH).as_secs_f64())
         }
     }
-}
 
-impl<'de> Deserialize<'de> for NumericDate {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct NumericDateVisitor;
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Timestamp, D::Error> {
+        deserializer.deserialize_any(NumericDateVisitor)
+    }
 
-        impl Visitor<'_> for NumericDateVisitor {
-            type Value = NumericDate;
+    struct NumericDateVisitor;
 
-            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str("an RFC 7519 NumericDate (a JSON number of seconds)")
-            }
+    impl Visitor<'_> for NumericDateVisitor {
+        type Value = Timestamp;
 
-            fn visit_i64<E: de::Error>(self, value: i64) -> Result<NumericDate, E> {
-                Timestamp::from_second(value)
-                    .map(NumericDate)
-                    .map_err(|e| E::custom(format!("NumericDate is not an instant: {e}")))
-            }
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("an RFC 7519 NumericDate (a JSON number of seconds)")
+        }
 
-            fn visit_u64<E: de::Error>(self, value: u64) -> Result<NumericDate, E> {
-                let seconds = i64::try_from(value)
-                    .map_err(|_| E::custom("NumericDate is beyond the representable range"))?;
-                self.visit_i64(seconds)
-            }
+        fn visit_i64<E: de::Error>(self, value: i64) -> Result<Timestamp, E> {
+            Timestamp::from_second(value)
+                .map_err(|e| E::custom(format!("NumericDate is not an instant: {e}")))
+        }
 
-            fn visit_f64<E: de::Error>(self, value: f64) -> Result<NumericDate, E> {
-                SignedDuration::try_from_secs_f64(value)
-                    .and_then(Timestamp::from_duration)
-                    .map(NumericDate)
-                    .map_err(|e| E::custom(format!("NumericDate is not an instant: {e}")))
+        fn visit_u64<E: de::Error>(self, value: u64) -> Result<Timestamp, E> {
+            let seconds = i64::try_from(value)
+                .map_err(|_| E::custom("NumericDate is beyond the representable range"))?;
+            self.visit_i64(seconds)
+        }
+
+        fn visit_f64<E: de::Error>(self, value: f64) -> Result<Timestamp, E> {
+            SignedDuration::try_from_secs_f64(value)
+                .and_then(Timestamp::from_duration)
+                .map_err(|e| E::custom(format!("NumericDate is not an instant: {e}")))
+        }
+    }
+
+    /// `#[serde(default, with = "numeric_date::option")]` for an optional claim.
+    pub mod option {
+        use jiff::Timestamp;
+        use serde::de::{self, Visitor};
+        use serde::{Deserializer, Serializer};
+        use std::fmt;
+
+        pub fn serialize<S: Serializer>(
+            at: &Option<Timestamp>,
+            serializer: S,
+        ) -> Result<S::Ok, S::Error> {
+            match at {
+                Some(at) => super::serialize(at, serializer),
+                None => serializer.serialize_none(),
             }
         }
 
-        deserializer.deserialize_any(NumericDateVisitor)
+        pub fn deserialize<'de, D: Deserializer<'de>>(
+            deserializer: D,
+        ) -> Result<Option<Timestamp>, D::Error> {
+            deserializer.deserialize_option(OptionVisitor)
+        }
+
+        struct OptionVisitor;
+
+        impl<'de> Visitor<'de> for OptionVisitor {
+            type Value = Option<Timestamp>;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("an RFC 7519 NumericDate or null")
+            }
+
+            fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+
+            fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(None)
+            }
+
+            fn visit_some<D: Deserializer<'de>>(
+                self,
+                deserializer: D,
+            ) -> Result<Self::Value, D::Error> {
+                super::deserialize(deserializer).map(Some)
+            }
+        }
     }
 }
 
@@ -119,10 +160,10 @@ impl ValidityWindow {
     pub(crate) const OWN_TOKEN_NBF_LEEWAY_SECS: i64 = 60;
 
     /// The window a JWT's `exp` and `nbf` claims describe.
-    pub(crate) fn from_claims(exp: Option<NumericDate>, nbf: Option<NumericDate>) -> Self {
+    pub(crate) fn from_claims(exp: Option<Timestamp>, nbf: Option<Timestamp>) -> Self {
         Self {
-            not_before: nbf.map(NumericDate::timestamp),
-            expires: exp.map(NumericDate::timestamp),
+            not_before: nbf,
+            expires: exp,
         }
     }
 
@@ -141,7 +182,7 @@ impl ValidityWindow {
     /// verified.
     ///
     /// `None` when the payload does not decode, or `exp` or `nbf` is present
-    /// but is not a [`NumericDate`]. RFC 7519 §4.1.4 and §4.1.5: each value
+    /// but is not a NumericDate. RFC 7519 §4.1.4 and §4.1.5: each value
     /// "MUST be a number containing a NumericDate value."
     pub(crate) fn from_token(token: &str) -> Option<Self> {
         let payload = super::jwt::decode_segment(token.split('.').nth(1)?)?;
@@ -151,7 +192,7 @@ impl ValidityWindow {
     /// Read the window from a decoded JWT payload; see [`Self::from_token`].
     pub(crate) fn from_payload(payload: &serde_json::Value) -> Option<Self> {
         let read = |name| match payload.get(name) {
-            Some(value) => NumericDate::deserialize(value).ok().map(Some),
+            Some(value) => numeric_date::deserialize(value).ok().map(Some),
             None => Some(None),
         };
         Some(Self::from_claims(read("exp")?, read("nbf")?))
@@ -203,9 +244,16 @@ impl ValidityWindow {
     reason = "test instants are literals inside jiff's range"
 )]
 mod tests {
-    use super::{NumericDate, ValidityWindow};
-    use crate::test_utils::{at_second, numeric_date};
+    use super::{ValidityWindow, numeric_date};
+    use crate::test_utils::at_second;
     use jiff::{SignedDuration, Timestamp};
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Serialize, Deserialize)]
+    struct Claim {
+        #[serde(with = "numeric_date")]
+        exp: Timestamp,
+    }
 
     const NOW: i64 = 1_700_000_000;
 
@@ -214,7 +262,7 @@ mod tests {
     // whose live `VerifyMac` call cannot run in a unit test.
     #[test]
     fn exp_boundary() {
-        let window = |exp| ValidityWindow::from_claims(Some(numeric_date(exp)), None);
+        let window = |exp| ValidityWindow::from_claims(Some(at_second(exp)), None);
         assert!(
             window(NOW + 1).accepts_own_token_at(at_second(NOW)),
             "one second before exp"
@@ -238,7 +286,7 @@ mod tests {
     // not-before date/time listed in the "nbf" claim".
     #[test]
     fn nbf_boundary() {
-        let window = ValidityWindow::from_claims(None, Some(numeric_date(NOW)));
+        let window = ValidityWindow::from_claims(None, Some(at_second(NOW)));
         assert!(!window.not_yet_valid_at(at_second(NOW), 0), "now == nbf");
         assert!(window.not_yet_valid_at(at_second(NOW - 1), 0));
         assert!(
@@ -279,38 +327,38 @@ mod tests {
     // values can be represented."
     #[test]
     fn numeric_date_reads_every_json_number() {
-        let read = |v: serde_json::Value| serde_json::from_value::<NumericDate>(v).ok();
-        assert_eq!(read(serde_json::json!(NOW)), Some(numeric_date(NOW)));
+        let read = |v: serde_json::Value| numeric_date::deserialize(&v).ok();
+        assert_eq!(read(serde_json::json!(NOW)), Some(at_second(NOW)));
         assert_eq!(
             read(serde_json::json!(1_700_000_000.0_f64)),
-            Some(numeric_date(NOW)),
+            Some(at_second(NOW)),
             "a whole-valued float is the same instant as the integer"
         );
         assert_eq!(
             read(serde_json::json!(1_700_000_000.5_f64)),
-            Some(NumericDate::from(
+            Some(
                 at_second(NOW)
                     .checked_add(SignedDuration::from_millis(500))
                     .unwrap()
-            )),
+            ),
             "the fraction is kept"
         );
         assert_eq!(
             read(serde_json::json!(1_700_000_000.25_f64)),
-            Some(NumericDate::from(
+            Some(
                 at_second(NOW)
                     .checked_add(SignedDuration::from_millis(250))
                     .unwrap()
-            )),
+            ),
             "no rounding to a coarser unit"
         );
         assert_eq!(
             read(serde_json::json!(-0.5_f64)),
-            Some(NumericDate::from(
+            Some(
                 Timestamp::UNIX_EPOCH
                     .checked_sub(SignedDuration::from_millis(500))
                     .unwrap()
-            )),
+            ),
             "before the epoch is still an instant"
         );
         assert_eq!(read(serde_json::json!(u64::MAX)), None, "beyond i64");
@@ -356,20 +404,17 @@ mod tests {
 
     #[test]
     fn numeric_date_serializes_as_the_number_it_was() {
+        let json = |exp| serde_json::to_string(&Claim { exp }).ok();
         assert_eq!(
-            serde_json::to_string(&numeric_date(NOW)).ok().as_deref(),
-            Some("1700000000")
+            json(at_second(NOW)).as_deref(),
+            Some(r#"{"exp":1700000000}"#)
         );
-        assert_eq!(
-            serde_json::to_string(&NumericDate::from(
-                at_second(NOW)
-                    .checked_add(SignedDuration::from_millis(500))
-                    .unwrap()
-            ))
-            .ok()
-            .as_deref(),
-            Some("1700000000.5")
-        );
+        let half = at_second(NOW)
+            .checked_add(SignedDuration::from_millis(500))
+            .unwrap();
+        assert_eq!(json(half).as_deref(), Some(r#"{"exp":1700000000.5}"#));
+        let parsed: Claim = serde_json::from_str(r#"{"exp":1700000000.5}"#).unwrap();
+        assert_eq!(parsed.exp, half);
     }
 
     #[test]
@@ -401,7 +446,7 @@ mod tests {
         assert!(!ValidityWindow::issued_at(Timestamp::MIN, 60).accepts_at(Timestamp::MAX, 0, 0));
         assert!(!ValidityWindow::issued_at(Timestamp::MAX, 60).accepts_at(Timestamp::MIN, 0, 0));
         assert!(
-            !ValidityWindow::from_claims(Some(numeric_date(NOW)), None)
+            !ValidityWindow::from_claims(Some(at_second(NOW)), None)
                 .expired_at(Timestamp::MIN, i64::MAX)
         );
     }

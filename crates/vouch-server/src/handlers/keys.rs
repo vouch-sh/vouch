@@ -64,7 +64,7 @@ impl RegistrationState {
         arrival: ArrivalTime,
     ) -> Result<Self, StateTokenError> {
         signer
-            .decode_state_token(token, JwtType::RegistrationState, arrival.as_second())
+            .decode_state_token(token, JwtType::RegistrationState, arrival.timestamp())
             .await
     }
 }
@@ -596,7 +596,7 @@ mod tests {
             .decode_state_token(
                 &token,
                 JwtType::BrowserRegistrationState,
-                test_arrival().as_second(),
+                test_arrival().timestamp(),
             )
             .await;
         assert!(result.is_err(), "Wrong JWT type should be rejected");

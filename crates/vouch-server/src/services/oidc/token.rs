@@ -13,6 +13,7 @@ use crate::AppState;
 use crate::arrival::ArrivalTime;
 use crate::assurance::{ACR_AAL3, AuthMethod, HardwareVerification};
 use crate::crypto::hash_token;
+use crate::crypto::validity::numeric_date;
 use crate::db::{self, Authenticator, OAuthClient, User};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use crate::infra::jwks::JwksOrigin;
@@ -25,6 +26,7 @@ use crate::services::auth::{
 use aws_lc_rs::digest::{self, SHA256};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use jiff::{SignedDuration, Timestamp};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -247,12 +249,18 @@ pub struct IdTokenClaims {
     /// OIDC Core Section 2: Audience(s).
     pub aud: String,
     /// OIDC Core Section 2: Expiration time.
-    pub exp: i64,
+    #[serde(with = "numeric_date")]
+    pub exp: Timestamp,
     /// OIDC Core Section 2: Issued at time.
-    pub iat: i64,
+    #[serde(with = "numeric_date")]
+    pub iat: Timestamp,
     /// OIDC Core Section 2: Time when the End-User authentication occurred.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub auth_time: Option<i64>,
+    #[serde(
+        default,
+        with = "numeric_date::option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub auth_time: Option<Timestamp>,
     /// OIDC Core Section 3.1.2.1: Nonce value from the authorization request.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nonce: Option<String>,
@@ -1001,9 +1009,8 @@ async fn generate_id_token(
     let expires_seconds = i64::try_from(params.expires_in)
         .map_err(|_| ServiceError::Internal("Invalid expires_in value".to_string()))?;
     let exp = now
-        .as_second()
-        .checked_add(expires_seconds)
-        .ok_or_else(|| ServiceError::Internal("Expiration time overflow".to_string()))?;
+        .checked_add(SignedDuration::from_secs(expires_seconds))
+        .map_err(|_| ServiceError::Internal("Expiration time overflow".to_string()))?;
 
     // RFC 9449 / RFC 8705 / RFC 7800 §3.1: the ID token goes to the client
     // that proved the key, so it carries the same confirmation as the access
@@ -1016,8 +1023,8 @@ async fn generate_id_token(
         iss: state.config().base_url.to_string(),
         sub: params.user_id.to_string(),
         aud: params.client_id.to_string(),
-        exp,
-        iat: now.as_second(),
+        exp: numeric_date::whole_second(exp),
+        iat: numeric_date::whole_second(now),
         auth_time: params.hardware_verification.auth_time(),
         nonce: params.nonce.map(String::from),
         email: if has_email {
@@ -1445,7 +1452,7 @@ mod tests {
     use crate::db::{self, ClientKeys, ClientType, OAuthClient};
     use crate::services::oidc::authorization::CodeChallengeMethod;
     use crate::services::oidc::mtls::{self, ClientCertificate};
-    use crate::test_utils::{self, TestClientSpec, TestJwks};
+    use crate::test_utils::{self, TestClientSpec, TestJwks, at_second};
 
     fn assert_oauth_error<T: std::fmt::Debug>(
         result: Result<T, ServiceError>,
@@ -1833,8 +1840,8 @@ mod tests {
             iss: "https://test.example.com".to_string(),
             sub: "user-1".to_string(),
             aud: "client-1".to_string(),
-            exp: 9_999_999_999,
-            iat: 0,
+            exp: at_second(9_999_999_999),
+            iat: at_second(0),
             auth_time: None,
             nonce,
             email: None,

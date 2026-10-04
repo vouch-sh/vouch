@@ -249,7 +249,7 @@ impl BrowserRegistrationState {
             .decode_state_token(
                 token,
                 JwtType::BrowserRegistrationState,
-                arrival.as_second(),
+                arrival.timestamp(),
             )
             .await
     }

@@ -174,7 +174,7 @@ impl AssertionGrant {
             .decode_state_token(
                 payload.state.as_str(),
                 JwtType::Fido2ChallengeState,
-                arrival.as_second(),
+                arrival.timestamp(),
             )
             .await
             .map_err(|e| {
