@@ -942,7 +942,7 @@ mod tests {
     use crate::db::documents::dpop::DpopJtiDoc;
     use crate::db::dpop;
     use crate::db::store::DocumentStore;
-    use crate::test_utils::test_arrival;
+    use crate::test_utils::{at_second, numeric_date, test_arrival};
     use jiff::Timestamp;
 
     fn dpop_headers(values: &[&[u8]]) -> HeaderMap {
@@ -1131,7 +1131,7 @@ mod tests {
             jti: "test-jti".to_string(),
             htm: htm.to_string(),
             htu: htu.to_string(),
-            iat: date(iat),
+            iat: numeric_date(iat),
             nonce: None,
             ath: None,
             source: None,
@@ -1142,19 +1142,11 @@ mod tests {
         jiff::Timestamp::now().as_second()
     }
 
-    fn at(secs: i64) -> Timestamp {
-        Timestamp::from_second(secs).unwrap()
-    }
-
-    fn date(secs: i64) -> NumericDate {
-        NumericDate::from(at(secs))
-    }
-
     /// Build a validation-params struct with sensible defaults, overriding
     /// only the fields a given test cares about.
     fn validation_params(now: i64, max_age_seconds: i64) -> DpopClaimsValidation<'static> {
         DpopClaimsValidation {
-            now: at(now),
+            now: at_second(now),
             expected_method: "POST",
             accepted_uris: &[],
             max_age_seconds,
@@ -1237,7 +1229,7 @@ mod tests {
         .expect("a fractional iat is a NumericDate");
         assert_eq!(
             claims.iat.timestamp(),
-            at(NOW - 1)
+            at_second(NOW - 1)
                 .checked_add(jiff::SignedDuration::from_millis(500))
                 .unwrap(),
             "the fraction is kept"
@@ -1859,8 +1851,8 @@ mod tests {
         // this replay moment.
         let replay_now = t0 + elapsed_within;
         assert!(
-            ValidityWindow::issued_at(at(edge_iat), config_max_age).accepts_at(
-                at(replay_now),
+            ValidityWindow::issued_at(at_second(edge_iat), config_max_age).accepts_at(
+                at_second(replay_now),
                 0,
                 skew
             ),
@@ -1890,8 +1882,8 @@ mod tests {
 
         let after_validity = t0 + elapsed_past;
         assert!(
-            !ValidityWindow::issued_at(at(edge_iat), config_max_age).accepts_at(
-                at(after_validity),
+            !ValidityWindow::issued_at(at_second(edge_iat), config_max_age).accepts_at(
+                at_second(after_validity),
                 0,
                 skew
             ),
@@ -1979,8 +1971,8 @@ mod tests {
         // fix closes by retaining for `max_age + skew`.
         let replay_now = t0 + config_max_age + 30;
         assert!(
-            ValidityWindow::issued_at(at(edge_iat), config_max_age).accepts_at(
-                at(replay_now),
+            ValidityWindow::issued_at(at_second(edge_iat), config_max_age).accepts_at(
+                at_second(replay_now),
                 0,
                 skew
             ),
@@ -1990,8 +1982,8 @@ mod tests {
         // Anchor the edge: one second past max_age + skew must be rejected.
         let after_validity = t0 + config_max_age + skew + 1;
         assert!(
-            !ValidityWindow::issued_at(at(edge_iat), config_max_age).accepts_at(
-                at(after_validity),
+            !ValidityWindow::issued_at(at_second(edge_iat), config_max_age).accepts_at(
+                at_second(after_validity),
                 0,
                 skew
             ),
@@ -2167,11 +2159,11 @@ mod tests {
 
         // The most forward-skewed proof accepted at `now_sec`.
         let iat = now_sec.saturating_add(skew);
-        let window = ValidityWindow::issued_at(at(iat), config_max_age);
-        assert!(window.accepts_at(at(now_sec), 0, skew));
+        let window = ValidityWindow::issued_at(at_second(iat), config_max_age);
+        assert!(window.accepts_at(at_second(now_sec), 0, skew));
         assert!(
-            !ValidityWindow::issued_at(at(iat + 1), config_max_age).accepts_at(
-                at(now_sec),
+            !ValidityWindow::issued_at(at_second(iat + 1), config_max_age).accepts_at(
+                at_second(now_sec),
                 0,
                 skew
             )
@@ -2179,11 +2171,11 @@ mod tests {
 
         let first_reject = iat.saturating_add(config_max_age);
         assert!(
-            window.accepts_at(at(first_reject - 1), 0, skew),
+            window.accepts_at(at_second(first_reject - 1), 0, skew),
             "last accepting second"
         );
         assert!(
-            !window.accepts_at(at(first_reject), 0, skew),
+            !window.accepts_at(at_second(first_reject), 0, skew),
             "first refusing second"
         );
 

@@ -331,17 +331,10 @@ pub fn map_algorithm(alg: JwsAlgorithm) -> jsonwebtoken::Algorithm {
 )]
 mod tests {
     use super::*;
+    use crate::test_utils::{at_second, numeric_date};
     use base64::Engine as _;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use jiff::Timestamp;
-
-    fn at(secs: i64) -> Timestamp {
-        Timestamp::from_second(secs).unwrap()
-    }
-
-    fn date(secs: i64) -> NumericDate {
-        NumericDate::from(at(secs))
-    }
 
     // RFC 8725 §3.9: the audience claim may be a single string.
     #[test]
@@ -588,8 +581,8 @@ mod tests {
             iss: "https://client.example.com".to_string(),
             sub: "https://client.example.com".to_string(),
             aud: JwtAudience::Single("https://auth.example.com/oauth/token".to_string()),
-            exp: date(now + 300),
-            iat: Some(date(now)),
+            exp: numeric_date(now + 300),
+            iat: Some(numeric_date(now)),
             nbf: None,
             jti: Some("unique-jti-123".to_string()),
         }
@@ -659,12 +652,12 @@ mod tests {
             jsonwebtoken::Algorithm::ES256,
             TEST_AUDIENCES,
             MAX_LIFETIME,
-            at(now),
+            at_second(now),
         )
         .expect("fractional exp, iat, and nbf inside the window must pass");
         assert_eq!(
             validated.claims.exp.timestamp(),
-            at(now)
+            at_second(now)
                 .checked_add(SignedDuration::from_millis(300_500))
                 .unwrap(),
             "exp keeps its fraction"
@@ -672,7 +665,7 @@ mod tests {
         assert_eq!(
             validated.claims.iat.map(NumericDate::timestamp),
             Some(
-                at(now)
+                at_second(now)
                     .checked_sub(SignedDuration::from_millis(500))
                     .unwrap()
             ),
@@ -687,8 +680,8 @@ mod tests {
         let now = Timestamp::now().as_second();
         // Expired 1 hour ago — well beyond 30s clock skew tolerance.
         let mut claims = valid_claims(now);
-        claims.iat = Some(date(now - 7200));
-        claims.exp = date(now - 3600);
+        claims.iat = Some(numeric_date(now - 7200));
+        claims.exp = numeric_date(now - 3600);
 
         let jwt = sign_test_jwt(&claims, &enc);
         let header = parse_assertion_header(&jwt).expect("header should parse");
@@ -722,8 +715,8 @@ mod tests {
         let now = 1_700_000_000;
         let validate = |exp: i64| {
             let mut claims = valid_claims(now);
-            claims.iat = Some(date(now - 60));
-            claims.exp = date(exp);
+            claims.iat = Some(numeric_date(now - 60));
+            claims.exp = numeric_date(exp);
             let jwt = sign_test_jwt(&claims, &enc);
             let header = parse_assertion_header(&jwt).expect("header should parse");
             validate_jwt_assertion(
@@ -733,7 +726,7 @@ mod tests {
                 jsonwebtoken::Algorithm::ES256,
                 TEST_AUDIENCES,
                 MAX_LIFETIME,
-                at(now),
+                at_second(now),
             )
         };
         assert!(validate(now - CLOCK_SKEW_SECONDS + 1).is_ok());
@@ -747,8 +740,8 @@ mod tests {
         let now = Timestamp::now().as_second();
         // exp is 5 seconds in the past — within the 10s clock skew window.
         let mut claims = valid_claims(now);
-        claims.iat = Some(date(now - 300));
-        claims.exp = date(now - 5);
+        claims.iat = Some(numeric_date(now - 300));
+        claims.exp = numeric_date(now - 5);
 
         let jwt = sign_test_jwt(&claims, &enc);
         let header = parse_assertion_header(&jwt).expect("header should parse");
@@ -777,7 +770,7 @@ mod tests {
         let now = Timestamp::now().as_second();
         let mut claims = valid_claims(now);
         // nbf 1 hour in the future — well beyond clock skew.
-        claims.nbf = Some(date(now + 3600));
+        claims.nbf = Some(numeric_date(now + 3600));
 
         let jwt = sign_test_jwt(&claims, &enc);
         let header = parse_assertion_header(&jwt).expect("header should parse");
@@ -808,7 +801,7 @@ mod tests {
         let now = Timestamp::now().as_second();
         let mut claims = valid_claims(now);
         // nbf 5 seconds in the future — within 10s clock skew.
-        claims.nbf = Some(date(now + 5));
+        claims.nbf = Some(numeric_date(now + 5));
 
         let jwt = sign_test_jwt(&claims, &enc);
         let header = parse_assertion_header(&jwt).expect("header should parse");
@@ -837,8 +830,8 @@ mod tests {
         let now = Timestamp::now().as_second();
         let mut claims = valid_claims(now);
         // iat 1 hour in the future.
-        claims.iat = Some(date(now + 3600));
-        claims.exp = date(now + 7200);
+        claims.iat = Some(numeric_date(now + 3600));
+        claims.exp = numeric_date(now + 7200);
 
         let jwt = sign_test_jwt(&claims, &enc);
         let header = parse_assertion_header(&jwt).expect("header should parse");
@@ -869,8 +862,8 @@ mod tests {
         let now = Timestamp::now().as_second();
         let mut claims = valid_claims(now);
         // exp - iat = 600s but max_lifetime = 300s.
-        claims.iat = Some(date(now));
-        claims.exp = date(now + 600);
+        claims.iat = Some(numeric_date(now));
+        claims.exp = numeric_date(now + 600);
         let max_lifetime = 300;
 
         let jwt = sign_test_jwt(&claims, &enc);
@@ -902,8 +895,8 @@ mod tests {
         let now = Timestamp::now().as_second();
         let mut claims = valid_claims(now);
         // exp - iat = 300s exactly, max_lifetime = 300s — should pass.
-        claims.iat = Some(date(now));
-        claims.exp = date(now + 300);
+        claims.iat = Some(numeric_date(now));
+        claims.exp = numeric_date(now + 300);
         let max_lifetime = 300;
 
         let jwt = sign_test_jwt(&claims, &enc);
@@ -1110,8 +1103,8 @@ mod tests {
             iss: "https://my-app.example.com".to_string(),
             sub: "service-account-42".to_string(),
             aud: JwtAudience::Single("https://auth.example.com/oauth/token".to_string()),
-            exp: date(now + 300),
-            iat: Some(date(now)),
+            exp: numeric_date(now + 300),
+            iat: Some(numeric_date(now)),
             nbf: None,
             jti: Some("jti-abc".to_string()),
         };
@@ -1123,7 +1116,7 @@ mod tests {
         assert_eq!(decoded.iss, "https://my-app.example.com");
         assert_eq!(decoded.sub, "service-account-42");
         assert_eq!(decoded.exp, claims.exp);
-        assert_eq!(decoded.iat, Some(date(now)));
+        assert_eq!(decoded.iat, Some(numeric_date(now)));
         assert_eq!(decoded.jti.as_deref(), Some("jti-abc"));
     }
 

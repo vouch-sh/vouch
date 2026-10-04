@@ -36,6 +36,7 @@ use crate::config::{
 use crate::crypto::document_crypto::DocumentCrypto;
 use crate::crypto::jwt::StateTokenSigner;
 use crate::crypto::keys::OidcSigningKey;
+use crate::crypto::validity::NumericDate;
 use crate::db::CreateAuthenticatorParams;
 use crate::db::CreatePendingOAuthParams;
 use crate::db::CreateScimTokenParams;
@@ -171,6 +172,19 @@ pub fn test_config() -> ServerConfig {
 #[must_use]
 pub fn test_arrival() -> ArrivalTime {
     ArrivalTime::for_test(jiff::Timestamp::now())
+}
+
+/// The instant `unix_seconds` names, for boundary tests written against
+/// integer-second claim values.
+#[must_use]
+pub fn at_second(unix_seconds: i64) -> jiff::Timestamp {
+    jiff::Timestamp::from_second(unix_seconds).expect("test timestamp in range")
+}
+
+/// A whole-second [`NumericDate`] claim value.
+#[must_use]
+pub fn numeric_date(unix_seconds: i64) -> NumericDate {
+    NumericDate::from(at_second(unix_seconds))
 }
 
 /// Create a test AppState with in-memory database.

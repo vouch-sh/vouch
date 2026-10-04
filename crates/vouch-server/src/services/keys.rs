@@ -403,10 +403,8 @@ pub(crate) async fn delete_key(
 )]
 mod tests {
     use super::*;
+    use crate::test_utils::at_second;
 
-    fn at(secs: i64) -> Timestamp {
-        Timestamp::from_second(secs).unwrap()
-    }
     use crate::{db, test_utils};
 
     fn make_iat(seconds_ago: i64) -> i64 {
@@ -440,8 +438,8 @@ mod tests {
     #[test]
     fn test_require_fresh_timestamp_boundary_exactly_at_max_age() {
         let now = 1_700_000_000;
-        assert!(require_fresh_timestamp(now - 59, 60, at(now)).is_ok());
-        assert!(require_fresh_timestamp(now - 60, 60, at(now)).is_err());
+        assert!(require_fresh_timestamp(now - 59, 60, at_second(now)).is_ok());
+        assert!(require_fresh_timestamp(now - 60, 60, at_second(now)).is_err());
     }
 
     #[test]

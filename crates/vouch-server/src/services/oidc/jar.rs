@@ -702,7 +702,7 @@ mod tests {
     use super::*;
     use crate::crypto::alg::JwsAlgorithm;
     use crate::services::oidc::fapi::STANDARD_CLOCK_SKEW_SECONDS;
-    use crate::test_utils::{self, test_arrival};
+    use crate::test_utils::{self, at_second, test_arrival};
     use base64::Engine as _;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use jiff::Timestamp;
@@ -1058,7 +1058,7 @@ mod tests {
         // Manually check expiration (as validate_request_object would)
         let exp = token_data.claims.exp.unwrap().timestamp();
         assert!(
-            exp < at(now - STANDARD_CLOCK_SKEW_SECONDS),
+            exp < at_second(now - STANDARD_CLOCK_SKEW_SECONDS),
             "Expired token should be detected"
         );
     }
@@ -1203,20 +1203,13 @@ mod tests {
     const TEMPORAL_NOW: i64 = 1_700_000_000;
     const TEMPORAL_SKEW: i64 = 10;
 
-    fn at(secs: i64) -> Timestamp {
-        Timestamp::from_second(secs).unwrap()
-    }
-
-    fn temporal_now() -> Timestamp {
-        at(TEMPORAL_NOW)
-    }
-
     // RFC 9101 §4: temporal claims are not required by the base profile.
     #[test]
     fn test_jar_temporal_no_claims_accepted() {
         let claims = temporal_claims(serde_json::json!({}));
         assert!(
-            validate_temporal_claims(&claims, TEMPORAL_SKEW, false, temporal_now()).is_ok(),
+            validate_temporal_claims(&claims, TEMPORAL_SKEW, false, at_second(TEMPORAL_NOW))
+                .is_ok(),
             "absent temporal claims must be accepted"
         );
     }
@@ -1233,12 +1226,13 @@ mod tests {
             "iat": now_f - 100.5,
         }));
         assert!(
-            validate_temporal_claims(&inside, TEMPORAL_SKEW, true, temporal_now()).is_ok(),
+            validate_temporal_claims(&inside, TEMPORAL_SKEW, true, at_second(TEMPORAL_NOW)).is_ok(),
             "fractional exp, nbf, and iat inside the window must be accepted"
         );
         let expired = temporal_claims(serde_json::json!({"exp": now_f - 100.5}));
         assert!(
-            validate_temporal_claims(&expired, TEMPORAL_SKEW, false, temporal_now()).is_err(),
+            validate_temporal_claims(&expired, TEMPORAL_SKEW, false, at_second(TEMPORAL_NOW))
+                .is_err(),
             "a fractional exp in the past is judged expired"
         );
     }
@@ -1250,12 +1244,13 @@ mod tests {
     fn test_jar_temporal_exp_boundary() {
         let inside = temporal_claims(serde_json::json!({"exp": TEMPORAL_NOW - TEMPORAL_SKEW + 1}));
         assert!(
-            validate_temporal_claims(&inside, TEMPORAL_SKEW, false, temporal_now()).is_ok(),
+            validate_temporal_claims(&inside, TEMPORAL_SKEW, false, at_second(TEMPORAL_NOW))
+                .is_ok(),
             "exp == now - skew + 1 must be accepted"
         );
 
         let at_edge = temporal_claims(serde_json::json!({"exp": TEMPORAL_NOW - TEMPORAL_SKEW}));
-        let err = validate_temporal_claims(&at_edge, TEMPORAL_SKEW, false, temporal_now())
+        let err = validate_temporal_claims(&at_edge, TEMPORAL_SKEW, false, at_second(TEMPORAL_NOW))
             .expect_err("exp == now - skew must be rejected");
         assert_eq!(
             *oauth_error_code(&err),
@@ -1269,14 +1264,16 @@ mod tests {
     fn test_jar_temporal_nbf_future_boundary() {
         let at_edge = temporal_claims(serde_json::json!({"nbf": TEMPORAL_NOW + TEMPORAL_SKEW}));
         assert!(
-            validate_temporal_claims(&at_edge, TEMPORAL_SKEW, false, temporal_now()).is_ok(),
+            validate_temporal_claims(&at_edge, TEMPORAL_SKEW, false, at_second(TEMPORAL_NOW))
+                .is_ok(),
             "nbf == now + skew must be accepted"
         );
 
         let past_edge =
             temporal_claims(serde_json::json!({"nbf": TEMPORAL_NOW + TEMPORAL_SKEW + 1}));
         assert!(
-            validate_temporal_claims(&past_edge, TEMPORAL_SKEW, false, temporal_now()).is_err(),
+            validate_temporal_claims(&past_edge, TEMPORAL_SKEW, false, at_second(TEMPORAL_NOW))
+                .is_err(),
             "nbf == now + skew + 1 must be rejected"
         );
     }
@@ -1287,18 +1284,21 @@ mod tests {
         let at_edge =
             temporal_claims(serde_json::json!({"nbf": TEMPORAL_NOW - 3600 - TEMPORAL_SKEW}));
         assert!(
-            validate_temporal_claims(&at_edge, TEMPORAL_SKEW, true, temporal_now()).is_ok(),
+            validate_temporal_claims(&at_edge, TEMPORAL_SKEW, true, at_second(TEMPORAL_NOW))
+                .is_ok(),
             "FAPI: nbf == now - 3600 - skew must be accepted"
         );
 
         let past_edge =
             temporal_claims(serde_json::json!({"nbf": TEMPORAL_NOW - 3600 - TEMPORAL_SKEW - 1}));
         assert!(
-            validate_temporal_claims(&past_edge, TEMPORAL_SKEW, true, temporal_now()).is_err(),
+            validate_temporal_claims(&past_edge, TEMPORAL_SKEW, true, at_second(TEMPORAL_NOW))
+                .is_err(),
             "FAPI: nbf == now - 3600 - skew - 1 must be rejected"
         );
         assert!(
-            validate_temporal_claims(&past_edge, TEMPORAL_SKEW, false, temporal_now()).is_ok(),
+            validate_temporal_claims(&past_edge, TEMPORAL_SKEW, false, at_second(TEMPORAL_NOW))
+                .is_ok(),
             "non-FAPI: far-past nbf must be accepted"
         );
     }
@@ -1308,14 +1308,16 @@ mod tests {
     fn test_jar_temporal_iat_boundary() {
         let at_edge = temporal_claims(serde_json::json!({"iat": TEMPORAL_NOW + TEMPORAL_SKEW}));
         assert!(
-            validate_temporal_claims(&at_edge, TEMPORAL_SKEW, false, temporal_now()).is_ok(),
+            validate_temporal_claims(&at_edge, TEMPORAL_SKEW, false, at_second(TEMPORAL_NOW))
+                .is_ok(),
             "iat == now + skew must be accepted"
         );
 
         let past_edge =
             temporal_claims(serde_json::json!({"iat": TEMPORAL_NOW + TEMPORAL_SKEW + 1}));
         assert!(
-            validate_temporal_claims(&past_edge, TEMPORAL_SKEW, false, temporal_now()).is_err(),
+            validate_temporal_claims(&past_edge, TEMPORAL_SKEW, false, at_second(TEMPORAL_NOW))
+                .is_err(),
             "iat == now + skew + 1 must be rejected"
         );
     }
