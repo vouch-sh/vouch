@@ -614,7 +614,7 @@ pub(crate) async fn exchange_token(
     let expires_in = cap_lifetime_by_subject_ttl(
         state.config().session_hours.saturating_mul(3600),
         subject_decoded.exp(),
-        arrival.as_second(),
+        arrival.timestamp(),
     );
 
     // Get authenticator_id from the session record (server-side, not from JWT)
@@ -1053,15 +1053,18 @@ fn calculate_granted_scope(
 /// `saturating_sub` + `try_from(..).unwrap_or(0)`. When the subject token has
 /// no `exp` claim, the configured `session_secs` is returned unchanged.
 ///
-/// `now` is taken as integer seconds because the subject JWT `exp` is an
-/// integer-second claim (RFC 7519 §4.1.4), so sub-second comparison would add
-/// no precision.
-fn cap_lifetime_by_subject_ttl(session_secs: u64, subject_exp: Option<i64>, now: i64) -> u64 {
+/// The remaining lifetime is the whole seconds from `now` to the subject's
+/// `exp`; a partial second is not granted.
+fn cap_lifetime_by_subject_ttl(
+    session_secs: u64,
+    subject_exp: Option<Timestamp>,
+    now: Timestamp,
+) -> u64 {
     let Some(subject_exp) = subject_exp else {
         return session_secs;
     };
-    let remaining = subject_exp.saturating_sub(now);
-    let remaining_u64 = u64::try_from(remaining).unwrap_or(0);
+    let remaining = subject_exp.duration_since(now);
+    let remaining_u64 = u64::try_from(remaining.as_secs()).unwrap_or(0);
     session_secs.min(remaining_u64)
 }
 
@@ -1075,6 +1078,7 @@ mod tests {
     use crate::arrival::ArrivalTime;
     use crate::crypto;
     use crate::db::ClientInfo;
+    use crate::test_utils::at_second;
 
     #[test]
     fn test_calculate_granted_scope_with_available() {
@@ -1141,14 +1145,17 @@ mod tests {
     #[test]
     fn test_cap_lifetime_no_subject_exp_returns_full_session() {
         // No `exp` claim (e.g. opaque/bare JWT subject) — no cap applies.
-        assert_eq!(cap_lifetime_by_subject_ttl(28_800, None, 1_000_000), 28_800);
+        assert_eq!(
+            cap_lifetime_by_subject_ttl(28_800, None, at_second(1_000_000)),
+            28_800
+        );
     }
 
     #[test]
     fn test_cap_lifetime_subject_far_future_returns_session_secs() {
         // Subject outlives the configured session — cap is the session lifetime.
         assert_eq!(
-            cap_lifetime_by_subject_ttl(28_800, Some(5_000_000), 1_000_000),
+            cap_lifetime_by_subject_ttl(28_800, Some(at_second(5_000_000)), at_second(1_000_000)),
             28_800
         );
     }
@@ -1157,7 +1164,7 @@ mod tests {
     fn test_cap_lifetime_subject_shorter_than_session_caps_to_remaining() {
         // Subject has 60s left — issued token is capped to ~60s, not 28800s.
         assert_eq!(
-            cap_lifetime_by_subject_ttl(28_800, Some(1_000_060), 1_000_000),
+            cap_lifetime_by_subject_ttl(28_800, Some(at_second(1_000_060)), at_second(1_000_000)),
             60
         );
     }
@@ -1168,7 +1175,7 @@ mod tests {
         // remaining. The old `if remaining > 0` guard skipped the cap and
         // minted the full 28800s; the fix must clamp to 0.
         assert_eq!(
-            cap_lifetime_by_subject_ttl(28_800, Some(1_000_000), 1_000_000),
+            cap_lifetime_by_subject_ttl(28_800, Some(at_second(1_000_000)), at_second(1_000_000)),
             0
         );
     }
@@ -1179,7 +1186,7 @@ mod tests {
         // reachable if the JWT validation gate's leeway admitted it) must also
         // clamp to 0, never fall back to the full session lifetime.
         assert_eq!(
-            cap_lifetime_by_subject_ttl(28_800, Some(999_999), 1_000_000),
+            cap_lifetime_by_subject_ttl(28_800, Some(at_second(999_999)), at_second(1_000_000)),
             0
         );
     }
@@ -1189,7 +1196,7 @@ mod tests {
         // Just above the boundary — 1s remaining yields a 1s token, proving
         // the boundary fix does not over-clamp the positive-remaining path.
         assert_eq!(
-            cap_lifetime_by_subject_ttl(28_800, Some(1_000_001), 1_000_000),
+            cap_lifetime_by_subject_ttl(28_800, Some(at_second(1_000_001)), at_second(1_000_000)),
             1
         );
     }
@@ -1199,7 +1206,7 @@ mod tests {
         // A tiny configured `session_secs` with a long-lived subject must
         // return `session_secs`, not the subject's longer remaining.
         assert_eq!(
-            cap_lifetime_by_subject_ttl(30, Some(5_000_000), 1_000_000),
+            cap_lifetime_by_subject_ttl(30, Some(at_second(5_000_000)), at_second(1_000_000)),
             30
         );
     }

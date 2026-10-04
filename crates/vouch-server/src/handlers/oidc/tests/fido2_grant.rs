@@ -9,6 +9,7 @@
 use super::helpers::*;
 use crate::db::documents::user::UserDoc;
 use crate::db::{self, TokenEndpointAuthMethod};
+use crate::test_utils::at_second;
 use vouch_common::encoding::Raw;
 use vouch_common::fido2_types::Challenge;
 
@@ -1328,7 +1329,7 @@ async fn test_fido2_challenge_state_decodes_without_client_id_field() {
 
     let decoded: Fido2ChallengeState = state
         .state_signer
-        .decode_state_token(&token, JwtType::Fido2ChallengeState, now)
+        .decode_state_token(&token, JwtType::Fido2ChallengeState, at_second(now))
         .await
         .expect("decode legacy state token");
 

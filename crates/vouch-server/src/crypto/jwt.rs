@@ -17,6 +17,7 @@ use crate::crypto::keys::OidcSigningKey;
 use crate::crypto::validity::ValidityWindow;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use jiff::Timestamp;
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use serde::Deserialize;
 use serde::Serialize;
@@ -168,7 +169,7 @@ impl StateTokenSigner {
 
     /// Decode and verify a state token JWT, judging `exp` against `now`.
     ///
-    /// `now` is Unix seconds — the crypto layer takes the primitive rather
+    /// `now` is a [`Timestamp`] — the crypto layer takes the instant rather
     /// than [`crate::arrival::ArrivalTime`], which lives above it. Callers on
     /// the request path pass the request's arrival instant, so this check and
     /// whatever the caller does with the decoded state read one clock.
@@ -176,7 +177,7 @@ impl StateTokenSigner {
         &self,
         token: &str,
         jwt_type: JwtType,
-        now: i64,
+        now: Timestamp,
     ) -> Result<T, StateTokenError> {
         match self {
             Self::Local { secret } => {
@@ -251,7 +252,7 @@ async fn kms_decode<T: DeserializeOwned>(
     key_id: &str,
     token: &str,
     jwt_type: JwtType,
-    now: i64,
+    now: Timestamp,
 ) -> Result<T, StateTokenError> {
     // Split into header.payload.signature
     let parts: Vec<&str> = token.splitn(3, '.').collect();
@@ -641,7 +642,7 @@ impl<'a> TokenValidationContext<'a> {
 pub(crate) fn decode_es256_token<C: DeserializeOwned>(
     token: &str,
     ctx: &TokenValidationContext<'_>,
-    now: i64,
+    now: Timestamp,
 ) -> Option<C> {
     // Peek at the header to determine the algorithm
     let header = jsonwebtoken::decode_header(token).ok()?;
@@ -720,7 +721,7 @@ pub(crate) fn decode_state_token<T: DeserializeOwned>(
     token: &str,
     jwt_type: JwtType,
     secret: &[u8],
-    now: i64,
+    now: Timestamp,
 ) -> Result<T, jsonwebtoken::errors::Error> {
     let validation = Validation {
         leeway: 0,
@@ -756,14 +757,16 @@ pub(crate) fn decode_state_token<T: DeserializeOwned>(
 mod tests {
     use super::*;
     use crate::crypto::keys::OidcSigningKey;
+    use crate::crypto::validity::numeric_date;
     use crate::services::auth::AccessTokenClaims;
     use crate::test_utils::{
-        TEST_ISSUER, TEST_JWT_SECRET, make_test_access_token, make_test_oidc_key,
+        TEST_ISSUER, TEST_JWT_SECRET, at_second, make_test_access_token, make_test_oidc_key,
     };
+    use jiff::SignedDuration;
 
     /// A fixed instant between the test fixtures' `iat` (1_000_000_000) and
     /// `exp` (9_999_999_999), so state-token decoding is deterministic.
-    const TEST_NOW: i64 = 1_500_000_000;
+    const TEST_NOW: Timestamp = Timestamp::constant(1_500_000_000, 0);
 
     fn make_ctx(key: &OidcSigningKey) -> TokenValidationContext<'_> {
         TokenValidationContext::new(key, TEST_ISSUER)
@@ -791,8 +794,8 @@ mod tests {
             iss: TEST_ISSUER.to_string(),
             sub: "user-123".to_string(),
             aud: "client-abc".to_string(),
-            exp: 9_999_999_999,
-            iat: 1_000_000_000,
+            exp: at_second(9_999_999_999),
+            iat: at_second(1_000_000_000),
             nbf: None,
             jti: "jti-1".to_string(),
             client_id: "client-abc".to_string(),
@@ -831,8 +834,8 @@ mod tests {
             iss: TEST_ISSUER.to_string(),
             sub: "user-123".to_string(),
             aud: "client-abc".to_string(),
-            exp: 1, // Expired in 1970
-            iat: 0,
+            exp: at_second(1), // Expired in 1970
+            iat: at_second(0),
             nbf: None,
             jti: "jti-1".to_string(),
             client_id: "client-abc".to_string(),
@@ -861,7 +864,7 @@ mod tests {
             iss: TEST_ISSUER.to_string(),
             sub: "user-123".to_string(),
             aud: "client-abc".to_string(),
-            exp: 9_999_999_999,
+            exp: at_second(9_999_999_999),
             iat: nbf,
             nbf: None,
             jti: "jti-1".to_string(),
@@ -886,26 +889,45 @@ mod tests {
             async move { key.sign_access_token_jwt(&claims).await.expect("sign") }
         };
         let decodes =
-            |token: &str, now: i64| decode_es256_token::<AccessTokenClaims>(token, &ctx, now);
+            |token: &str, now: Timestamp| decode_es256_token::<AccessTokenClaims>(token, &ctx, now);
 
         // RFC 7519 §4.1.5: "the current date/time MUST be after or equal to
         // the not-before date/time ... Implementers MAY provide for some small
         // leeway, usually no more than a few minutes, to account for clock
         // skew."
-        let token = sign_with_nbf(Some(serde_json::json!(nbf))).await;
+        let token = sign_with_nbf(Some(serde_json::json!(nbf.as_second()))).await;
         assert!(decodes(&token, nbf).is_some(), "now == nbf is accepted");
         assert!(
-            decodes(&token, nbf - ValidityWindow::OWN_TOKEN_NBF_LEEWAY_SECS).is_some(),
+            decodes(
+                &token,
+                nbf.checked_sub(SignedDuration::from_secs(
+                    ValidityWindow::OWN_TOKEN_NBF_LEEWAY_SECS
+                ))
+                .expect("in range")
+            )
+            .is_some(),
             "a server clock behind by the leeway still accepts the token"
         );
         assert!(
-            decodes(&token, nbf - ValidityWindow::OWN_TOKEN_NBF_LEEWAY_SECS - 1).is_none(),
+            decodes(
+                &token,
+                nbf.checked_sub(SignedDuration::from_secs(
+                    ValidityWindow::OWN_TOKEN_NBF_LEEWAY_SECS + 1
+                ))
+                .expect("in range")
+            )
+            .is_none(),
             "a token not yet valid beyond the leeway is refused"
         );
 
         let token = sign_with_nbf(None).await;
         assert!(
-            decodes(&token, nbf - 3600).is_some(),
+            decodes(
+                &token,
+                nbf.checked_sub(SignedDuration::from_secs(3600))
+                    .expect("in range")
+            )
+            .is_some(),
             "nbf is optional (RFC 7519 §4.1.5): its absence imposes no bound"
         );
 
@@ -924,13 +946,15 @@ mod tests {
     async fn test_access_token_expiry_is_judged_at_the_caller_clock() {
         let key = make_test_oidc_key();
         let ctx = make_ctx(&key);
-        let exp = 1_600_000_000;
+        let exp = Timestamp::constant(1_600_000_000, 0);
         let claims = AccessTokenClaims {
             iss: TEST_ISSUER.to_string(),
             sub: "user-123".to_string(),
             aud: "client-abc".to_string(),
             exp,
-            iat: exp - 3600,
+            iat: exp
+                .checked_sub(SignedDuration::from_secs(3600))
+                .expect("in range"),
             nbf: None,
             jti: "jti-1".to_string(),
             client_id: "client-abc".to_string(),
@@ -947,7 +971,13 @@ mod tests {
         let token = key.sign_access_token_jwt(&claims).await.expect("sign");
 
         assert!(
-            decode_es256_token::<AccessTokenClaims>(&token, &ctx, exp - 1).is_some(),
+            decode_es256_token::<AccessTokenClaims>(
+                &token,
+                &ctx,
+                exp.checked_sub(SignedDuration::from_secs(1))
+                    .expect("in range")
+            )
+            .is_some(),
             "one second before exp the token is valid"
         );
         assert!(
@@ -978,8 +1008,8 @@ mod tests {
             iss: "https://wrong-issuer.com".to_string(),
             sub: "user-123".to_string(),
             aud: "client-abc".to_string(),
-            exp: 9_999_999_999,
-            iat: 1_000_000_000,
+            exp: at_second(9_999_999_999),
+            iat: at_second(1_000_000_000),
             nbf: None,
             jti: "jti-1".to_string(),
             client_id: "client-abc".to_string(),
@@ -1033,7 +1063,7 @@ mod tests {
             &token,
             JwtType::RegistrationState,
             TEST_JWT_SECRET,
-            1_000_000_059,
+            at_second(1_000_000_059),
         );
         assert!(fresh.is_ok(), "a token one second from expiry must decode");
 
@@ -1044,7 +1074,7 @@ mod tests {
             &token,
             JwtType::RegistrationState,
             TEST_JWT_SECRET,
-            1_000_000_060,
+            at_second(1_000_000_060),
         );
         assert!(
             matches!(
@@ -1279,8 +1309,12 @@ mod tests {
         };
         let token = encode_state_token(&state, JwtType::Fido2ChallengeState, TEST_JWT_SECRET)
             .expect("encode");
-        let result: Result<TestState, _> =
-            decode_state_token(&token, JwtType::Fido2ChallengeState, TEST_JWT_SECRET, now);
+        let result: Result<TestState, _> = decode_state_token(
+            &token,
+            JwtType::Fido2ChallengeState,
+            TEST_JWT_SECRET,
+            at_second(now),
+        );
         assert!(
             result.is_err(),
             "State token 5s past exp must be rejected with zero leeway"
@@ -1297,13 +1331,17 @@ mod tests {
         let key = make_test_oidc_key();
         let ctx = make_ctx(&key);
 
-        let now = jiff::Timestamp::now().as_second();
+        let now = numeric_date::whole_second(Timestamp::now());
         let claims = AccessTokenClaims {
             iss: TEST_ISSUER.to_string(),
             sub: "user-123".to_string(),
             aud: "client-abc".to_string(),
-            exp: now - 5, // inside the default 60s leeway window, but past exp
-            iat: now - 3600,
+            exp: now
+                .checked_sub(SignedDuration::from_secs(5))
+                .expect("in range"), // inside the default 60s leeway window, but past exp
+            iat: now
+                .checked_sub(SignedDuration::from_secs(3600))
+                .expect("in range"),
             nbf: None,
             jti: "jti-1".to_string(),
             client_id: "client-abc".to_string(),

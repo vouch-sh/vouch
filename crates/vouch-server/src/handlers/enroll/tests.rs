@@ -2,7 +2,6 @@
 #![expect(
     clippy::expect_used,
     clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
     reason = "test code: panic on assertion failure is acceptable"
 )]
 
@@ -45,8 +44,10 @@ async fn make_valid_state_token(state: &AppState) -> String {
         user_id,
         user_email: "test@example.com".to_string(),
         webauthn_state,
-        iat: now.as_second(),
-        exp: now.as_second() + 300,
+        iat: now,
+        exp: now
+            .checked_add(SignedDuration::from_secs(300))
+            .expect("exp in range"),
     };
 
     reg_state
@@ -253,13 +254,15 @@ async fn test_browser_register_complete_rejects_replayed_state() {
         .expect("start_passkey_registration");
 
     let now = jiff::Timestamp::now();
-    let exp = now.as_second() + 300;
+    let exp = now
+        .checked_add(SignedDuration::from_secs(300))
+        .expect("exp in range");
     let reg_state = BrowserRegistrationState {
         device_auth_id: String::new(),
         user_id,
         user_email: user.email.clone(),
         webauthn_state,
-        iat: now.as_second(),
+        iat: now,
         exp,
     };
     let state_jwt = reg_state
@@ -268,7 +271,7 @@ async fn test_browser_register_complete_rejects_replayed_state() {
         .expect("encode state");
 
     // Pre-consume the state token to simulate prior use.
-    let expires_at = jiff::Timestamp::from_second(exp).expect("valid exp");
+    let expires_at = exp;
     let _claim = db::consume_challenge_state_for_test(&state.store, &state_jwt, expires_at)
         .await
         .expect("pre-consume must succeed");
@@ -2046,8 +2049,10 @@ async fn test_browser_register_complete_rejects_self_attestation() {
         user_id,
         user_email: user_email.to_string(),
         webauthn_state,
-        iat: now.as_second(),
-        exp: now.as_second() + 300,
+        iat: now,
+        exp: now
+            .checked_add(SignedDuration::from_secs(300))
+            .expect("exp in range"),
     };
     let state_token = reg_state
         .encode(&state.state_signer)
@@ -2341,8 +2346,10 @@ async fn test_browser_register_complete_refuses_deactivated_user() {
         user_id: user_uuid,
         user_email: user.email.clone(),
         webauthn_state,
-        iat: now.as_second(),
-        exp: now.as_second() + 300,
+        iat: now,
+        exp: now
+            .checked_add(SignedDuration::from_secs(300))
+            .expect("exp in range"),
     };
     let state_jwt = reg_state
         .encode(&state.state_signer)
@@ -2458,8 +2465,10 @@ async fn test_browser_register_complete_refuses_vanished_user() {
         user_id: user_uuid,
         user_email: user.email.clone(),
         webauthn_state,
-        iat: now.as_second(),
-        exp: now.as_second() + 300,
+        iat: now,
+        exp: now
+            .checked_add(SignedDuration::from_secs(300))
+            .expect("exp in range"),
     };
     let state_jwt = reg_state
         .encode(&state.state_signer)
@@ -2551,20 +2560,22 @@ async fn browser_user_session(state: &AppState, email: &str) -> (User, String) {
 
 /// Mint a `BrowserRegistrationState` JWT bound to `user.id`, returning the
 /// token and the expiry timestamp the consume test helper needs.
-async fn browser_register_state(state: &AppState, user: &User) -> (String, i64) {
+async fn browser_register_state(state: &AppState, user: &User) -> (String, Timestamp) {
     let user_id = Uuid::parse_str(&user.id).expect("user id is a uuid");
     let (_ccr, webauthn_state) = state
         .webauthn
         .start_passkey_registration(user_id, &user.email, &user.email, None)
         .expect("start_passkey_registration");
     let now = jiff::Timestamp::now();
-    let exp = now.as_second() + 300;
+    let exp = now
+        .checked_add(SignedDuration::from_secs(300))
+        .expect("exp in range");
     let reg_state = BrowserRegistrationState {
         device_auth_id: String::new(),
         user_id,
         user_email: user.email.clone(),
         webauthn_state,
-        iat: now.as_second(),
+        iat: now,
         exp,
     };
     let jwt = reg_state
@@ -2623,7 +2634,7 @@ async fn test_browser_register_complete_rejects_state_user_mismatch() {
     // into the single-use store, so this assertion consumes the token as
     // a side-effect — that's why the legitimate retry below uses a
     // *fresh* state JWT.
-    let expires_at = jiff::Timestamp::from_second(exp).expect("valid exp");
+    let expires_at = exp;
     let consume = db::consume_challenge_state_for_test(&state.store, &state_jwt, expires_at).await;
     assert!(
         consume.is_ok(),
@@ -2707,7 +2718,7 @@ async fn test_browser_register_complete_requires_session() {
 
 /// Build a registration state JWT together with the expiry needed to consume
 /// it directly, which `make_valid_state_token` does not expose.
-async fn make_state_token_with_exp(state: &AppState, email: &str) -> (String, i64) {
+async fn make_state_token_with_exp(state: &AppState, email: &str) -> (String, Timestamp) {
     let user_id = Uuid::now_v7();
     let (_ccr, webauthn_state) = state
         .webauthn
@@ -2715,13 +2726,15 @@ async fn make_state_token_with_exp(state: &AppState, email: &str) -> (String, i6
         .expect("start_passkey_registration");
 
     let now = jiff::Timestamp::now();
-    let exp = now.as_second() + 300;
+    let exp = now
+        .checked_add(SignedDuration::from_secs(300))
+        .expect("exp in range");
     let reg_state = BrowserRegistrationState {
         device_auth_id: String::new(),
         user_id,
         user_email: email.to_string(),
         webauthn_state,
-        iat: now.as_second(),
+        iat: now,
         exp,
     };
 
@@ -2733,8 +2746,8 @@ async fn make_state_token_with_exp(state: &AppState, email: &str) -> (String, i6
 }
 
 /// Assert the state token is still unconsumed by spending it directly.
-async fn assert_state_unconsumed(state: &AppState, state_jwt: &str, exp: i64) {
-    let expires_at = jiff::Timestamp::from_second(exp).expect("valid exp");
+async fn assert_state_unconsumed(state: &AppState, state_jwt: &str, exp: Timestamp) {
+    let expires_at = exp;
     let consume = db::consume_challenge_state_for_test(&state.store, state_jwt, expires_at).await;
     assert!(
         consume.is_ok(),
@@ -2870,8 +2883,10 @@ async fn finalize_enrollment_audit_records_enrollment_when_device_auth_release_f
         user_id: user_uuid,
         user_email: user.email.clone(),
         webauthn_state,
-        iat: now.as_second(),
-        exp: now.as_second() + 300,
+        iat: now,
+        exp: now
+            .checked_add(SignedDuration::from_secs(300))
+            .expect("exp in range"),
     };
     let now = jiff::Timestamp::now();
     let result = finalize_enrollment_audit_and_device_auth(
@@ -2959,8 +2974,10 @@ async fn finalize_enrollment_audit_records_both_events_when_cli_release_succeeds
         user_id: user_uuid,
         user_email: user.email.clone(),
         webauthn_state,
-        iat: now.as_second(),
-        exp: now.as_second() + 300,
+        iat: now,
+        exp: now
+            .checked_add(SignedDuration::from_secs(300))
+            .expect("exp in range"),
     };
     let now = jiff::Timestamp::now();
     let result = finalize_enrollment_audit_and_device_auth(
@@ -3030,8 +3047,10 @@ async fn finalize_enrollment_audit_records_only_enrollment_for_direct_browser_fl
         user_id: user_uuid,
         user_email: user.email.clone(),
         webauthn_state,
-        iat: now.as_second(),
-        exp: now.as_second() + 300,
+        iat: now,
+        exp: now
+            .checked_add(SignedDuration::from_secs(300))
+            .expect("exp in range"),
     };
     let now = jiff::Timestamp::now();
     let result = finalize_enrollment_audit_and_device_auth(

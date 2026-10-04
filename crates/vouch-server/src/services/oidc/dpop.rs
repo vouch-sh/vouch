@@ -12,6 +12,7 @@
 use aws_lc_rs::digest::{self, SHA256};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 
@@ -24,7 +25,7 @@ use crate::arrival::ArrivalTime;
 use crate::crypto::alg::JwsAlgorithm;
 use crate::crypto::jwk::Jwk;
 use crate::crypto::jwt::{HeaderAlg, Jws, JwsError};
-use crate::crypto::validity::ValidityWindow;
+use crate::crypto::validity::{ValidityWindow, numeric_date};
 use crate::db::{self, store::DocumentStore};
 use crate::error::{OAuthErrorCode, OAuthErrorResponse, ServiceError};
 use crate::http;
@@ -99,8 +100,10 @@ pub struct DpopClaims {
     pub htm: String,
     /// HTTP URI of the request (without query/fragment).
     pub htu: String,
-    /// Issued at timestamp (seconds since epoch).
-    pub iat: i64,
+    /// Issued at timestamp. RFC 9449 §4.2: "Creation timestamp of the JWT
+    /// (Section 4.1.6 of [RFC7519])", a NumericDate the client serializes.
+    #[serde(with = "numeric_date")]
+    pub iat: Timestamp,
     /// Server-provided nonce (if required).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nonce: Option<String>,
@@ -501,14 +504,14 @@ fn parse_and_verify_dpop_proof(proof: &str) -> Result<(DpopHeader, DpopClaims), 
 /// since it is the one field every caller stamps identically.
 #[derive(Clone, Copy)]
 pub struct DpopClaimsValidation<'a> {
-    /// Current time (seconds since epoch), shared with the JTI retention
+    /// The arrival instant, shared with the JTI retention
     /// computation — the request's [`ArrivalTime`] in production via
     /// [`validate_dpop_common`], a fixed value in tests for deterministic
     /// boundary checks. The freshness check and the JTI `expires_at` MUST
     /// share this single instant — restamping `now` between the two lets
     /// the freshness window's upper bound drift past the replay record's
     /// `expires_at` and reopens a replay gap (RFC 9449 §11.1).
-    pub now: i64,
+    pub now: Timestamp,
     pub expected_method: &'a str,
     pub accepted_uris: &'a [String],
     pub max_age_seconds: i64,
@@ -728,17 +731,20 @@ async fn validate_dpop_common(
     // for the time window in which the respective DPoP proof JWT would be
     // accepted" — this server retains the JTI for that whole window so the
     // single-use check holds. `validate_dpop_claims` accepts an `iat` up to
-    // `PROOF_SKEW_SECONDS` ahead of `floor(now)` and rejects from
-    // `iat + max_age` on, so the last proof it accepts is refused from
-    // `floor(now) + skew + max_age`. Committing for `config_max_age +
-    // PROOF_SKEW_SECONDS` from `floor(now)` sets `expires_at` to exactly that
-    // second, and cleanup deletes only rows whose `expires_at` is before the
-    // current time, so the row outlives every second the proof is accepted.
+    // `PROOF_SKEW_SECONDS` ahead of `now` and rejects from `iat + max_age`
+    // on, so the last proof it accepts is refused from `now + skew +
+    // max_age`, which is no later than `ceil(now) + skew + max_age`.
+    // Committing for `config_max_age + PROOF_SKEW_SECONDS` from `ceil(now)`
+    // sets `expires_at` to that second, and cleanup deletes only rows whose
+    // `expires_at` is before the current time, so the row outlives every
+    // instant the proof is accepted, including a fractional `iat`.
     // `saturating_add` cannot saturate in practice — jiff's representable
     // second range is far below `i64::MAX` — and if it ever did,
     // `Timestamp::from_second` inside the DB helper returns `Err` and
     // surfaces as `ClaimError::Database` rather than a panic.
-    let now_second = now.as_second();
+    let now_second = now
+        .as_second()
+        .saturating_add(i64::from(now.subsec_nanosecond() != 0));
     let jti_retention = config_max_age.saturating_add(PROOF_SKEW_SECONDS);
     let jti_claim =
         match db::check_and_store_dpop_jti_at_second(store, &claims.jti, now_second, jti_retention)
@@ -763,14 +769,14 @@ async fn validate_dpop_common(
 
     // Validate claims (method, URI, timestamp, nonce inline, ath)
     // Pass None for expected_nonce to skip redundant self-comparison;
-    // database nonce validation happens below. `now.as_second()` is the same
-    // arrival instant that produced `now_second` above, so the freshness
+    // database nonce validation happens below. `now` is the same arrival
+    // instant that produced `now_second` above, so the freshness
     // check and the JTI retention cannot drift apart across the insert's
     // `await`.
     validate_dpop_claims(
         &claims,
         &DpopClaimsValidation {
-            now: now.as_second(),
+            now,
             expected_method,
             accepted_uris,
             max_age_seconds: config_max_age,
@@ -937,7 +943,8 @@ mod tests {
     use crate::db::documents::dpop::DpopJtiDoc;
     use crate::db::dpop;
     use crate::db::store::DocumentStore;
-    use crate::test_utils::test_arrival;
+    use crate::test_utils::{at_second, test_arrival};
+    use jiff::SignedDuration;
     use jiff::Timestamp;
 
     fn dpop_headers(values: &[&[u8]]) -> HeaderMap {
@@ -1076,12 +1083,12 @@ mod tests {
     // wrong target does.
     #[test]
     fn test_unparseable_htu_is_a_uri_mismatch() {
-        let claims = make_claims("POST", "/oauth/token", Timestamp::now().as_second());
+        let claims = make_claims("POST", "/oauth/token", Timestamp::now());
         let uris = vec!["https://example.com/oauth/token".to_string()];
         let result = validate_dpop_claims(
             &claims,
             &DpopClaimsValidation {
-                now: Timestamp::now().as_second(),
+                now: Timestamp::now(),
                 expected_method: "POST",
                 accepted_uris: &uris,
                 max_age_seconds: 300,
@@ -1121,7 +1128,7 @@ mod tests {
         assert!(matches!(fmt_err, DpopError::InvalidFormat(_)));
     }
 
-    fn make_claims(htm: &str, htu: &str, iat: i64) -> DpopClaims {
+    fn make_claims(htm: &str, htu: &str, iat: Timestamp) -> DpopClaims {
         DpopClaims {
             jti: "test-jti".to_string(),
             htm: htm.to_string(),
@@ -1133,13 +1140,13 @@ mod tests {
         }
     }
 
-    fn now() -> i64 {
-        jiff::Timestamp::now().as_second()
+    fn now() -> Timestamp {
+        Timestamp::now()
     }
 
     /// Build a validation-params struct with sensible defaults, overriding
     /// only the fields a given test cares about.
-    fn validation_params(now: i64, max_age_seconds: i64) -> DpopClaimsValidation<'static> {
+    fn validation_params(now: Timestamp, max_age_seconds: i64) -> DpopClaimsValidation<'static> {
         DpopClaimsValidation {
             now,
             expected_method: "POST",
@@ -1181,7 +1188,13 @@ mod tests {
     #[test]
     fn test_validate_dpop_claims_expired() {
         // iat older than max_age_seconds
-        let claims = make_claims("POST", "https://example.com/token", now() - 120);
+        let claims = make_claims(
+            "POST",
+            "https://example.com/token",
+            now()
+                .checked_sub(SignedDuration::from_secs(120))
+                .expect("in range"),
+        );
         let uris = ["https://example.com/token".to_string()];
         let result = validate_dpop_claims(
             &claims,
@@ -1196,7 +1209,13 @@ mod tests {
     #[test]
     fn test_validate_dpop_claims_future_iat() {
         // iat more than 60 seconds in the future (age < -60)
-        let claims = make_claims("POST", "https://example.com/token", now() + 120);
+        let claims = make_claims(
+            "POST",
+            "https://example.com/token",
+            now()
+                .checked_add(SignedDuration::from_secs(120))
+                .expect("in range"),
+        );
         let uris = ["https://example.com/token".to_string()];
         let result = validate_dpop_claims(
             &claims,
@@ -1206,6 +1225,36 @@ mod tests {
             },
         );
         assert!(matches!(result, Err(DpopError::Expired)));
+    }
+
+    // RFC 9449 §4.2: `iat` is a "Creation timestamp of the JWT (Section 4.1.6
+    // of [RFC7519])", and RFC 7519 §2 says of a NumericDate that "non-integer
+    // values can be represented". A client that writes a fraction is judged by
+    // the freshness window, not refused by the parser.
+    #[test]
+    fn test_dpop_claims_read_fractional_iat() {
+        let now = Timestamp::constant(1_700_000_000, 0);
+        let claims: DpopClaims = serde_json::from_value(serde_json::json!({
+            "jti": "test-jti",
+            "htm": "POST",
+            "htu": "https://example.com/token",
+            "iat": 1_699_999_999.5_f64,
+        }))
+        .expect("a fractional iat is a NumericDate");
+        assert_eq!(
+            claims.iat,
+            Timestamp::constant(1_699_999_999, 500_000_000),
+            "the fraction is kept"
+        );
+        let uris = ["https://example.com/token".to_string()];
+        let result = validate_dpop_claims(
+            &claims,
+            &DpopClaimsValidation {
+                accepted_uris: &uris,
+                ..validation_params(now, 60)
+            },
+        );
+        assert!(result.is_ok(), "{result:?}");
     }
 
     #[test]
@@ -1267,8 +1316,14 @@ mod tests {
     /// accepted (`age == -60`, not `< -60`).
     #[test]
     fn test_validate_dpop_claims_skew_boundary_accepted() {
-        let fixed_now = 1_700_000_000;
-        let claims = make_claims("POST", "https://example.com/token", fixed_now + 60);
+        let fixed_now = Timestamp::constant(1_700_000_000, 0);
+        let claims = make_claims(
+            "POST",
+            "https://example.com/token",
+            fixed_now
+                .checked_add(SignedDuration::from_secs(60))
+                .expect("in range"),
+        );
         let uris = ["https://example.com/token".to_string()];
         let result = validate_dpop_claims(
             &claims,
@@ -1287,8 +1342,14 @@ mod tests {
     /// must be rejected (`age == -61 < -60`).
     #[test]
     fn test_validate_dpop_claims_skew_boundary_rejected() {
-        let fixed_now = 1_700_000_000;
-        let claims = make_claims("POST", "https://example.com/token", fixed_now + 61);
+        let fixed_now = Timestamp::constant(1_700_000_000, 0);
+        let claims = make_claims(
+            "POST",
+            "https://example.com/token",
+            fixed_now
+                .checked_add(SignedDuration::from_secs(61))
+                .expect("in range"),
+        );
         let uris = ["https://example.com/token".to_string()];
         let result = validate_dpop_claims(
             &claims,
@@ -1304,12 +1365,14 @@ mod tests {
     /// `max_age_seconds - 1` it is still fresh.
     #[test]
     fn test_validate_dpop_claims_max_age_boundary_accepted() {
-        let fixed_now = 1_700_000_000;
+        let fixed_now = Timestamp::constant(1_700_000_000, 0);
         let max_age_seconds = 60;
         let claims = make_claims(
             "POST",
             "https://example.com/token",
-            fixed_now - (max_age_seconds - 1),
+            fixed_now
+                .checked_sub(SignedDuration::from_secs(max_age_seconds - 1))
+                .expect("in range"),
         );
         let uris = ["https://example.com/token".to_string()];
         let result = validate_dpop_claims(
@@ -1328,12 +1391,14 @@ mod tests {
     /// At age `max_age_seconds` the window has closed.
     #[test]
     fn test_validate_dpop_claims_max_age_boundary_rejected() {
-        let fixed_now = 1_700_000_000;
+        let fixed_now = Timestamp::constant(1_700_000_000, 0);
         let max_age_seconds = 60;
         let claims = make_claims(
             "POST",
             "https://example.com/token",
-            fixed_now - max_age_seconds,
+            fixed_now
+                .checked_sub(SignedDuration::from_secs(max_age_seconds))
+                .expect("in range"),
         );
         let uris = ["https://example.com/token".to_string()];
         let result = validate_dpop_claims(
@@ -1814,7 +1879,11 @@ mod tests {
         // this replay moment.
         let replay_now = t0 + elapsed_within;
         assert!(
-            ValidityWindow::issued_at(edge_iat, config_max_age).accepts_at(replay_now, 0, skew),
+            ValidityWindow::issued_at(at_second(edge_iat), config_max_age).accepts_at(
+                at_second(replay_now),
+                0,
+                skew
+            ),
             "proof iat = T0+skew must still be fresh at T0 + max_age + 30"
         );
 
@@ -1841,8 +1910,8 @@ mod tests {
 
         let after_validity = t0 + elapsed_past;
         assert!(
-            !ValidityWindow::issued_at(edge_iat, config_max_age).accepts_at(
-                after_validity,
+            !ValidityWindow::issued_at(at_second(edge_iat), config_max_age).accepts_at(
+                at_second(after_validity),
                 0,
                 skew
             ),
@@ -1930,15 +1999,19 @@ mod tests {
         // fix closes by retaining for `max_age + skew`.
         let replay_now = t0 + config_max_age + 30;
         assert!(
-            ValidityWindow::issued_at(edge_iat, config_max_age).accepts_at(replay_now, 0, skew),
+            ValidityWindow::issued_at(at_second(edge_iat), config_max_age).accepts_at(
+                at_second(replay_now),
+                0,
+                skew
+            ),
             "proof iat = T0+skew must still be fresh at T0 + max_age + 30 (within max_age + skew)"
         );
 
         // Anchor the edge: one second past max_age + skew must be rejected.
         let after_validity = t0 + config_max_age + skew + 1;
         assert!(
-            !ValidityWindow::issued_at(edge_iat, config_max_age).accepts_at(
-                after_validity,
+            !ValidityWindow::issued_at(at_second(edge_iat), config_max_age).accepts_at(
+                at_second(after_validity),
                 0,
                 skew
             ),
@@ -2055,8 +2128,8 @@ mod tests {
 
         let expires_at = doc.data.expires_at.as_second();
 
-        // `expires_at = floor(now_call) + max_age + skew`, and
-        // `now_before <= floor(now_call) <= now_after`.
+        // `expires_at = ceil(now_call) + max_age + skew`, and
+        // `now_before <= ceil(now_call) <= now_after + 1`.
         let lower = now_before
             .saturating_add(CONFIG_MAX_AGE)
             .saturating_add(skew);
@@ -2068,6 +2141,7 @@ mod tests {
         );
 
         let upper = now_after
+            .saturating_add(1)
             .saturating_add(CONFIG_MAX_AGE)
             .saturating_add(skew);
         assert!(
@@ -2113,17 +2187,23 @@ mod tests {
 
         // The most forward-skewed proof accepted at `now_sec`.
         let iat = now_sec.saturating_add(skew);
-        let window = ValidityWindow::issued_at(iat, config_max_age);
-        assert!(window.accepts_at(now_sec, 0, skew));
-        assert!(!ValidityWindow::issued_at(iat + 1, config_max_age).accepts_at(now_sec, 0, skew));
+        let window = ValidityWindow::issued_at(at_second(iat), config_max_age);
+        assert!(window.accepts_at(at_second(now_sec), 0, skew));
+        assert!(
+            !ValidityWindow::issued_at(at_second(iat + 1), config_max_age).accepts_at(
+                at_second(now_sec),
+                0,
+                skew
+            )
+        );
 
         let first_reject = iat.saturating_add(config_max_age);
         assert!(
-            window.accepts_at(first_reject - 1, 0, skew),
+            window.accepts_at(at_second(first_reject - 1), 0, skew),
             "last accepting second"
         );
         assert!(
-            !window.accepts_at(first_reject, 0, skew),
+            !window.accepts_at(at_second(first_reject), 0, skew),
             "first refusing second"
         );
 

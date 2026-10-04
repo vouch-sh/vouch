@@ -464,7 +464,7 @@ pub(crate) async fn verify_id_token(
     // gives `nbf` the same allowance.
     let validity = ValidityWindow::from_token(id_token)
         .ok_or_else(|| anyhow::anyhow!("ID token exp or nbf is not a NumericDate"))?;
-    let now = arrival.as_second();
+    let now = arrival.timestamp();
     if validity.expired_at(now, IDP_CLOCK_SKEW_SECS) {
         anyhow::bail!("ID token has expired");
     }

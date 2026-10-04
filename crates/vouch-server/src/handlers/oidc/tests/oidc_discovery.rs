@@ -9,6 +9,7 @@ use crate::services::oidc::claims::CnfClaim;
 use crate::services::oidc::grant_type::OAuthGrantType;
 use crate::services::oidc::token::{ADVERTISED_ID_TOKEN_CLAIMS, IdTokenClaims};
 use crate::services::oidc::{OAuthScope, SUPPORTED_RESPONSE_TYPES};
+use crate::test_utils::at_second;
 use std::collections::BTreeSet;
 
 #[tokio::test]
@@ -583,9 +584,9 @@ async fn test_oidc_discovery_claims_match_id_token_struct() {
         iss: "https://issuer.example".to_string(),
         sub: "user".to_string(),
         aud: "client".to_string(),
-        exp: 1,
-        iat: 1,
-        auth_time: Some(1),
+        exp: at_second(1),
+        iat: at_second(1),
+        auth_time: Some(at_second(1)),
         nonce: Some("nonce".to_string()),
         email: Some("user@example.com".to_string()),
         email_verified: Some(true),

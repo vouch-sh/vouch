@@ -234,8 +234,8 @@ pub async fn introspect_token(
         client_id: Some(claims.client_id.clone()),
         username: claims.email.clone(),
         token_type: Some(token_type.to_string()),
-        exp: Some(claims.exp),
-        iat: Some(claims.iat),
+        exp: Some(claims.exp.as_second()),
+        iat: Some(claims.iat.as_second()),
         sub: Some(claims.sub.clone()),
         aud: Some(claims.aud.clone()),
         iss: Some(claims.iss.clone()),
@@ -597,7 +597,7 @@ mod tests {
         use crate::test_utils::test_app_state;
 
         let state = test_app_state().await;
-        let now = jiff::Timestamp::now().as_second();
+        let now = jiff::Timestamp::now();
 
         // Valid RFC 9068 access token signed with the state's own key and
         // issuer, so decode_token succeeds and execution reaches the DB-backed
@@ -607,7 +607,9 @@ mod tests {
             iss: state.config().base_url.to_string(),
             sub: "user-123".to_string(),
             aud: "client-abc".to_string(),
-            exp: now + 3600,
+            exp: now
+                .checked_add(jiff::SignedDuration::from_secs(3600))
+                .unwrap(),
             iat: now,
             nbf: None,
             jti: "jti-540".to_string(),

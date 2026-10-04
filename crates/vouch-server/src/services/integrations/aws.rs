@@ -369,7 +369,7 @@ mod tests {
             hardware_verified: true,
             session_purpose: SessionPurpose::CredentialIssuance,
             auth_time: None,
-            exp: 0,
+            exp: jiff::Timestamp::UNIX_EPOCH,
             token_hash: String::new(),
             dpop_source,
             hardware_aaguid,

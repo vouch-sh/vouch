@@ -20,6 +20,7 @@ use crate::arrival::ArrivalTime;
 use crate::assurance::{AuthMethod, HardwareVerification};
 use crate::crypto::hash_token;
 use crate::crypto::keys::OidcSigningKey;
+use crate::crypto::validity::numeric_date;
 use crate::crypto::webauthn_verify::{self, AuthTime, OriginPolicy};
 use crate::db::store::DocumentStore;
 use crate::db::{self, Authenticator, SessionPurpose, User};
@@ -807,12 +808,18 @@ pub(crate) struct AccessTokenClaims {
     /// RFC 9068 Section 2.2: REQUIRED. Audience (client_id or target resource).
     pub aud: String,
     /// RFC 9068 Section 2.2: REQUIRED. Expiration time (Unix timestamp).
-    pub exp: i64,
+    #[serde(with = "numeric_date")]
+    pub exp: Timestamp,
     /// RFC 9068 Section 2.2: REQUIRED. Issued at time (Unix timestamp).
-    pub iat: i64,
+    #[serde(with = "numeric_date")]
+    pub iat: Timestamp,
     /// RFC 8725 §3.4: Not before time (set to iat).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub nbf: Option<i64>,
+    #[serde(
+        default,
+        with = "numeric_date::option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub nbf: Option<Timestamp>,
     /// RFC 9068 Section 2.2: REQUIRED. Unique token identifier.
     pub jti: String,
     /// RFC 9068 Section 2.2: REQUIRED. OAuth client that requested this token.
@@ -838,8 +845,12 @@ pub(crate) struct AccessTokenClaims {
     /// token carrying it was issued. OIDC Core Section 2 makes it REQUIRED
     /// when `max_age` is requested or `auth_time` is an Essential Claim, and
     /// OPTIONAL otherwise.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auth_time: Option<i64>,
+    #[serde(
+        default,
+        with = "numeric_date::option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub auth_time: Option<Timestamp>,
     /// RFC 8693 Section 4.1: Actor claim for delegation chains.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub act: Option<ActorClaim>,
@@ -1145,9 +1156,9 @@ pub(crate) async fn create_oauth_access_token(
         iss: state.config().base_url.to_string(),
         sub: params.user_id.to_string(),
         aud,
-        exp: expires.as_second(),
-        iat: now.as_second(),
-        nbf: Some(now.as_second()),
+        exp: numeric_date::whole_second(expires),
+        iat: numeric_date::whole_second(now),
+        nbf: Some(numeric_date::whole_second(now)),
         jti,
         client_id: params.client_id.to_string(),
         scope: params.scope.clone(),
@@ -1242,9 +1253,9 @@ impl DecodedToken {
         }
     }
 
-    /// RFC 7519 Section 4.1.4: Expiration time (Unix timestamp).
+    /// RFC 7519 Section 4.1.4: Expiration time.
     #[must_use]
-    pub(crate) fn exp(&self) -> Option<i64> {
+    pub(crate) fn exp(&self) -> Option<Timestamp> {
         match self {
             Self::AccessToken(c) => Some(c.exp),
         }
@@ -1324,9 +1335,9 @@ pub(crate) struct ValidatedResourceToken {
     /// issuance gates on [`SessionPurpose::issues_credentials`].
     pub session_purpose: SessionPurpose,
     /// Authentication time (`auth_time` claim).
-    pub auth_time: Option<i64>,
-    /// RFC 7519 §4.1.4 expiration time (`exp` claim), Unix seconds.
-    pub exp: i64,
+    pub auth_time: Option<Timestamp>,
+    /// RFC 7519 §4.1.4 expiration time (`exp` claim).
+    pub exp: Timestamp,
     /// SHA-256 hash of the access token (for DB lookups/revocation).
     pub token_hash: String,
     /// AI coding agent identifier from DPoP proof custom claim (e.g., "claude-code").
@@ -1357,7 +1368,7 @@ pub(crate) fn decode_token(
     arrival: ArrivalTime,
 ) -> Option<DecodedToken> {
     let ctx = TokenValidationContext::new(oidc_key, expected_issuer);
-    let claims: AccessTokenClaims = jwt::decode_es256_token(token, &ctx, arrival.as_second())?;
+    let claims: AccessTokenClaims = jwt::decode_es256_token(token, &ctx, arrival.timestamp())?;
     Some(DecodedToken::AccessToken(claims))
 }
 
@@ -1459,7 +1470,7 @@ where
 mod tests {
     use super::*;
     use crate::db;
-    use crate::test_utils::test_arrival;
+    use crate::test_utils::{at_second, test_arrival};
 
     // WebAuthn L2 §7.2: the signCount check (step 21) runs only after the
     // signature verified (step 20), so a counter regression — and only a
@@ -1601,8 +1612,8 @@ mod tests {
             iss: TEST_ISSUER.to_string(),
             sub: "user-123".to_string(),
             aud: "client-abc".to_string(),
-            exp: 9_999_999_999,
-            iat: 1_000_000_000,
+            exp: at_second(9_999_999_999),
+            iat: at_second(1_000_000_000),
             nbf: None,
             jti: "jti-1".to_string(),
             client_id: "client-abc".to_string(),
@@ -1640,8 +1651,8 @@ mod tests {
             iss: TEST_ISSUER.to_string(),
             sub: "user-123".to_string(),
             aud: "client-abc".to_string(),
-            exp: 1, // Expired in 1970
-            iat: 0,
+            exp: at_second(1), // Expired in 1970
+            iat: at_second(0),
             nbf: None,
             jti: "jti-1".to_string(),
             client_id: "client-abc".to_string(),
@@ -1726,8 +1737,8 @@ mod tests {
             iss: "https://example.com".to_string(),
             sub: "user-123".to_string(),
             aud: "client-abc".to_string(),
-            exp: 9_999_999_999,
-            iat: 1_000_000_000,
+            exp: at_second(9_999_999_999),
+            iat: at_second(1_000_000_000),
             nbf: None,
             jti: "jti-1".to_string(),
             client_id: "client-abc".to_string(),

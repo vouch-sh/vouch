@@ -36,6 +36,7 @@ use crate::config::{
 use crate::crypto::document_crypto::DocumentCrypto;
 use crate::crypto::jwt::StateTokenSigner;
 use crate::crypto::keys::OidcSigningKey;
+use crate::crypto::validity::numeric_date;
 use crate::db::CreateAuthenticatorParams;
 use crate::db::CreatePendingOAuthParams;
 use crate::db::CreateScimTokenParams;
@@ -171,6 +172,13 @@ pub fn test_config() -> ServerConfig {
 #[must_use]
 pub fn test_arrival() -> ArrivalTime {
     ArrivalTime::for_test(jiff::Timestamp::now())
+}
+
+/// The instant `unix_seconds` names, for boundary tests written against
+/// integer-second claim values.
+#[must_use]
+pub fn at_second(unix_seconds: i64) -> jiff::Timestamp {
+    jiff::Timestamp::from_second(unix_seconds).expect("test timestamp in range")
 }
 
 /// Create a test AppState with in-memory database.
@@ -1775,7 +1783,7 @@ async fn forge_auth_time(
         !claims.hardware_verified,
         "the base token must be unverified for this fixture to mean anything"
     );
-    claims.auth_time = Some(auth_time);
+    claims.auth_time = Some(at_second(auth_time));
     claims.jti = uuid::Uuid::now_v7().to_string();
 
     let token = state
@@ -1786,7 +1794,7 @@ async fn forge_auth_time(
 
     let (hardware_aaguid, org_domain) =
         resolve_session_snapshot(state, spec.user_id, spec.auth_id).await;
-    let expires_at = jiff::Timestamp::from_second(claims.exp).expect("valid expiry");
+    let expires_at = claims.exp;
     db::create_session(
         &state.store,
         &CreateSessionParams {
@@ -1859,10 +1867,10 @@ pub async fn forge_short_lived_access_token(
     )
     .expect("the token this deployment just minted must decode");
 
-    let now = jiff::Timestamp::now().as_second();
+    let now = numeric_date::whole_second(jiff::Timestamp::now());
     claims.exp = now
-        .checked_add(exp_seconds_from_now)
-        .expect("exp_seconds_from_now fits in i64");
+        .checked_add(jiff::SignedDuration::from_secs(exp_seconds_from_now))
+        .expect("exp_seconds_from_now in range");
     // Keep `nbf`/`iat` honest so nothing else about the token contradicts
     // the shortened lifetime; `jti` must change so the new token's hash is
     // distinct from the base token's.
@@ -1877,8 +1885,7 @@ pub async fn forge_short_lived_access_token(
         .expect("Failed to sign the short-lived access token");
 
     let (hardware_aaguid, org_domain) = resolve_session_snapshot(state, user_id, auth_id).await;
-    let expires_at =
-        jiff::Timestamp::from_second(claims.exp).expect("the forged exp is a valid Unix second");
+    let expires_at = claims.exp;
     db::create_session(
         &state.store,
         &CreateSessionParams {
@@ -2536,8 +2543,8 @@ pub async fn make_test_access_token(key: &OidcSigningKey) -> String {
         iss: TEST_ISSUER.to_string(),
         sub: "user-123".to_string(),
         aud: "client-abc".to_string(),
-        exp: 9_999_999_999,
-        iat: 1_000_000_000,
+        exp: at_second(9_999_999_999),
+        iat: at_second(1_000_000_000),
         nbf: None,
         jti: "jti-1".to_string(),
         client_id: "client-abc".to_string(),

@@ -1825,3 +1825,59 @@ async fn verify_id_token_time_window_is_judged_at_arrival_with_leeway() {
         "RFC 7519 §4.1.5: nbf \"MUST be a number containing a NumericDate value\""
     );
 }
+
+// RFC 7519 §2: a NumericDate is "A JSON numeric value representing the number
+// of seconds from 1970-01-01T00:00:00Z UTC", and "non-integer values can be
+// represented". An OP that serializes `exp` or `nbf` with a fraction is judged
+// by the window, not refused by the parser (issue #1785).
+#[tokio::test]
+async fn verify_id_token_reads_fractional_numeric_dates() {
+    use crate::arrival::ArrivalTime;
+    use wiremock::MockServer;
+
+    let server = MockServer::start().await;
+    let issuer = server.uri();
+    let client_id = "test-client";
+    let key = OidcSigningKey::generate().unwrap();
+    mount_jwks(&server, &key).await;
+    let provider = make_test_provider(&issuer);
+    let client = reqwest::Client::new();
+    let mark = 1_600_000_000_i64;
+    let mark_f = 1_600_000_000.0_f64;
+    let at = ArrivalTime::for_test_second;
+
+    let mut claims = base_claims(&issuer, client_id);
+    claims["exp"] = serde_json::json!(mark_f + 300.5);
+    claims["nbf"] = serde_json::json!(mark_f - 100.5);
+    let token = sign_test_jwt(&key, claims).await;
+    let verify = |now| verify_id_token(&client, &provider, &token, client_id, "", at(now));
+    assert!(
+        verify(mark).await.is_ok(),
+        "inside a window with fractional bounds"
+    );
+    let err = verify(mark + 300 + IDP_CLOCK_SKEW_SECS + 1)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("expired"),
+        "past a fractional exp: {err}"
+    );
+    let err = verify(mark - 100 - IDP_CLOCK_SKEW_SECS - 1)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("not yet valid"),
+        "before a fractional nbf: {err}"
+    );
+
+    // A whole-valued float is still a float to the JSON parser.
+    let mut claims = base_claims(&issuer, client_id);
+    claims["exp"] = serde_json::json!(mark_f + 300.0);
+    let token = sign_test_jwt(&key, claims).await;
+    assert!(
+        verify_id_token(&client, &provider, &token, client_id, "", at(mark))
+            .await
+            .is_ok(),
+        "`1600000300.0` is the same instant as `1600000300`"
+    );
+}

@@ -14,6 +14,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
+use jiff::Timestamp;
 use std::sync::Arc;
 use vouch_common::{SessionStatus, protocol};
 
@@ -91,14 +92,14 @@ pub(crate) async fn status(
 /// carries no "if authenticated" qualifier in the contract and is returned
 /// unconditionally.
 fn build_status(
-    exp: i64,
+    exp: Timestamp,
     email: Option<String>,
     device_name: Option<String>,
     arrival: ArrivalTime,
 ) -> SessionStatus {
-    let now = arrival.as_second();
+    let now = arrival.timestamp();
     let expires_in = if exp > now {
-        u64::try_from(exp.saturating_sub(now)).ok()
+        u64::try_from(exp.duration_since(now).as_secs()).ok()
     } else {
         None
     };
@@ -180,10 +181,12 @@ pub(crate) async fn logout(
 mod tests {
     use crate::arrival::ArrivalTime;
     use crate::crypto;
+    use crate::crypto::validity::numeric_date;
     use crate::db::{self, AuditEvent, AuditEventFilter, AuditEventKind, SessionPurpose};
     use crate::services::oidc::mtls::compute_cert_thumbprint;
     use crate::test_utils::*;
     use axum::http::StatusCode;
+    use jiff::{SignedDuration, Timestamp};
 
     #[tokio::test]
     async fn test_auth_status_valid_session() {
@@ -285,7 +288,7 @@ mod tests {
 
     /// A fixed instant, so a test about the `exp == now` edge compares against
     /// exactly the second it constructed its claims from.
-    const FIXED: i64 = 1_800_000_000;
+    const FIXED: Timestamp = Timestamp::constant(1_800_000_000, 0);
 
     #[test]
     fn build_status_email_is_none_at_exp_boundary() {
@@ -293,7 +296,7 @@ mod tests {
             FIXED,
             Some("user@example.com".to_string()),
             None,
-            ArrivalTime::for_test_second(FIXED),
+            ArrivalTime::for_test(FIXED),
         );
         // `exp == now` is the sharp edge of the strict `exp > now` re-check:
         // jsonwebtoken accepts it, but the server's authoritative rule rejects
@@ -310,10 +313,12 @@ mod tests {
     #[test]
     fn build_status_email_is_some_when_authenticated() {
         let status = super::build_status(
-            FIXED.saturating_add(3600),
+            FIXED
+                .checked_add(SignedDuration::from_secs(3600))
+                .expect("in range"),
             Some("user@example.com".to_string()),
             None,
-            ArrivalTime::for_test_second(FIXED),
+            ArrivalTime::for_test(FIXED),
         );
         assert!(status.authenticated);
         assert_eq!(status.email.as_deref(), Some("user@example.com"));
@@ -323,19 +328,23 @@ mod tests {
     #[test]
     fn build_status_device_name_returned_regardless_of_auth() {
         let live = super::build_status(
-            FIXED.saturating_add(3600),
+            FIXED
+                .checked_add(SignedDuration::from_secs(3600))
+                .expect("in range"),
             Some("user@example.com".to_string()),
             Some("YubiKey 5C".to_string()),
-            ArrivalTime::for_test_second(FIXED),
+            ArrivalTime::for_test(FIXED),
         );
         assert!(live.authenticated);
         assert_eq!(live.device_name.as_deref(), Some("YubiKey 5C"));
 
         let expired = super::build_status(
-            FIXED.saturating_sub(3600),
+            FIXED
+                .checked_sub(SignedDuration::from_secs(3600))
+                .expect("in range"),
             Some("user@example.com".to_string()),
             Some("YubiKey 5C".to_string()),
-            ArrivalTime::for_test_second(FIXED),
+            ArrivalTime::for_test(FIXED),
         );
         // `device_name` is documented without an "if authenticated" qualifier,
         // so it is returned unconditionally — do not gate it on `authenticated`.
@@ -384,7 +393,7 @@ mod tests {
             test_arrival(),
         )
         .expect("real token must decode");
-        let now = Timestamp::now().as_second();
+        let now = numeric_date::whole_second(Timestamp::now());
         claims.exp = now;
         claims.jti = uuid::Uuid::now_v7().to_string();
         let forged = state
@@ -396,8 +405,9 @@ mod tests {
         // Persist a *valid* session row (expires_at 1h out) keyed by the forged
         // hash so the cache-miss DB lookup returns the row.
         let forged_hash = crypto::hash_token(&forged);
-        let expires_at =
-            Timestamp::from_second(now.saturating_add(3600)).expect("valid expires_at");
+        let expires_at = now
+            .checked_add(SignedDuration::from_secs(3600))
+            .expect("valid expires_at");
         create_session(
             &state.store,
             &CreateSessionParams {

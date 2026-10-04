@@ -26,6 +26,7 @@
 use crate::AppState;
 use crate::arrival::ArrivalTime;
 use crate::crypto::jwt::JwtType;
+use crate::crypto::validity::numeric_date;
 use crate::db;
 use crate::error::{OAuthErrorCode, ServiceError};
 use crate::handlers::extractors::OAuthFormOrLegacyEmpty;
@@ -45,7 +46,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
-use jiff::Timestamp;
+use jiff::{SignedDuration, Timestamp};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -210,16 +211,18 @@ pub(crate) async fn fido2_challenge(
     };
 
     let challenge: Challenge<Raw> = challenge.into();
-    let now = Timestamp::now();
+    let now = numeric_date::whole_second(Timestamp::now());
+    // A five-minute window cannot leave jiff's range; should it, the state is
+    // born expired rather than endless.
     let exp = now
-        .checked_add(jiff::Span::new().minutes(5))
-        .map_or(now.as_second().saturating_add(300), |t| t.as_second());
+        .checked_add(SignedDuration::from_secs(300))
+        .unwrap_or(now);
 
     let challenge_state = Fido2ChallengeState {
         challenge: challenge.clone(),
         rp_id: state.config().rp_id.clone(),
         client_id,
-        iat: now.as_second(),
+        iat: now,
         exp,
     };
 

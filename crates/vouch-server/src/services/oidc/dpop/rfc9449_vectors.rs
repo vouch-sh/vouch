@@ -25,6 +25,7 @@ use super::{
 };
 use crate::crypto::alg::JwsAlgorithm;
 use crate::crypto::jwk::Jwk;
+use jiff::Timestamp;
 
 /// The DPoP proof from RFC 9449 Figure 2, reused verbatim in Figure 5.
 ///
@@ -102,7 +103,7 @@ fn figure_2_proof_signature_verifies() {
     assert_eq!(claims.jti, "-BwC3ESc6acc2lTc");
     assert_eq!(claims.htm, "POST");
     assert_eq!(claims.htu, "https://server.example.com/token");
-    assert_eq!(claims.iat, 1_562_262_616);
+    assert_eq!(claims.iat.as_second(), 1_562_262_616);
     assert_eq!(claims.ath, None);
     assert_eq!(claims.nonce, None);
 }
@@ -128,7 +129,7 @@ fn figure_13_proof_signature_verifies() {
     assert_eq!(claims.jti, "e1j3V_bKic8-LAEB");
     assert_eq!(claims.htm, "GET");
     assert_eq!(claims.htu, "https://resource.example.org/protectedresource");
-    assert_eq!(claims.iat, 1_562_262_618);
+    assert_eq!(claims.iat.as_second(), 1_562_262_618);
     assert_eq!(claims.ath.as_deref(), Some(FIGURE_14_ATH));
 }
 
@@ -157,7 +158,7 @@ fn figure_13_claims_validate_against_rfc_timeline() {
         &claims,
         &DpopClaimsValidation {
             // One second after the proof was issued, per Figure 14's `iat`.
-            now: 1_562_262_619,
+            now: Timestamp::from_second(1_562_262_619).expect("vector instant"),
             expected_method: "GET",
             accepted_uris: &accepted,
             max_age_seconds: 60,
@@ -179,7 +180,7 @@ fn figure_13_claims_rejected_when_stale() {
         &claims,
         &DpopClaimsValidation {
             // Well beyond max_age_seconds after the published `iat`.
-            now: 1_562_262_618 + 3600,
+            now: Timestamp::from_second(1_562_262_618 + 3600).expect("vector instant"),
             expected_method: "GET",
             accepted_uris: &accepted,
             max_age_seconds: 60,

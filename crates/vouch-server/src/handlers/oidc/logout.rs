@@ -531,19 +531,20 @@ mod tests {
     use crate::db::{self, AuditEvent, AuditEventFilter, AuditEventKind, SessionPurpose};
     use crate::services::oidc::token::IdTokenClaims;
     use crate::test_utils::{
-        TestClientSpec, TestSessionSpec, create_test_authenticator, create_test_client,
+        TestClientSpec, TestSessionSpec, at_second, create_test_authenticator, create_test_client,
         create_test_expired_session_row, create_test_session_with, create_test_user, http_get,
         http_post_form, http_post_form_full, test_app, test_app_state, test_app_state_with_rsa_key,
     };
+    use jiff::Timestamp;
 
     /// Build a minimal `IdTokenClaims` for signing in tests.
-    fn test_id_token_claims(iss: &str, sub: &str, aud: &str, exp: i64) -> IdTokenClaims {
+    fn test_id_token_claims(iss: &str, sub: &str, aud: &str, exp: Timestamp) -> IdTokenClaims {
         IdTokenClaims {
             iss: iss.to_string(),
             sub: sub.to_string(),
             aud: aud.to_string(),
             exp,
-            iat: 0,
+            iat: at_second(0),
             auth_time: None,
             nonce: None,
             email: None,
@@ -578,7 +579,7 @@ mod tests {
             "https://evil.example.com",
             "user-123",
             "client-abc",
-            9_999_999_999,
+            at_second(9_999_999_999),
         );
         let token = state.oidc_key.sign_jwt(&claims).await.unwrap();
         assert!(verify_id_token_hint(&state, &token).is_none());
@@ -589,7 +590,12 @@ mod tests {
         let state = test_app_state().await;
         let base_url = state.config().base_url.clone();
 
-        let claims = test_id_token_claims(&base_url, "user-123", "client-abc", 9_999_999_999);
+        let claims = test_id_token_claims(
+            &base_url,
+            "user-123",
+            "client-abc",
+            at_second(9_999_999_999),
+        );
         let token = state.oidc_key.sign_jwt(&claims).await.unwrap();
 
         let result = verify_id_token_hint(&state, &token);
@@ -605,7 +611,7 @@ mod tests {
         let base_url = state.config().base_url.clone();
 
         // exp in the past — should still verify (validate_exp = false).
-        let claims = test_id_token_claims(&base_url, "user-456", "client-xyz", 1);
+        let claims = test_id_token_claims(&base_url, "user-456", "client-xyz", at_second(1));
         let token = state.oidc_key.sign_jwt(&claims).await.unwrap();
 
         let result = verify_id_token_hint(&state, &token);
@@ -620,7 +626,12 @@ mod tests {
         let base_url = state.config().base_url.clone();
 
         let rsa_key = state.oidc_rsa_key.as_ref().unwrap();
-        let claims = test_id_token_claims(&base_url, "user-rs256", "client-rs256", 9_999_999_999);
+        let claims = test_id_token_claims(
+            &base_url,
+            "user-rs256",
+            "client-rs256",
+            at_second(9_999_999_999),
+        );
         let token = rsa_key.sign_jwt(&claims).await.unwrap();
 
         let result = verify_id_token_hint(&state, &token);
@@ -637,7 +648,12 @@ mod tests {
         let base_url = state_with_rsa.config().base_url.clone();
 
         let rsa_key = state_with_rsa.oidc_rsa_key.as_ref().unwrap();
-        let claims = test_id_token_claims(&base_url, "user-no-rsa", "client-no-rsa", 9_999_999_999);
+        let claims = test_id_token_claims(
+            &base_url,
+            "user-no-rsa",
+            "client-no-rsa",
+            at_second(9_999_999_999),
+        );
         let token = rsa_key.sign_jwt(&claims).await.unwrap();
 
         // Now verify against a state that has NO RSA key.
@@ -658,7 +674,7 @@ mod tests {
     /// Build a signed id_token_hint for the given app state and client_id.
     async fn make_hint(state: &crate::AppState, client_id: &str) -> String {
         let base_url = state.config().base_url.clone();
-        let claims = test_id_token_claims(&base_url, "user-1", client_id, 9_999_999_999);
+        let claims = test_id_token_claims(&base_url, "user-1", client_id, at_second(9_999_999_999));
         state.oidc_key.sign_jwt(&claims).await.unwrap()
     }
 

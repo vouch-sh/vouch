@@ -42,12 +42,12 @@ use std::sync::Arc;
 struct PendingJti {
     jti: Option<String>,
     client_id: String,
-    /// The validated assertion's `exp` claim (seconds since the Unix
-    /// epoch). Only the *validated* `exp` is safe to retain against: it
+    /// The validated assertion's `exp` claim. Only the *validated* `exp` is
+    /// safe to retain against: it
     /// has already cleared the `exp - iat ≤ max_lifetime` bound in the
     /// validator, so deriving `expires_at` from it cannot extend the
     /// record beyond what the assertion's own validity permits.
-    assertion_exp: i64,
+    assertion_exp: Timestamp,
 }
 
 /// Witness that a JWT client assertion passed RFC 7523 §3 validation
@@ -109,12 +109,13 @@ impl PendingJti {
         };
         // Not a database call: a timestamp overflow here is an internal
         // fault, and `DatabaseError` is the variant that renders it as a 500.
-        // `assertion_exp` is the validated `exp` (seconds since epoch);
+        // `assertion_exp` is the validated `exp`;
         // `CLOCK_SKEW_SECONDS` is the same constant the validator applies
         // to `exp`, so the record outlives the validator's acceptance
         // window exactly.
-        let expires_at = Timestamp::from_second(self.assertion_exp)
-            .and_then(|t| t.checked_add(CLOCK_SKEW_SECONDS.seconds()))
+        let expires_at = self
+            .assertion_exp
+            .checked_add(CLOCK_SKEW_SECONDS.seconds())
             .map_err(|e| ClientAuthError::DatabaseError(e.to_string()))?;
 
         db::store_jwt_assertion_jti(&state.store, &jti, &self.client_id, expires_at)
@@ -258,7 +259,7 @@ pub async fn authenticate_client_jwt(
         algorithm,
         &allowed_audiences,
         max_lifetime,
-        arrival.as_second(),
+        arrival.timestamp(),
     )
     .map_err(|e| {
         tracing::debug!(
@@ -584,7 +585,7 @@ mod tests {
         let pending = PendingJti {
             jti: Some("unique-jti-abc".to_string()),
             client_id: "client-1".to_string(),
-            assertion_exp: Timestamp::now().as_second().saturating_add(300),
+            assertion_exp: Timestamp::now().checked_add(300.seconds()).unwrap(),
         };
 
         let result = pending.commit(&state).await;
@@ -601,7 +602,7 @@ mod tests {
         let first = PendingJti {
             jti: Some("replay-jti-xyz".to_string()),
             client_id: "client-replay".to_string(),
-            assertion_exp: Timestamp::now().as_second().saturating_add(300),
+            assertion_exp: Timestamp::now().checked_add(300.seconds()).unwrap(),
         };
 
         // First commit succeeds.
@@ -615,7 +616,7 @@ mod tests {
         let second = PendingJti {
             jti: Some("replay-jti-xyz".to_string()),
             client_id: "client-replay".to_string(),
-            assertion_exp: Timestamp::now().as_second().saturating_add(300),
+            assertion_exp: Timestamp::now().checked_add(300.seconds()).unwrap(),
         };
         let result = second.commit(&state).await;
 
@@ -633,7 +634,7 @@ mod tests {
         let pending = PendingJti {
             jti: None,
             client_id: "client-no-jti".to_string(),
-            assertion_exp: Timestamp::now().as_second().saturating_add(300),
+            assertion_exp: Timestamp::now().checked_add(300.seconds()).unwrap(),
         };
 
         let result = pending.commit(&state).await;
@@ -662,7 +663,7 @@ mod tests {
     #[tokio::test]
     async fn test_commit_expires_at_binds_to_assertion_exp_plus_clock_skew() {
         let state = make_state().await;
-        let now = Timestamp::now().as_second();
+        let now = Timestamp::now();
 
         // (a) Commit a JTI whose `exp` is far in the past. Under the fix the
         // row's `expires_at = exp + CLOCK_SKEW_SECONDS` is also in the past,
@@ -672,7 +673,7 @@ mod tests {
         let past = PendingJti {
             jti: Some("exp-bound-jti-past".to_string()),
             client_id: "client-exp-bind".to_string(),
-            assertion_exp: now.saturating_sub(3600),
+            assertion_exp: now.checked_sub(3600.seconds()).unwrap(),
         };
         let _claim = past.commit(&state).await.expect("past-exp commit succeeds");
         let deleted_past = db::delete_expired_jwt_assertion_jtis(&state.store)
@@ -689,7 +690,7 @@ mod tests {
         // row's `expires_at = exp + CLOCK_SKEW_SECONDS` is in the future, so
         // cleanup must NOT delete it, and a verbatim replay must still
         // collide on the `(jti, client_id)` PRIMARY KEY.
-        let future_exp = now.saturating_add(3600);
+        let future_exp = now.checked_add(3600.seconds()).unwrap();
         let future = PendingJti {
             jti: Some("exp-bound-jti-future".to_string()),
             client_id: "client-exp-bind".to_string(),
@@ -729,7 +730,7 @@ mod tests {
             iss: iss.to_string(),
             sub: sub.to_string(),
             aud: JwtAudience::Single("https://test.example.com".to_string()),
-            exp: i64::MAX,
+            exp: Timestamp::MAX,
             iat: None,
             nbf: None,
             jti: None,

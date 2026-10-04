@@ -6,8 +6,9 @@
 
 use crate::crypto::alg::JwsAlgorithm;
 use crate::crypto::jwt::{HeaderAlg, Jws, JwsError};
-use crate::crypto::validity::ValidityWindow;
+use crate::crypto::validity::{ValidityWindow, numeric_date};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
+use jiff::{SignedDuration, Timestamp};
 use serde::{Deserialize, Serialize};
 
 /// Clock skew tolerance in seconds.
@@ -33,14 +34,16 @@ pub struct JwtAssertionClaims {
     pub sub: String,
     /// Audience — the authorization server's token endpoint URL.
     pub aud: JwtAudience,
-    /// Expiration time.
-    pub exp: i64,
+    /// Expiration time. RFC 7523 §3 item 4: "The JWT MUST contain an "exp"
+    /// (expiration time) claim", a NumericDate the client serializes.
+    #[serde(with = "numeric_date")]
+    pub exp: Timestamp,
     /// Issued at time (optional per RFC but we require it).
-    #[serde(default)]
-    pub iat: Option<i64>,
+    #[serde(default, with = "numeric_date::option")]
+    pub iat: Option<Timestamp>,
     /// Not before time (optional).
-    #[serde(default)]
-    pub nbf: Option<i64>,
+    #[serde(default, with = "numeric_date::option")]
+    pub nbf: Option<Timestamp>,
     /// JWT ID — unique identifier for replay prevention.
     #[serde(default)]
     pub jti: Option<String>,
@@ -201,7 +204,7 @@ pub fn validate_client_assertion_algorithm(
 /// * `algorithm` - The expected algorithm
 /// * `expected_audiences` - Acceptable audience values (token endpoint URL, base URL, etc.)
 /// * `max_lifetime_seconds` - Maximum allowed assertion lifetime
-/// * `now` - Unix seconds the temporal claims are judged against (the
+/// * `now` - the instant the temporal claims are judged at (the
 ///   request's [`crate::arrival::ArrivalTime`] in production)
 ///
 /// # Returns
@@ -217,7 +220,7 @@ pub fn validate_jwt_assertion(
     algorithm: jsonwebtoken::Algorithm,
     expected_audiences: &[&str],
     max_lifetime_seconds: i64,
-    now: i64,
+    now: Timestamp,
 ) -> ServiceResult<ValidatedJwtAssertion> {
     // Build validation settings
     let mut validation = jsonwebtoken::Validation::new(algorithm);
@@ -270,12 +273,13 @@ pub fn validate_jwt_assertion(
 
     // Validate max lifetime: exp - iat (or exp - now if no iat)
     let effective_iat = claims.iat.unwrap_or(now);
-    let lifetime = claims.exp.saturating_sub(effective_iat);
-    if lifetime > max_lifetime_seconds {
+    let lifetime = claims.exp.duration_since(effective_iat);
+    if lifetime > SignedDuration::from_secs(max_lifetime_seconds) {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClient,
             format!(
-                "JWT assertion lifetime ({lifetime}s) exceeds maximum ({max_lifetime_seconds}s)"
+                "JWT assertion lifetime ({}s) exceeds maximum ({max_lifetime_seconds}s)",
+                lifetime.as_secs()
             ),
         ));
     }
@@ -323,7 +327,6 @@ pub fn map_algorithm(alg: JwsAlgorithm) -> jsonwebtoken::Algorithm {
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
@@ -572,12 +575,14 @@ mod tests {
     }
 
     /// Build default valid claims centered around `now`.
-    fn valid_claims(now: i64) -> JwtAssertionClaims {
+    fn valid_claims(now: Timestamp) -> JwtAssertionClaims {
         JwtAssertionClaims {
             iss: "https://client.example.com".to_string(),
             sub: "https://client.example.com".to_string(),
             aud: JwtAudience::Single("https://auth.example.com/oauth/token".to_string()),
-            exp: now + 300,
+            exp: now
+                .checked_add(SignedDuration::from_secs(300))
+                .expect("in range"),
             iat: Some(now),
             nbf: None,
             jti: Some("unique-jti-123".to_string()),
@@ -598,7 +603,7 @@ mod tests {
     #[test]
     fn test_validate_jwt_assertion_valid() {
         let (enc, dec) = test_es256_keys();
-        let now = Timestamp::now().as_second();
+        let now = numeric_date::whole_second(Timestamp::now());
         let claims = valid_claims(now);
         let jwt = sign_test_jwt(&claims, &enc);
 
@@ -610,7 +615,7 @@ mod tests {
             jsonwebtoken::Algorithm::ES256,
             TEST_AUDIENCES,
             MAX_LIFETIME,
-            jiff::Timestamp::now().as_second(),
+            jiff::Timestamp::now(),
         );
 
         let validated = result.expect("valid JWT assertion should pass");
@@ -619,15 +624,65 @@ mod tests {
         assert_eq!(validated.alg, JwsAlgorithm::Es256);
     }
 
+    // RFC 7523 §3 item 4: "The JWT MUST contain an "exp" (expiration time)
+    // claim", and RFC 7519 §2 says of a NumericDate that "non-integer values
+    // can be represented". A client that writes fractions is judged by the
+    // window, not refused by the parser.
+    #[test]
+    fn test_validate_jwt_assertion_reads_fractional_numeric_dates() {
+        let (enc, dec) = test_es256_keys();
+        let now = Timestamp::constant(1_700_000_000, 0);
+        let now_f = 1_700_000_000.0_f64;
+        let claims = serde_json::json!({
+            "iss": "https://client.example.com",
+            "sub": "https://client.example.com",
+            "aud": "https://auth.example.com/oauth/token",
+            "exp": now_f + 300.5,
+            "iat": now_f - 0.5,
+            "nbf": now_f - 0.5,
+            "jti": "fractional-jti",
+        });
+        let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
+        let jwt = jsonwebtoken::encode(&header, &claims, &enc).expect("JWT signing must succeed");
+        let header = parse_assertion_header(&jwt).expect("header should parse");
+
+        let validated = validate_jwt_assertion(
+            &jwt,
+            &header,
+            &dec,
+            jsonwebtoken::Algorithm::ES256,
+            TEST_AUDIENCES,
+            MAX_LIFETIME,
+            now,
+        )
+        .expect("fractional exp, iat, and nbf inside the window must pass");
+        assert_eq!(
+            validated.claims.exp,
+            now.checked_add(SignedDuration::from_millis(300_500))
+                .unwrap(),
+            "exp keeps its fraction"
+        );
+        assert_eq!(
+            validated.claims.iat,
+            Some(now.checked_sub(SignedDuration::from_millis(500)).unwrap()),
+            "iat keeps its fraction"
+        );
+    }
+
     // RFC 7523 §3: an assertion past its exp is rejected.
     #[test]
     fn test_validate_jwt_assertion_rejects_expired() {
         let (enc, dec) = test_es256_keys();
-        let now = Timestamp::now().as_second();
+        let now = numeric_date::whole_second(Timestamp::now());
         // Expired 1 hour ago — well beyond 30s clock skew tolerance.
         let mut claims = valid_claims(now);
-        claims.iat = Some(now - 7200);
-        claims.exp = now - 3600;
+        claims.iat = Some(
+            now.checked_sub(SignedDuration::from_secs(7200))
+                .expect("in range"),
+        );
+        claims.exp = now
+            .checked_sub(SignedDuration::from_secs(3600))
+            .expect("in range");
 
         let jwt = sign_test_jwt(&claims, &enc);
         let header = parse_assertion_header(&jwt).expect("header should parse");
@@ -639,7 +694,7 @@ mod tests {
             jsonwebtoken::Algorithm::ES256,
             TEST_AUDIENCES,
             MAX_LIFETIME,
-            jiff::Timestamp::now().as_second(),
+            jiff::Timestamp::now(),
         );
 
         assert!(result.is_err(), "Expired JWT must be rejected");
@@ -658,10 +713,13 @@ mod tests {
     #[test]
     fn test_validate_jwt_assertion_exp_boundary() {
         let (enc, dec) = test_es256_keys();
-        let now = 1_700_000_000;
-        let validate = |exp: i64| {
+        let now = Timestamp::constant(1_700_000_000, 0);
+        let validate = |exp: Timestamp| {
             let mut claims = valid_claims(now);
-            claims.iat = Some(now - 60);
+            claims.iat = Some(
+                now.checked_sub(SignedDuration::from_secs(60))
+                    .expect("in range"),
+            );
             claims.exp = exp;
             let jwt = sign_test_jwt(&claims, &enc);
             let header = parse_assertion_header(&jwt).expect("header should parse");
@@ -675,19 +733,36 @@ mod tests {
                 now,
             )
         };
-        assert!(validate(now - CLOCK_SKEW_SECONDS + 1).is_ok());
-        assert!(validate(now - CLOCK_SKEW_SECONDS).is_err());
+        assert!(
+            validate(
+                now.checked_sub(SignedDuration::from_secs(CLOCK_SKEW_SECONDS - 1))
+                    .expect("in range")
+            )
+            .is_ok()
+        );
+        assert!(
+            validate(
+                now.checked_sub(SignedDuration::from_secs(CLOCK_SKEW_SECONDS))
+                    .expect("in range")
+            )
+            .is_err()
+        );
     }
 
     // RFC 7523 §3: a bounded clock skew allowance is applied.
     #[test]
     fn test_validate_jwt_assertion_accepts_within_clock_skew() {
         let (enc, dec) = test_es256_keys();
-        let now = Timestamp::now().as_second();
+        let now = numeric_date::whole_second(Timestamp::now());
         // exp is 5 seconds in the past — within the 10s clock skew window.
         let mut claims = valid_claims(now);
-        claims.iat = Some(now - 300);
-        claims.exp = now - 5;
+        claims.iat = Some(
+            now.checked_sub(SignedDuration::from_secs(300))
+                .expect("in range"),
+        );
+        claims.exp = now
+            .checked_sub(SignedDuration::from_secs(5))
+            .expect("in range");
 
         let jwt = sign_test_jwt(&claims, &enc);
         let header = parse_assertion_header(&jwt).expect("header should parse");
@@ -699,7 +774,7 @@ mod tests {
             jsonwebtoken::Algorithm::ES256,
             TEST_AUDIENCES,
             MAX_LIFETIME,
-            jiff::Timestamp::now().as_second(),
+            jiff::Timestamp::now(),
         );
 
         assert!(
@@ -713,10 +788,13 @@ mod tests {
     #[test]
     fn test_validate_jwt_assertion_rejects_future_nbf() {
         let (enc, dec) = test_es256_keys();
-        let now = Timestamp::now().as_second();
+        let now = numeric_date::whole_second(Timestamp::now());
         let mut claims = valid_claims(now);
         // nbf 1 hour in the future — well beyond clock skew.
-        claims.nbf = Some(now + 3600);
+        claims.nbf = Some(
+            now.checked_add(SignedDuration::from_secs(3600))
+                .expect("in range"),
+        );
 
         let jwt = sign_test_jwt(&claims, &enc);
         let header = parse_assertion_header(&jwt).expect("header should parse");
@@ -728,7 +806,7 @@ mod tests {
             jsonwebtoken::Algorithm::ES256,
             TEST_AUDIENCES,
             MAX_LIFETIME,
-            jiff::Timestamp::now().as_second(),
+            jiff::Timestamp::now(),
         );
 
         assert!(result.is_err(), "Future nbf must be rejected");
@@ -744,10 +822,13 @@ mod tests {
     #[test]
     fn test_validate_jwt_assertion_accepts_nbf_within_clock_skew() {
         let (enc, dec) = test_es256_keys();
-        let now = Timestamp::now().as_second();
+        let now = numeric_date::whole_second(Timestamp::now());
         let mut claims = valid_claims(now);
         // nbf 5 seconds in the future — within 10s clock skew.
-        claims.nbf = Some(now + 5);
+        claims.nbf = Some(
+            now.checked_add(SignedDuration::from_secs(5))
+                .expect("in range"),
+        );
 
         let jwt = sign_test_jwt(&claims, &enc);
         let header = parse_assertion_header(&jwt).expect("header should parse");
@@ -759,7 +840,7 @@ mod tests {
             jsonwebtoken::Algorithm::ES256,
             TEST_AUDIENCES,
             MAX_LIFETIME,
-            jiff::Timestamp::now().as_second(),
+            jiff::Timestamp::now(),
         );
 
         assert!(
@@ -773,11 +854,16 @@ mod tests {
     #[test]
     fn test_validate_jwt_assertion_rejects_future_iat() {
         let (enc, dec) = test_es256_keys();
-        let now = Timestamp::now().as_second();
+        let now = numeric_date::whole_second(Timestamp::now());
         let mut claims = valid_claims(now);
         // iat 1 hour in the future.
-        claims.iat = Some(now + 3600);
-        claims.exp = now + 7200;
+        claims.iat = Some(
+            now.checked_add(SignedDuration::from_secs(3600))
+                .expect("in range"),
+        );
+        claims.exp = now
+            .checked_add(SignedDuration::from_secs(7200))
+            .expect("in range");
 
         let jwt = sign_test_jwt(&claims, &enc);
         let header = parse_assertion_header(&jwt).expect("header should parse");
@@ -789,7 +875,7 @@ mod tests {
             jsonwebtoken::Algorithm::ES256,
             TEST_AUDIENCES,
             MAX_LIFETIME,
-            jiff::Timestamp::now().as_second(),
+            jiff::Timestamp::now(),
         );
 
         assert!(result.is_err(), "Future iat must be rejected");
@@ -805,11 +891,13 @@ mod tests {
     #[test]
     fn test_validate_jwt_assertion_rejects_excessive_lifetime() {
         let (enc, dec) = test_es256_keys();
-        let now = Timestamp::now().as_second();
+        let now = numeric_date::whole_second(Timestamp::now());
         let mut claims = valid_claims(now);
         // exp - iat = 600s but max_lifetime = 300s.
         claims.iat = Some(now);
-        claims.exp = now + 600;
+        claims.exp = now
+            .checked_add(SignedDuration::from_secs(600))
+            .expect("in range");
         let max_lifetime = 300;
 
         let jwt = sign_test_jwt(&claims, &enc);
@@ -822,7 +910,7 @@ mod tests {
             jsonwebtoken::Algorithm::ES256,
             TEST_AUDIENCES,
             max_lifetime,
-            jiff::Timestamp::now().as_second(),
+            jiff::Timestamp::now(),
         );
 
         assert!(result.is_err(), "Excessive lifetime must be rejected");
@@ -838,11 +926,13 @@ mod tests {
     #[test]
     fn test_validate_jwt_assertion_accepts_exactly_max_lifetime() {
         let (enc, dec) = test_es256_keys();
-        let now = Timestamp::now().as_second();
+        let now = numeric_date::whole_second(Timestamp::now());
         let mut claims = valid_claims(now);
         // exp - iat = 300s exactly, max_lifetime = 300s — should pass.
         claims.iat = Some(now);
-        claims.exp = now + 300;
+        claims.exp = now
+            .checked_add(SignedDuration::from_secs(300))
+            .expect("in range");
         let max_lifetime = 300;
 
         let jwt = sign_test_jwt(&claims, &enc);
@@ -855,7 +945,7 @@ mod tests {
             jsonwebtoken::Algorithm::ES256,
             TEST_AUDIENCES,
             max_lifetime,
-            jiff::Timestamp::now().as_second(),
+            jiff::Timestamp::now(),
         );
 
         assert!(
@@ -869,7 +959,7 @@ mod tests {
     #[test]
     fn test_validate_jwt_assertion_rejects_wrong_audience() {
         let (enc, dec) = test_es256_keys();
-        let now = Timestamp::now().as_second();
+        let now = numeric_date::whole_second(Timestamp::now());
         let mut claims = valid_claims(now);
         claims.aud = JwtAudience::Single("https://wrong.example.com".to_string());
 
@@ -883,7 +973,7 @@ mod tests {
             jsonwebtoken::Algorithm::ES256,
             TEST_AUDIENCES,
             MAX_LIFETIME,
-            jiff::Timestamp::now().as_second(),
+            jiff::Timestamp::now(),
         );
 
         assert!(result.is_err(), "Wrong audience must be rejected");
@@ -907,7 +997,7 @@ mod tests {
     #[test]
     fn test_validate_jwt_assertion_fapi_rejects_token_endpoint_audience() {
         let (enc, dec) = test_es256_keys();
-        let now = Timestamp::now().as_second();
+        let now = numeric_date::whole_second(Timestamp::now());
         let mut claims = valid_claims(now);
         // Client sets aud to the token endpoint URL — invalid for FAPI clients
         // where only the issuer (base) URL is accepted.
@@ -927,7 +1017,7 @@ mod tests {
             jsonwebtoken::Algorithm::ES256,
             fapi_audiences,
             MAX_LIFETIME,
-            jiff::Timestamp::now().as_second(),
+            jiff::Timestamp::now(),
         );
 
         assert!(
@@ -946,7 +1036,7 @@ mod tests {
     #[test]
     fn test_validate_jwt_assertion_fapi_accepts_issuer_url_audience() {
         let (enc, dec) = test_es256_keys();
-        let now = Timestamp::now().as_second();
+        let now = numeric_date::whole_second(Timestamp::now());
         let mut claims = valid_claims(now);
         // Client correctly uses the issuer URL as aud for a FAPI client.
         claims.aud = JwtAudience::Single("https://example.com".to_string());
@@ -963,7 +1053,7 @@ mod tests {
             jsonwebtoken::Algorithm::ES256,
             fapi_audiences,
             MAX_LIFETIME,
-            jiff::Timestamp::now().as_second(),
+            jiff::Timestamp::now(),
         );
 
         assert!(
@@ -977,7 +1067,7 @@ mod tests {
     #[test]
     fn test_validate_jwt_assertion_accepts_audience_as_array() {
         let (enc, dec) = test_es256_keys();
-        let now = Timestamp::now().as_second();
+        let now = numeric_date::whole_second(Timestamp::now());
         let mut claims = valid_claims(now);
         // Array with one wrong and one correct audience value.
         claims.aud = JwtAudience::Multiple(vec![
@@ -995,7 +1085,7 @@ mod tests {
             jsonwebtoken::Algorithm::ES256,
             TEST_AUDIENCES,
             MAX_LIFETIME,
-            jiff::Timestamp::now().as_second(),
+            jiff::Timestamp::now(),
         );
 
         assert!(
@@ -1010,7 +1100,7 @@ mod tests {
     fn test_validate_jwt_assertion_rejects_wrong_signature() {
         let (enc, _dec) = test_es256_keys();
         let (_enc2, dec2) = test_es256_keys(); // Different key pair
-        let now = Timestamp::now().as_second();
+        let now = numeric_date::whole_second(Timestamp::now());
         let claims = valid_claims(now);
 
         // Sign with key 1, verify with key 2.
@@ -1024,7 +1114,7 @@ mod tests {
             jsonwebtoken::Algorithm::ES256,
             TEST_AUDIENCES,
             MAX_LIFETIME,
-            jiff::Timestamp::now().as_second(),
+            jiff::Timestamp::now(),
         );
 
         assert!(result.is_err(), "Wrong signing key must be rejected");
@@ -1044,12 +1134,14 @@ mod tests {
     #[test]
     fn test_decode_claims_unverified_extracts_iss_and_sub() {
         let (enc, _dec) = test_es256_keys();
-        let now = Timestamp::now().as_second();
+        let now = numeric_date::whole_second(Timestamp::now());
         let claims = JwtAssertionClaims {
             iss: "https://my-app.example.com".to_string(),
             sub: "service-account-42".to_string(),
             aud: JwtAudience::Single("https://auth.example.com/oauth/token".to_string()),
-            exp: now + 300,
+            exp: now
+                .checked_add(SignedDuration::from_secs(300))
+                .expect("in range"),
             iat: Some(now),
             nbf: None,
             jti: Some("jti-abc".to_string()),
