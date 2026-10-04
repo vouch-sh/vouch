@@ -39,7 +39,7 @@ judgement columns come from the batch's record in `.local/`.
 | 2026-10-01 | 5 | 5 | 0 | 0 | 5 | 5 of 5 | #1686 closed (empty JWKS is valid, fails closed); #1689 superseded by #1690 (per-fork gate audience); #1688 superseded by #1691 (typed inactive-account refusal, translated); #1685 amended (FIDO2 grant success row after issuance, shared fixtures); #1687 superseded by the DPoP challenge class fix | 0 | 0 (type-level: `DpopChallenge`, `ServiceError::InactiveAccount`) |
 | 2026-10-02 | 25 | 25 | 0 | 4 | 3 | 22 of 25 | 3 merged as-is (#1729, #1735, #1746); 11 amended (#1721, #1722, #1724, #1725, #1726, #1732, #1737, #1742, #1743, #1744, #1745); 8 superseded by class fixes #1747–#1752; 3 closed (#1720, #1730, #1741) | 0 exact; #1733/#1734 in the 10-01 DPoP residue's class | 5 requested (`rcr_3ee858dd…`, `rcr_47c80cbd…`, `rcr_b099c70a…`, `rcr_0a472081…`, `rcr_1145b9ef…`), not synced |
 | 2026-10-03 | 4 | 4 | 0 | 1 | 4 | 4 of 4 | 3 superseded by class fixes #1777 (access-token clock), #1778 (inactive-account refusal scheme), #1779 (request_uri scheme + allowlist); #1776 closed, #1772 wontfix + docs #1780 (RFC 7519 §2 exact `aud`) | 0 exact; all 4 are siblings of 10-02 class fixes #1750, #1725, #1751 | 0 (type-level: `decode_token` takes `ArrivalTime`; one refusal site in `extract_resource_token`) |
-| 2026-10-04 | 1 | 1 | 0 | 0 | 1 | 1 of 1 | #1786 superseded by a class fix: `crypto::validity::NumericDate` for every externally minted time claim (ID token, DPoP `iat`, JAR, JWT-bearer), `ceil` to whole seconds; `.clippy.toml` reason renamed `TemporalClaims` → `ValidityWindow` | 0 (not recorded; #1782's description had decided the opposite) | 1 description ready (`detail` CLI unavailable) |
+| 2026-10-04 | 1 | 1 | 0 | 0 | 1 | 1 of 1 | #1786 superseded by a class fix: `crypto::validity::NumericDate` (a `jiff::Timestamp`) for every externally minted time claim (ID token, DPoP `iat`, JAR, JWT-bearer), judged against `ArrivalTime::timestamp()` at full precision; `.clippy.toml` reason renamed `TemporalClaims` → `ValidityWindow` | 0 (not recorded; #1782's description had decided the opposite) | 1 description ready (`detail` CLI unavailable) |
 
 Batches before 2026-08-20 have no record, so only their counted columns exist:
 run the script. `escape-unaware-delimiter-normalization` exists on Detail's side
@@ -947,13 +947,20 @@ the merged decision. The sibling hunt found the same integer typing, predating
 window check; own-token decoders mint whole seconds and were left alone. Detail's
 #1786 fixed only the window reader, quoted a sentence that is not in RFC 7519
 ("MAY be represented by a decimal fraction"), and carried an unsigned commit.
-Superseded by one `NumericDate` type (integer or finite float within ±2^53,
-`ceil`, so `now < exp ⟺ now < ceil(exp)` for an integer `now`) used by the
-window reader and all four claim structs, with a fractional-claim test per
-decoder.
+Superseded by one `NumericDate` type wrapping a `jiff::Timestamp`, built by
+checked library conversions and compared against the full-precision arrival
+instant, used by the window reader and all four claim structs, with a
+fractional-claim test per decoder. A first draft rounded the float to whole
+seconds with a cast; the user rejected it, and RFC 7519 §2 agrees: the value is
+a real number of seconds, so the comparison keeps the fraction.
 
 ### Process
 
+- "Follow the spec exactly" means representing the value the spec defines, not
+  a convenient projection of it. Rounding a NumericDate to whole seconds looked
+  harmless under the leeway and was still a second parser decision the spec
+  never made; keeping the instant removed the cast, the `#[expect]`, and the
+  argument.
 - When a fix narrows what a parser accepts, read the spec's definition of the
   value type, not only the sentence that names it. "MUST be a number containing
   a NumericDate value" was quoted correctly and still misread, because
