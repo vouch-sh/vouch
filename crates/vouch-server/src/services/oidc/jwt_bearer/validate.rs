@@ -327,12 +327,10 @@ pub fn map_algorithm(alg: JwsAlgorithm) -> jsonwebtoken::Algorithm {
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
     use super::*;
-    use crate::test_utils::at_second;
     use base64::Engine as _;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use jiff::Timestamp;
@@ -577,13 +575,15 @@ mod tests {
     }
 
     /// Build default valid claims centered around `now`.
-    fn valid_claims(now: i64) -> JwtAssertionClaims {
+    fn valid_claims(now: Timestamp) -> JwtAssertionClaims {
         JwtAssertionClaims {
             iss: "https://client.example.com".to_string(),
             sub: "https://client.example.com".to_string(),
             aud: JwtAudience::Single("https://auth.example.com/oauth/token".to_string()),
-            exp: at_second(now + 300),
-            iat: Some(at_second(now)),
+            exp: now
+                .checked_add(SignedDuration::from_secs(300))
+                .expect("in range"),
+            iat: Some(now),
             nbf: None,
             jti: Some("unique-jti-123".to_string()),
         }
@@ -603,7 +603,7 @@ mod tests {
     #[test]
     fn test_validate_jwt_assertion_valid() {
         let (enc, dec) = test_es256_keys();
-        let now = Timestamp::now().as_second();
+        let now = numeric_date::whole_second(Timestamp::now());
         let claims = valid_claims(now);
         let jwt = sign_test_jwt(&claims, &enc);
 
@@ -631,7 +631,7 @@ mod tests {
     #[test]
     fn test_validate_jwt_assertion_reads_fractional_numeric_dates() {
         let (enc, dec) = test_es256_keys();
-        let now = 1_700_000_000_i64;
+        let now = Timestamp::constant(1_700_000_000, 0);
         let now_f = 1_700_000_000.0_f64;
         let claims = serde_json::json!({
             "iss": "https://client.example.com",
@@ -653,23 +653,18 @@ mod tests {
             jsonwebtoken::Algorithm::ES256,
             TEST_AUDIENCES,
             MAX_LIFETIME,
-            at_second(now),
+            now,
         )
         .expect("fractional exp, iat, and nbf inside the window must pass");
         assert_eq!(
             validated.claims.exp,
-            at_second(now)
-                .checked_add(SignedDuration::from_millis(300_500))
+            now.checked_add(SignedDuration::from_millis(300_500))
                 .unwrap(),
             "exp keeps its fraction"
         );
         assert_eq!(
             validated.claims.iat,
-            Some(
-                at_second(now)
-                    .checked_sub(SignedDuration::from_millis(500))
-                    .unwrap()
-            ),
+            Some(now.checked_sub(SignedDuration::from_millis(500)).unwrap()),
             "iat keeps its fraction"
         );
     }
@@ -678,11 +673,16 @@ mod tests {
     #[test]
     fn test_validate_jwt_assertion_rejects_expired() {
         let (enc, dec) = test_es256_keys();
-        let now = Timestamp::now().as_second();
+        let now = numeric_date::whole_second(Timestamp::now());
         // Expired 1 hour ago — well beyond 30s clock skew tolerance.
         let mut claims = valid_claims(now);
-        claims.iat = Some(at_second(now - 7200));
-        claims.exp = at_second(now - 3600);
+        claims.iat = Some(
+            now.checked_sub(SignedDuration::from_secs(7200))
+                .expect("in range"),
+        );
+        claims.exp = now
+            .checked_sub(SignedDuration::from_secs(3600))
+            .expect("in range");
 
         let jwt = sign_test_jwt(&claims, &enc);
         let header = parse_assertion_header(&jwt).expect("header should parse");
@@ -713,11 +713,14 @@ mod tests {
     #[test]
     fn test_validate_jwt_assertion_exp_boundary() {
         let (enc, dec) = test_es256_keys();
-        let now = 1_700_000_000;
-        let validate = |exp: i64| {
+        let now = Timestamp::constant(1_700_000_000, 0);
+        let validate = |exp: Timestamp| {
             let mut claims = valid_claims(now);
-            claims.iat = Some(at_second(now - 60));
-            claims.exp = at_second(exp);
+            claims.iat = Some(
+                now.checked_sub(SignedDuration::from_secs(60))
+                    .expect("in range"),
+            );
+            claims.exp = exp;
             let jwt = sign_test_jwt(&claims, &enc);
             let header = parse_assertion_header(&jwt).expect("header should parse");
             validate_jwt_assertion(
@@ -727,22 +730,39 @@ mod tests {
                 jsonwebtoken::Algorithm::ES256,
                 TEST_AUDIENCES,
                 MAX_LIFETIME,
-                at_second(now),
+                now,
             )
         };
-        assert!(validate(now - CLOCK_SKEW_SECONDS + 1).is_ok());
-        assert!(validate(now - CLOCK_SKEW_SECONDS).is_err());
+        assert!(
+            validate(
+                now.checked_sub(SignedDuration::from_secs(CLOCK_SKEW_SECONDS - 1))
+                    .expect("in range")
+            )
+            .is_ok()
+        );
+        assert!(
+            validate(
+                now.checked_sub(SignedDuration::from_secs(CLOCK_SKEW_SECONDS))
+                    .expect("in range")
+            )
+            .is_err()
+        );
     }
 
     // RFC 7523 §3: a bounded clock skew allowance is applied.
     #[test]
     fn test_validate_jwt_assertion_accepts_within_clock_skew() {
         let (enc, dec) = test_es256_keys();
-        let now = Timestamp::now().as_second();
+        let now = numeric_date::whole_second(Timestamp::now());
         // exp is 5 seconds in the past — within the 10s clock skew window.
         let mut claims = valid_claims(now);
-        claims.iat = Some(at_second(now - 300));
-        claims.exp = at_second(now - 5);
+        claims.iat = Some(
+            now.checked_sub(SignedDuration::from_secs(300))
+                .expect("in range"),
+        );
+        claims.exp = now
+            .checked_sub(SignedDuration::from_secs(5))
+            .expect("in range");
 
         let jwt = sign_test_jwt(&claims, &enc);
         let header = parse_assertion_header(&jwt).expect("header should parse");
@@ -768,10 +788,13 @@ mod tests {
     #[test]
     fn test_validate_jwt_assertion_rejects_future_nbf() {
         let (enc, dec) = test_es256_keys();
-        let now = Timestamp::now().as_second();
+        let now = numeric_date::whole_second(Timestamp::now());
         let mut claims = valid_claims(now);
         // nbf 1 hour in the future — well beyond clock skew.
-        claims.nbf = Some(at_second(now + 3600));
+        claims.nbf = Some(
+            now.checked_add(SignedDuration::from_secs(3600))
+                .expect("in range"),
+        );
 
         let jwt = sign_test_jwt(&claims, &enc);
         let header = parse_assertion_header(&jwt).expect("header should parse");
@@ -799,10 +822,13 @@ mod tests {
     #[test]
     fn test_validate_jwt_assertion_accepts_nbf_within_clock_skew() {
         let (enc, dec) = test_es256_keys();
-        let now = Timestamp::now().as_second();
+        let now = numeric_date::whole_second(Timestamp::now());
         let mut claims = valid_claims(now);
         // nbf 5 seconds in the future — within 10s clock skew.
-        claims.nbf = Some(at_second(now + 5));
+        claims.nbf = Some(
+            now.checked_add(SignedDuration::from_secs(5))
+                .expect("in range"),
+        );
 
         let jwt = sign_test_jwt(&claims, &enc);
         let header = parse_assertion_header(&jwt).expect("header should parse");
@@ -828,11 +854,16 @@ mod tests {
     #[test]
     fn test_validate_jwt_assertion_rejects_future_iat() {
         let (enc, dec) = test_es256_keys();
-        let now = Timestamp::now().as_second();
+        let now = numeric_date::whole_second(Timestamp::now());
         let mut claims = valid_claims(now);
         // iat 1 hour in the future.
-        claims.iat = Some(at_second(now + 3600));
-        claims.exp = at_second(now + 7200);
+        claims.iat = Some(
+            now.checked_add(SignedDuration::from_secs(3600))
+                .expect("in range"),
+        );
+        claims.exp = now
+            .checked_add(SignedDuration::from_secs(7200))
+            .expect("in range");
 
         let jwt = sign_test_jwt(&claims, &enc);
         let header = parse_assertion_header(&jwt).expect("header should parse");
@@ -860,11 +891,13 @@ mod tests {
     #[test]
     fn test_validate_jwt_assertion_rejects_excessive_lifetime() {
         let (enc, dec) = test_es256_keys();
-        let now = Timestamp::now().as_second();
+        let now = numeric_date::whole_second(Timestamp::now());
         let mut claims = valid_claims(now);
         // exp - iat = 600s but max_lifetime = 300s.
-        claims.iat = Some(at_second(now));
-        claims.exp = at_second(now + 600);
+        claims.iat = Some(now);
+        claims.exp = now
+            .checked_add(SignedDuration::from_secs(600))
+            .expect("in range");
         let max_lifetime = 300;
 
         let jwt = sign_test_jwt(&claims, &enc);
@@ -893,11 +926,13 @@ mod tests {
     #[test]
     fn test_validate_jwt_assertion_accepts_exactly_max_lifetime() {
         let (enc, dec) = test_es256_keys();
-        let now = Timestamp::now().as_second();
+        let now = numeric_date::whole_second(Timestamp::now());
         let mut claims = valid_claims(now);
         // exp - iat = 300s exactly, max_lifetime = 300s — should pass.
-        claims.iat = Some(at_second(now));
-        claims.exp = at_second(now + 300);
+        claims.iat = Some(now);
+        claims.exp = now
+            .checked_add(SignedDuration::from_secs(300))
+            .expect("in range");
         let max_lifetime = 300;
 
         let jwt = sign_test_jwt(&claims, &enc);
@@ -924,7 +959,7 @@ mod tests {
     #[test]
     fn test_validate_jwt_assertion_rejects_wrong_audience() {
         let (enc, dec) = test_es256_keys();
-        let now = Timestamp::now().as_second();
+        let now = numeric_date::whole_second(Timestamp::now());
         let mut claims = valid_claims(now);
         claims.aud = JwtAudience::Single("https://wrong.example.com".to_string());
 
@@ -962,7 +997,7 @@ mod tests {
     #[test]
     fn test_validate_jwt_assertion_fapi_rejects_token_endpoint_audience() {
         let (enc, dec) = test_es256_keys();
-        let now = Timestamp::now().as_second();
+        let now = numeric_date::whole_second(Timestamp::now());
         let mut claims = valid_claims(now);
         // Client sets aud to the token endpoint URL — invalid for FAPI clients
         // where only the issuer (base) URL is accepted.
@@ -1001,7 +1036,7 @@ mod tests {
     #[test]
     fn test_validate_jwt_assertion_fapi_accepts_issuer_url_audience() {
         let (enc, dec) = test_es256_keys();
-        let now = Timestamp::now().as_second();
+        let now = numeric_date::whole_second(Timestamp::now());
         let mut claims = valid_claims(now);
         // Client correctly uses the issuer URL as aud for a FAPI client.
         claims.aud = JwtAudience::Single("https://example.com".to_string());
@@ -1032,7 +1067,7 @@ mod tests {
     #[test]
     fn test_validate_jwt_assertion_accepts_audience_as_array() {
         let (enc, dec) = test_es256_keys();
-        let now = Timestamp::now().as_second();
+        let now = numeric_date::whole_second(Timestamp::now());
         let mut claims = valid_claims(now);
         // Array with one wrong and one correct audience value.
         claims.aud = JwtAudience::Multiple(vec![
@@ -1065,7 +1100,7 @@ mod tests {
     fn test_validate_jwt_assertion_rejects_wrong_signature() {
         let (enc, _dec) = test_es256_keys();
         let (_enc2, dec2) = test_es256_keys(); // Different key pair
-        let now = Timestamp::now().as_second();
+        let now = numeric_date::whole_second(Timestamp::now());
         let claims = valid_claims(now);
 
         // Sign with key 1, verify with key 2.
@@ -1099,13 +1134,15 @@ mod tests {
     #[test]
     fn test_decode_claims_unverified_extracts_iss_and_sub() {
         let (enc, _dec) = test_es256_keys();
-        let now = Timestamp::now().as_second();
+        let now = numeric_date::whole_second(Timestamp::now());
         let claims = JwtAssertionClaims {
             iss: "https://my-app.example.com".to_string(),
             sub: "service-account-42".to_string(),
             aud: JwtAudience::Single("https://auth.example.com/oauth/token".to_string()),
-            exp: at_second(now + 300),
-            iat: Some(at_second(now)),
+            exp: now
+                .checked_add(SignedDuration::from_secs(300))
+                .expect("in range"),
+            iat: Some(now),
             nbf: None,
             jti: Some("jti-abc".to_string()),
         };
@@ -1117,7 +1154,7 @@ mod tests {
         assert_eq!(decoded.iss, "https://my-app.example.com");
         assert_eq!(decoded.sub, "service-account-42");
         assert_eq!(decoded.exp, claims.exp);
-        assert_eq!(decoded.iat, Some(at_second(now)));
+        assert_eq!(decoded.iat, Some(now));
         assert_eq!(decoded.jti.as_deref(), Some("jti-abc"));
     }
 

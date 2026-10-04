@@ -36,6 +36,7 @@ use crate::config::{
 use crate::crypto::document_crypto::DocumentCrypto;
 use crate::crypto::jwt::StateTokenSigner;
 use crate::crypto::keys::OidcSigningKey;
+use crate::crypto::validity::numeric_date;
 use crate::db::CreateAuthenticatorParams;
 use crate::db::CreatePendingOAuthParams;
 use crate::db::CreateScimTokenParams;
@@ -1866,16 +1867,15 @@ pub async fn forge_short_lived_access_token(
     )
     .expect("the token this deployment just minted must decode");
 
-    let now = jiff::Timestamp::now().as_second();
-    claims.exp = at_second(
-        now.checked_add(exp_seconds_from_now)
-            .expect("exp_seconds_from_now fits in i64"),
-    );
+    let now = numeric_date::whole_second(jiff::Timestamp::now());
+    claims.exp = now
+        .checked_add(jiff::SignedDuration::from_secs(exp_seconds_from_now))
+        .expect("exp_seconds_from_now in range");
     // Keep `nbf`/`iat` honest so nothing else about the token contradicts
     // the shortened lifetime; `jti` must change so the new token's hash is
     // distinct from the base token's.
-    claims.iat = at_second(now);
-    claims.nbf = Some(at_second(now));
+    claims.iat = now;
+    claims.nbf = Some(now);
     claims.jti = uuid::Uuid::now_v7().to_string();
 
     let token = state

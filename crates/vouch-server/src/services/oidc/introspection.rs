@@ -491,7 +491,6 @@ pub async fn revoke_token(
 )]
 mod tests {
     use super::*;
-    use crate::test_utils::at_second;
     use crate::test_utils::test_arrival;
 
     #[test]
@@ -598,7 +597,7 @@ mod tests {
         use crate::test_utils::test_app_state;
 
         let state = test_app_state().await;
-        let now = jiff::Timestamp::now().as_second();
+        let now = jiff::Timestamp::now();
 
         // Valid RFC 9068 access token signed with the state's own key and
         // issuer, so decode_token succeeds and execution reaches the DB-backed
@@ -608,8 +607,10 @@ mod tests {
             iss: state.config().base_url.to_string(),
             sub: "user-123".to_string(),
             aud: "client-abc".to_string(),
-            exp: at_second(now + 3600),
-            iat: at_second(now),
+            exp: now
+                .checked_add(jiff::SignedDuration::from_secs(3600))
+                .unwrap(),
+            iat: now,
             nbf: None,
             jti: "jti-540".to_string(),
             client_id: "client-abc".to_string(),

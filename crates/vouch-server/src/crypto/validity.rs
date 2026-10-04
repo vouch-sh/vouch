@@ -255,29 +255,30 @@ mod tests {
         exp: Timestamp,
     }
 
-    const NOW: i64 = 1_700_000_000;
+    const NOW: Timestamp = Timestamp::constant(1_700_000_000, 0);
 
     // RFC 7519 §4.1.4: "the current date/time MUST be before the expiration
     // date/time listed in the "exp" claim." Covers the KMS state-token path,
     // whose live `VerifyMac` call cannot run in a unit test.
     #[test]
     fn exp_boundary() {
-        let window = |exp| ValidityWindow::from_claims(Some(at_second(exp)), None);
+        let window = |exp| ValidityWindow::from_claims(Some(exp), None);
         assert!(
-            window(NOW + 1).accepts_own_token_at(at_second(NOW)),
+            window(NOW.checked_add(SignedDuration::from_secs(1)).unwrap())
+                .accepts_own_token_at(NOW),
             "one second before exp"
         );
-        assert!(!window(NOW).accepts_own_token_at(at_second(NOW)), "at exp");
+        assert!(!window(NOW).accepts_own_token_at(NOW), "at exp");
         assert!(
-            !window(NOW - 29).expired_at(at_second(NOW), 30),
+            !window(NOW.checked_sub(SignedDuration::from_secs(29)).unwrap()).expired_at(NOW, 30),
             "inside the leeway"
         );
         assert!(
-            window(NOW - 30).expired_at(at_second(NOW), 30),
+            window(NOW.checked_sub(SignedDuration::from_secs(30)).unwrap()).expired_at(NOW, 30),
             "at exp + leeway"
         );
         assert!(
-            !ValidityWindow::from_claims(None, None).accepts_own_token_at(at_second(NOW)),
+            !ValidityWindow::from_claims(None, None).accepts_own_token_at(NOW),
             "this server's tokens always carry exp"
         );
     }
@@ -286,14 +287,16 @@ mod tests {
     // not-before date/time listed in the "nbf" claim".
     #[test]
     fn nbf_boundary() {
-        let window = ValidityWindow::from_claims(None, Some(at_second(NOW)));
-        assert!(!window.not_yet_valid_at(at_second(NOW), 0), "now == nbf");
-        assert!(window.not_yet_valid_at(at_second(NOW - 1), 0));
+        let window = ValidityWindow::from_claims(None, Some(NOW));
+        assert!(!window.not_yet_valid_at(NOW, 0), "now == nbf");
+        assert!(window.not_yet_valid_at(NOW.checked_sub(SignedDuration::from_secs(1)).unwrap(), 0));
         assert!(
-            !window.not_yet_valid_at(at_second(NOW - 60), 60),
+            !window.not_yet_valid_at(NOW.checked_sub(SignedDuration::from_secs(60)).unwrap(), 60),
             "inside the leeway"
         );
-        assert!(window.not_yet_valid_at(at_second(NOW - 61), 60));
+        assert!(
+            window.not_yet_valid_at(NOW.checked_sub(SignedDuration::from_secs(61)).unwrap(), 60)
+        );
     }
 
     #[test]
@@ -328,28 +331,20 @@ mod tests {
     #[test]
     fn numeric_date_reads_every_json_number() {
         let read = |v: serde_json::Value| numeric_date::deserialize(&v).ok();
-        assert_eq!(read(serde_json::json!(NOW)), Some(at_second(NOW)));
+        assert_eq!(read(serde_json::json!(1_700_000_000)), Some(NOW));
         assert_eq!(
             read(serde_json::json!(1_700_000_000.0_f64)),
-            Some(at_second(NOW)),
+            Some(NOW),
             "a whole-valued float is the same instant as the integer"
         );
         assert_eq!(
             read(serde_json::json!(1_700_000_000.5_f64)),
-            Some(
-                at_second(NOW)
-                    .checked_add(SignedDuration::from_millis(500))
-                    .unwrap()
-            ),
+            Some(NOW.checked_add(SignedDuration::from_millis(500)).unwrap()),
             "the fraction is kept"
         );
         assert_eq!(
             read(serde_json::json!(1_700_000_000.25_f64)),
-            Some(
-                at_second(NOW)
-                    .checked_add(SignedDuration::from_millis(250))
-                    .unwrap()
-            ),
+            Some(NOW.checked_add(SignedDuration::from_millis(250)).unwrap()),
             "no rounding to a coarser unit"
         );
         assert_eq!(
@@ -384,10 +379,10 @@ mod tests {
             "nbf": 1_699_999_990.5_f64,
         }));
         let accepts = |now| window.is_some_and(|w| w.accepts_at(now, 0, 0));
-        let exp = at_second(NOW)
-            .checked_add(SignedDuration::from_millis(500))
-            .unwrap();
-        let nbf = at_second(NOW - 10)
+        let exp = NOW.checked_add(SignedDuration::from_millis(500)).unwrap();
+        let nbf = NOW
+            .checked_sub(SignedDuration::from_secs(10))
+            .unwrap()
             .checked_add(SignedDuration::from_millis(500))
             .unwrap();
         assert!(
@@ -405,13 +400,8 @@ mod tests {
     #[test]
     fn numeric_date_serializes_as_the_number_it_was() {
         let json = |exp| serde_json::to_string(&Claim { exp }).ok();
-        assert_eq!(
-            json(at_second(NOW)).as_deref(),
-            Some(r#"{"exp":1700000000}"#)
-        );
-        let half = at_second(NOW)
-            .checked_add(SignedDuration::from_millis(500))
-            .unwrap();
+        assert_eq!(json(NOW).as_deref(), Some(r#"{"exp":1700000000}"#));
+        let half = NOW.checked_add(SignedDuration::from_millis(500)).unwrap();
         assert_eq!(json(half).as_deref(), Some(r#"{"exp":1700000000.5}"#));
         let parsed: Claim = serde_json::from_str(r#"{"exp":1700000000.5}"#).unwrap();
         assert_eq!(parsed.exp, half);
@@ -419,25 +409,29 @@ mod tests {
 
     #[test]
     fn issued_at_window_closes_at_max_age() {
-        let window = ValidityWindow::issued_at(at_second(NOW - 60), 60);
+        let window =
+            ValidityWindow::issued_at(NOW.checked_sub(SignedDuration::from_secs(60)).unwrap(), 60);
         assert!(
-            window.accepts_at(at_second(NOW - 1), 0, 0),
+            window.accepts_at(NOW.checked_sub(SignedDuration::from_secs(1)).unwrap(), 0, 0),
             "age max_age - 1"
         );
-        assert!(!window.accepts_at(at_second(NOW), 0, 0), "age max_age");
+        assert!(!window.accepts_at(NOW, 0, 0), "age max_age");
     }
 
     // A timestamp dated after `now` fails closed unless a skew is allowed.
     #[test]
     fn issued_at_window_future_timestamp() {
         assert!(
-            !ValidityWindow::issued_at(at_second(NOW + 1), 60).accepts_at(at_second(NOW), 0, 0)
+            !ValidityWindow::issued_at(NOW.checked_add(SignedDuration::from_secs(1)).unwrap(), 60)
+                .accepts_at(NOW, 0, 0)
         );
         assert!(
-            ValidityWindow::issued_at(at_second(NOW + 60), 60).accepts_at(at_second(NOW), 0, 60)
+            ValidityWindow::issued_at(NOW.checked_add(SignedDuration::from_secs(60)).unwrap(), 60)
+                .accepts_at(NOW, 0, 60)
         );
         assert!(
-            !ValidityWindow::issued_at(at_second(NOW + 61), 60).accepts_at(at_second(NOW), 0, 60)
+            !ValidityWindow::issued_at(NOW.checked_add(SignedDuration::from_secs(61)).unwrap(), 60)
+                .accepts_at(NOW, 0, 60)
         );
     }
 
@@ -445,9 +439,6 @@ mod tests {
     fn arithmetic_at_the_bounds_fails_closed() {
         assert!(!ValidityWindow::issued_at(Timestamp::MIN, 60).accepts_at(Timestamp::MAX, 0, 0));
         assert!(!ValidityWindow::issued_at(Timestamp::MAX, 60).accepts_at(Timestamp::MIN, 0, 0));
-        assert!(
-            !ValidityWindow::from_claims(Some(at_second(NOW)), None)
-                .expired_at(Timestamp::MIN, i64::MAX)
-        );
+        assert!(!ValidityWindow::from_claims(Some(NOW), None).expired_at(Timestamp::MIN, i64::MAX));
     }
 }

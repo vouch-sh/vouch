@@ -944,6 +944,7 @@ mod tests {
     use crate::db::dpop;
     use crate::db::store::DocumentStore;
     use crate::test_utils::{at_second, test_arrival};
+    use jiff::SignedDuration;
     use jiff::Timestamp;
 
     fn dpop_headers(values: &[&[u8]]) -> HeaderMap {
@@ -1082,7 +1083,7 @@ mod tests {
     // wrong target does.
     #[test]
     fn test_unparseable_htu_is_a_uri_mismatch() {
-        let claims = make_claims("POST", "/oauth/token", Timestamp::now().as_second());
+        let claims = make_claims("POST", "/oauth/token", Timestamp::now());
         let uris = vec!["https://example.com/oauth/token".to_string()];
         let result = validate_dpop_claims(
             &claims,
@@ -1127,27 +1128,27 @@ mod tests {
         assert!(matches!(fmt_err, DpopError::InvalidFormat(_)));
     }
 
-    fn make_claims(htm: &str, htu: &str, iat: i64) -> DpopClaims {
+    fn make_claims(htm: &str, htu: &str, iat: Timestamp) -> DpopClaims {
         DpopClaims {
             jti: "test-jti".to_string(),
             htm: htm.to_string(),
             htu: htu.to_string(),
-            iat: at_second(iat),
+            iat,
             nonce: None,
             ath: None,
             source: None,
         }
     }
 
-    fn now() -> i64 {
-        jiff::Timestamp::now().as_second()
+    fn now() -> Timestamp {
+        Timestamp::now()
     }
 
     /// Build a validation-params struct with sensible defaults, overriding
     /// only the fields a given test cares about.
-    fn validation_params(now: i64, max_age_seconds: i64) -> DpopClaimsValidation<'static> {
+    fn validation_params(now: Timestamp, max_age_seconds: i64) -> DpopClaimsValidation<'static> {
         DpopClaimsValidation {
-            now: at_second(now),
+            now,
             expected_method: "POST",
             accepted_uris: &[],
             max_age_seconds,
@@ -1187,7 +1188,13 @@ mod tests {
     #[test]
     fn test_validate_dpop_claims_expired() {
         // iat older than max_age_seconds
-        let claims = make_claims("POST", "https://example.com/token", now() - 120);
+        let claims = make_claims(
+            "POST",
+            "https://example.com/token",
+            now()
+                .checked_sub(SignedDuration::from_secs(120))
+                .expect("in range"),
+        );
         let uris = ["https://example.com/token".to_string()];
         let result = validate_dpop_claims(
             &claims,
@@ -1202,7 +1209,13 @@ mod tests {
     #[test]
     fn test_validate_dpop_claims_future_iat() {
         // iat more than 60 seconds in the future (age < -60)
-        let claims = make_claims("POST", "https://example.com/token", now() + 120);
+        let claims = make_claims(
+            "POST",
+            "https://example.com/token",
+            now()
+                .checked_add(SignedDuration::from_secs(120))
+                .expect("in range"),
+        );
         let uris = ["https://example.com/token".to_string()];
         let result = validate_dpop_claims(
             &claims,
@@ -1220,7 +1233,7 @@ mod tests {
     // the freshness window, not refused by the parser.
     #[test]
     fn test_dpop_claims_read_fractional_iat() {
-        const NOW: i64 = 1_700_000_000;
+        let now = Timestamp::constant(1_700_000_000, 0);
         let claims: DpopClaims = serde_json::from_value(serde_json::json!({
             "jti": "test-jti",
             "htm": "POST",
@@ -1230,9 +1243,7 @@ mod tests {
         .expect("a fractional iat is a NumericDate");
         assert_eq!(
             claims.iat,
-            at_second(NOW - 1)
-                .checked_add(jiff::SignedDuration::from_millis(500))
-                .unwrap(),
+            Timestamp::constant(1_699_999_999, 500_000_000),
             "the fraction is kept"
         );
         let uris = ["https://example.com/token".to_string()];
@@ -1240,7 +1251,7 @@ mod tests {
             &claims,
             &DpopClaimsValidation {
                 accepted_uris: &uris,
-                ..validation_params(NOW, 60)
+                ..validation_params(now, 60)
             },
         );
         assert!(result.is_ok(), "{result:?}");
@@ -1305,8 +1316,14 @@ mod tests {
     /// accepted (`age == -60`, not `< -60`).
     #[test]
     fn test_validate_dpop_claims_skew_boundary_accepted() {
-        let fixed_now = 1_700_000_000;
-        let claims = make_claims("POST", "https://example.com/token", fixed_now + 60);
+        let fixed_now = Timestamp::constant(1_700_000_000, 0);
+        let claims = make_claims(
+            "POST",
+            "https://example.com/token",
+            fixed_now
+                .checked_add(SignedDuration::from_secs(60))
+                .expect("in range"),
+        );
         let uris = ["https://example.com/token".to_string()];
         let result = validate_dpop_claims(
             &claims,
@@ -1325,8 +1342,14 @@ mod tests {
     /// must be rejected (`age == -61 < -60`).
     #[test]
     fn test_validate_dpop_claims_skew_boundary_rejected() {
-        let fixed_now = 1_700_000_000;
-        let claims = make_claims("POST", "https://example.com/token", fixed_now + 61);
+        let fixed_now = Timestamp::constant(1_700_000_000, 0);
+        let claims = make_claims(
+            "POST",
+            "https://example.com/token",
+            fixed_now
+                .checked_add(SignedDuration::from_secs(61))
+                .expect("in range"),
+        );
         let uris = ["https://example.com/token".to_string()];
         let result = validate_dpop_claims(
             &claims,
@@ -1342,12 +1365,14 @@ mod tests {
     /// `max_age_seconds - 1` it is still fresh.
     #[test]
     fn test_validate_dpop_claims_max_age_boundary_accepted() {
-        let fixed_now = 1_700_000_000;
+        let fixed_now = Timestamp::constant(1_700_000_000, 0);
         let max_age_seconds = 60;
         let claims = make_claims(
             "POST",
             "https://example.com/token",
-            fixed_now - (max_age_seconds - 1),
+            fixed_now
+                .checked_sub(SignedDuration::from_secs(max_age_seconds - 1))
+                .expect("in range"),
         );
         let uris = ["https://example.com/token".to_string()];
         let result = validate_dpop_claims(
@@ -1366,12 +1391,14 @@ mod tests {
     /// At age `max_age_seconds` the window has closed.
     #[test]
     fn test_validate_dpop_claims_max_age_boundary_rejected() {
-        let fixed_now = 1_700_000_000;
+        let fixed_now = Timestamp::constant(1_700_000_000, 0);
         let max_age_seconds = 60;
         let claims = make_claims(
             "POST",
             "https://example.com/token",
-            fixed_now - max_age_seconds,
+            fixed_now
+                .checked_sub(SignedDuration::from_secs(max_age_seconds))
+                .expect("in range"),
         );
         let uris = ["https://example.com/token".to_string()];
         let result = validate_dpop_claims(
