@@ -28,6 +28,7 @@ use crate::services::oidc::jwt_bearer::validate::{
 use crate::services::oidc::jwt_bearer::{
     find_matching_key_with_refresh_client, resolve_client_jwks,
 };
+use jiff::{SignedDuration, Timestamp};
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -469,7 +470,7 @@ pub async fn validate_request_object(
     // 5. Validate temporal claims
     // FAPI 2.0 clients use a tighter 10-second clock skew tolerance.
     let clock_skew = super::fapi::clock_skew_seconds(client);
-    validate_temporal_claims(&claims, clock_skew, client.is_fapi(), arrival.as_second())?;
+    validate_temporal_claims(&claims, clock_skew, client.is_fapi(), arrival.timestamp())?;
 
     // 6. Validate issuer — must match client_id
     if let Some(ref iss) = claims.iss
@@ -522,8 +523,8 @@ pub async fn validate_request_object(
         // FAPI 2.0 Message Signing: exp must not be more than 60 minutes
         // after nbf (prevents long-lived request objects).
         if let (Some(exp), Some(nbf)) = (claims.exp, claims.nbf) {
-            let window = i64::from(exp).saturating_sub(i64::from(nbf));
-            if window > 3600 {
+            let window = exp.timestamp().duration_since(nbf.timestamp());
+            if window > SignedDuration::from_secs(3600) {
                 return Err(ServiceError::oauth(
                     OAuthErrorCode::InvalidRequestObject,
                     "FAPI 2.0: Request Object exp must not be more than 60 minutes after nbf",
@@ -649,10 +650,9 @@ fn validate_temporal_claims(
     claims: &RequestObjectClaims,
     clock_skew: i64,
     is_fapi: bool,
-    now: i64,
+    now: Timestamp,
 ) -> ServiceResult<()> {
-    let validity =
-        ValidityWindow::from_claims(claims.exp.map(i64::from), claims.nbf.map(i64::from));
+    let validity = ValidityWindow::from_claims(claims.exp, claims.nbf);
     if validity.expired_at(now, clock_skew) {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidRequestObject,
@@ -660,7 +660,7 @@ fn validate_temporal_claims(
         ));
     }
 
-    if let Some(nbf) = claims.nbf.map(i64::from) {
+    if let Some(nbf) = claims.nbf.map(NumericDate::timestamp) {
         if validity.not_yet_valid_at(now, clock_skew) {
             return Err(ServiceError::oauth(
                 OAuthErrorCode::InvalidRequestObject,
@@ -668,7 +668,10 @@ fn validate_temporal_claims(
             ));
         }
         // FAPI 2.0: nbf must not be more than 60 minutes in the past.
-        if is_fapi && nbf < now.saturating_sub(3600).saturating_sub(clock_skew) {
+        let oldest_nbf = now.checked_sub(SignedDuration::from_secs(
+            3600_i64.saturating_add(clock_skew),
+        ));
+        if is_fapi && oldest_nbf.ok().is_none_or(|oldest| nbf < oldest) {
             return Err(ServiceError::oauth(
                 OAuthErrorCode::InvalidRequestObject,
                 "Request Object nbf is too far in the past (more than 60 minutes)",
@@ -677,9 +680,7 @@ fn validate_temporal_claims(
     }
 
     // An `iat` after `now` describes a token not issued yet.
-    if ValidityWindow::from_claims(None, claims.iat.map(i64::from))
-        .not_yet_valid_at(now, clock_skew)
-    {
+    if ValidityWindow::from_claims(None, claims.iat).not_yet_valid_at(now, clock_skew) {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidRequestObject,
             "Request Object iat claim is in the future",
@@ -1055,9 +1056,9 @@ mod tests {
             jsonwebtoken::decode::<RequestObjectClaims>(&jwt, &dec, &validation).unwrap();
 
         // Manually check expiration (as validate_request_object would)
-        let exp = i64::from(token_data.claims.exp.unwrap());
+        let exp = token_data.claims.exp.unwrap().timestamp();
         assert!(
-            exp < now - STANDARD_CLOCK_SKEW_SECONDS,
+            exp < at(now - STANDARD_CLOCK_SKEW_SECONDS),
             "Expired token should be detected"
         );
     }
@@ -1202,12 +1203,20 @@ mod tests {
     const TEMPORAL_NOW: i64 = 1_700_000_000;
     const TEMPORAL_SKEW: i64 = 10;
 
+    fn at(secs: i64) -> Timestamp {
+        Timestamp::from_second(secs).unwrap()
+    }
+
+    fn temporal_now() -> Timestamp {
+        at(TEMPORAL_NOW)
+    }
+
     // RFC 9101 §4: temporal claims are not required by the base profile.
     #[test]
     fn test_jar_temporal_no_claims_accepted() {
         let claims = temporal_claims(serde_json::json!({}));
         assert!(
-            validate_temporal_claims(&claims, TEMPORAL_SKEW, false, TEMPORAL_NOW).is_ok(),
+            validate_temporal_claims(&claims, TEMPORAL_SKEW, false, temporal_now()).is_ok(),
             "absent temporal claims must be accepted"
         );
     }
@@ -1224,12 +1233,12 @@ mod tests {
             "iat": now_f - 100.5,
         }));
         assert!(
-            validate_temporal_claims(&inside, TEMPORAL_SKEW, true, TEMPORAL_NOW).is_ok(),
+            validate_temporal_claims(&inside, TEMPORAL_SKEW, true, temporal_now()).is_ok(),
             "fractional exp, nbf, and iat inside the window must be accepted"
         );
         let expired = temporal_claims(serde_json::json!({"exp": now_f - 100.5}));
         assert!(
-            validate_temporal_claims(&expired, TEMPORAL_SKEW, false, TEMPORAL_NOW).is_err(),
+            validate_temporal_claims(&expired, TEMPORAL_SKEW, false, temporal_now()).is_err(),
             "a fractional exp in the past is judged expired"
         );
     }
@@ -1241,12 +1250,12 @@ mod tests {
     fn test_jar_temporal_exp_boundary() {
         let inside = temporal_claims(serde_json::json!({"exp": TEMPORAL_NOW - TEMPORAL_SKEW + 1}));
         assert!(
-            validate_temporal_claims(&inside, TEMPORAL_SKEW, false, TEMPORAL_NOW).is_ok(),
+            validate_temporal_claims(&inside, TEMPORAL_SKEW, false, temporal_now()).is_ok(),
             "exp == now - skew + 1 must be accepted"
         );
 
         let at_edge = temporal_claims(serde_json::json!({"exp": TEMPORAL_NOW - TEMPORAL_SKEW}));
-        let err = validate_temporal_claims(&at_edge, TEMPORAL_SKEW, false, TEMPORAL_NOW)
+        let err = validate_temporal_claims(&at_edge, TEMPORAL_SKEW, false, temporal_now())
             .expect_err("exp == now - skew must be rejected");
         assert_eq!(
             *oauth_error_code(&err),
@@ -1260,14 +1269,14 @@ mod tests {
     fn test_jar_temporal_nbf_future_boundary() {
         let at_edge = temporal_claims(serde_json::json!({"nbf": TEMPORAL_NOW + TEMPORAL_SKEW}));
         assert!(
-            validate_temporal_claims(&at_edge, TEMPORAL_SKEW, false, TEMPORAL_NOW).is_ok(),
+            validate_temporal_claims(&at_edge, TEMPORAL_SKEW, false, temporal_now()).is_ok(),
             "nbf == now + skew must be accepted"
         );
 
         let past_edge =
             temporal_claims(serde_json::json!({"nbf": TEMPORAL_NOW + TEMPORAL_SKEW + 1}));
         assert!(
-            validate_temporal_claims(&past_edge, TEMPORAL_SKEW, false, TEMPORAL_NOW).is_err(),
+            validate_temporal_claims(&past_edge, TEMPORAL_SKEW, false, temporal_now()).is_err(),
             "nbf == now + skew + 1 must be rejected"
         );
     }
@@ -1278,18 +1287,18 @@ mod tests {
         let at_edge =
             temporal_claims(serde_json::json!({"nbf": TEMPORAL_NOW - 3600 - TEMPORAL_SKEW}));
         assert!(
-            validate_temporal_claims(&at_edge, TEMPORAL_SKEW, true, TEMPORAL_NOW).is_ok(),
+            validate_temporal_claims(&at_edge, TEMPORAL_SKEW, true, temporal_now()).is_ok(),
             "FAPI: nbf == now - 3600 - skew must be accepted"
         );
 
         let past_edge =
             temporal_claims(serde_json::json!({"nbf": TEMPORAL_NOW - 3600 - TEMPORAL_SKEW - 1}));
         assert!(
-            validate_temporal_claims(&past_edge, TEMPORAL_SKEW, true, TEMPORAL_NOW).is_err(),
+            validate_temporal_claims(&past_edge, TEMPORAL_SKEW, true, temporal_now()).is_err(),
             "FAPI: nbf == now - 3600 - skew - 1 must be rejected"
         );
         assert!(
-            validate_temporal_claims(&past_edge, TEMPORAL_SKEW, false, TEMPORAL_NOW).is_ok(),
+            validate_temporal_claims(&past_edge, TEMPORAL_SKEW, false, temporal_now()).is_ok(),
             "non-FAPI: far-past nbf must be accepted"
         );
     }
@@ -1299,14 +1308,14 @@ mod tests {
     fn test_jar_temporal_iat_boundary() {
         let at_edge = temporal_claims(serde_json::json!({"iat": TEMPORAL_NOW + TEMPORAL_SKEW}));
         assert!(
-            validate_temporal_claims(&at_edge, TEMPORAL_SKEW, false, TEMPORAL_NOW).is_ok(),
+            validate_temporal_claims(&at_edge, TEMPORAL_SKEW, false, temporal_now()).is_ok(),
             "iat == now + skew must be accepted"
         );
 
         let past_edge =
             temporal_claims(serde_json::json!({"iat": TEMPORAL_NOW + TEMPORAL_SKEW + 1}));
         assert!(
-            validate_temporal_claims(&past_edge, TEMPORAL_SKEW, false, TEMPORAL_NOW).is_err(),
+            validate_temporal_claims(&past_edge, TEMPORAL_SKEW, false, temporal_now()).is_err(),
             "iat == now + skew + 1 must be rejected"
         );
     }

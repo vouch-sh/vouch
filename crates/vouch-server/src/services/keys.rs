@@ -15,6 +15,7 @@ use crate::db::{self, store::DocumentStore};
 use crate::error::ServiceError;
 use crate::infra::i18n::Tr;
 use crate::services::auth::ValidatedResourceToken;
+use jiff::Timestamp;
 use vouch_common::{KeyInfo, ResourceLabel, lookup_device_model};
 
 /// Maximum session age (in seconds) for destructive key operations.
@@ -108,7 +109,7 @@ pub(crate) fn require_recent_hardware_verification(
     require_fresh_timestamp(
         token.auth_time.unwrap_or(0),
         KEY_DELETE_MAX_AGE_SECS,
-        arrival.as_second(),
+        arrival.timestamp(),
     )
 }
 
@@ -127,9 +128,11 @@ pub(crate) fn require_recent_hardware_verification(
 pub(crate) fn require_fresh_timestamp(
     issued_at: i64,
     max_age_secs: i64,
-    now: i64,
+    now: Timestamp,
 ) -> Result<(), ServiceError> {
-    if ValidityWindow::issued_at(issued_at, max_age_secs).accepts_at(now, 0, 0) {
+    if Timestamp::from_second(issued_at).is_ok_and(|issued_at| {
+        ValidityWindow::issued_at(issued_at, max_age_secs).accepts_at(now, 0, 0)
+    }) {
         return Ok(());
     }
     Err(ServiceError::StepUpRequired {
@@ -400,6 +403,10 @@ pub(crate) async fn delete_key(
 )]
 mod tests {
     use super::*;
+
+    fn at(secs: i64) -> Timestamp {
+        Timestamp::from_second(secs).unwrap()
+    }
     use crate::{db, test_utils};
 
     fn make_iat(seconds_ago: i64) -> i64 {
@@ -409,13 +416,13 @@ mod tests {
     #[test]
     fn test_require_fresh_timestamp_passes_for_fresh() {
         let iat = make_iat(5); // 5 seconds old
-        assert!(require_fresh_timestamp(iat, 60, jiff::Timestamp::now().as_second()).is_ok());
+        assert!(require_fresh_timestamp(iat, 60, jiff::Timestamp::now()).is_ok());
     }
 
     #[test]
     fn test_require_fresh_timestamp_fails_for_stale() {
         let iat = make_iat(120); // 2 minutes old
-        let err = require_fresh_timestamp(iat, 60, jiff::Timestamp::now().as_second()).unwrap_err();
+        let err = require_fresh_timestamp(iat, 60, jiff::Timestamp::now()).unwrap_err();
         assert!(
             matches!(
                 err,
@@ -433,14 +440,14 @@ mod tests {
     #[test]
     fn test_require_fresh_timestamp_boundary_exactly_at_max_age() {
         let now = 1_700_000_000;
-        assert!(require_fresh_timestamp(now - 59, 60, now).is_ok());
-        assert!(require_fresh_timestamp(now - 60, 60, now).is_err());
+        assert!(require_fresh_timestamp(now - 59, 60, at(now)).is_ok());
+        assert!(require_fresh_timestamp(now - 60, 60, at(now)).is_err());
     }
 
     #[test]
     fn test_require_fresh_timestamp_one_second_over() {
         let iat = make_iat(61); // 61 seconds old (1 second over)
-        let err = require_fresh_timestamp(iat, 60, jiff::Timestamp::now().as_second()).unwrap_err();
+        let err = require_fresh_timestamp(iat, 60, jiff::Timestamp::now()).unwrap_err();
         assert!(
             matches!(err, ServiceError::StepUpRequired { .. }),
             "Expected StepUpRequired for timestamp 1 second over max_age"
@@ -563,12 +570,8 @@ mod tests {
     /// as freshly authenticated.
     #[test]
     fn test_require_fresh_timestamp_epoch_is_rejected() {
-        let err = require_fresh_timestamp(
-            0,
-            KEY_DELETE_MAX_AGE_SECS,
-            jiff::Timestamp::now().as_second(),
-        )
-        .unwrap_err();
+        let err = require_fresh_timestamp(0, KEY_DELETE_MAX_AGE_SECS, jiff::Timestamp::now())
+            .unwrap_err();
         assert!(
             matches!(
                 err,
@@ -593,12 +596,9 @@ mod tests {
     #[test]
     fn test_require_fresh_timestamp_future_is_rejected() {
         let future_iat = jiff::Timestamp::now().as_second() + 3600; // 1 h ahead
-        let err = require_fresh_timestamp(
-            future_iat,
-            KEY_DELETE_MAX_AGE_SECS,
-            jiff::Timestamp::now().as_second(),
-        )
-        .unwrap_err();
+        let err =
+            require_fresh_timestamp(future_iat, KEY_DELETE_MAX_AGE_SECS, jiff::Timestamp::now())
+                .unwrap_err();
         assert!(
             matches!(
                 err,
@@ -618,12 +618,7 @@ mod tests {
     fn test_require_fresh_timestamp_now_passes() {
         let now = jiff::Timestamp::now().as_second();
         assert!(
-            require_fresh_timestamp(
-                now,
-                KEY_DELETE_MAX_AGE_SECS,
-                jiff::Timestamp::now().as_second()
-            )
-            .is_ok()
+            require_fresh_timestamp(now, KEY_DELETE_MAX_AGE_SECS, jiff::Timestamp::now()).is_ok()
         );
     }
 }

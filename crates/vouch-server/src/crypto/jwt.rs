@@ -17,6 +17,7 @@ use crate::crypto::keys::OidcSigningKey;
 use crate::crypto::validity::ValidityWindow;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use jiff::Timestamp;
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use serde::Deserialize;
 use serde::Serialize;
@@ -324,7 +325,7 @@ async fn kms_decode<T: DeserializeOwned>(
         .map_err(|e| StateTokenError::Validation(format!("Invalid payload JSON: {e}")))?;
     let validity = ValidityWindow::from_payload(&raw)
         .ok_or_else(|| StateTokenError::Validation("Invalid exp or nbf claim".to_string()))?;
-    if !validity.accepts_own_token_at(now) {
+    if !Timestamp::from_second(now).is_ok_and(|now| validity.accepts_own_token_at(now)) {
         return Err(StateTokenError::Expired);
     }
 
@@ -669,6 +670,7 @@ pub(crate) fn decode_es256_token<C: DeserializeOwned>(
                 return None;
             }
 
+            let now = Timestamp::from_second(now).ok()?;
             if !ValidityWindow::from_token(token)?.accepts_own_token_at(now) {
                 return None;
             }
@@ -739,7 +741,9 @@ pub(crate) fn decode_state_token<T: DeserializeOwned>(
             jsonwebtoken::errors::ErrorKind::InvalidToken,
         ));
     }
-    let accepted = ValidityWindow::from_token(token).is_some_and(|v| v.accepts_own_token_at(now));
+    let accepted = Timestamp::from_second(now).is_ok_and(|now| {
+        ValidityWindow::from_token(token).is_some_and(|v| v.accepts_own_token_at(now))
+    });
     if !accepted {
         return Err(jsonwebtoken::errors::Error::from(
             jsonwebtoken::errors::ErrorKind::ExpiredSignature,
