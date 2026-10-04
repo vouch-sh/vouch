@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "2026.10.2"
+version = "2026.10.3"
 edition = "2024"
 license = "Apache-2.0 OR MIT"
 rust-version = "1.99.0"

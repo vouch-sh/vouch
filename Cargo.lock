@@ -2608,9 +2608,9 @@ dependencies = [
 
 [[package]]
 name = "fs-err"
-version = "3.3.1"
+version = "3.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b91aa448ca50d7e79433bdf3ee8d99215430d2ec02ade5aefab2a073a1822e8a"
+checksum = "b5c95b673b8f6f7235229ae11c5642d81b04c2e64c1e2fb417bc0cf73ca45f29"
 dependencies = [
  "autocfg",
  "tokio",
@@ -7394,7 +7394,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vouch-agent"
-version = "2026.10.2"
+version = "2026.10.3"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -7425,7 +7425,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-cli"
-version = "2026.10.2"
+version = "2026.10.3"
 dependencies = [
  "anyhow",
  "apple-native-keyring-store",
@@ -7486,7 +7486,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-common"
-version = "2026.10.2"
+version = "2026.10.3"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
@@ -7509,7 +7509,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-httpsig"
-version = "2026.10.2"
+version = "2026.10.3"
 dependencies = [
  "aws-lc-rs",
  "axum",
@@ -7525,7 +7525,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-i18n"
-version = "2026.10.2"
+version = "2026.10.3"
 dependencies = [
  "anyhow",
  "fluent-bundle",
@@ -7537,7 +7537,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-server"
-version = "2026.10.2"
+version = "2026.10.3"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -7627,7 +7627,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-tests"
-version = "2026.10.2"
+version = "2026.10.3"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
