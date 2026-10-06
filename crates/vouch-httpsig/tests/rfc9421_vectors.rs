@@ -426,4 +426,3 @@ fn test_b4_transform_signature_base() {
 
     assert_eq!(base_str, expected);
 }
-
