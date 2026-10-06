@@ -373,7 +373,6 @@ mod tests {
     use super::*;
     use crate::algorithm::SigningAlgorithm;
     use crate::algorithm::ecdsa_p256::EcdsaP256Signer;
-    use crate::algorithm::ed25519::Ed25519Signer;
     use crate::algorithm::hmac_sha256::HmacSha256Key;
     use crate::digest::DigestAlgorithm;
     use crate::sfv::parse::parse_inner_list;
@@ -430,24 +429,6 @@ mod tests {
             .authority()
             .path()
             .field("accept")
-            .created(1_618_884_473)
-            .sign_request(&mut req, &signer)
-            .unwrap();
-
-        verify_request_signature(&req, "sig1", &verifier, None).unwrap();
-    }
-
-    // RFC 9421 §3.3.6: ed25519 signs and verifies.
-    #[test]
-    fn test_ed25519_sign_verify_roundtrip() {
-        let signer = Ed25519Signer::generate("ed-key").unwrap();
-        let verifier = signer.verifier();
-
-        let mut req = make_request("DELETE", "https://example.com/item/42", &[]);
-
-        SignatureBuilder::new("sig1")
-            .method()
-            .path()
             .created(1_618_884_473)
             .sign_request(&mut req, &signer)
             .unwrap();

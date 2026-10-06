@@ -2,7 +2,6 @@
 //! Signing and verification algorithm implementations for RFC 9421.
 
 pub mod ecdsa_p256;
-pub mod ed25519;
 pub mod hmac_sha256;
 
 use crate::error::HttpSigError;
@@ -18,8 +17,6 @@ use crate::error::HttpSigError;
 pub enum SignatureAlgorithm {
     /// `ecdsa-p256-sha256` — RFC 9421 Section 3.3.4. 64-octet `r || s` signatures.
     EcdsaP256Sha256,
-    /// `ed25519` — RFC 9421 Section 3.3.6. Raw 64-byte signatures.
-    Ed25519,
     /// `hmac-sha256` — RFC 9421 Section 3.3.3.
     HmacSha256,
 }
@@ -30,7 +27,6 @@ impl SignatureAlgorithm {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::EcdsaP256Sha256 => "ecdsa-p256-sha256",
-            Self::Ed25519 => "ed25519",
             Self::HmacSha256 => "hmac-sha256",
         }
     }
