@@ -8,7 +8,6 @@
 //! ## Supported algorithms
 //!
 //! - `ecdsa-p256-sha256` — ECDSA with P-256 and SHA-256 (64-octet `r || s` signatures)
-//! - `ed25519` — Ed25519 (raw 64-byte signatures)
 //! - `hmac-sha256` — HMAC with SHA-256
 
 pub mod algorithm;

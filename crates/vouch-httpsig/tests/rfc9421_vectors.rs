@@ -14,26 +14,12 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 
 use vouch_httpsig::algorithm::ecdsa_p256::EcdsaP256Verifier;
-use vouch_httpsig::algorithm::ed25519::{Ed25519Signer, Ed25519Verifier};
 use vouch_httpsig::algorithm::hmac_sha256::HmacSha256Key;
 use vouch_httpsig::algorithm::{SigningAlgorithm, VerifyingAlgorithm};
 use vouch_httpsig::component::ComponentIdentifier;
 use vouch_httpsig::signature_base::build_request_base_with_params_str;
 use vouch_httpsig::signature_base::build_response_base_with_params_str;
 use vouch_httpsig::signature_params::SignatureParams;
-
-// ---------------------------------------------------------------------------
-// B.1.4 — Ed25519 test key (PKCS#8 PEM, no encryption)
-// ---------------------------------------------------------------------------
-const ED25519_PRIVATE_KEY_PEM: &str = "\
------BEGIN PRIVATE KEY-----\n\
-MC4CAQAwBQYDK2VwBCIEIJ+DYvh6SEqVTm50DFtMDoQikTmiCqirVv9mWG9qfSnF\n\
------END PRIVATE KEY-----";
-
-const ED25519_PUBLIC_KEY_PEM: &str = "\
------BEGIN PUBLIC KEY-----\n\
-MCowBQYDK2VwAyEAJrQLj5P/89iXES9+vFgrIy29clF9CC/oPPsw3c5D0bs=\n\
------END PUBLIC KEY-----";
 
 // ---------------------------------------------------------------------------
 // B.1.5 — HMAC shared secret (base64-encoded, 64 bytes)
@@ -394,65 +380,6 @@ fn test_b26_ed25519_signature_base() {
     assert_eq!(base_str, expected);
 }
 
-// RFC 9421 §3.3.6 (Appendix B.2.6): the published ed25519 signature verifies.
-#[test]
-fn test_b26_ed25519_verify_signature() {
-    let req = build_test_request();
-    let params = SignatureParams {
-        components: vec![
-            ComponentIdentifier::field("date"),
-            ComponentIdentifier::method(),
-            ComponentIdentifier::path(),
-            ComponentIdentifier::authority(),
-            ComponentIdentifier::field("content-type"),
-            ComponentIdentifier::field("content-length"),
-        ],
-        alg: None,
-        keyid: Some("test-key-ed25519".into()),
-        created: Some(1_618_884_473),
-        expires: None,
-        nonce: None,
-        tag: None,
-    };
-
-    let base = build_request_base_with_params_str(&req, &params, &params.serialize()).unwrap();
-
-    // Decode the Ed25519 private key from PEM (PKCS#8)
-    let pem_body = ED25519_PRIVATE_KEY_PEM
-        .lines()
-        .filter(|l| !l.starts_with("-----"))
-        .collect::<String>();
-    let pkcs8_der = STANDARD.decode(&pem_body).unwrap();
-
-    let signer = Ed25519Signer::from_pkcs8(&pkcs8_der, "test-key-ed25519").unwrap();
-
-    // Ed25519 is deterministic — our signature should match the RFC
-    let sig = SigningAlgorithm::sign(&signer, &base).unwrap();
-    let sig_b64 = STANDARD.encode(&sig);
-
-    let expected_sig =
-        "wqcAqbmYJ2ji2glfAMaRy4gruYYnx2nEFN2HN6jrnDnQCK1u02Gb04v9EDgwUPiu4A0w6vuQv5lIp5WPpBKRCw==";
-    assert_eq!(
-        sig_b64, expected_sig,
-        "Ed25519 signature must match RFC vector"
-    );
-
-    // Verify with public key
-    let pub_pem_body = ED25519_PUBLIC_KEY_PEM
-        .lines()
-        .filter(|l| !l.starts_with("-----"))
-        .collect::<String>();
-    let pub_spki_der = STANDARD.decode(&pub_pem_body).unwrap();
-    // Ed25519 SPKI: 12 bytes header, then 32 bytes key
-    let pub_key_bytes = &pub_spki_der[12..];
-    assert_eq!(pub_key_bytes.len(), 32);
-
-    let verifier = Ed25519Verifier::new(pub_key_bytes);
-
-    let expected_sig_bytes = STANDARD.decode(expected_sig).unwrap();
-    VerifyingAlgorithm::verify(&verifier, &base, &expected_sig_bytes).unwrap();
-}
-
 // ---------------------------------------------------------------------------
 // B.4 — HTTP Message Transformations (Ed25519)
 // ---------------------------------------------------------------------------
@@ -498,104 +425,4 @@ fn test_b4_transform_signature_base() {
 ;created=1618884473;keyid=\"test-key-ed25519\"";
 
     assert_eq!(base_str, expected);
-}
-
-// RFC 9421 §1.3 (Appendix B.4): a signature survives permitted message transformations.
-#[test]
-fn test_b4_transform_verify_ed25519_signature() {
-    let req = http::Request::builder()
-        .method("GET")
-        .uri("https://example.org/demo?name1=Value1&Name2=value2")
-        .header("host", "example.org")
-        .header("date", "Fri, 15 Jul 2022 14:24:55 GMT")
-        .header("accept", "application/json")
-        .header("accept", "*/*")
-        .body(())
-        .unwrap();
-
-    let params = SignatureParams {
-        components: vec![
-            ComponentIdentifier::method(),
-            ComponentIdentifier::path(),
-            ComponentIdentifier::authority(),
-            ComponentIdentifier::field("accept"),
-        ],
-        alg: None,
-        keyid: Some("test-key-ed25519".into()),
-        created: Some(1_618_884_473),
-        expires: None,
-        nonce: None,
-        tag: None,
-    };
-
-    let base = build_request_base_with_params_str(&req, &params, &params.serialize()).unwrap();
-
-    // Verify the RFC's Ed25519 signature
-    let pub_pem_body = ED25519_PUBLIC_KEY_PEM
-        .lines()
-        .filter(|l| !l.starts_with("-----"))
-        .collect::<String>();
-    let pub_spki_der = STANDARD.decode(&pub_pem_body).unwrap();
-    let pub_key_bytes = &pub_spki_der[12..];
-
-    let verifier = Ed25519Verifier::new(pub_key_bytes);
-
-    let sig_b64 =
-        "ZT1kooQsEHpZ0I1IjCqtQppOmIqlJPeo7DHR3SoMn0s5JZ1eRGS0A+vyYP9t/LXlh5QMFFQ6cpLt2m0pmj3NDA==";
-    let sig_bytes = STANDARD.decode(sig_b64).unwrap();
-
-    VerifyingAlgorithm::verify(&verifier, &base, &sig_bytes).unwrap();
-}
-
-// Verify that modifying the method/authority invalidates the signature (B.4)
-// RFC 9421 §1.3 (Appendix B.4): changing the method is not a permitted transformation.
-#[test]
-fn test_b4_transform_modified_method_fails() {
-    // Same as B.4 but method changed to POST and host to example.com
-    let req = http::Request::builder()
-        .method("POST")
-        .uri("https://example.com/demo?name1=Value1&Name2=value2")
-        .header("host", "example.com")
-        .header("date", "Fri, 15 Jul 2022 14:24:55 GMT")
-        .header("accept", "application/json")
-        .header("accept", "*/*")
-        .body(())
-        .unwrap();
-
-    let params = SignatureParams {
-        components: vec![
-            ComponentIdentifier::method(),
-            ComponentIdentifier::path(),
-            ComponentIdentifier::authority(),
-            ComponentIdentifier::field("accept"),
-        ],
-        alg: None,
-        keyid: Some("test-key-ed25519".into()),
-        created: Some(1_618_884_473),
-        expires: None,
-        nonce: None,
-        tag: None,
-    };
-
-    let base = build_request_base_with_params_str(&req, &params, &params.serialize()).unwrap();
-
-    let pub_pem_body = ED25519_PUBLIC_KEY_PEM
-        .lines()
-        .filter(|l| !l.starts_with("-----"))
-        .collect::<String>();
-    let pub_spki_der = STANDARD.decode(&pub_pem_body).unwrap();
-    let pub_key_bytes = &pub_spki_der[12..];
-
-    let verifier = Ed25519Verifier::new(pub_key_bytes);
-
-    let sig_b64 =
-        "ZT1kooQsEHpZ0I1IjCqtQppOmIqlJPeo7DHR3SoMn0s5JZ1eRGS0A+vyYP9t/LXlh5QMFFQ6cpLt2m0pmj3NDA==";
-    let sig_bytes = STANDARD.decode(sig_b64).unwrap();
-
-    // This MUST fail since method and authority changed
-    let result = VerifyingAlgorithm::verify(&verifier, &base, &sig_bytes);
-    assert!(
-        result.is_err(),
-        "modified method/authority must invalidate signature"
-    );
 }
