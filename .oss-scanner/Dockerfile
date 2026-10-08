@@ -21,8 +21,4 @@ RUN cargo fetch --locked
 
 # Build all crates and test binaries with debug info and frame pointers, so the scan can run offline.
 ENV RUSTFLAGS="-C force-frame-pointers=yes"
-RUN cargo build --locked --all-features --workspace --all-targets \
-    && cargo test --locked --all-features --workspace --no-run
-
-# Run the unit tests so the image is known to work, without letting a failure abort the build.
-RUN cargo test --locked --all-features --workspace || echo "WARNING: cargo test reported failures"
+RUN cargo build --locked --all-features --workspace --all-targets
