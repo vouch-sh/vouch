@@ -1,0 +1,7 @@
+# The scanner needs the whole workspace (every crate, tests, fuzz targets and .git), unlike the
+# root .dockerignore, which admits only the server sources. Exclude just local build output and secrets.
+target/
+.env
+*.db
+ssh_ca_key*
+.local/
