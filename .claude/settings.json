@@ -17,12 +17,11 @@
     ]
   },
   "enabledPlugins": {
-    "rust-agents@claude-rust-agents": true,
     "rust-analyzer-lsp@claude-plugins-official": true,
-    "context7@claude-plugins-official": true
+    "dev-agents@claude-dev-agents": true
   },
   "extraKnownMarketplaces": {
-    "claude-rust-agents": {
+    "claude-dev-agents": {
       "source": {
         "source": "github",
         "repo": "bug-ops/claude-plugins"
