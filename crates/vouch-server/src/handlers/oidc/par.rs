@@ -361,10 +361,12 @@ pub(crate) async fn par(
             }
         };
 
-        // client_id from JWT must match the authenticated client
+        // RFC 9101 §6.3: "If the Client ID check or the request validation
+        // fails, then the authorization server MUST return an error ... as
+        // specified in Section 5.2 of [RFC6749]".
         if request_params.client_id != authenticated_client.client_id {
             return par_error_response(
-                OAuthErrorCode::InvalidRequestObject,
+                OAuthErrorCode::InvalidRequest,
                 presentation,
                 "client_id in Request Object does not match authenticated client",
             );

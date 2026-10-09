@@ -757,7 +757,6 @@ async fn handle_jar_request(
     let query_hints = QueryParamHints {
         client_id: Some(client_id),
         response_type: query.response_type.as_deref(),
-        scope: query.scope.as_deref(),
     };
 
     let request_params = match validate_request_object(
@@ -1142,7 +1141,6 @@ async fn fetch_and_resolve_request_uri(
     let query_hints = QueryParamHints {
         client_id: Some(client_id),
         response_type: query.response_type.as_deref(),
-        scope: query.scope.as_deref(),
     };
     let request_params = match validate_request_object(
         state,

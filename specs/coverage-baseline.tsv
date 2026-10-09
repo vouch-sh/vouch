@@ -478,15 +478,6 @@ oidc-core-1_0#5.6.2#97b34f2f	SHOULD	They SHOULD treat this the same as when any 
 oidc-core-1_0#5.6.2#cdd5b87b	MUST	The endpoint URL MUST return the Claim as a JWT.
 oidc-core-1_0#5.7#26ebcfb7	MUST	The "sub" (subject) and "iss" (issuer) Claims from the ID Token, used together, are the only Claims that an RP can rely upon as a stable identifier for the End-
 oidc-core-1_0#5.7#7e61149c	MUST NOT	Therefore, other Claims such as "email", "phone_number", "preferred_username", and "name" MUST NOT be used as unique identifiers for the End-User, whether obtai
-oidc-core-1_0#6.1#1cdce333	SHOULD	The "aud" value SHOULD be or include the OP's Issuer Identifier URL.
-oidc-core-1_0#6.1#2fd97182	SHOULD	If signed, the Request Object SHOULD contain the Claims "iss" (issuer) and "aud" (audience) as members.
-oidc-core-1_0#6.1#36c6e7a1	MUST NOT	"request" and "request_uri" parameters MUST NOT be included in Request Objects.
-oidc-core-1_0#6.1#37710722	MUST	So that the request is a valid OAuth 2.0 Authorization Request, values for the "response_type" and "client_id" parameters MUST be included using the OAuth 2.0 r
-oidc-core-1_0#6.1#622ffb62	MUST	Should an OP not support this parameter and an RP uses it, the OP MUST return the "request_not_supported" error.
-oidc-core-1_0#6.1#78570752	MUST	The values for these parameters MUST match those in the Request Object, if present.
-oidc-core-1_0#6.1#b48cd7ad	MUST	If both signing and encryption are performed, it MUST be signed then encrypted, with the result being a Nested JWT, as defined in [JWT].
-oidc-core-1_0#6.1#d4ec4240	SHOULD	The "iss" value SHOULD be the Client ID of the RP, unless it was signed by a different party than the RP.
-oidc-core-1_0#6.1#e39185c9	MUST	Even if a "scope" parameter is present in the Request Object value, a "scope" parameter MUST always be passed using the OAuth 2.0 request syntax containing the 
 oidc-core-1_0#6.2.1#29f5c203	SHOULD	It is RECOMMENDED that it be removed if it is known that it will not be used again or after a reasonable timeout unless access control measures are taken.
 oidc-core-1_0#6.2.1#8af5d07c	MUST NOT	If the Request Object includes requested values for Claims, it MUST NOT be revealed to anybody but the Authorization Server.
 oidc-core-1_0#6.2.1#9b7c91d1	MUST	As such, the "request_uri" MUST have appropriate entropy for its lifetime.
