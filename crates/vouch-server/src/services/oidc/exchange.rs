@@ -410,6 +410,21 @@ pub(crate) async fn exchange_token(
             &config.base_url,
         )?
     };
+    // A requested audience was checked against the client's registered
+    // resources by resolve_exchange_audience; the inherited audience (a
+    // narrowed subject with no request) is checked here, so omitting
+    // `audience` cannot step around the allowlist.
+    if params.requested_token_type != Some(RequestedTokenType::IdToken)
+        && params.audience.is_none()
+        && let Some(aud) = audience
+        && !params.client.is_valid_resource_uri(aud)
+    {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidTarget,
+            "No audience was requested, and the inherited audience is not \
+             registered for this client",
+        ));
+    }
 
     // Temporal policy gate (WIF/agent credential path): active exchange
     // policies — step-up recency, IP consistency, logout-invalidates —
