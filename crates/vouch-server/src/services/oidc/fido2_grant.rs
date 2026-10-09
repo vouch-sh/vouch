@@ -259,6 +259,14 @@ pub(crate) async fn exchange_fido2_assertion(
     sender_constraint: SenderConstraintProof,
     arrival: ArrivalTime,
 ) -> ServiceResult<Fido2AssertionResult> {
+    // RFC 6749 §3.3: an omitted scope takes the pre-defined default, every
+    // supported scope. Checked first, so a refused scope leaves the challenge
+    // state and the authenticator's counter untouched.
+    let scope = match params.scope {
+        Some(requested) => ScopeSet::parse(requested).into_requested_grant()?,
+        None => ScopeSet::all(),
+    };
+
     // Parse and check the assertion. This reads only the assertion parameter,
     // so it completes before the challenge state is consumed below.
     let grant = AssertionGrant::validate(params.assertion, state, arrival).await?;
@@ -491,7 +499,6 @@ pub(crate) async fn exchange_fido2_assertion(
     }
 
     // Create OAuth access token
-    let scope = params.scope.map_or_else(ScopeSet::all, ScopeSet::parse);
 
     let issued = async {
         // Org domain, read once at session creation for the federation claims.

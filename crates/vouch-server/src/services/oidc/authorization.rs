@@ -779,7 +779,11 @@ pub fn validate_authorize_request(
         None
     };
 
-    let scope = ScopeSet::parse(&params.scope.unwrap_or_else(|| "openid".to_string()));
+    // RFC 6749 §3.3: an omitted scope takes the pre-defined default, `openid`.
+    let scope = match params.scope {
+        Some(requested) => ScopeSet::parse(&requested).into_requested_grant()?,
+        None => ScopeSet::parse("openid"),
+    };
 
     // RFC 8707 Section 2: Validate resource parameter if present
     if let Some(ref resource) = params.resource {
@@ -1503,6 +1507,42 @@ mod tests {
         assert!(result.is_ok());
         let validated = result.unwrap();
         assert_eq!(*validated.scope(), ScopeSet::parse("openid")); // Default scope
+    }
+
+    // RFC 6749 §3.3: a requested scope that grants nothing cannot be reported
+    // (the grammar has no empty scope), so it is refused with §5.2
+    // `invalid_scope`.
+    #[test]
+    fn test_validate_authorize_request_refuses_scope_granting_nothing() {
+        let params = AuthorizeRequestParams {
+            response_type: "code".to_string(),
+            client_id: "test-client".to_string(),
+            redirect_uri: "https://example.com/callback".to_string(),
+            scope: Some("profile".to_string()),
+            state: None,
+            nonce: None,
+            code_challenge: Some("challenge".to_string()),
+            code_challenge_method: Some("S256".to_string()),
+            resource: None,
+            acr_values: None,
+            max_age: None,
+            prompt: None,
+            dpop_jkt: None,
+            authorization_details: None,
+            response_mode: None,
+        };
+
+        let err = validate_authorize_request(params).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ServiceError::OAuth {
+                    code: OAuthErrorCode::InvalidScope,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
     }
 
     // OIDC Core §3.1.2.1: PKCE parameters are not required of every client.

@@ -196,6 +196,10 @@ pub struct DeviceTokenResponse {
     pub token_type: String,
     /// Seconds until token expires.
     pub expires_in: u64,
+    /// RFC 6749 §5.1 `scope`: "OPTIONAL, if identical to the scope requested
+    /// by the client; otherwise, REQUIRED." The device grant ignores the
+    /// requested scope, so the granted scope is always reported.
+    pub scope: String,
     /// User's email address.
     pub email: String,
 }
@@ -207,6 +211,7 @@ impl std::fmt::Debug for DeviceTokenResponse {
             .field("access_token", &"[REDACTED]")
             .field("token_type", &self.token_type)
             .field("expires_in", &self.expires_in)
+            .field("scope", &self.scope)
             .field("email", &self.email)
             .finish()
     }

@@ -97,3 +97,22 @@ becomes the token's `aud` and RFC 7519 §2 compares those "as case-sensitive
 strings with no transformations or canonicalizations applied". Register the
 issuer exactly as `/.well-known/openid-configuration` publishes it, with no
 trailing slash: `https://vouch.example.com/` does not match.
+
+## Scopes
+
+Vouch supports two scopes, `openid` and `email`. Unknown scope values in a
+request are ignored. RFC 6749 §3.3 asks the server to "document its scope
+requirements and default value"; the defaults when a request omits `scope` are:
+
+| Grant | Default when `scope` is omitted |
+|-------|---------------------------------|
+| Authorization code (`/oauth/authorize`, `/oauth/par`) | `openid` |
+| FIDO2 assertion (`vouch login`) | `openid email` |
+| Device authorization (`vouch enroll`) | `openid email`. The requested scope is ignored, so this is always the grant |
+| Token exchange (RFC 8693) | The subject token's scope; `openid` when the subject token carries none |
+| Client credentials | No scope. `openid` and `email` describe a user and are never granted to a client acting for itself |
+
+Every token response that grants a scope reports it in `scope`. A request
+whose `scope` leaves nothing to grant — only unknown values, or only
+`openid`/`email` on the client-credentials grant — is refused with
+`invalid_scope`, because an empty scope cannot be reported.

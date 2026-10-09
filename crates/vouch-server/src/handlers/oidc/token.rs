@@ -62,7 +62,10 @@ pub(super) struct TokenResponse {
     /// OIDC Core Section 3.1.3.3: The ID Token.
     #[serde(serialize_with = "vouch_common::serialize_opt_secret_string")]
     pub id_token: Option<SecretString>,
-    /// RFC 6749 Section 3.3: The scope of the access token.
+    /// RFC 6749 Section 5.1: "OPTIONAL, if identical to the scope requested
+    /// by the client; otherwise, REQUIRED." `None` only when no scope was
+    /// requested and none was granted, so omitting it is the identical case.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<ScopeSet>,
     /// User email (included in FIDO2 assertion grant responses).
     #[serde(skip_serializing_if = "Option::is_none")]

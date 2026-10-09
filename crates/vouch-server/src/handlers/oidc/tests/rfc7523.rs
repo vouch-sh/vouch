@@ -1332,6 +1332,38 @@ async fn test_jwt_assertion_jti_concurrent_replay_token_exchange() {
     );
 }
 
+// RFC 6749 §3.3: a requested scope that grants nothing cannot be reported,
+// so the FIDO2 grant refuses it with §5.2 `invalid_scope`. The scope is
+// checked before the assertion, so a garbage assertion is never reached and
+// the challenge state is left unconsumed.
+#[tokio::test]
+async fn test_fido2_assertion_refuses_scope_granting_nothing() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "fido2-scope@example.com").await;
+    let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
+    let token_endpoint = format!("{}/oauth/token", state.config().base_url);
+    let assertion = build_client_assertion(&client.client_id, &token_endpoint, &pkcs8_bytes, None);
+    let garbage_assertion = URL_SAFE_NO_PAD.encode(b"{}");
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:fido2-assertion\
+             &assertion={garbage_assertion}\
+             &scope=profile\
+             &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+             &client_assertion={assertion}"
+        ),
+        &[],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_scope", "{body}");
+}
+
 #[tokio::test]
 async fn test_jwt_assertion_jti_concurrent_replay_fido2_assertion() {
     // The fido2-assertion grant requires a real WebAuthn signature, which

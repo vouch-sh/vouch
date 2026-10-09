@@ -160,6 +160,9 @@ pub enum OAuthErrorCode {
     UnauthorizedClient,
     /// RFC 6749 Section 5.2: The authorization grant type is not supported.
     UnsupportedGrantType,
+    /// RFC 6749 Section 5.2: "The requested scope is invalid, unknown,
+    /// malformed, or exceeds the scope granted by the resource owner."
+    InvalidScope,
     /// RFC 6749 Section 4.1.2.1: The authorization server encountered an unexpected condition.
     ServerError,
     /// RFC 6749 Section 4.1.2.1: Access denied by the resource owner or authorization server.
@@ -240,6 +243,7 @@ impl OAuthErrorCode {
             Self::InsufficientUserAuthentication => StatusCode::UNAUTHORIZED,
             Self::InvalidGrant
             | Self::UnsupportedGrantType
+            | Self::InvalidScope
             | Self::UnsupportedResponseType
             | Self::AccessDenied
             // RFC 6749 §5.2 names 401 only for `invalid_client`: every other
@@ -261,6 +265,7 @@ impl OAuthErrorCode {
             Self::InvalidGrant => "invalid_grant",
             Self::UnauthorizedClient => "unauthorized_client",
             Self::UnsupportedGrantType => "unsupported_grant_type",
+            Self::InvalidScope => "invalid_scope",
             Self::UnsupportedResponseType => "unsupported_response_type",
             Self::ServerError => "server_error",
             Self::AccessDenied => protocol::ERROR_ACCESS_DENIED,

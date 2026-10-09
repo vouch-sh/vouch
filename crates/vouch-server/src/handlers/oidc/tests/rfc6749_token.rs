@@ -544,6 +544,68 @@ async fn test_token_db_error_on_client_lookup_returns_internal_server_error() {
     );
 }
 
+/// A client registered only for the client-credentials grant.
+async fn machine_client(
+    state: &std::sync::Arc<crate::AppState>,
+    email: &str,
+) -> test_utils::TestOAuthClient {
+    let user = create_test_user(&state.store, email).await;
+    create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            name: "Machine Client".to_string(),
+            grant_types: Some(vec!["client_credentials".to_string()]),
+            ..Default::default()
+        },
+    )
+    .await
+}
+
+// RFC 6749 §3.3: "If the issued access token scope is different from the one
+// requested by the client, the authorization server MUST include the "scope"
+// response parameter". `openid` grants nothing to a client acting for itself,
+// and the grammar has no empty scope, so the request is refused with §5.2
+// `invalid_scope`.
+#[tokio::test]
+async fn test_client_credentials_refuses_scope_granting_nothing() {
+    let (app, state) = test_app().await;
+    let client = machine_client(&state, "cc-scope@example.com").await;
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        "grant_type=client_credentials&scope=openid",
+        &[("Authorization", &client.basic_auth_header())],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_scope", "{body}");
+}
+
+// RFC 6749 §5.1: `scope` is "OPTIONAL, if identical to the scope requested by
+// the client". No scope was requested and none was granted, so the member is
+// omitted rather than sent as `null`.
+#[tokio::test]
+async fn test_client_credentials_without_scope_omits_scope_member() {
+    let (app, state) = test_app().await;
+    let client = machine_client(&state, "cc-noscope@example.com").await;
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        "grant_type=client_credentials",
+        &[("Authorization", &client.basic_auth_header())],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert!(json.get("scope").is_none(), "scope must be omitted: {body}");
+}
+
 #[test]
 fn test_token_response_wire_shape_with_and_without_id_token() {
     // RFC 6749 Section 5.1 responses without an ID token (client
