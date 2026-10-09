@@ -3322,3 +3322,80 @@ async fn test_rfc9101_uppercase_scheme_request_uri_matches_registered_allowlist(
         "error redirect must echo the Request Object's `state` ({ro_state}); got: {location}",
     );
 }
+
+// ========================================================================
+// RFC 9101 §6.2 — `request_uri` denied page error code for unsupported alg
+// ========================================================================
+//
+// A Request Object fetched via `request_uri` whose `alg` is not in the JAR
+// allowlist (`none`, a symmetric HS* algorithm, …) must be reported to the end
+// user as `invalid_request_object`, not `invalid_client`. The shared
+// `assertion_header_from` returns `invalid_client` (it is also the JWT
+// bearer/client-auth path); `parse_request_object_header` remaps it. The
+// `/oauth/authorize` `request_uri=` error path renders `ServiceError::OAuth`
+// directly into the denial page, so the wrong code was visible there before
+// the remap (the PAR path masks it with an explicit handler-level override).
+
+/// Build a Request Object JWT whose header advertises `alg` and the correct
+/// `typ`, with an arbitrary payload and (unused) signature. It is rejected at
+/// the algorithm check before signature verification, so no key is needed.
+fn build_unsigned_algorithm_request_object(alg: &str) -> String {
+    let header = serde_json::json!({"alg": alg, "typ": "oauth-authz-req+jwt"});
+    let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap());
+    let payload_b64 = URL_SAFE_NO_PAD.encode(b"{}");
+    format!("{header_b64}.{payload_b64}.")
+}
+
+/// `alg=none` fetched via `request_uri` denies with `invalid_request_object`
+/// on the authorize denial page. Before the fix, the page rendered
+/// `invalid_client` because `assertion_header_from`'s `InvalidClient` was
+/// propagated unchanged by `parse_request_object_header`.
+#[tokio::test]
+async fn test_rfc9101_request_uri_alg_none_error_code_is_invalid_request_object() {
+    let http_client = https_client_trusting_any_cert();
+    let (app, state) = test_app_with_http_client(http_client).await;
+
+    let user = create_test_user(&state.store, "jar-requri-alg-none@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, _pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
+
+    let request_jwt = build_unsigned_algorithm_request_object("none");
+    let request_uri = spawn_request_object_server(request_jwt).await;
+
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?client_id={}&request_uri={}",
+            client.client_id,
+            urlencoding::encode(&request_uri),
+        ),
+        &[],
+    )
+    .await;
+
+    // The denial page is rendered via `AuthorizeDeniedTemplate` (HTTP 200), not
+    // a redirect: `validate_request_object` fails before a redirect target is
+    // resolved.
+    assert_eq!(
+        response.status,
+        StatusCode::OK,
+        "an unsupported-alg Request Object should render the denial page, \
+         got: {} body: {}",
+        response.status,
+        response.body,
+    );
+    assert!(
+        !response.headers.contains_key("Location"),
+        "no code is issued and no redirect occurs for an unsupported-alg Request Object"
+    );
+    assert!(
+        response.body.contains("invalid_request_object"),
+        "the denial page must report invalid_request_object, got: {}",
+        response.body,
+    );
+    assert!(
+        !response.body.contains("invalid_client"),
+        "the denial page must NOT report invalid_client for a Request Object error, got: {}",
+        response.body,
+    );
+}
