@@ -795,6 +795,11 @@ async fn finalize_login_session(
 }
 
 /// The fallible tail of [`finalize_login_session`]; see its doc comment.
+#[expect(
+    clippy::too_many_lines,
+    reason = "linear post-assertion sequence: device-auth release, session mint, \
+              prior-session revocation, audit, cookie"
+)]
 async fn finalize_login_session_inner(
     state: &AppState,
     params: LoginSessionParams<'_>,
@@ -923,6 +928,27 @@ async fn finalize_login_session_inner(
     })?;
     let token = session_result.token;
 
+    // Revoke the prior (bootstrap) session the user is upgrading from, so a
+    // captured copy of the old cookie cannot keep authenticating after the
+    // WebAuthn upgrade. The new session carries a fresh random token, so
+    // deleting the old row by its hash leaves the new one intact. This runs
+    // only after the new session is minted: a transient token-issuance
+    // failure must not strand the user by revoking the session they would
+    // retry from. Best-effort (warn on error) — the user has already
+    // re-authenticated and the new cookie is being set, so a storage fault
+    // here is observed rather than failing the upgrade.
+    if let Some(old) = jar.get(vouch_common::SESSION_COOKIE_NAME)
+        && let Err(e) = state
+            .session_cache
+            .delete_by_token_hash(&state.store, &hash_token(old.value()))
+            .await
+    {
+        tracing::warn!(
+            target: "security",
+            "Failed to revoke prior session during WebAuthn upgrade: {e}"
+        );
+    }
+
     // Log successful login event (consistent with failure path)
     let auth_event_params = AuthEventParams {
         user_id: db::Principal::Verified(user.id.clone()),
@@ -987,6 +1013,7 @@ mod tests {
     use crate::crypto::jwt::StateTokenSigner;
     use crate::crypto::webauthn_verify::AuthTime;
     use crate::db::{self, AuditEventFilter, CreatePendingOAuthParams};
+    use crate::handlers::session::extract_session_from_cookie;
     use crate::test_utils::{
         self, TestPendingAuthSpec, TestSessionSpec, TestVerification, at_second, test_arrival,
     };
@@ -2285,6 +2312,358 @@ mod tests {
         assert!(
             successes.is_empty(),
             "no LoginSuccess may be recorded when session creation did not complete"
+        );
+    }
+
+    // Regression: a captured bootstrap (IdP-only, non-hardware-verified) cookie
+    // must be revoked the moment its holder upgrades to a hardware-verified
+    // session via `finalize_login_session`. Before the fix the old session row
+    // was left in the DB for the full session lifetime, so a captured copy of
+    // the bootstrap cookie kept authenticating as the victim. The fix revokes
+    // the prior session by its token hash once the new one is minted.
+    #[tokio::test]
+    async fn finalize_login_session_revokes_captured_bootstrap_cookie_on_upgrade() {
+        let state = test_utils::test_app_state().await;
+        let user =
+            test_utils::create_test_user(&state.store, "captured-bootstrap@example.com").await;
+        let auth_id = test_utils::create_test_authenticator(&state.store, &user.id).await;
+        let authenticator = db::get_authenticator_by_id(&state.store, &auth_id)
+            .await
+            .expect("read authenticator")
+            .expect("authenticator present");
+
+        // Mint a bootstrap (IdP-only, NOT hardware-verified) session, exactly
+        // as `vouch enroll`'s OIDC callback does.
+        let bootstrap_token = test_utils::create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                verification: TestVerification::NotVerified,
+                ..Default::default()
+            },
+        )
+        .await;
+        let bootstrap_hash = hash_token(&bootstrap_token);
+
+        assert!(
+            db::find_session_by_token_hash(&state.store, &bootstrap_hash)
+                .await
+                .expect("bootstrap lookup before")
+                .is_some(),
+            "bootstrap session row must exist before finalize"
+        );
+
+        // The jar carrying the bootstrap cookie — the value an attacker
+        // captures before the victim finishes WebAuthn.
+        let old_jar = CookieJar::new().add(axum_extra::extract::cookie::Cookie::new(
+            vouch_common::SESSION_COOKIE_NAME,
+            bootstrap_token.clone(),
+        ));
+
+        // Run the WebAuthn upgrade (the production code path).
+        let expires_at = Timestamp::now()
+            .checked_add(Span::new().minutes(5))
+            .expect("valid expiry");
+        let claim = db::consume_challenge_state_for_test(
+            &state.store,
+            "test-state-jwt-captured-bootstrap@example.com",
+            expires_at,
+        )
+        .await
+        .expect("consume challenge state");
+
+        let response = finalize_login_session(
+            &state,
+            LoginSessionParams {
+                jar: &old_jar,
+                user: &user,
+                authenticator: &authenticator,
+                auth_now: AuthTime::for_test(Timestamp::now().as_second()),
+                challenge_claim: claim,
+                pending_auth: None,
+                client_info: ClientInfo::default(),
+            },
+            test_arrival(),
+        )
+        .await
+        .expect("upgrade must succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // ── Guarantee 1: the OLD session row is revoked from the database ──
+        let after = db::find_session_by_token_hash(&state.store, &bootstrap_hash)
+            .await
+            .expect("bootstrap lookup after");
+        assert!(
+            after.is_none(),
+            "OLD bootstrap row must be revoked after upgrade"
+        );
+
+        // ── Guarantee 2: the OLD cookie no longer authenticates through the
+        //    full validation path (SessionCache → DB → generation guard →
+        //    load_active_user → authenticator lookup) ──
+        let revalidated = extract_session_from_cookie(&state, &old_jar, test_arrival()).await;
+        assert!(
+            revalidated.is_err(),
+            "captured bootstrap cookie must NOT authenticate after upgrade"
+        );
+
+        // ── Guarantee 3: the NEW session the upgrade minted still
+        //    authenticates and is hardware-verified, proving the revocation
+        //    targeted only the old row (different token hash) and did not
+        //    strand the user. ──
+        let cookie_prefix = format!("{}=", vouch_common::SESSION_COOKIE_NAME);
+        let new_token = response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .find_map(|v| v.strip_prefix(&cookie_prefix))
+            .map(|rest| rest.split(';').next().unwrap_or(rest).to_string())
+            .expect("new session Set-Cookie must be present");
+        assert_ne!(new_token, bootstrap_token, "new token must differ");
+        assert_ne!(
+            hash_token(&new_token),
+            bootstrap_hash,
+            "new token hash must differ from the old one"
+        );
+        let new_jar = CookieJar::new().add(axum_extra::extract::cookie::Cookie::new(
+            vouch_common::SESSION_COOKIE_NAME,
+            new_token,
+        ));
+        let new_session = extract_session_from_cookie(&state, &new_jar, test_arrival())
+            .await
+            .expect("new session cookie must authenticate");
+        assert!(
+            new_session.token.hardware_verified,
+            "new session must be hardware-verified"
+        );
+        assert_eq!(
+            new_session.user.id, user.id,
+            "new session is authenticated as the upgrading user"
+        );
+    }
+
+    // The revocation must target only the specific OLD session (by token
+    // hash), never every session for the user — a `delete_for_user` would
+    // wrongly revoke a live bootstrap session on a second device that has not
+    // upgraded yet. A second bootstrap session for the same user must survive
+    // the upgrade of the first.
+    #[tokio::test]
+    async fn finalize_login_session_revokes_only_upgraded_session_not_siblings() {
+        let state = test_utils::test_app_state().await;
+        let user =
+            test_utils::create_test_user(&state.store, "sibling-bootstrap@example.com").await;
+        let auth_id = test_utils::create_test_authenticator(&state.store, &user.id).await;
+        let authenticator = db::get_authenticator_by_id(&state.store, &auth_id)
+            .await
+            .expect("read authenticator")
+            .expect("authenticator present");
+
+        // Two independent bootstrap sessions for the same user — e.g. two
+        // browsers mid-enrollment.
+        let upgraded_token = test_utils::create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                verification: TestVerification::NotVerified,
+                ..Default::default()
+            },
+        )
+        .await;
+        let sibling_token = test_utils::create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                verification: TestVerification::NotVerified,
+                ..Default::default()
+            },
+        )
+        .await;
+        let upgraded_hash = hash_token(&upgraded_token);
+        let sibling_hash = hash_token(&sibling_token);
+
+        let upgrading_jar = CookieJar::new().add(axum_extra::extract::cookie::Cookie::new(
+            vouch_common::SESSION_COOKIE_NAME,
+            upgraded_token,
+        ));
+        let sibling_jar = CookieJar::new().add(axum_extra::extract::cookie::Cookie::new(
+            vouch_common::SESSION_COOKIE_NAME,
+            sibling_token.clone(),
+        ));
+
+        let expires_at = Timestamp::now()
+            .checked_add(Span::new().minutes(5))
+            .expect("valid expiry");
+        let claim = db::consume_challenge_state_for_test(
+            &state.store,
+            "test-state-jwt-sibling-bootstrap@example.com",
+            expires_at,
+        )
+        .await
+        .expect("consume challenge state");
+        let response = finalize_login_session(
+            &state,
+            LoginSessionParams {
+                jar: &upgrading_jar,
+                user: &user,
+                authenticator: &authenticator,
+                auth_now: AuthTime::for_test(Timestamp::now().as_second()),
+                challenge_claim: claim,
+                pending_auth: None,
+                client_info: ClientInfo::default(),
+            },
+            test_arrival(),
+        )
+        .await
+        .expect("upgrade must succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // The upgraded session is revoked …
+        assert!(
+            db::find_session_by_token_hash(&state.store, &upgraded_hash)
+                .await
+                .expect("upgraded lookup")
+                .is_none(),
+            "upgraded bootstrap row must be revoked"
+        );
+        // … but the sibling session on the other device is untouched.
+        assert!(
+            db::find_session_by_token_hash(&state.store, &sibling_hash)
+                .await
+                .expect("sibling lookup")
+                .is_some(),
+            "sibling bootstrap row must survive the other session's upgrade"
+        );
+        let sibling = extract_session_from_cookie(&state, &sibling_jar, test_arrival())
+            .await
+            .expect("sibling bootstrap cookie must still authenticate");
+        assert_eq!(
+            sibling.user.id, user.id,
+            "sibling session still belongs to user"
+        );
+        assert!(
+            !sibling.token.hardware_verified,
+            "sibling session is still the low-trust one"
+        );
+    }
+
+    // End-to-end through the real HTTP router: a returning user carrying a
+    // bootstrap (non-hardware-verified) session cookie POSTs a real signed
+    // WebAuthn assertion to `/login/webauthn/complete`. The handler must mint
+    // the new hardware-verified session AND revoke the old bootstrap session
+    // row, so the captured bootstrap cookie stops authenticating — the same
+    // path the manual e2e exercises, driven through the full Axum stack with a
+    // software signing authenticator (no physical YubiKey needed).
+    #[tokio::test]
+    async fn webauthn_complete_revokes_bootstrap_cookie_through_full_http_path() {
+        let (app, state) = test_utils::test_app().await;
+        let user = test_utils::create_test_user(&state.store, "e2e-upgrade@example.com").await;
+        let credential_id = format!("cred-e2e-upgrade-{}", Uuid::now_v7());
+        let key = test_utils::create_test_signing_authenticator(
+            &state.store,
+            &user.id,
+            credential_id.as_bytes(),
+            4,
+        )
+        .await;
+
+        // Mint the bootstrap (IdP-only, NOT hardware-verified) session — the
+        // cookie an attacker captures before the victim finishes WebAuthn.
+        let bootstrap_token = test_utils::create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: None,
+                verification: TestVerification::NotVerified,
+                ..Default::default()
+            },
+        )
+        .await;
+        let bootstrap_hash = hash_token(&bootstrap_token);
+        assert!(
+            db::find_session_by_token_hash(&state.store, &bootstrap_hash)
+                .await
+                .expect("bootstrap lookup before")
+                .is_some(),
+            "bootstrap row exists before upgrade"
+        );
+
+        // Build the WebAuthn challenge + signed assertion the way
+        // `POST /login/webauthn/start` would.
+        let challenge = b"e2e-upgrade-challenge".to_vec();
+        let now = jiff::Timestamp::now();
+        let auth_state = BrowserAuthenticationState {
+            challenge: challenge.clone(),
+            rp_id: state.config().rp_id.clone(),
+            created_at: now,
+            exp: now
+                .checked_add(SignedDuration::from_secs(300))
+                .expect("exp in range"),
+            pending_auth: None,
+        };
+        let state_jwt = auth_state
+            .encode(&state.state_signer)
+            .await
+            .expect("encode auth state");
+        let assertion = key.sign_assertion(
+            &state.config().rp_id,
+            state.config().base_url.as_str(),
+            &challenge,
+            5,
+        );
+
+        let user_uuid = Uuid::parse_str(&user.id).expect("user id is a uuid");
+        let enc = |b: &[u8]| URL_SAFE_NO_PAD.encode(b);
+        let body = serde_json::json!({
+            "state": state_jwt,
+            "credential_id": enc(&key.credential_id),
+            "authenticator_data": enc(&assertion.authenticator_data),
+            "client_data_json": enc(&assertion.client_data_json),
+            "signature": enc(&assertion.signature),
+            "user_handle": enc(user_uuid.as_bytes()),
+        })
+        .to_string();
+
+        let cookie_header = format!("{}={}", vouch_common::SESSION_COOKIE_NAME, bootstrap_token);
+        let config = state.config();
+        let origin = config.base_url.as_str();
+        let (status, _resp_body) = test_utils::http_post_json(
+            &app,
+            "/login/webauthn/complete",
+            &body,
+            &[("Origin", origin), ("Cookie", cookie_header.as_str())],
+        )
+        .await;
+
+        // ── The upgrade must succeed (HTTP 200) ──
+        assert_eq!(status, StatusCode::OK, "upgrade through HTTP must succeed");
+
+        // The OLD bootstrap session row must be revoked from the DB.
+        assert!(
+            db::find_session_by_token_hash(&state.store, &bootstrap_hash)
+                .await
+                .expect("bootstrap lookup after")
+                .is_none(),
+            "OLD bootstrap row must be revoked after HTTP upgrade"
+        );
+
+        // The OLD cookie no longer authenticates through the full
+        // extract_session_from_cookie validation path.
+        let old_jar = CookieJar::new().add(axum_extra::extract::cookie::Cookie::new(
+            vouch_common::SESSION_COOKIE_NAME,
+            bootstrap_token,
+        ));
+        let revalidated = extract_session_from_cookie(&state, &old_jar, test_arrival()).await;
+        assert!(
+            revalidated.is_err(),
+            "captured bootstrap cookie must NOT authenticate after HTTP upgrade"
         );
     }
 

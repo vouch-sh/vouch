@@ -1780,6 +1780,28 @@ pub(crate) async fn browser_register_complete(
     })?;
     let token = session_result.token;
 
+    // Revoke the prior (bootstrap) session the user is upgrading from, so a
+    // captured copy of the old cookie cannot keep authenticating after the
+    // key registration completes. `session.token_hash` is the validated hash
+    // of the cookie `extract_session_from_cookie` read above, and the new
+    // session carries a fresh random token, so deleting the old row by its
+    // hash leaves the new one intact. This runs only after the new session is
+    // minted: a transient token-issuance failure must not strand the user by
+    // revoking the session they would retry from. Best-effort (warn on error)
+    // — the user has already re-authenticated and the new cookie is being
+    // set, so a storage fault here is observed rather than failing the
+    // enrollment.
+    if let Err(e) = state
+        .session_cache
+        .delete_by_token_hash(&state.store, &session.token_hash)
+        .await
+    {
+        tracing::warn!(
+            target: "security",
+            "Failed to revoke prior session during enrollment upgrade: {e}"
+        );
+    }
+
     // Return success template with session cookie
     let cookie = create_session_cookie(
         token.expose_secret(),
