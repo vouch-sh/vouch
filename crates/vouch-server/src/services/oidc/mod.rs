@@ -95,7 +95,8 @@ pub mod validated_client;
 pub use authorization::{AuthorizationCodeParams, ValidatedAuthRequest, check_client_access};
 pub use authorization_details::AuthorizationDetails;
 pub use claims::{
-    AwsSessionTags, ClaimsBuildError, CnfClaim, OidcIdTokenClaims, OidcIdTokenClaimsBuilder,
+    AwsClaimError, AwsSessionTags, AwsSourceIdentity, AwsTagValue, ClaimsBuildError, CnfClaim,
+    OidcIdTokenClaims, OidcIdTokenClaimsBuilder,
 };
 pub use discovery::{OidcDiscoveryDocument, build_discovery_document, build_jwks};
 pub use dpop::{DpopError, ValidatedDpopProof};

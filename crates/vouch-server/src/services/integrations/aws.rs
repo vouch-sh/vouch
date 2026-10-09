@@ -114,7 +114,9 @@
 use crate::crypto::keys::OidcRsaSigningKey;
 use crate::redact_email;
 use crate::services::auth::ValidatedResourceToken;
-use crate::services::oidc::{AwsSessionTags, OidcIdTokenClaimsBuilder};
+use crate::services::oidc::{
+    AwsClaimError, AwsSessionTags, AwsSourceIdentity, AwsTagValue, OidcIdTokenClaimsBuilder,
+};
 
 /// Error types for AWS integration operations.
 #[derive(Debug, thiserror::Error)]
@@ -126,6 +128,10 @@ pub(crate) enum AwsError {
     /// Failed to sign the token.
     #[error("Failed to sign token: {0}")]
     TokenSign(String),
+
+    /// A claim value AWS STS would refuse, so no usable token can be minted.
+    #[error(transparent)]
+    UnrepresentableClaim(#[from] AwsClaimError),
 }
 
 /// Result type for AWS integration operations.
@@ -167,35 +173,49 @@ impl std::fmt::Debug for AwsTokenResult {
 /// condition that grants on them is trusting the caller's own assertion.
 ///
 /// `vouch:Email` is always present. `vouch:Domain` is added when the org
-/// domain (`hd`) is known. All tags are transitive, so they propagate through
-/// role chains and carry their provenance with them.
+/// domain (`hd`) is known. `vouch:AccessType=ai` is added whenever the proof
+/// claims a `source`, since that claim is what attaches the agent session
+/// policy; `vouch:Agent` is added only when the claimed name is not blank.
+/// No tag is set with an empty value. All tags are transitive, so they
+/// propagate through role chains and carry their provenance with them.
+///
+/// # Errors
+///
+/// Returns [`AwsError::UnrepresentableClaim`] when the email is empty or a
+/// value is one STS refuses as a tag value (see [`AwsTagValue`]).
 fn build_aws_session_tags(
     user_email: &str,
     hd: Option<&str>,
     source: Option<&str>,
-) -> AwsSessionTags {
+) -> AwsResult<AwsSessionTags> {
+    let mut tags = vec![(
+        "vouch:Email",
+        AwsTagValue::parse("vouch:Email", user_email)?,
+    )];
+    if let Some(domain) = AwsTagValue::parse_optional("vouch:Domain", hd)? {
+        tags.push(("vouch:Domain", domain));
+    }
+    if source.is_some() {
+        tags.push((
+            "vouch:AccessType",
+            AwsTagValue::parse("vouch:AccessType", "ai")?,
+        ));
+    }
+    if let Some(agent) = AwsTagValue::parse_optional("vouch:Agent", source)? {
+        tags.push(("vouch:Agent", agent));
+    }
+
     let mut principal_tags = std::collections::HashMap::new();
     let mut transitive_tag_keys = Vec::new();
-
-    principal_tags.insert("vouch:Email".to_string(), vec![user_email.to_string()]);
-    transitive_tag_keys.push("vouch:Email".to_string());
-
-    if let Some(domain) = hd {
-        principal_tags.insert("vouch:Domain".to_string(), vec![domain.to_string()]);
-        transitive_tag_keys.push("vouch:Domain".to_string());
+    for (key, value) in tags {
+        principal_tags.insert(key.to_string(), vec![value]);
+        transitive_tag_keys.push(key.to_string());
     }
 
-    if let Some(agent) = source {
-        principal_tags.insert("vouch:AccessType".to_string(), vec!["ai".to_string()]);
-        transitive_tag_keys.push("vouch:AccessType".to_string());
-        principal_tags.insert("vouch:Agent".to_string(), vec![agent.to_string()]);
-        transitive_tag_keys.push("vouch:Agent".to_string());
-    }
-
-    AwsSessionTags {
+    Ok(AwsSessionTags {
         principal_tags,
         transitive_tag_keys,
-    }
+    })
 }
 
 /// Issue an OIDC ID token for AWS.
@@ -245,11 +265,12 @@ pub(crate) async fn issue_aws_token(
         user_email,
         token.org_domain.as_deref(),
         token.dpop_source.as_deref(),
-    );
+    )?;
+    let source_identity = AwsSourceIdentity::parse(user_email)?;
 
     // Build OIDC claims
     // For AWS, the audience is the issuer URL (AWS matches against the OIDC provider)
-    let id_claims = OidcIdTokenClaimsBuilder::for_aws(issuer, user_email)
+    let id_claims = OidcIdTokenClaimsBuilder::for_aws(issuer, user_email, source_identity)
         .hardware_aaguid(token.hardware_aaguid.clone())
         .hd(token.org_domain.clone())
         .aws_tags(aws_tags)
@@ -375,6 +396,86 @@ mod tests {
             hardware_aaguid,
             org_domain,
         }
+    }
+
+    // STS refuses `o'malley@example.com` as `SourceIdentity` and as a tag value
+    // (ValidationError, measured 2026-10-09), so no token minted for it could
+    // be used. It is refused at issuance with a reason, not rewritten.
+    #[tokio::test]
+    async fn test_aws_token_refused_for_email_sts_rejects() {
+        let result = issue_aws_token(
+            BASE_URL,
+            SESSION_HOURS,
+            test_rsa_key(),
+            "o'malley@example.com",
+            &test_token(None, None, None),
+            None,
+            test_now(),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(AwsError::UnrepresentableClaim(_))),
+            "{result:?}"
+        );
+    }
+
+    // The `vouch:Agent` tag value comes from the client's DPoP proof, so it
+    // is held to the same STS tag value pattern as server-side values.
+    #[tokio::test]
+    async fn test_aws_token_refused_for_agent_sts_rejects() {
+        let result = issue_aws_token(
+            BASE_URL,
+            SESSION_HOURS,
+            test_rsa_key(),
+            USER_EMAIL,
+            &test_token(None, None, Some("agent'name".to_string())),
+            None,
+            test_now(),
+        )
+        .await;
+        assert!(
+            matches!(
+                result,
+                Err(AwsError::UnrepresentableClaim(AwsClaimError::TagValue {
+                    key: "vouch:Agent",
+                    ..
+                }))
+            ),
+            "{result:?}"
+        );
+    }
+
+    // A tag that states nothing is never set: a blank org domain omits
+    // `vouch:Domain`, and a blank agent name omits `vouch:Agent` while the
+    // agent claim itself still yields `vouch:AccessType=ai`.
+    #[test]
+    fn test_session_tags_omit_blank_optional_values() {
+        let tags = build_aws_session_tags(USER_EMAIL, Some(""), Some("  "))
+            .expect("blank optional values are omitted, not refused");
+        let keys: std::collections::BTreeSet<&str> =
+            tags.principal_tags.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            std::collections::BTreeSet::from(["vouch:Email", "vouch:AccessType"])
+        );
+        assert_eq!(tags.transitive_tag_keys.len(), 2);
+    }
+
+    // `vouch:Email` is required, so an empty email refuses the token rather
+    // than setting an empty tag.
+    #[test]
+    fn test_session_tags_refuse_empty_email() {
+        let result = build_aws_session_tags(" ", None, None);
+        assert!(
+            matches!(
+                result,
+                Err(AwsError::UnrepresentableClaim(AwsClaimError::TagValue {
+                    key: "vouch:Email",
+                    ..
+                }))
+            ),
+            "{result:?}"
+        );
     }
 
     /// The AWS token must be signed with RS256: the IAM Identity Center

@@ -415,6 +415,16 @@ fn map_aws_error(e: AwsError) -> ServiceError {
                 "Failed to sign token",
             )
         }
+        // The account's identity cannot be expressed in the claims STS
+        // requires, so no token this server mints would be accepted.
+        AwsError::UnrepresentableClaim(ref err) => {
+            tracing::warn!("AWS token refused: a claim value is outside STS's constraints");
+            ServiceError::api(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "aws_identity_unsupported",
+                err.to_string(),
+            )
+        }
     }
 }
 
@@ -1280,6 +1290,40 @@ mod tests {
             .expect("base64url header");
         let header: serde_json::Value = serde_json::from_slice(&header_bytes).expect("header JSON");
         assert_eq!(header["alg"], "RS256");
+    }
+
+    // STS refuses an apostrophe in `SourceIdentity` and in tag values
+    // (ValidationError, measured 2026-10-09). The account can hold no usable
+    // AWS token, so the endpoint says why instead of minting one STS rejects.
+    #[tokio::test]
+    async fn test_aws_token_refused_for_email_sts_rejects() {
+        let state = test_app_state_with_rsa_key().await;
+        let config = state.config();
+        let app = router::build_app(state.clone(), &config).expect("build app");
+
+        let user = create_test_user(&state.store, "o'malley@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with(
+            &state,
+            TestSessionSpec {
+                user_id: &user.id,
+                email: &user.email,
+                auth_id: Some(&auth_id),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let (status, body) = http_get(
+            &app,
+            "/v1/credentials/aws/token",
+            &[("Authorization", &format!("Bearer {token}"))],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert!(body.contains("aws_identity_unsupported"), "{body}");
+        assert!(body.contains("o'malley@example.com"), "{body}");
     }
 
     /// The AWS token's signed `exp` claim must agree with the `token_expires_at`

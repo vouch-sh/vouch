@@ -259,9 +259,133 @@ pub struct OidcIdTokenClaims {
 #[derive(Debug, Clone, Serialize)]
 pub struct AwsSessionTags {
     /// Tag key-value pairs. Values are single-element arrays per AWS spec.
-    pub principal_tags: std::collections::HashMap<String, Vec<String>>,
+    pub principal_tags: std::collections::HashMap<String, Vec<AwsTagValue>>,
     /// Tag keys that propagate through role chains.
     pub transitive_tag_keys: Vec<String>,
+}
+
+/// A value AWS STS accepts as a session's source identity.
+///
+/// STS `SourceIdentity`: "Length Constraints: Minimum length of 2. Maximum
+/// length of 64. Pattern: [\w+=,.@-]*" (AssumeRole API reference). Measured
+/// against STS on 2026-10-09, `\w` is ASCII-only (`jürgen@example.com` is
+/// refused) and the enforced maximum is 256, matching the IAM User Guide's
+/// "between 2 and 256 characters", not the 64 in the API reference. A value
+/// outside this set makes STS refuse the whole credential request, so it is
+/// refused here instead, before a token is minted. Surrounding whitespace is
+/// trimmed; nothing inside the value is rewritten or removed, because the
+/// source identity is the audit identity that trust policies match on, and
+/// `o'malley@example.com` must not become another user's
+/// `omalley@example.com`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AwsSourceIdentity(String);
+
+impl AwsSourceIdentity {
+    const MIN_LEN: usize = 2;
+    const MAX_LEN: usize = 256;
+
+    /// Accept `value`, with surrounding whitespace trimmed, if STS will.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AwsClaimError`] naming the value when STS would refuse it.
+    pub fn parse(value: &str) -> Result<Self, AwsClaimError> {
+        let value = value.trim();
+        let allowed = |c: char| c.is_ascii_alphanumeric() || "_+=,.@-".contains(c);
+        let len = value.chars().count();
+        if (Self::MIN_LEN..=Self::MAX_LEN).contains(&len) && value.chars().all(allowed) {
+            Ok(Self(value.to_owned()))
+        } else {
+            Err(AwsClaimError::SourceIdentity(value.to_owned()))
+        }
+    }
+}
+
+/// A value AWS STS accepts as a session tag value.
+///
+/// STS `Tag.Value`: "Length Constraints: Minimum length of 0. Maximum length
+/// of 256. Pattern: [\p{L}\p{Z}\p{N}_.:/=+\-@]*" (Tag API reference),
+/// confirmed against STS on 2026-10-09: `o'malley@example.com` is refused,
+/// `jürgen@example.com` and a value with a space are accepted. `\p{N}` is
+/// `char::is_numeric` and `\p{Z}` is non-control whitespace;
+/// `char::is_alphabetic` admits a few combining marks beyond `\p{L}`, which
+/// STS still refuses at assume time.
+///
+/// STS accepts an empty value, but a tag that states nothing is never set:
+/// an empty value is refused, and an optional tag with no value is omitted
+/// ([`Self::parse_optional`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct AwsTagValue(String);
+
+impl AwsTagValue {
+    const MAX_LEN: usize = 256;
+
+    /// Accept `value`, with surrounding whitespace trimmed, for the tag `key`
+    /// if it is not empty and STS will accept it. Nothing inside the value is
+    /// rewritten or removed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AwsClaimError`] naming the tag when the value is empty or
+    /// STS would refuse it.
+    pub fn parse(key: &'static str, value: &str) -> Result<Self, AwsClaimError> {
+        let value = value.trim();
+        let allowed = |c: char| {
+            c.is_alphabetic()
+                || c.is_numeric()
+                || (c.is_whitespace() && !c.is_control())
+                || "_.:/=+-@".contains(c)
+        };
+        let len = value.chars().count();
+        if (1..=Self::MAX_LEN).contains(&len) && value.chars().all(allowed) {
+            Ok(Self(value.to_owned()))
+        } else {
+            Err(AwsClaimError::TagValue {
+                key,
+                value: value.to_owned(),
+            })
+        }
+    }
+
+    /// Like [`Self::parse`] for an optional tag: an absent value, or one that
+    /// is empty after trimming, yields `None`, so the tag is not set.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AwsClaimError`] naming the tag when STS would refuse a
+    /// non-empty value.
+    pub fn parse_optional(
+        key: &'static str,
+        value: Option<&str>,
+    ) -> Result<Option<Self>, AwsClaimError> {
+        value
+            .filter(|v| !v.trim().is_empty())
+            .map(|v| Self::parse(key, v))
+            .transpose()
+    }
+}
+
+/// A claim value AWS STS would refuse.
+#[derive(Debug, thiserror::Error)]
+pub enum AwsClaimError {
+    /// The source identity is outside STS's `[\w+=,.@-]`, 2 to 256 characters.
+    #[error(
+        "'{0}' cannot be an AWS source identity: AWS allows only ASCII letters, digits, \
+         and _+=,.@- (2 to 256 characters)"
+    )]
+    SourceIdentity(String),
+    /// A session tag value is outside STS's tag value pattern.
+    #[error(
+        "'{value}' cannot be the AWS session tag {key}: AWS allows only letters, digits, \
+         spaces, and _.:/=+-@ (1 to 256 characters)"
+    )]
+    TagValue {
+        /// The tag key.
+        key: &'static str,
+        /// The refused value.
+        value: String,
+    },
 }
 
 /// Errors from building OIDC ID token claims.
@@ -321,13 +445,13 @@ impl OidcIdTokenClaimsBuilder {
     /// Includes `https://aws.amazon.com/source_identity` claim set to the
     /// user's email for role chaining audit trails.
     #[must_use]
-    pub fn for_aws(issuer: &str, email: &str) -> Self {
+    pub fn for_aws(issuer: &str, email: &str, source_identity: AwsSourceIdentity) -> Self {
         Self::new()
             .issuer(issuer)
             .subject(email)
             .audience(issuer) // AWS uses issuer as audience
             .email(email)
-            .source_identity(email)
+            .source_identity(source_identity)
     }
 
     /// Create a builder pre-configured for an external relying party that
@@ -398,8 +522,8 @@ impl OidcIdTokenClaimsBuilder {
     /// Only relevant for AWS tokens. The value appears in CloudTrail
     /// and persists immutably through role chains.
     #[must_use]
-    pub fn source_identity(mut self, identity: &str) -> Self {
-        self.source_identity = Some(identity.to_string());
+    pub fn source_identity(mut self, identity: AwsSourceIdentity) -> Self {
+        self.source_identity = Some(identity.0);
         self
     }
 
@@ -516,6 +640,98 @@ impl Default for OidcIdTokenClaimsBuilder {
 )]
 mod tests {
     use super::*;
+
+    // STS `SourceIdentity` (AssumeRole API reference): "Pattern:
+    // [\w+=,.@-]*". Each case below was sent to STS on 2026-10-09: the
+    // accepted ones drew AccessDenied, the refused ones ValidationError.
+    #[test]
+    fn test_aws_source_identity_matches_sts() {
+        let at_limit = format!("{}@example.com", "a".repeat(244));
+        let over_limit = format!("{}@example.com", "a".repeat(245));
+        for ok in [
+            "omalley@example.com",
+            "ab",
+            "first.last+tag@example.com",
+            &at_limit,
+        ] {
+            assert!(AwsSourceIdentity::parse(ok).is_ok(), "{ok}");
+        }
+        for refused in [
+            "o'malley@example.com",
+            "jürgen@example.com",
+            "first last@example.com",
+            "a",
+            " a ",
+            &over_limit,
+        ] {
+            assert!(AwsSourceIdentity::parse(refused).is_err(), "{refused}");
+        }
+        assert_eq!(
+            AwsSourceIdentity::parse("  omalley@example.com\n").unwrap(),
+            AwsSourceIdentity::parse("omalley@example.com").unwrap(),
+            "surrounding whitespace is trimmed"
+        );
+    }
+
+    #[test]
+    fn test_aws_tag_value_trims_surrounding_whitespace() {
+        assert_eq!(
+            AwsTagValue::parse("vouch:Agent", "\tclaude-code ").unwrap(),
+            AwsTagValue::parse("vouch:Agent", "claude-code").unwrap(),
+        );
+        assert_eq!(
+            AwsTagValue::parse("vouch:Email", " first last@example.com ").unwrap(),
+            AwsTagValue::parse("vouch:Email", "first last@example.com").unwrap(),
+            "an interior space is kept"
+        );
+    }
+
+    // A tag that states nothing is never set: an absent or blank optional
+    // value yields no tag, and a value STS refuses is still an error.
+    #[test]
+    fn test_aws_tag_value_parse_optional() {
+        assert_eq!(
+            AwsTagValue::parse_optional("vouch:Domain", None).unwrap(),
+            None
+        );
+        assert_eq!(
+            AwsTagValue::parse_optional("vouch:Domain", Some("")).unwrap(),
+            None
+        );
+        assert_eq!(
+            AwsTagValue::parse_optional("vouch:Domain", Some(" \t")).unwrap(),
+            None
+        );
+        assert_eq!(
+            AwsTagValue::parse_optional("vouch:Domain", Some(" example.com ")).unwrap(),
+            Some(AwsTagValue::parse("vouch:Domain", "example.com").unwrap()),
+        );
+        assert!(AwsTagValue::parse_optional("vouch:Agent", Some("agent'name")).is_err());
+    }
+
+    // STS `Tag.Value` (Tag API reference): "Maximum length of 256. Pattern:
+    // [\p{L}\p{Z}\p{N}_.:/=+\-@]*". Cases sent to STS on 2026-10-09 as
+    // above.
+    #[test]
+    fn test_aws_tag_value_matches_sts() {
+        let at_limit = format!("{}@example.com", "a".repeat(244));
+        let over_limit = format!("{}@example.com", "a".repeat(245));
+        for ok in [
+            "omalley@example.com",
+            "jürgen@example.com",
+            "first last@example.com",
+            "claude-code/1.0",
+            &at_limit,
+        ] {
+            assert!(AwsTagValue::parse("vouch:Email", ok).is_ok(), "{ok}");
+        }
+        for refused in ["o'malley@example.com", "tab\there", "", "   ", &over_limit] {
+            assert!(
+                AwsTagValue::parse("vouch:Email", refused).is_err(),
+                "{refused}"
+            );
+        }
+    }
 
     /// A deterministic reference instant used by [`issued_at`](OidcIdTokenClaimsBuilder::issued_at)
     /// so tests can assert exact `iat`/`exp` values rather than a window
@@ -658,10 +874,13 @@ mod tests {
 
     #[test]
     fn test_for_aws_uses_issuer_as_audience() {
-        let result =
-            OidcIdTokenClaimsBuilder::for_aws("https://vouch.example.com", "user@example.com")
-                .issued_at(test_now())
-                .build();
+        let result = OidcIdTokenClaimsBuilder::for_aws(
+            "https://vouch.example.com",
+            "user@example.com",
+            AwsSourceIdentity::parse("user@example.com").unwrap(),
+        )
+        .issued_at(test_now())
+        .build();
 
         assert!(result.is_ok());
         if let Ok(claims) = result {
@@ -675,16 +894,22 @@ mod tests {
 
     #[test]
     fn test_jti_is_unique_per_build() {
-        let claims1 =
-            OidcIdTokenClaimsBuilder::for_aws("https://vouch.example.com", "user@example.com")
-                .issued_at(test_now())
-                .build()
-                .unwrap();
-        let claims2 =
-            OidcIdTokenClaimsBuilder::for_aws("https://vouch.example.com", "user@example.com")
-                .issued_at(test_now())
-                .build()
-                .unwrap();
+        let claims1 = OidcIdTokenClaimsBuilder::for_aws(
+            "https://vouch.example.com",
+            "user@example.com",
+            AwsSourceIdentity::parse("user@example.com").unwrap(),
+        )
+        .issued_at(test_now())
+        .build()
+        .unwrap();
+        let claims2 = OidcIdTokenClaimsBuilder::for_aws(
+            "https://vouch.example.com",
+            "user@example.com",
+            AwsSourceIdentity::parse("user@example.com").unwrap(),
+        )
+        .issued_at(test_now())
+        .build()
+        .unwrap();
         assert_ne!(claims1.jti, claims2.jti);
     }
 
@@ -729,21 +954,30 @@ mod tests {
     #[test]
     fn test_aws_tags_serialized_in_jwt() {
         let mut principal_tags = std::collections::HashMap::new();
-        principal_tags.insert("email".to_string(), vec!["user@example.com".to_string()]);
-        principal_tags.insert("domain".to_string(), vec!["example.com".to_string()]);
+        principal_tags.insert(
+            "email".to_string(),
+            vec![AwsTagValue::parse("email", "user@example.com").unwrap()],
+        );
+        principal_tags.insert(
+            "domain".to_string(),
+            vec![AwsTagValue::parse("domain", "example.com").unwrap()],
+        );
 
         let aws_tags = AwsSessionTags {
             principal_tags,
             transitive_tag_keys: vec!["email".to_string(), "domain".to_string()],
         };
 
-        let claims =
-            OidcIdTokenClaimsBuilder::for_aws("https://vouch.example.com", "user@example.com")
-                .hd(Some("example.com".to_string()))
-                .aws_tags(aws_tags)
-                .issued_at(test_now())
-                .build()
-                .unwrap();
+        let claims = OidcIdTokenClaimsBuilder::for_aws(
+            "https://vouch.example.com",
+            "user@example.com",
+            AwsSourceIdentity::parse("user@example.com").unwrap(),
+        )
+        .hd(Some("example.com".to_string()))
+        .aws_tags(aws_tags)
+        .issued_at(test_now())
+        .build()
+        .unwrap();
 
         let json = serde_json::to_value(&claims).unwrap();
 
@@ -772,11 +1006,14 @@ mod tests {
 
     #[test]
     fn test_aws_tags_omitted_when_none() {
-        let claims =
-            OidcIdTokenClaimsBuilder::for_aws("https://vouch.example.com", "user@example.com")
-                .issued_at(test_now())
-                .build()
-                .unwrap();
+        let claims = OidcIdTokenClaimsBuilder::for_aws(
+            "https://vouch.example.com",
+            "user@example.com",
+            AwsSourceIdentity::parse("user@example.com").unwrap(),
+        )
+        .issued_at(test_now())
+        .build()
+        .unwrap();
 
         let json = serde_json::to_value(&claims).unwrap();
         assert!(
@@ -787,12 +1024,15 @@ mod tests {
 
     #[test]
     fn test_aws_role_serialized_as_single_element_array() {
-        let claims =
-            OidcIdTokenClaimsBuilder::for_aws("https://vouch.example.com", "user@example.com")
-                .aws_role(Some("arn:aws:iam::123456789012:role/MyRole"))
-                .issued_at(test_now())
-                .build()
-                .unwrap();
+        let claims = OidcIdTokenClaimsBuilder::for_aws(
+            "https://vouch.example.com",
+            "user@example.com",
+            AwsSourceIdentity::parse("user@example.com").unwrap(),
+        )
+        .aws_role(Some("arn:aws:iam::123456789012:role/MyRole"))
+        .issued_at(test_now())
+        .build()
+        .unwrap();
 
         let json = serde_json::to_value(&claims).unwrap();
         assert_eq!(
@@ -803,12 +1043,15 @@ mod tests {
 
     #[test]
     fn test_aws_roles_omitted_when_none() {
-        let claims =
-            OidcIdTokenClaimsBuilder::for_aws("https://vouch.example.com", "user@example.com")
-                .aws_role(None)
-                .issued_at(test_now())
-                .build()
-                .unwrap();
+        let claims = OidcIdTokenClaimsBuilder::for_aws(
+            "https://vouch.example.com",
+            "user@example.com",
+            AwsSourceIdentity::parse("user@example.com").unwrap(),
+        )
+        .aws_role(None)
+        .issued_at(test_now())
+        .build()
+        .unwrap();
 
         let json = serde_json::to_value(&claims).unwrap();
         assert!(
