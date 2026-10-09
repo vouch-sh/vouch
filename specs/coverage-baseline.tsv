@@ -1344,9 +1344,6 @@ rfc6749#2.2#da74fbb8	SHOULD	The authorization server SHOULD document the size of
 rfc6749#2.3.2#32ff2ae9	MUST	When using other authentication methods, the authorization server MUST define a mapping between the client identifier (registration record) and authentication s
 rfc6749#3.1.1#00ec783f	MUST	The value MUST be one of "code" for requesting an authorization code as described by Section 4.1.1, "token" for requesting an access token (implicit grant) as d
 rfc6749#3.1.1#b261c7f4	MUST	If an authorization request is missing the "response_type" parameter, or if the response type is not understood, the authorization server MUST return an error r
-rfc6749#3.3#2e348962	SHOULD	The authorization server SHOULD document its scope requirements and default value (if defined).
-rfc6749#3.3#445806b1	MUST	If the client omits the scope parameter when requesting authorization, the authorization server MUST either process the request using a pre-defined default valu
-rfc6749#3.3#cbdd0232	MUST	If the issued access token scope is different from the one requested by the client, the authorization server MUST include the "scope" response parameter to info
 rfc6749#4.2.1#32138854	MUST	The authorization server MUST verify that the redirection URI to which it will redirect the access token matches a redirection URI registered by the client as d
 rfc6749#4.2.1#5235952a	MUST	Value MUST be set to "token".
 rfc6749#4.2.1#df00629b	SHOULD	The parameter SHOULD be used for preventing cross-site request forgery as described in Section 10.12.
