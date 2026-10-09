@@ -447,14 +447,114 @@ pub(crate) async fn exchange_fido2_assertion(
         assertion_result.user_verified,
     );
 
-    // From here on every exit records an audit event: `LoginFailed` from
-    // the posture gate or from a server fault during issuance, and
-    // `LoginSuccess` once the token exists. Verification committed the
-    // counter, and a verified ceremony must never vanish from AuthEvents.
+    // From here on every exit records an audit event: `LoginFailed` from the
+    // near-mint deactivation refusal, the posture gate, or a server fault
+    // during issuance, and `LoginSuccess` once the token exists. Verification
+    // committed the counter, and a verified ceremony must never vanish from
+    // AuthEvents.
 
     // Capture client metadata for the audit events below.
     let client_ip = params.client_info.client_ip();
     let audit_client = params.client_info.clone();
+
+    // Near-mint `active` re-check — mirrors the device-flow guard
+    // (`handlers::device.rs`). The snapshot from
+    // `lookup_and_verify_authenticator` can be stale: a SCIM or admin
+    // deactivation that commits in the window between that lookup and here
+    // flips `active` to false without deleting the authenticator row, so
+    // `verify_login_assertion`'s counter commit does not detect it. Re-fetch
+    // the user and refuse when the account is no longer active. The challenge
+    // state was already consumed by `try_consume_challenge_state`, so this
+    // refusal burns it — the client cannot retry with the same state JWT,
+    // exactly as the device flow burns the already-consumed device code.
+    //
+    // The assertion already verified, so a refusal here is attributed to the
+    // verified owner and records `login_failed` (`user_deactivated`), never
+    // `login_success`: temporal policies treat `login_success` as proof of a
+    // completed, policy-compliant hardware login, and a user deactivated at
+    // mint time is not that.
+    match db::get_user_by_id(&state.store, &user.id).await {
+        Ok(Some(u)) if !u.active => {
+            tracing::warn!(
+                target: "security",
+                user_id = %user.id,
+                "FIDO2 assertion grant: refusing token for deactivated user"
+            );
+            db::record_auth_event(
+                &state.audit,
+                AuthEventParams {
+                    user_id: Principal::Verified(user.id.clone()),
+                    event_type: AuthEventType::LoginFailed,
+                    authenticator_id: Some(authenticator.id.clone()),
+                    success: false,
+                    failure_reason: Some("user_deactivated".to_string()),
+                    client: params.client_info,
+                    client_id: None,
+                    idp_issuer: None,
+                },
+                Some(user.email.clone()),
+            )
+            .await;
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidGrant,
+                "Authentication failed",
+            ));
+        }
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            // The account vanished after verification (a concurrent
+            // `delete_user`). The ceremony verified, so the failure is recorded
+            // against the verified owner as a server fault — the row cannot
+            // feed `failed_login_burst` — and answered with `invalid_grant`.
+            tracing::warn!(
+                target: "security",
+                user_id = %user.id,
+                "FIDO2 assertion grant: user vanished after verification"
+            );
+            db::record_auth_event(
+                &state.audit,
+                AuthEventParams {
+                    user_id: Principal::ServerFault {
+                        verified: user.id.clone(),
+                    },
+                    event_type: AuthEventType::LoginFailed,
+                    authenticator_id: Some(authenticator.id.clone()),
+                    success: false,
+                    failure_reason: Some("user_not_found".to_string()),
+                    client: params.client_info,
+                    client_id: None,
+                    idp_issuer: None,
+                },
+                Some(user.email.clone()),
+            )
+            .await;
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidGrant,
+                "Authentication failed",
+            ));
+        }
+        Err(e) => {
+            tracing::error!("FIDO2 assertion grant: failed to re-load user: {e}");
+            db::record_auth_event(
+                &state.audit,
+                AuthEventParams {
+                    user_id: Principal::ServerFault {
+                        verified: user.id.clone(),
+                    },
+                    event_type: AuthEventType::LoginFailed,
+                    authenticator_id: Some(authenticator.id.clone()),
+                    success: false,
+                    failure_reason: Some(format!("post_verification: {e}")),
+                    client: params.client_info,
+                    client_id: None,
+                    idp_issuer: None,
+                },
+                Some(user.email.clone()),
+            )
+            .await;
+            return Err(ServiceError::Internal("Failed to re-load user".to_string()));
+        }
+    }
 
     // Evaluate device posture policies (if org has active policies).
     // The login audit event is written AFTER this gate: a policy-denied

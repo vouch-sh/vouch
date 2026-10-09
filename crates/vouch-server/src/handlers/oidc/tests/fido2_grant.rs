@@ -1623,3 +1623,207 @@ async fn create_jwt_client_with_grants(
 
     (client, pkcs8_bytes)
 }
+
+// A user deactivated between `lookup_and_verify_authenticator` and the token
+// mint must NOT receive an access token, and the verified ceremony must
+// record `login_failed` (`user_deactivated`), never `login_success`. The
+// deactivation is injected inside `commit_authenticator_counter` (after the
+// lookup's `active` check passed, before `create_oauth_access_token`) via the
+// `set_modify_test_hook` seam, using an un-hooked store clone so the
+// authenticator's counter commit still succeeds — exactly the
+// deactivation-mid-ceremony race the near-mint re-check closes.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "full ceremony: keygen, sign, POST, audit"
+)]
+async fn test_fido2_grant_refuses_token_for_user_deactivated_mid_ceremony() {
+    use crate::db::documents::authenticator::AuthenticatorDoc;
+    use crate::db::documents::session::SessionDoc;
+    use crate::db::documents::user::UserDoc;
+    use aws_lc_rs::digest::digest;
+    use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair};
+    use std::sync::{Arc, Mutex};
+
+    let target = Arc::new(Mutex::new(None));
+    let hook_target = Arc::clone(&target);
+    let (app, state) = test_app_with_modify_hook(move |store| {
+        let writer = store.clone();
+        store.set_modify_test_hook(Arc::new(move |doc_id: &str, _attempt: u32| {
+            let writer = writer.clone();
+            let doc_id = doc_id.to_string();
+            let target = Arc::clone(&hook_target);
+            Box::pin(async move {
+                let want = target.lock().expect("lock").clone();
+                if want.as_deref() != Some(doc_id.as_str()) {
+                    return;
+                }
+                // Deactivate the authenticator's owner via the un-hooked
+                // writer, leaving the authenticator row (and its counter
+                // commit) untouched — mirroring a SCIM `active: false` that
+                // commits during the ceremony.
+                let auth = writer
+                    .get::<AuthenticatorDoc>(&doc_id)
+                    .await
+                    .expect("read authenticator")
+                    .expect("authenticator exists");
+                writer
+                    .modify::<UserDoc, _>(&auth.data.user_id, |d| d.active = false)
+                    .await
+                    .expect("deactivate user");
+            })
+        }));
+    })
+    .await;
+
+    let owner = create_test_user(&state.store, "fido2-mid-deact@example.com").await;
+    let (client, pkcs8) = create_test_jwt_client(&state.store, &owner.id).await;
+    let client_assertion = build_client_assertion(
+        &client.client_id,
+        "https://test.example.com/oauth/token",
+        &pkcs8,
+        None,
+    );
+
+    // Obtain a real challenge + state JWT from the challenge endpoint.
+    let (status, body) = post_challenge(&app, &client.client_id, &pkcs8).await;
+    assert_eq!(status, StatusCode::OK, "challenge endpoint: {body}");
+    let challenge_resp: serde_json::Value =
+        serde_json::from_str(&body).expect("challenge response JSON");
+    let state_jwt = challenge_resp["state"]
+        .as_str()
+        .expect("state JWT")
+        .to_string();
+    let rp_id = challenge_resp["rp_id"].as_str().expect("rp_id").to_string();
+    let challenge_b64 = challenge_resp["challenge"]
+        .as_str()
+        .expect("challenge")
+        .to_string();
+    assert_eq!(rp_id, "test.example.com");
+
+    // Register a real Ed25519 credential owned by `owner` so the assertion
+    // verifies.
+    let key = Ed25519KeyPair::generate().expect("keygen");
+    let cose = ciborium::Value::Map(vec![
+        (1.into(), 1.into()),    // kty: OKP
+        (3.into(), (-8).into()), // alg: EdDSA
+        ((-1).into(), 6.into()), // crv: Ed25519
+        (
+            (-2).into(),
+            ciborium::Value::Bytes(key.public_key().as_ref().to_vec()),
+        ),
+    ]);
+    let mut public_key = Vec::new();
+    ciborium::into_writer(&cose, &mut public_key).expect("encode COSE");
+    let credential_id = format!("cred-fido2-mid-deact-{}", uuid::Uuid::now_v7());
+    let auth_id = db::create_authenticator(
+        &state.store,
+        &db::CreateAuthenticatorParams {
+            user_id: &owner.id,
+            name: "Mid-Deact Key",
+            credential_id: credential_id.as_bytes(),
+            public_key: &public_key,
+            aaguid: None,
+            user_handle: Some(owner.id.as_bytes()),
+            attestation_verified: false,
+            counter: 4,
+        },
+    )
+    .await
+    .expect("create authenticator");
+    *target.lock().expect("lock") = Some(auth_id.clone());
+
+    // Sign a valid assertion: SHA256(rp_id) || UP+UV || sign_count.
+    let sign_count: u32 = 5;
+    let mut authenticator_data = digest(&SHA256, rp_id.as_bytes()).as_ref().to_vec();
+    authenticator_data.push(0x05); // UP + UV
+    authenticator_data.extend_from_slice(&sign_count.to_be_bytes());
+    let client_data_json = serde_json::to_vec(&serde_json::json!({
+        "type": "webauthn.get",
+        "challenge": challenge_b64,
+        "origin": format!("https://{rp_id}"),
+    }))
+    .expect("client data");
+    let mut signed = authenticator_data.clone();
+    signed.extend_from_slice(digest(&SHA256, &client_data_json).as_ref());
+    let signature = key.sign(&signed).as_ref().to_vec();
+
+    let owner_uuid = uuid::Uuid::parse_str(&owner.id).expect("owner id is a uuid");
+    let assertion_payload = serde_json::json!({
+        "state": state_jwt,
+        "credential_id": URL_SAFE_NO_PAD.encode(credential_id.as_bytes()),
+        "authenticator_data": URL_SAFE_NO_PAD.encode(&authenticator_data),
+        "signature": URL_SAFE_NO_PAD.encode(&signature),
+        "client_data_json": URL_SAFE_NO_PAD.encode(&client_data_json),
+        "user_handle": URL_SAFE_NO_PAD.encode(owner_uuid.as_bytes()),
+    });
+    let assertion =
+        URL_SAFE_NO_PAD.encode(serde_json::to_vec(&assertion_payload).expect("JSON encode"));
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Afido2-assertion\
+             &assertion={assertion}\
+             &client_assertion_type=urn%3Aietf%3Aparams%3Aoauth%3Aclient-assertion-type%3Ajwt-bearer\
+             &client_assertion={client_assertion}"
+        ),
+        &[],
+    )
+    .await;
+
+    // FIX: the grant is refused; no access token is minted for the
+    // deactivated user.
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["error"], "invalid_grant", "{body}");
+
+    // The hook fired: the user is deactivated in the DB.
+    let after = db::get_user_by_id(&state.store, &owner.id)
+        .await
+        .expect("read user")
+        .expect("user exists");
+    assert!(!after.active, "user must be deactivated");
+
+    // The verified ceremony records `login_failed` attributed to the
+    // verified owner with reason `user_deactivated` — never login_success.
+    let rows = login_failed_rows(&state, None).await;
+    assert_eq!(rows.len(), 1, "one login_failed row: {rows:?}");
+    let row = rows.first().expect("login_failed row");
+    assert_eq!(
+        row.user_id.as_deref(),
+        Some(owner.id.as_str()),
+        "attributed to the verified owner: {row:?}"
+    );
+    assert_eq!(failure_reason(row), "user_deactivated");
+    let data = payload(row);
+    assert_eq!(data["user_id"].as_str(), Some(owner.id.as_str()), "{data}");
+    assert_eq!(
+        data["authenticator_id"].as_str(),
+        Some(auth_id.as_str()),
+        "{data}"
+    );
+
+    // No login_success may be recorded.
+    let successes = state
+        .audit
+        .query_events(&db::AuditEventFilter {
+            event_types: Some(vec!["login_success".to_string()]),
+            ..db::AuditEventFilter::default()
+        })
+        .await
+        .expect("query audit events");
+    assert!(
+        successes.is_empty(),
+        "no login_success for a deactivated user: {successes:?}"
+    );
+
+    // No session row is created (the token was never minted).
+    let sessions = state
+        .store
+        .count::<SessionDoc>("user_id", &owner.id)
+        .await
+        .expect("count sessions");
+    assert_eq!(sessions, 0, "no session for a deactivated user");
+}

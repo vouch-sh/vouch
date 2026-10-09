@@ -562,6 +562,90 @@ async fn log_login_failure(
     db::record_auth_event(audit, params, email.map(String::from)).await;
 }
 
+/// Near-mint `active` re-check after a verified browser WebAuthn assertion.
+///
+/// The snapshot from `lookup_and_verify_authenticator` can be stale: a SCIM
+/// or admin deactivation that commits in the window between that lookup and
+/// the token mint flips `active` to false without deleting the authenticator
+/// row, so `verify_login_assertion`'s counter commit does not detect it.
+/// Re-fetch the user and refuse when the account is no longer active,
+/// mirroring the device-flow guard and the FIDO2 grant's. The challenge state
+/// was already consumed, so the refusal burns it — the browser cannot retry
+/// with the same state JWT. The assertion already verified, so the refusal
+/// is attributed to the verified owner and records `login_failed`
+/// (`user_deactivated`), never `login_success` — the same audit-ordering
+/// guarantee `finalize_login_session` provides for its own post-verification
+/// steps.
+async fn verify_user_still_active(
+    state: &AppState,
+    user: &db::User,
+    authenticator: &db::Authenticator,
+    client_info: &ClientInfo,
+) -> Result<(), ServiceError> {
+    match db::get_user_by_id(&state.store, &user.id).await {
+        Ok(Some(u)) if !u.active => {
+            tracing::warn!(
+                target: "security",
+                user_id = %user.id,
+                "Browser WebAuthn login: refusing login for deactivated user"
+            );
+            log_login_failure(
+                &state.audit,
+                client_info.clone(),
+                db::Principal::Verified(user.id.clone()),
+                Some(&user.email),
+                Some(&authenticator.id),
+                "user_deactivated",
+            )
+            .await;
+            Err(ServiceError::api(
+                StatusCode::UNAUTHORIZED,
+                "account_deactivated",
+                Tr::new("login-error-account-deactivated").to_string(),
+            ))
+        }
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => {
+            tracing::warn!(
+                target: "security",
+                user_id = %user.id,
+                "Browser WebAuthn login: user vanished after verification"
+            );
+            log_login_failure(
+                &state.audit,
+                client_info.clone(),
+                db::Principal::ServerFault {
+                    verified: user.id.clone(),
+                },
+                Some(&user.email),
+                Some(&authenticator.id),
+                "user_not_found",
+            )
+            .await;
+            Err(ServiceError::api(
+                StatusCode::UNAUTHORIZED,
+                "auth_failed",
+                Tr::new("login-error-auth-failed").to_string(),
+            ))
+        }
+        Err(e) => {
+            tracing::error!("Browser WebAuthn login: failed to re-load user: {e}");
+            log_login_failure(
+                &state.audit,
+                client_info.clone(),
+                db::Principal::ServerFault {
+                    verified: user.id.clone(),
+                },
+                Some(&user.email),
+                Some(&authenticator.id),
+                &format!("post_verification: {e}"),
+            )
+            .await;
+            Err(ServiceError::Internal("Failed to re-load user".to_string()))
+        }
+    }
+}
+
 /// POST /login/webauthn/complete
 ///
 /// Verify WebAuthn assertion and create session.
@@ -716,6 +800,11 @@ pub(crate) async fn browser_login_complete(
         verification_result.new_counter,
         verification_result.user_verified
     );
+
+    // Near-mint `active` re-check — mirrors the device-flow guard and the
+    // FIDO2 grant's (`verify_user_still_active`); see its doc comment. The
+    // challenge state was already consumed, so the refusal burns it.
+    verify_user_still_active(&state, &user, &authenticator, &client_info).await?;
 
     // The assertion has verified and its counter is committed; every
     // remaining step (device-auth release, session creation) is fallible. If any of them
@@ -2400,5 +2489,181 @@ mod tests {
             .await
             .expect("query audit events");
         assert!(successes.is_empty(), "no login_success on a failed commit");
+    }
+
+    // A user deactivated between `lookup_and_verify_authenticator` and the
+    // token mint must NOT complete browser login, and the verified ceremony
+    // must record `login_failed` (`user_deactivated`), never `login_success`.
+    // The deactivation is injected inside `commit_authenticator_counter` (after
+    // the lookup's `active` check passed, before `finalize_login_session`
+    // mints a session) via the `set_modify_test_hook` seam, using an un-hooked
+    // store clone so the authenticator's counter commit still succeeds —
+    // exactly the deactivation-mid-ceremony race the near-mint re-check closes.
+    #[tokio::test]
+    async fn test_browser_login_refuses_login_for_user_deactivated_mid_ceremony() {
+        use crate::db::documents::authenticator::AuthenticatorDoc;
+        use crate::db::documents::session::SessionDoc;
+        use crate::db::documents::user::UserDoc;
+        use std::sync::Mutex;
+
+        let target = Arc::new(Mutex::new(None));
+        let hook_target = Arc::clone(&target);
+        let (app, state) = test_utils::test_app_with_modify_hook(move |store| {
+            let writer = store.clone();
+            store.set_modify_test_hook(Arc::new(move |doc_id: &str, _attempt: u32| {
+                let writer = writer.clone();
+                let doc_id = doc_id.to_string();
+                let target = Arc::clone(&hook_target);
+                Box::pin(async move {
+                    let want = target.lock().expect("lock").clone();
+                    if want.as_deref() != Some(doc_id.as_str()) {
+                        return;
+                    }
+                    // Deactivate the authenticator's owner via the un-hooked
+                    // writer, leaving the authenticator row (and its counter
+                    // commit) untouched — mirroring a SCIM `active: false`
+                    // that commits during the ceremony.
+                    let auth = writer
+                        .get::<AuthenticatorDoc>(&doc_id)
+                        .await
+                        .expect("read authenticator")
+                        .expect("authenticator exists");
+                    writer
+                        .modify::<UserDoc, _>(&auth.data.user_id, |d| d.active = false)
+                        .await
+                        .expect("deactivate user");
+                })
+            }));
+        })
+        .await;
+
+        let user =
+            test_utils::create_test_user(&state.store, "browser-mid-deact@example.com").await;
+        let credential_id = format!("cred-browser-mid-deact-{}", Uuid::now_v7());
+        let key = test_utils::create_test_signing_authenticator(
+            &state.store,
+            &user.id,
+            credential_id.as_bytes(),
+            4,
+        )
+        .await;
+        let auth_id = key.authenticator_id.clone();
+        *target.lock().expect("target lock") = Some(auth_id.clone());
+
+        let challenge = b"browser-mid-deact-challenge".to_vec();
+        let now = jiff::Timestamp::now();
+        let auth_state = BrowserAuthenticationState {
+            challenge: challenge.clone(),
+            rp_id: state.config().rp_id.clone(),
+            created_at: now,
+            exp: now
+                .checked_add(SignedDuration::from_secs(300))
+                .expect("exp in range"),
+            pending_auth: None,
+        };
+        let state_jwt = auth_state
+            .encode(&state.state_signer)
+            .await
+            .expect("encode auth state");
+        let assertion = key.sign_assertion(
+            &state.config().rp_id,
+            state.config().base_url.as_str(),
+            &challenge,
+            5,
+        );
+
+        let user_uuid = Uuid::parse_str(&user.id).expect("user id is a uuid");
+        let enc = |b: &[u8]| URL_SAFE_NO_PAD.encode(b);
+        let body = serde_json::json!({
+            "state": state_jwt,
+            "credential_id": enc(&key.credential_id),
+            "authenticator_data": enc(&assertion.authenticator_data),
+            "client_data_json": enc(&assertion.client_data_json),
+            "signature": enc(&assertion.signature),
+            "user_handle": enc(user_uuid.as_bytes()),
+        })
+        .to_string();
+
+        let (status, resp_body) = test_utils::http_post_json(
+            &app,
+            "/login/webauthn/complete",
+            &body,
+            &[("Origin", state.config().base_url.as_str())],
+        )
+        .await;
+
+        // FIX: login is refused (401, account_deactivated), not 200 OK.
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{resp_body}");
+        let error: serde_json::Value = serde_json::from_str(&resp_body).expect("Valid JSON");
+        assert_eq!(
+            error.get("code").and_then(serde_json::Value::as_str),
+            Some("account_deactivated"),
+            "{resp_body}"
+        );
+
+        // The hook fired: the user is deactivated in the DB.
+        let after = db::get_user_by_id(&state.store, &user.id)
+            .await
+            .expect("read user")
+            .expect("user exists");
+        assert!(!after.active, "user must be deactivated");
+
+        // The verified ceremony records `login_failed` attributed to the
+        // verified owner with reason `user_deactivated` — never login_success.
+        let rows = state
+            .audit
+            .query_events(&AuditEventFilter {
+                event_types: Some(vec!["login_failed".to_string()]),
+                ..AuditEventFilter::default()
+            })
+            .await
+            .expect("query audit events");
+        assert_eq!(rows.len(), 1, "one login_failed row: {rows:?}");
+        let row = rows.first().expect("login_failed row");
+        assert_eq!(
+            row.user_id.as_deref(),
+            Some(user.id.as_str()),
+            "attributed to the verified owner: {row:?}"
+        );
+        let data: serde_json::Value = serde_json::from_str(&row.data).expect("event data JSON");
+        assert_eq!(
+            data.get("user_id").and_then(serde_json::Value::as_str),
+            Some(user.id.as_str()),
+            "{data}"
+        );
+        assert_eq!(
+            data.get("failure_reason")
+                .and_then(serde_json::Value::as_str),
+            Some("user_deactivated"),
+            "{data}"
+        );
+        assert_eq!(
+            data.get("authenticator_id")
+                .and_then(serde_json::Value::as_str),
+            Some(auth_id.as_str()),
+            "{data}"
+        );
+
+        // No login_success may be recorded.
+        let successes = state
+            .audit
+            .query_events(&AuditEventFilter {
+                event_types: Some(vec!["login_success".to_string()]),
+                ..AuditEventFilter::default()
+            })
+            .await
+            .expect("query audit events");
+        assert!(
+            successes.is_empty(),
+            "no login_success for a deactivated user: {successes:?}"
+        );
+
+        // No session row is created (the token was never minted).
+        let sessions = state
+            .store
+            .count::<SessionDoc>("user_id", &user.id)
+            .await
+            .expect("count sessions");
+        assert_eq!(sessions, 0, "no session for a deactivated user");
     }
 }

@@ -354,6 +354,7 @@ login-error-device-auth-failed = Failed to complete CLI authorization
 login-error-session-create-failed = Failed to create session
 login-error-missing-origin = Origin header required
 login-error-origin-mismatch = Request origin mismatch
+login-error-account-deactivated = This account has been deactivated by your organization, so sign-in was refused. Please contact your administrator to restore access.
 enroll-error-auth-complete-failed = Failed to complete authentication
 enroll-error-token-verify-failed = Failed to verify identity token
 enroll-error-invalid-email = The identity provider returned an invalid email address. Please contact your administrator.
