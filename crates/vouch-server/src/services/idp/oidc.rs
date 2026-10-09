@@ -17,6 +17,7 @@ use crate::db::{Domain, UpstreamLogin};
 use crate::email::Email;
 use crate::infra::csp::CspOrigin;
 use crate::infra::egress::read_capped_json;
+use crate::services::oidc::jwt_bearer::validate::JwtAudience;
 
 /// Clock skew allowed on an upstream ID token's `exp` and `nbf`, which the
 /// IdP stamped on its own clock.
@@ -147,6 +148,9 @@ struct IdTokenClaims {
     /// therefore verification (fail-closed). Account matching keys on
     /// `(iss, sub)`, never on the email string alone.
     sub: String,
+    /// OIDC Core §2: "REQUIRED. Audience(s) that this ID Token is intended
+    /// for." No serde default, so a token without `aud` fails to decode.
+    aud: JwtAudience,
     email: String,
     #[serde(default)]
     email_verified: bool,
@@ -473,6 +477,15 @@ pub(crate) async fn verify_id_token(
     }
 
     let claims = token_data.claims;
+
+    // OIDC Core §3.1.3.7 step 3: "The ID Token MUST be rejected if the ID
+    // Token does not list the Client as a valid audience, or if it contains
+    // additional audiences not trusted by the Client." Vouch trusts no
+    // audience but its own client_id. `jsonwebtoken` only requires the two
+    // sets to overlap, so the exact check is made here.
+    if !claims.aud.is_only(expected_client_id) {
+        anyhow::bail!("ID token audience must be exactly the client_id '{expected_client_id}'");
+    }
 
     if entra_template_issuer && extract_entra_tenant_from_issuer(&claims.iss).is_none() {
         anyhow::bail!(
