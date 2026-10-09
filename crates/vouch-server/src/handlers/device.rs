@@ -558,6 +558,9 @@ pub(crate) async fn device_token(
                 None => None,
             };
 
+            // RFC 6749 §3.3: the device grant processes every request with
+            // the pre-defined default, every supported scope.
+            let scope = ScopeSet::all();
             let session_result = create_oauth_access_token(
                 &state,
                 CreateOAuthTokenParams {
@@ -565,7 +568,7 @@ pub(crate) async fn device_token(
                     email: &user_email,
                     authenticator_id: Some(&authenticator_id),
                     client_id: &client_id,
-                    scope: Some(ScopeSet::all()),
+                    scope: Some(scope.clone()),
                     binding: TokenBinding::new(dpop_proof.as_ref(), mtls_cert_thumbprint.as_ref()),
                     act: None,
                     audience: None,
@@ -644,6 +647,7 @@ pub(crate) async fn device_token(
                 access_token: token.clone(),
                 token_type: token_type.to_string(),
                 expires_in,
+                scope: scope.to_space_separated(),
                 email: user_email,
             }))
         }

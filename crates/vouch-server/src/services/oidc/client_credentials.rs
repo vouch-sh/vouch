@@ -47,14 +47,16 @@ pub(crate) async fn exchange_client_credentials(
     proof: TokenIssuanceProof,
     arrival: ArrivalTime,
 ) -> ServiceResult<ClientCredentialsResult> {
-    // Filter out openid and email scopes — neither is meaningful without a user.
-    let scope = requested_scope.map(|s| {
-        let requested = ScopeSet::parse(s);
-        requested.without_user_scopes()
-    });
-
-    // Flatten empty scope to None
-    let scope = scope.filter(|s| !s.is_empty());
+    // `openid` and `email` mean nothing without a user, so they are never
+    // granted here. An omitted scope grants none, and the response omits
+    // `scope` as identical to the (absent) request.
+    let scope = requested_scope
+        .map(|s| {
+            ScopeSet::parse(s)
+                .without_user_scopes()
+                .into_requested_grant()
+        })
+        .transpose()?;
 
     // Issue access token with client_id as the subject (RFC 9068 Section 2.2)
     let session_result = create_oauth_access_token(

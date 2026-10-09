@@ -10,6 +10,7 @@
 //! - RFC 6749 Section 3.3 — Access Token Scope
 //! - OIDC Core Section 3.1.2.1 — `openid` scope requirement
 
+use crate::error::{OAuthErrorCode, ServiceError};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashSet;
 use std::fmt;
@@ -120,6 +121,30 @@ impl ScopeSet {
         )
     }
 
+    /// Accept this set as the grant for a request that carried a `scope`
+    /// parameter, refusing a grant that came out empty.
+    ///
+    /// RFC 6749 §3.3: "If the issued access token scope is different from
+    /// the one requested by the client, the authorization server MUST include
+    /// the "scope" response parameter". Its grammar has no empty scope
+    /// (`scope-token = 1*( %x21 / %x23-5B / %x5D-7E )`), so an empty grant
+    /// cannot be reported and is refused with §5.2 `invalid_scope`: "The
+    /// requested scope is invalid, unknown, malformed, or exceeds the scope
+    /// granted by the resource owner."
+    ///
+    /// # Errors
+    ///
+    /// Returns `invalid_scope` when the set is empty.
+    pub fn into_requested_grant(self) -> Result<Self, ServiceError> {
+        if self.is_empty() {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidScope,
+                "None of the requested scopes can be granted",
+            ));
+        }
+        Ok(self)
+    }
+
     /// Produce a space-separated string (RFC 6749 Section 3.3).
     ///
     /// Ordering is deterministic: `openid` always precedes `email`.
@@ -162,6 +187,33 @@ impl fmt::Display for ScopeSet {
 )]
 mod tests {
     use super::*;
+
+    // RFC 6749 §3.3: the "scope" grammar has no empty value, so an empty
+    // grant for a request that carried a scope is refused with §5.2
+    // `invalid_scope`.
+    #[test]
+    fn test_into_requested_grant_refuses_empty() {
+        let err = ScopeSet::parse("profile")
+            .into_requested_grant()
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ServiceError::OAuth {
+                    code: OAuthErrorCode::InvalidScope,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+        assert_eq!(
+            ScopeSet::parse("openid profile")
+                .into_requested_grant()
+                .unwrap(),
+            ScopeSet::parse("openid"),
+            "a partial grant is kept, with the unknown value filtered"
+        );
+    }
 
     #[test]
     fn test_parse_known_scopes() {

@@ -476,6 +476,26 @@ async fn test_device_grant_redeems_for_client_registered_for_device_code() {
     );
 }
 
+// RFC 8628 §3.5: the token endpoint "responds with a success response
+// defined in Section 5.1 of [RFC6749]", where `scope` is "OPTIONAL, if
+// identical to the scope requested by the client; otherwise, REQUIRED." The
+// device grant ignores the requested scope, so it always reports the grant.
+#[tokio::test]
+async fn test_rfc8628_token_response_reports_granted_scope() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "device-scope@example.com").await;
+    let auth = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let device_code =
+        setup_authorized_device(&state, &user, &auth, "scope", &client.client_id).await;
+
+    let (status, body) = poll_device_token(&app, &device_code, &client).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(json["scope"], "openid email", "{body}");
+}
+
 /// The `grant_types` gate runs before `try_consume_device_auth`, so an
 /// unauthorized client does not burn the single-use device code. Re-authorize
 /// the client for device_code and the *same* device code must then redeem —

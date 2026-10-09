@@ -608,9 +608,7 @@ pub(crate) async fn exchange_token(
     );
 
     // Calculate granted scope (intersection of requested and available).
-    // For FIDO2 sessions (scope: None), require explicit scope in the request
-    // rather than defaulting to ScopeSet::all() to prevent scope escalation.
-    let granted_scope = calculate_granted_scope(params.scope, subject_decoded.scope());
+    let granted_scope = calculate_granted_scope(params.scope, subject_decoded.scope())?;
 
     // Cap exchanged-token lifetime by subject token's remaining TTL. RFC 8693
     // §2.2.1 defines `expires_in` as "The validity lifetime, in seconds, of
@@ -1005,45 +1003,31 @@ async fn issue_id_token(
 
 /// Calculate the granted scope based on requested and available scopes.
 ///
-/// For FIDO2 sessions (available = `None`), require explicit scope in the
-/// exchange request to prevent scope escalation. Only tokens with an
-/// explicit scope set propagate their scope.
+/// A requested scope is intersected with the subject token's scope, or with
+/// every supported scope for a FIDO2 session token, which carries none. With
+/// no request, a scoped subject passes its scope through and an unscoped one
+/// grants `openid` only, so an exchange never widens the subject's scope.
+///
+/// # Errors
+///
+/// Returns `invalid_scope` when a requested scope leaves nothing to grant
+/// (see [`ScopeSet::into_requested_grant`]).
 fn calculate_granted_scope(
     requested: Option<&str>,
     available: Option<&ScopeSet>,
-) -> Option<ScopeSet> {
-    let available_set = match available {
-        Some(s) => s.clone(),
-        // FIDO2 sessions don't carry scope — intersect request with all known
-        // scopes to prevent escalation beyond what the server supports.
-        None => {
-            if let Some(requested) = requested {
-                let requested_set = ScopeSet::parse(requested);
-                let granted = requested_set.intersection(&ScopeSet::all());
-                return if granted.is_empty() {
-                    None
-                } else {
-                    Some(granted)
-                };
-            }
-            // No scope in subject token and no explicit request — grant openid only
-            return Some(ScopeSet::parse("openid"));
-        }
+) -> ServiceResult<Option<ScopeSet>> {
+    let Some(requested) = requested else {
+        return Ok(match available {
+            None => Some(ScopeSet::parse("openid")),
+            Some(set) if set.is_empty() => None,
+            Some(set) => Some(set.clone()),
+        });
     };
-
-    if let Some(requested) = requested {
-        let requested_set = ScopeSet::parse(requested);
-        let granted = requested_set.intersection(&available_set);
-        if granted.is_empty() {
-            None
-        } else {
-            Some(granted)
-        }
-    } else if available_set.is_empty() {
-        None
-    } else {
-        Some(available_set)
-    }
+    let ceiling = available.cloned().unwrap_or_else(ScopeSet::all);
+    ScopeSet::parse(requested)
+        .intersection(&ceiling)
+        .into_requested_grant()
+        .map(Some)
 }
 
 /// Cap an exchanged access token's lifetime by the subject token's remaining
@@ -1097,56 +1081,70 @@ mod tests {
     #[test]
     fn test_calculate_granted_scope_with_available() {
         let available = ScopeSet::parse("openid email");
-        let result = calculate_granted_scope(None, Some(&available));
+        let result = calculate_granted_scope(None, Some(&available)).expect("scope granted");
         assert_eq!(result, Some(ScopeSet::parse("openid email")));
     }
 
     #[test]
     fn test_calculate_granted_scope_subset() {
         let available = ScopeSet::parse("openid email profile");
-        let result = calculate_granted_scope(Some("openid email"), Some(&available));
+        let result =
+            calculate_granted_scope(Some("openid email"), Some(&available)).expect("scope granted");
         assert_eq!(result, Some(ScopeSet::parse("openid email")));
     }
 
     #[test]
     fn test_calculate_granted_scope_invalid() {
         let available = ScopeSet::parse("openid");
-        let result = calculate_granted_scope(Some("admin superuser"), Some(&available));
-        assert_eq!(result, None);
+        // RFC 6749 §5.2 `invalid_scope`: an empty grant cannot be reported.
+        let err = calculate_granted_scope(Some("admin superuser"), Some(&available))
+            .expect_err("empty grant refused");
+        assert!(
+            matches!(
+                err,
+                ServiceError::OAuth {
+                    code: OAuthErrorCode::InvalidScope,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
     }
 
     #[test]
     fn test_calculate_granted_scope_mixed() {
         let available = ScopeSet::parse("openid email");
-        let result = calculate_granted_scope(Some("openid admin email"), Some(&available));
+        let result = calculate_granted_scope(Some("openid admin email"), Some(&available))
+            .expect("scope granted");
         assert_eq!(result, Some(ScopeSet::parse("openid email")));
     }
 
     #[test]
     fn test_calculate_granted_scope_respects_available() {
         let available = ScopeSet::parse("openid");
-        let result = calculate_granted_scope(Some("openid email"), Some(&available));
+        let result =
+            calculate_granted_scope(Some("openid email"), Some(&available)).expect("scope granted");
         assert_eq!(result, Some(ScopeSet::parse("openid")));
     }
 
     #[test]
     fn test_calculate_granted_scope_no_request_uses_available() {
         let available = ScopeSet::parse("openid");
-        let result = calculate_granted_scope(None, Some(&available));
+        let result = calculate_granted_scope(None, Some(&available)).expect("scope granted");
         assert_eq!(result, Some(ScopeSet::parse("openid")));
     }
 
     #[test]
     fn test_calculate_granted_scope_fido2_no_scope_defaults_openid() {
         // FIDO2 sessions have no scope — should default to openid
-        let result = calculate_granted_scope(None, None);
+        let result = calculate_granted_scope(None, None).expect("scope granted");
         assert_eq!(result, Some(ScopeSet::parse("openid")));
     }
 
     #[test]
     fn test_calculate_granted_scope_fido2_with_explicit_request() {
         // FIDO2 sessions with explicit scope request
-        let result = calculate_granted_scope(Some("openid email"), None);
+        let result = calculate_granted_scope(Some("openid email"), None).expect("scope granted");
         assert_eq!(result, Some(ScopeSet::parse("openid email")));
     }
 
