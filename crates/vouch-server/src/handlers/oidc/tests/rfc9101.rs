@@ -1095,6 +1095,9 @@ async fn test_rfc9101_par_request_object_client_id_mismatch_rejected() {
         StatusCode::BAD_REQUEST,
         "PAR with client_id mismatch should return 400: {response_body}"
     );
+    // RFC 9101 §6.3: a failed Client ID check takes an RFC 6749 §5.2 code.
+    let json: serde_json::Value = serde_json::from_str(&response_body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_request", "{response_body}");
 }
 
 // ========================================================================
@@ -1532,67 +1535,6 @@ async fn test_rfc9101_fapi2_response_type_mismatch_rejected() {
         );
     } else {
         // Error page is also acceptable
-        assert_eq!(
-            response.status,
-            StatusCode::OK,
-            "Expected error page or redirect with error, got: {} body: {}",
-            response.status,
-            response.body
-        );
-    }
-}
-
-#[tokio::test]
-async fn test_rfc9101_fapi2_scope_mismatch_rejected() {
-    // FAPI 2.0 Section 5.3.2: If scope appears in both the query string and
-    // the JWT, they must match. A mismatch must be rejected.
-    let (app, state) = test_app().await;
-
-    let user = create_test_user(&state.store, "jar-fapi-scope@example.com").await;
-    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
-    let (client, pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
-
-    let now = jiff::Timestamp::now().as_second();
-    let issuer = &state.config().base_url;
-    let challenge = sha256_base64url("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk");
-
-    // JWT has scope=openid
-    let claims = serde_json::json!({
-        "iss": client.client_id,
-        "aud": issuer,
-        "exp": now + 300,
-        "iat": now,
-        "response_type": "code",
-        "client_id": client.client_id,
-        "redirect_uri": "https://example.com/callback",
-        "scope": "openid",
-        "code_challenge": challenge,
-        "code_challenge_method": "S256"
-    });
-
-    let request_jwt = build_request_object_with_claims(&claims, &pkcs8_bytes);
-
-    // Query string has scope=openid profile — this should mismatch with JWT's "openid"
-    let response = http_get_full(
-        &app,
-        &format!(
-            "/oauth/authorize?client_id={}&scope={}&redirect_uri={}&request={}",
-            client.client_id,
-            urlencoding::encode("openid profile"),
-            urlencoding::encode("https://example.com/callback"),
-            urlencoding::encode(&request_jwt),
-        ),
-        &[],
-    )
-    .await;
-
-    if response.status == StatusCode::FOUND || response.status == StatusCode::SEE_OTHER {
-        let location = response.headers.get("Location").unwrap().to_str().unwrap();
-        assert!(
-            location.contains("invalid_request_object") || location.contains("invalid_request"),
-            "scope mismatch should return error, got: {location}"
-        );
-    } else {
         assert_eq!(
             response.status,
             StatusCode::OK,

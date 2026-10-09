@@ -140,8 +140,6 @@ pub struct QueryParamHints<'a> {
     pub client_id: Option<&'a str>,
     /// `response_type` from the query string.
     pub response_type: Option<&'a str>,
-    /// `scope` from the query string.
-    pub scope: Option<&'a str>,
 }
 
 /// Maximum size for a fetched Request Object (64 KB).
@@ -333,9 +331,16 @@ fn parse_request_object_header(jwt: &str) -> ServiceResult<(Option<String>, JwtA
 
 /// Validate a Request Object JWT and extract authorization parameters.
 ///
-/// If `query_params` are provided, validates that any overlapping parameters
-/// (`client_id`, `response_type`, `scope`) match between query and JWT
-/// (FAPI 2.0 Section 5.3.2).
+/// If `query_params` are provided, validates that `client_id` and
+/// `response_type` match between query and JWT (OIDC Core §6.1: "The values
+/// for these parameters MUST match those in the Request Object, if present").
+///
+/// Failures of the Request Object itself (header, signature, temporal and
+/// audience claims) are `invalid_request_object` (RFC 9101 §6.2, §7).
+/// Failures of the request it carries are RFC 6749 §5.2 codes: RFC 9101 §6.3,
+/// "If the Client ID check or the request validation fails, then the
+/// authorization server MUST return an error ... as specified in Section 5.2
+/// of [RFC6749]".
 #[expect(clippy::too_many_lines, reason = "single-pass RFC 9101 JAR validation")]
 #[expect(
     clippy::disallowed_methods,
@@ -559,52 +564,43 @@ pub async fn validate_request_object(
         ));
     }
 
-    // 9. Validate required OAuth parameters
+    // 9. Validate required OAuth parameters (RFC 9101 §6.3: request
+    // validation failures take RFC 6749 §5.2 codes)
     let response_type = claims.response_type.ok_or_else(|| {
         ServiceError::oauth(
-            OAuthErrorCode::InvalidRequestObject,
+            OAuthErrorCode::InvalidRequest,
             "Request Object must contain 'response_type' claim",
         )
     })?;
 
     let redirect_uri = claims.redirect_uri.ok_or_else(|| {
         ServiceError::oauth(
-            OAuthErrorCode::InvalidRequestObject,
+            OAuthErrorCode::InvalidRequest,
             "Request Object must contain 'redirect_uri' claim",
         )
     })?;
 
-    // 10. FAPI 2.0 parameter consistency check
+    // 10. OIDC Core §6.1: `client_id` and `response_type` in the query MUST
+    // match the Request Object. No specification asks the same of `scope`,
+    // and RFC 9101 §6.3 has the server "only use the parameters in the
+    // Request Object", so a differing query `scope` is ignored.
     if let Some(hints) = query_params {
-        // client_id in query must match JWT (already validated against client above)
         if let Some(query_client_id) = hints.client_id
             && let Some(ref jwt_client_id) = claims.client_id
             && query_client_id != jwt_client_id
         {
             return Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidRequestObject,
+                OAuthErrorCode::InvalidRequest,
                 "client_id in query string does not match Request Object",
             ));
         }
 
-        // response_type in query must match JWT
         if let Some(query_rt) = hints.response_type
             && query_rt != response_type
         {
             return Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidRequestObject,
+                OAuthErrorCode::InvalidRequest,
                 "response_type in query string does not match Request Object",
-            ));
-        }
-
-        // scope in query must match JWT
-        if let Some(query_scope) = hints.scope
-            && let Some(ref jwt_scope) = claims.scope
-            && query_scope != jwt_scope
-        {
-            return Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidRequestObject,
-                "scope in query string does not match Request Object",
             ));
         }
     }
@@ -1441,5 +1437,114 @@ mod tests {
             result.is_ok(),
             "inline-JWKS client must validate Request Object despite cache DB error: {result:?}"
         );
+    }
+
+    /// A client with an inline ES256 key, and a function that signs a Request
+    /// Object for it after applying `edit` to otherwise valid claims.
+    async fn jar_fixture(
+        email: &str,
+    ) -> (
+        Arc<AppState>,
+        OAuthClient,
+        impl Fn(&dyn Fn(&mut serde_json::Value)) -> String,
+    ) {
+        use crate::db::get_oauth_client_by_id;
+        use crate::test_utils::{TestClientSpec, TestJwks, create_test_client, create_test_user};
+
+        let state = test_utils::test_app_state().await;
+        let (encoding_key, jwks, kid) = test_es256_key_with_jwks();
+        let user = create_test_user(&state.store, email).await;
+        let created = create_test_client(
+            &state.store,
+            &user.id,
+            TestClientSpec {
+                jwks: TestJwks::Custom(jwks),
+                ..Default::default()
+            },
+        )
+        .await;
+        let client = get_oauth_client_by_id(&state.store, &created.app_id)
+            .await
+            .expect("db lookup")
+            .expect("client exists");
+        let claims = valid_request_object_claims(
+            &client.client_id,
+            &state.config().base_url,
+            Timestamp::now().as_second(),
+        );
+        let sign = move |edit: &dyn Fn(&mut serde_json::Value)| {
+            let mut claims = claims.clone();
+            edit(&mut claims);
+            sign_request_object_with_kid(&claims, &encoding_key, &kid)
+        };
+        (state, client, sign)
+    }
+
+    fn assert_code(result: ServiceResult<AuthorizeRequestParams>, expected: OAuthErrorCode) {
+        assert!(
+            matches!(&result, Err(ServiceError::OAuth { code, .. }) if *code == expected),
+            "expected {expected:?}, got {result:?}"
+        );
+    }
+
+    // RFC 9101 §6.3: "If the Client ID check or the request validation fails,
+    // then the authorization server MUST return an error ... as specified in
+    // Section 5.2 of [RFC6749]". A missing required parameter is RFC 6749
+    // §5.2 `invalid_request`, not `invalid_request_object`.
+    #[tokio::test]
+    async fn test_request_object_missing_parameters_are_invalid_request() {
+        let (state, client, sign) = jar_fixture("jar-missing@example.com").await;
+        for claim in ["response_type", "redirect_uri"] {
+            let jwt = sign(&|c| {
+                c.as_object_mut().expect("claims object").remove(claim);
+            });
+            let result = validate_request_object(&state, &jwt, &client, None, test_arrival()).await;
+            assert_code(result, OAuthErrorCode::InvalidRequest);
+        }
+    }
+
+    // RFC 9101 §6.3 Client ID check, and OIDC Core §6.1: "The values for
+    // these parameters MUST match those in the Request Object, if present."
+    // Both failures take RFC 6749 §5.2 `invalid_request`.
+    #[tokio::test]
+    async fn test_request_object_query_mismatch_is_invalid_request() {
+        let (state, client, sign) = jar_fixture("jar-mismatch@example.com").await;
+        let jwt = sign(&|_| {});
+
+        let other_client = QueryParamHints {
+            client_id: Some("another-client"),
+            response_type: Some("code"),
+        };
+        let result =
+            validate_request_object(&state, &jwt, &client, Some(&other_client), test_arrival())
+                .await;
+        assert_code(result, OAuthErrorCode::InvalidRequest);
+
+        let other_type = QueryParamHints {
+            client_id: Some(&client.client_id),
+            response_type: Some("token"),
+        };
+        let result =
+            validate_request_object(&state, &jwt, &client, Some(&other_type), test_arrival()).await;
+        assert_code(result, OAuthErrorCode::InvalidRequest);
+    }
+
+    // RFC 9101 §6.3: the server "MUST only use the parameters in the Request
+    // Object, even if the same parameter is provided in the query parameter".
+    // No specification requires the query `scope` to match, so a Request
+    // Object scope wider than the query's is used as sent.
+    #[tokio::test]
+    async fn test_request_object_scope_is_taken_from_request_object() {
+        let (state, client, sign) = jar_fixture("jar-scope@example.com").await;
+        let jwt = sign(&|c| c["scope"] = serde_json::json!("openid email"));
+        let hints = QueryParamHints {
+            client_id: Some(&client.client_id),
+            response_type: Some("code"),
+        };
+
+        let params = validate_request_object(&state, &jwt, &client, Some(&hints), test_arrival())
+            .await
+            .expect("query scope does not decide the request");
+        assert_eq!(params.scope.as_deref(), Some("openid email"));
     }
 }
