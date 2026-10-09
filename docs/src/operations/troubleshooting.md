@@ -174,8 +174,10 @@ allow:
 - Source identity: ASCII letters, digits, and `_+=,.@-`, 2 to 256 characters.
   An apostrophe (`o'malley@…`), a non-ASCII letter (`jürgen@…`), or a space
   is refused.
-- Session tag values: letters, digits, spaces, and `_.:/=+-@`, up to 256
-  characters. An apostrophe is refused.
+- Session tag values: letters, digits, spaces, and `_.:/=+-@`, 1 to 256
+  characters. An apostrophe is refused. Vouch never sets a tag with an empty
+  value: a blank org domain or agent name omits that tag, and a blank email
+  refuses the token.
 
 Vouch refuses the token instead of rewriting the value, because the source
 identity is what CloudTrail records and trust policies match. The

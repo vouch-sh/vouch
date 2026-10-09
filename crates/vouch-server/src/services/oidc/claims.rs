@@ -310,6 +310,10 @@ impl AwsSourceIdentity {
 /// `char::is_numeric` and `\p{Z}` is non-control whitespace;
 /// `char::is_alphabetic` admits a few combining marks beyond `\p{L}`, which
 /// STS still refuses at assume time.
+///
+/// STS accepts an empty value, but a tag that states nothing is never set:
+/// an empty value is refused, and an optional tag with no value is omitted
+/// ([`Self::parse_optional`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct AwsTagValue(String);
@@ -318,11 +322,13 @@ impl AwsTagValue {
     const MAX_LEN: usize = 256;
 
     /// Accept `value`, with surrounding whitespace trimmed, for the tag `key`
-    /// if STS will. Nothing inside the value is rewritten or removed.
+    /// if it is not empty and STS will accept it. Nothing inside the value is
+    /// rewritten or removed.
     ///
     /// # Errors
     ///
-    /// Returns [`AwsClaimError`] naming the tag when STS would refuse it.
+    /// Returns [`AwsClaimError`] naming the tag when the value is empty or
+    /// STS would refuse it.
     pub fn parse(key: &'static str, value: &str) -> Result<Self, AwsClaimError> {
         let value = value.trim();
         let allowed = |c: char| {
@@ -331,7 +337,8 @@ impl AwsTagValue {
                 || (c.is_whitespace() && !c.is_control())
                 || "_.:/=+-@".contains(c)
         };
-        if value.chars().count() <= Self::MAX_LEN && value.chars().all(allowed) {
+        let len = value.chars().count();
+        if (1..=Self::MAX_LEN).contains(&len) && value.chars().all(allowed) {
             Ok(Self(value.to_owned()))
         } else {
             Err(AwsClaimError::TagValue {
@@ -339,6 +346,23 @@ impl AwsTagValue {
                 value: value.to_owned(),
             })
         }
+    }
+
+    /// Like [`Self::parse`] for an optional tag: an absent value, or one that
+    /// is empty after trimming, yields `None`, so the tag is not set.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AwsClaimError`] naming the tag when STS would refuse a
+    /// non-empty value.
+    pub fn parse_optional(
+        key: &'static str,
+        value: Option<&str>,
+    ) -> Result<Option<Self>, AwsClaimError> {
+        value
+            .filter(|v| !v.trim().is_empty())
+            .map(|v| Self::parse(key, v))
+            .transpose()
     }
 }
 
@@ -354,7 +378,7 @@ pub enum AwsClaimError {
     /// A session tag value is outside STS's tag value pattern.
     #[error(
         "'{value}' cannot be the AWS session tag {key}: AWS allows only letters, digits, \
-         spaces, and _.:/=+-@ (up to 256 characters)"
+         spaces, and _.:/=+-@ (1 to 256 characters)"
     )]
     TagValue {
         /// The tag key.
@@ -662,6 +686,29 @@ mod tests {
         );
     }
 
+    // A tag that states nothing is never set: an absent or blank optional
+    // value yields no tag, and a value STS refuses is still an error.
+    #[test]
+    fn test_aws_tag_value_parse_optional() {
+        assert_eq!(
+            AwsTagValue::parse_optional("vouch:Domain", None).unwrap(),
+            None
+        );
+        assert_eq!(
+            AwsTagValue::parse_optional("vouch:Domain", Some("")).unwrap(),
+            None
+        );
+        assert_eq!(
+            AwsTagValue::parse_optional("vouch:Domain", Some(" \t")).unwrap(),
+            None
+        );
+        assert_eq!(
+            AwsTagValue::parse_optional("vouch:Domain", Some(" example.com ")).unwrap(),
+            Some(AwsTagValue::parse("vouch:Domain", "example.com").unwrap()),
+        );
+        assert!(AwsTagValue::parse_optional("vouch:Agent", Some("agent'name")).is_err());
+    }
+
     // STS `Tag.Value` (Tag API reference): "Maximum length of 256. Pattern:
     // [\p{L}\p{Z}\p{N}_.:/=+\-@]*". Cases sent to STS on 2026-10-09 as
     // above.
@@ -673,13 +720,12 @@ mod tests {
             "omalley@example.com",
             "jürgen@example.com",
             "first last@example.com",
-            "",
             "claude-code/1.0",
             &at_limit,
         ] {
             assert!(AwsTagValue::parse("vouch:Email", ok).is_ok(), "{ok}");
         }
-        for refused in ["o'malley@example.com", "tab\there", &over_limit] {
+        for refused in ["o'malley@example.com", "tab\there", "", "   ", &over_limit] {
             assert!(
                 AwsTagValue::parse("vouch:Email", refused).is_err(),
                 "{refused}"

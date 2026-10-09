@@ -173,31 +173,42 @@ impl std::fmt::Debug for AwsTokenResult {
 /// condition that grants on them is trusting the caller's own assertion.
 ///
 /// `vouch:Email` is always present. `vouch:Domain` is added when the org
-/// domain (`hd`) is known. All tags are transitive, so they propagate through
-/// role chains and carry their provenance with them.
+/// domain (`hd`) is known. `vouch:AccessType=ai` is added whenever the proof
+/// claims a `source`, since that claim is what attaches the agent session
+/// policy; `vouch:Agent` is added only when the claimed name is not blank.
+/// No tag is set with an empty value. All tags are transitive, so they
+/// propagate through role chains and carry their provenance with them.
 ///
 /// # Errors
 ///
-/// Returns [`AwsError::UnrepresentableClaim`] when a value is one STS refuses
-/// as a tag value (see [`AwsTagValue`]).
+/// Returns [`AwsError::UnrepresentableClaim`] when the email is empty or a
+/// value is one STS refuses as a tag value (see [`AwsTagValue`]).
 fn build_aws_session_tags(
     user_email: &str,
     hd: Option<&str>,
     source: Option<&str>,
 ) -> AwsResult<AwsSessionTags> {
-    let mut tags: Vec<(&'static str, &str)> = vec![("vouch:Email", user_email)];
-    if let Some(domain) = hd {
+    let mut tags = vec![(
+        "vouch:Email",
+        AwsTagValue::parse("vouch:Email", user_email)?,
+    )];
+    if let Some(domain) = AwsTagValue::parse_optional("vouch:Domain", hd)? {
         tags.push(("vouch:Domain", domain));
     }
-    if let Some(agent) = source {
-        tags.push(("vouch:AccessType", "ai"));
+    if source.is_some() {
+        tags.push((
+            "vouch:AccessType",
+            AwsTagValue::parse("vouch:AccessType", "ai")?,
+        ));
+    }
+    if let Some(agent) = AwsTagValue::parse_optional("vouch:Agent", source)? {
         tags.push(("vouch:Agent", agent));
     }
 
     let mut principal_tags = std::collections::HashMap::new();
     let mut transitive_tag_keys = Vec::new();
     for (key, value) in tags {
-        principal_tags.insert(key.to_string(), vec![AwsTagValue::parse(key, value)?]);
+        principal_tags.insert(key.to_string(), vec![value]);
         transitive_tag_keys.push(key.to_string());
     }
 
@@ -427,6 +438,39 @@ mod tests {
                 result,
                 Err(AwsError::UnrepresentableClaim(AwsClaimError::TagValue {
                     key: "vouch:Agent",
+                    ..
+                }))
+            ),
+            "{result:?}"
+        );
+    }
+
+    // A tag that states nothing is never set: a blank org domain omits
+    // `vouch:Domain`, and a blank agent name omits `vouch:Agent` while the
+    // agent claim itself still yields `vouch:AccessType=ai`.
+    #[test]
+    fn test_session_tags_omit_blank_optional_values() {
+        let tags = build_aws_session_tags(USER_EMAIL, Some(""), Some("  "))
+            .expect("blank optional values are omitted, not refused");
+        let keys: std::collections::BTreeSet<&str> =
+            tags.principal_tags.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            std::collections::BTreeSet::from(["vouch:Email", "vouch:AccessType"])
+        );
+        assert_eq!(tags.transitive_tag_keys.len(), 2);
+    }
+
+    // `vouch:Email` is required, so an empty email refuses the token rather
+    // than setting an empty tag.
+    #[test]
+    fn test_session_tags_refuse_empty_email() {
+        let result = build_aws_session_tags(" ", None, None);
+        assert!(
+            matches!(
+                result,
+                Err(AwsError::UnrepresentableClaim(AwsClaimError::TagValue {
+                    key: "vouch:Email",
                     ..
                 }))
             ),
