@@ -1,7 +1,7 @@
 # Git Branching
 
 Branch naming conventions for Vouch.
-This file is read by `/rust-agents:solve-issue` to derive branch names from GitHub issues.
+This file is read by `/dev-agents:solve-issue` to derive branch names from GitHub issues.
 
 ## Branch Naming
 
@@ -17,7 +17,7 @@ Branch names mirror the Conventional Commit type of the work (see `commits-and-i
 ## Workflow
 
 - **Never push directly to `main`.** All changes land via feature branch + PR.
-- For each new issue, use `/rust-agents:solve-issue <number>` to create a branch and start development.
+- For each new issue, use `/dev-agents:solve-issue <number>` to create a branch and start development.
 - One writer at a time in the main checkout. Agents editing **in parallel** must each use their own worktree (`wt switch <branch>`). Before reassigning in-flight work in the main checkout, stand the old agent down and snapshot the diff first (see `development-discipline.md`).
 - PRs are squash-merged; the PR title becomes the Conventional Commit subject (e.g. `feat(cli): pre-fill device code (#566)`).
 
