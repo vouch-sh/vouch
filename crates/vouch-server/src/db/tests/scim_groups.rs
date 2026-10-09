@@ -374,9 +374,10 @@ async fn test_scim_filter_group_display_name_co_remains_case_insensitive() {
 
 #[tokio::test]
 async fn test_scim_filter_group_display_name_eq_is_case_insensitive() {
-    // `displayName` is `caseExact: false` per RFC 7643 Section 8.7.2, so
-    // `displayName eq` must be case-insensitive: a filter with different
-    // casing than the stored value must still match.
+    // `displayName` is `caseExact: false` per RFC 7643 §2.2 (the default;
+    // not overridden in the §4.2 group schema), so `displayName eq` must be
+    // case-insensitive: a filter with different casing than the stored
+    // value must still match.
     let (store, _audit) = test_db().await;
     seed_test_org(&store).await;
 
@@ -400,6 +401,102 @@ async fn test_scim_filter_group_display_name_eq_is_case_insensitive() {
     );
     assert_eq!(groups.len(), 1);
     assert_eq!(groups[0].display_name, "Engineering");
+}
+
+#[tokio::test]
+async fn test_scim_filter_group_display_name_eq_is_case_insensitive_non_ascii() {
+    // `displayName` is `caseExact: false` per RFC 7643 §2.2 (the default;
+    // not overridden in the §4.2 group schema), so `displayName eq` must be
+    // case-insensitive for non-ASCII letters too: a group stored as
+    // "ÉQUIPE" must be found by `displayName eq "équipe"`.
+    //
+    // The indexed `eq` path used to normalize with `to_ascii_lowercase`,
+    // which leaves É (U+00C9) unchanged, so the stored index "Équipe" !=
+    // the query "équipe" and the lookup missed. The in-memory `co`/`sw`
+    // path used full-Unicode `to_lowercase` and matched, so `eq` and
+    // `co`/`sw` disagreed for non-ASCII names. Both paths now use
+    // `to_lowercase`.
+    let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
+
+    create_scim_group(&store, TEST_ORG_ID, "ÉQUIPE", None, &[])
+        .await
+        .expect("Failed to create group");
+
+    let (groups, total) = list_scim_groups(
+        &store,
+        TEST_ORG_ID,
+        Some(&group_filter(r#"displayName eq "équipe""#)),
+        1,
+        100,
+    )
+    .await
+    .expect("Failed to filter groups");
+    assert_eq!(
+        total, 1,
+        "displayName eq must be case-insensitive for non-ASCII per RFC 7643 caseExact: false"
+    );
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].display_name, "ÉQUIPE");
+}
+
+#[tokio::test]
+async fn test_scim_filter_group_display_name_eq_and_co_sw_agree_for_non_ascii() {
+    // After the fix, the indexed `eq` path and the in-memory `co`/`sw` path
+    // both normalize `displayName` with full-Unicode `to_lowercase`, so the
+    // three operators agree for non-ASCII names. A group stored as
+    // "ÜBERGRUPPE" must be found by `eq`, `co`, and `sw` against recased
+    // non-ASCII filters. This locks the consistency guarantee the fix
+    // restores: the bug reported `eq` disagreeing with `co`/`sw` on the same
+    // `caseExact: false` attribute.
+    let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
+
+    create_scim_group(&store, TEST_ORG_ID, "ÜBERGRUPPE", None, &[])
+        .await
+        .expect("Failed to create group");
+
+    // `eq` (indexed) folds Ü → ü.
+    let (_groups, total_eq) = list_scim_groups(
+        &store,
+        TEST_ORG_ID,
+        Some(&group_filter(r#"displayName eq "übergruppe""#)),
+        1,
+        100,
+    )
+    .await
+    .expect("Failed to filter groups (eq)");
+    assert_eq!(total_eq, 1, "displayName eq must fold non-ASCII and match");
+
+    // `co` (in-memory) agrees.
+    let (_groups, total_co) = list_scim_groups(
+        &store,
+        TEST_ORG_ID,
+        Some(&group_filter(r#"displayName co "BERGR""#)),
+        1,
+        100,
+    )
+    .await
+    .expect("Failed to filter groups (co)");
+    assert_eq!(
+        total_co, 1,
+        "displayName co is case-insensitive for non-ASCII (in-memory path)"
+    );
+
+    // `sw` (in-memory) agrees.
+    let (_groups, total_sw) = list_scim_groups(
+        &store,
+        TEST_ORG_ID,
+        Some(&group_filter(r#"displayName sw "über""#)),
+        1,
+        100,
+    )
+    .await
+    .expect("Failed to filter groups (sw)");
+    assert_eq!(
+        total_sw, 1,
+        "displayName sw is case-insensitive for non-ASCII (in-memory path)"
+    );
 }
 
 #[tokio::test]
@@ -818,10 +915,13 @@ async fn read_display_name_index(store: &DocumentStore, group_id: &str) -> Strin
 
 #[tokio::test]
 async fn test_scim_group_display_name_index_is_lowercased() {
-    // `displayName` is `caseExact: false` per RFC 7643, so the blind-index
-    // value is stored ASCII-lowercased — mirroring how `UserDoc` stores the
-    // `email` index through the canonicalizing `Email` type. The document
-    // body preserves the original casing for display.
+    // `displayName` is `caseExact: false` per RFC 7643 §2.2 (the default;
+    // not overridden in the §4.2 group schema), so the blind-index value is
+    // stored Unicode-lowercased (`to_lowercase`, not `to_ascii_lowercase`,
+    // because `displayName` is a free-form Unicode string per RFC 7643
+    // §2.3.1) — contrasting with the ASCII-constrained `email` index, which
+    // the `Email` type canonicalizes. The document body preserves the
+    // original casing for display.
     let (store, _audit) = test_db().await;
     seed_test_org(&store).await;
 
@@ -832,13 +932,42 @@ async fn test_scim_group_display_name_index_is_lowercased() {
     let idx = read_display_name_index(&store, &group.id).await;
     assert_eq!(
         idx, "engineering",
-        "display_name index must be ASCII-lowercased"
+        "display_name index must be Unicode-lowercased"
     );
     let fetched = get_scim_group(&store, &group.id, TEST_ORG_ID)
         .await
         .expect("get group")
         .expect("group exists");
     assert_eq!(fetched.display_name, "Engineering", "body preserves casing");
+}
+
+#[tokio::test]
+async fn test_scim_group_display_name_index_is_lowercased_non_ascii() {
+    // Sibling to `test_scim_group_display_name_index_is_lowercased`:
+    // `to_ascii_lowercase` would leave É (U+00C9) unchanged, so the stored
+    // index would equal the original "ÉQUIPE"; `to_lowercase` folds it to
+    // "équipe". This guards the index-storage side of the fix directly
+    // (the query-side fold is covered by the `eq` tests above).
+    let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
+
+    let group = create_scim_group(&store, TEST_ORG_ID, "ÉQUIPE", None, &[])
+        .await
+        .expect("create group");
+
+    let idx = read_display_name_index(&store, &group.id).await;
+    assert_eq!(
+        idx, "équipe",
+        "display_name index must fold non-ASCII via to_lowercase, not to_ascii_lowercase"
+    );
+    let fetched = get_scim_group(&store, &group.id, TEST_ORG_ID)
+        .await
+        .expect("get group")
+        .expect("group exists");
+    assert_eq!(
+        fetched.display_name, "ÉQUIPE",
+        "body preserves original casing"
+    );
 }
 
 // ============================================================================

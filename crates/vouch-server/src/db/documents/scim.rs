@@ -55,16 +55,31 @@ impl DocumentType for ScimGroupDoc {
     const DOC_TYPE: &'static str = "scim_group";
 
     fn index_entries(&self) -> Vec<IndexEntry> {
-        // `displayName` is `caseExact: false` per RFC 7643 Section 8.7.2, so
-        // the blind-index value is stored ASCII-lowercased to make equality
-        // lookups case-insensitive — mirroring how `UserDoc` stores the
-        // `email` index through the canonicalizing `Email` type. The
-        // document body (`display_name` field below) keeps its original
-        // casing for display; only the index row is normalized.
+        // `displayName` is `caseExact: false` per RFC 7643 §2.2 (the default;
+        // not overridden in the §4.2 group schema), so the blind-index value
+        // is stored lowercased to make `eq` lookups case-insensitive. Unlike
+        // the `email`/`userName` indexes — which are ASCII-constrained and
+        // canonicalized through the `Email` type — `displayName` is a
+        // free-form Unicode string (RFC 7643 §2.3.1), so `to_lowercase`
+        // (full Unicode case-folding) is used rather than `to_ascii_lowercase`,
+        // which would leave non-ASCII letters (É, Ü, Ñ) unfolded and make
+        // `eq` case-sensitive for them. The document body (`display_name`
+        // field below) keeps its original casing for display; only the
+        // index row is normalized.
+        //
+        // Legacy rows written before this used `to_ascii_lowercase`; a
+        // non-ASCII group from that era is not found by a recased non-ASCII
+        // `eq` until the group is next written — the indexed path is
+        // authoritative (see `try_indexed_group_lookup`). A re-index
+        // migration is infeasible here: production index values are
+        // HMAC-hashed and document bodies are encrypted at rest, so neither
+        // can be recomputed in SQL. The lazy heal-on-write matches the
+        // established precedent for this index
+        // (`test_scim_filter_group_display_name_eq_is_indexed_not_rescanned`).
         let mut entries = vec![
             IndexEntry {
                 field: "display_name",
-                value: self.display_name.to_ascii_lowercase(),
+                value: self.display_name.to_lowercase(),
             },
             IndexEntry {
                 field: "org_id",
