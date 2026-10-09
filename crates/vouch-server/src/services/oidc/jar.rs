@@ -300,7 +300,19 @@ fn parse_request_object_header(jwt: &str) -> ServiceResult<(Option<String>, JwtA
 
     // Validate the algorithm through the shared assertion check, reusing the
     // header already decoded above rather than re-parsing the token.
-    let assertion_header = assertion_header_from(&jws)?;
+    //
+    // `assertion_header_from` is shared with the JWT bearer/client-auth path,
+    // where an unsupported algorithm is `invalid_client`; a Request Object's
+    // algorithm is a property of the Request Object, not the client
+    // authentication, so RFC 9101 §6.2 requires `invalid_request_object`. The
+    // description is preserved so the diagnostic detail still names the
+    // offending algorithm.
+    let assertion_header = assertion_header_from(&jws).map_err(|e| {
+        let ServiceError::OAuth { description, .. } = &e else {
+            return e;
+        };
+        ServiceError::oauth(OAuthErrorCode::InvalidRequestObject, description.clone())
+    })?;
 
     // RFC 9101 Section 10.2: typ SHOULD be "oauth-authz-req+jwt".
     // Accept case-insensitively per MIME type rules, and also accept
@@ -1179,6 +1191,48 @@ mod tests {
             *oauth_error_code(&err),
             OAuthErrorCode::InvalidRequestObject,
             "JAR errors should use invalid_request_object error code"
+        );
+    }
+
+    // RFC 9101 §6.2: an unsupported request object algorithm — `none`, a
+    // symmetric HS* algorithm, or any other value outside the JAR allowlist —
+    // is an error with the Request Object, not the client authentication, and
+    // must surface as `invalid_request_object`. `assertion_header_from`
+    // (shared with the JWT bearer client-auth path) returns `invalid_client`
+    // for these algorithms; `parse_request_object_header` remaps it. The
+    // description is preserved so the offending algorithm is still named.
+    #[test]
+    fn test_jar_parse_header_none_algorithm_error_code_is_invalid_request_object() {
+        let jwt =
+            make_jwt_with_header(&serde_json::json!({"alg": "none", "typ": "oauth-authz-req+jwt"}));
+        let err = parse_request_object_header(&jwt).expect_err("alg=none must be rejected");
+        assert_eq!(
+            *oauth_error_code(&err),
+            OAuthErrorCode::InvalidRequestObject,
+            "alg=none should produce invalid_request_object, not invalid_client"
+        );
+        let ServiceError::OAuth { description, .. } = &err else {
+            // `oauth_error_code` above already asserted this is an OAuth error.
+            return;
+        };
+        assert!(
+            description.contains("none"),
+            "description should name the offending algorithm, got: {description}"
+        );
+    }
+
+    // RFC 9101 §10.1 / §6.2: a symmetric algorithm is rejected, and the rejection
+    // is reported as `invalid_request_object`.
+    #[test]
+    fn test_jar_parse_header_hs256_error_code_is_invalid_request_object() {
+        let jwt = make_jwt_with_header(
+            &serde_json::json!({"alg": "HS256", "typ": "oauth-authz-req+jwt"}),
+        );
+        let err = parse_request_object_header(&jwt).expect_err("HS256 must be rejected");
+        assert_eq!(
+            *oauth_error_code(&err),
+            OAuthErrorCode::InvalidRequestObject,
+            "HS256 should produce invalid_request_object, not invalid_client"
         );
     }
 
