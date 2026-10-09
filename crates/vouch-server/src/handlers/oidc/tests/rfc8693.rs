@@ -2346,6 +2346,38 @@ async fn test_rfc8693_id_token_rejects_actor_token() {
     assert_eq!(error["error"], "invalid_request");
 }
 
+// RFC 8693 §2.2.1: `scope` is "OPTIONAL if the scope of the issued security
+// token is identical to the scope requested by the client; otherwise, it is
+// REQUIRED." An ID token carries no scope, so a requested scope can be neither
+// issued nor reported, and the request is refused with RFC 6749 §5.2
+// `invalid_scope`.
+#[tokio::test]
+async fn test_rfc8693_id_token_rejects_scope() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "id-scope@example.com").await;
+    let auth = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let (subject_token, _) = issue_oauth_access_token(&app, &state, &user, &auth, &client).await;
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={subject_token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &requested_token_type={ID_TOKEN_TYPE}\
+             &scope=openid"
+        ),
+        &[("Authorization", &client.basic_auth_header())],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["error"], "invalid_scope", "{body}");
+}
+
 // ========================================================================
 // Issue #550 — Deactivated actor user must be rejected
 //
@@ -3814,8 +3846,7 @@ async fn test_exchange_rejects_dpop_bound_subject_without_proof() {
                 "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
                  &subject_token={subject}\
                  &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
-                 &requested_token_type={requested}\
-                 &scope=openid"
+                 &requested_token_type={requested}"
             ),
             &[("Authorization", &basic)],
         )
