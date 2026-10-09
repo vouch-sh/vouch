@@ -1,6 +1,6 @@
 # Commit Messages and Issue Guidelines
 
-This file is read by `rust-team`, `rust-code-reviewer`, and `/rust-agents:solve-issue`.
+This file is read by `rust-team`, `code-reviewer`, and `/dev-agents:solve-issue`.
 
 ## Commit Message Format
 

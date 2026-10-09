@@ -1,7 +1,7 @@
 # Development Discipline
 
-Read by the team lead, `rust-architect`, `rust-developer`, `rust-code-reviewer`,
-and `/rust-agents:solve-issue` before design, implementation, or review work.
+Read by the team lead, `architect`, `developer`, `code-reviewer`,
+and `/dev-agents:solve-issue` before design, implementation, or review work.
 
 ## Design decisions
 

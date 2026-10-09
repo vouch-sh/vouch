@@ -1,7 +1,7 @@
 # Continuous Improvement
 
 Project-specific instructions for the continuous improvement cycle.
-This file is read by the `rust-ci-analyst` agent and the `/rust-agents:continuous-improvement` skill.
+This file is read by the `rust-ci-analyst` agent and the `/dev-agents:continuous-improvement` skill.
 
 ## Test Configuration
 
