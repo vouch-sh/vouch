@@ -40,6 +40,7 @@ judgement columns come from the batch's record in `.local/`.
 | 2026-10-02 | 25 | 25 | 0 | 4 | 3 | 22 of 25 | 3 merged as-is (#1729, #1735, #1746); 11 amended (#1721, #1722, #1724, #1725, #1726, #1732, #1737, #1742, #1743, #1744, #1745); 8 superseded by class fixes #1747–#1752; 3 closed (#1720, #1730, #1741) | 0 exact; #1733/#1734 in the 10-01 DPoP residue's class | 5 requested (`rcr_3ee858dd…`, `rcr_47c80cbd…`, `rcr_b099c70a…`, `rcr_0a472081…`, `rcr_1145b9ef…`), not synced |
 | 2026-10-03 | 4 | 4 | 0 | 1 | 4 | 4 of 4 | 3 superseded by class fixes #1777 (access-token clock), #1778 (inactive-account refusal scheme), #1779 (request_uri scheme + allowlist); #1776 closed, #1772 wontfix + docs #1780 (RFC 7519 §2 exact `aud`) | 0 exact; all 4 are siblings of 10-02 class fixes #1750, #1725, #1751 | 0 (type-level: `decode_token` takes `ArrivalTime`; one refusal site in `extract_resource_token`) |
 | 2026-10-04 | 1 | 1 | 0 | 0 | 1 | 1 of 1 | #1786 superseded by a class fix: `crypto::validity::NumericDate` (a `jiff::Timestamp`) for every externally minted time claim (ID token, DPoP `iat`, JAR, JWT-bearer), judged against `ArrivalTime::timestamp()` at full precision; `.clippy.toml` reason renamed `TemporalClaims` → `ValidityWindow` | 0 (not recorded; #1782's description had decided the opposite) | 1 description ready (`detail` CLI unavailable) |
+| 2026-10-09 | 11 | 10 | 0 | 1 | 0 | 7 of 10 | 3 merged as-is (#1803, #1804, #1812); #1806 amended (`invalid_request`, RFC 8693 §2.2.2); 4 superseded: #1808 by #1813 (extra-audience MUST), #1805/#1809/#1810 by scope class fix #1815; #1807, #1811 closed wontfix; #1798 (no PR) fixed by #1814; sibling found reviewing #1803 fixed by #1816 (Request Object parameter failures → RFC 6749 codes, RFC 9101 §6.3) | 0 exact; #1796 matches the KB's accepted deactivation window | 0 (user: no rule requests, 2026-10-03) |
 
 Batches before 2026-08-20 have no record, so only their counted columns exist:
 run the script. `escape-unaware-delimiter-normalization` exists on Detail's side
@@ -972,3 +973,54 @@ a real number of seconds, so the comparison keeps the fraction.
   "passed" its tests, and `git checkout <file>` to undo a mutation also undid
   the day's edits to that file. Mutate and restore with an edit that asserts
   on its match count.
+
+## 2026-10-09
+
+11 issues, 10 fix PRs. Attributions run from #20 (January) to #1666 (September 30); PR≤3d 0 of 11,
+Detail PR 1 (#1795 ← #1666). Backlog, not fix-generated: the first batch since 10-02 with no finding
+in a recent class fix. October so far: n 46, median age 87d, p90 220d, `<30d` 16, `>90d` 21. The
+median rose from 60d on 10-04 while `<30d` moved 15 → 16.
+
+Classes (keyword clustering, directional; October column): authz gap 8, string canonicalization 6,
+stale-cache invalidation 4, concurrency 3, incomplete revocation 3, time/clock 3, fail-open 3,
+missing audit 2.
+
+One real class: scope reporting (#1794, #1799, #1800). The three fix PRs contradicted each other on
+the default when `scope` is omitted, #1805 cited a sentence that is not in RFC 6749 ("granted scope
+MUST NOT exceed requested scope"), and #1805/#1809 pruned the §3.3 report-the-scope row from the
+coverage baseline while the device response still violated it. RFC 6749 §3.3 leaves the default to
+the server and permits over-grant ("MAY fully or partially ignore"); the actual defects were the
+device response omitting `scope` (§5.1 via RFC 8628 §3.5) and requested scopes that grant nothing,
+which the §3.3 grammar cannot report. #1815 fixes both: `ScopeSet::into_requested_grant` refuses
+empty grants with `invalid_scope` on every grant that takes a scope, and docs list each default.
+Defaults and response-body email are unchanged.
+
+Instances: #1797 extended to OIDC Core §3.1.3.7's additional-audience MUST (#1813; `jsonwebtoken`
+only requires audience overlap); #1798's sweep fixed in the one primitive behind every cleanup, with
+the index delete the issue's own fix missed (#1814); #1795 kept but corrected from `invalid_target`
+to `invalid_request`. #1796 and #1801 closed against recorded decisions (use-time account check;
+IdP-trust for browser sessions).
+
+Sibling: reviewing #1803 found `jar.rs` returning `invalid_request_object` for request-validation
+failures inside a Request Object (missing `response_type`/`redirect_uri`, `client_id` and
+`response_type` mismatches), against RFC 9101 §6.3 ("as specified in Section 5.2 of [RFC6749]") and
+the KB's own #1121 decision, plus a query-`scope` match check no specification requires, cited to a
+FAPI 2.0 §5.3.2 rule that does not exist. Fixed in #1816 after checking every conformance-suite
+condition that demands `invalid_request_object` alone: all are Request-Object-level failures.
+
+### Process
+
+- A spec citation in a recorded decision is still a claim. The KB said "omitted scope defaults to
+  `openid` per the §3.3 two-branch MUST"; the MUST requires *a* default and names none. Triage
+  recommended `openid` on that basis and the user caught it. Reopen the quote before acting on a
+  recorded decision's normative wording.
+- Separate what the spec requires from what is a product choice in the recommendation itself.
+  Calling email gating a compliance fix overstated it; it is a privacy decision.
+- A subagent reported an AWS STS limit (64 characters) as fact for the web-identity claim path. AWS's
+  pages disagree (AssumeRole API 64, IAM guide 256, web-identity page silent). Vendor limits for one
+  operation do not transfer to another path without a live call.
+- Check every coverage-baseline prune in a fix PR against the code: a test that cites a section can
+  prune a row the code still violates.
+- Leaving a spec gap as an "open item" for the user to decide is the wrong default when the spec
+  answers it. The user's direction for this batch: when the text is clear, follow it in the same
+  pass; ask only where the spec is genuinely silent or ambiguous.
