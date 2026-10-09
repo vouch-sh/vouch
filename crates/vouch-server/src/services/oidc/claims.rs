@@ -272,9 +272,11 @@ pub struct AwsSessionTags {
 /// refused) and the enforced maximum is 256, matching the IAM User Guide's
 /// "between 2 and 256 characters", not the 64 in the API reference. A value
 /// outside this set makes STS refuse the whole credential request, so it is
-/// refused here instead, before a token is minted. It is never rewritten:
-/// the source identity is the audit identity that trust policies match on,
-/// and `o'malley` must not become `o_malley`.
+/// refused here instead, before a token is minted. Surrounding whitespace is
+/// trimmed; nothing inside the value is rewritten or removed, because the
+/// source identity is the audit identity that trust policies match on, and
+/// `o'malley@example.com` must not become another user's
+/// `omalley@example.com`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AwsSourceIdentity(String);
 
@@ -282,12 +284,13 @@ impl AwsSourceIdentity {
     const MIN_LEN: usize = 2;
     const MAX_LEN: usize = 256;
 
-    /// Accept `value` if STS will.
+    /// Accept `value`, with surrounding whitespace trimmed, if STS will.
     ///
     /// # Errors
     ///
     /// Returns [`AwsClaimError`] naming the value when STS would refuse it.
     pub fn parse(value: &str) -> Result<Self, AwsClaimError> {
+        let value = value.trim();
         let allowed = |c: char| c.is_ascii_alphanumeric() || "_+=,.@-".contains(c);
         let len = value.chars().count();
         if (Self::MIN_LEN..=Self::MAX_LEN).contains(&len) && value.chars().all(allowed) {
@@ -314,12 +317,14 @@ pub struct AwsTagValue(String);
 impl AwsTagValue {
     const MAX_LEN: usize = 256;
 
-    /// Accept `value` for the tag `key` if STS will.
+    /// Accept `value`, with surrounding whitespace trimmed, for the tag `key`
+    /// if STS will. Nothing inside the value is rewritten or removed.
     ///
     /// # Errors
     ///
     /// Returns [`AwsClaimError`] naming the tag when STS would refuse it.
     pub fn parse(key: &'static str, value: &str) -> Result<Self, AwsClaimError> {
+        let value = value.trim();
         let allowed = |c: char| {
             c.is_alphabetic()
                 || c.is_numeric()
@@ -632,10 +637,29 @@ mod tests {
             "jürgen@example.com",
             "first last@example.com",
             "a",
+            " a ",
             &over_limit,
         ] {
             assert!(AwsSourceIdentity::parse(refused).is_err(), "{refused}");
         }
+        assert_eq!(
+            AwsSourceIdentity::parse("  omalley@example.com\n").unwrap(),
+            AwsSourceIdentity::parse("omalley@example.com").unwrap(),
+            "surrounding whitespace is trimmed"
+        );
+    }
+
+    #[test]
+    fn test_aws_tag_value_trims_surrounding_whitespace() {
+        assert_eq!(
+            AwsTagValue::parse("vouch:Agent", "\tclaude-code ").unwrap(),
+            AwsTagValue::parse("vouch:Agent", "claude-code").unwrap(),
+        );
+        assert_eq!(
+            AwsTagValue::parse("vouch:Email", " first last@example.com ").unwrap(),
+            AwsTagValue::parse("vouch:Email", "first last@example.com").unwrap(),
+            "an interior space is kept"
+        );
     }
 
     // STS `Tag.Value` (Tag API reference): "Maximum length of 256. Pattern:
