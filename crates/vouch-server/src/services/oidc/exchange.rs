@@ -410,6 +410,20 @@ pub(crate) async fn exchange_token(
             &config.base_url,
         )?
     };
+    // `resolve_exchange_audience` already checked a requested audience, so
+    // only an audience inherited from a narrowed subject token can fail here.
+    // RFC 8693 §2.2.2: a subject token "unacceptable based on policy" gets
+    // "the "invalid_request" error code"; `invalid_target` is for targets
+    // "indicated by the "resource" or "audience" parameters", and none was.
+    if let Some(aud) = audience
+        && !params.client.is_valid_resource_uri(aud)
+    {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidRequest,
+            "No audience was requested, and the inherited audience is not \
+             registered for this client",
+        ));
+    }
 
     // Temporal policy gate (WIF/agent credential path): active exchange
     // policies — step-up recency, IP consistency, logout-invalidates —

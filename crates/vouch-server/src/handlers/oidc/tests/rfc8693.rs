@@ -3045,6 +3045,211 @@ async fn test_rfc8693_resource_uris_permissive_client_allows_arbitrary_audience(
     );
 }
 
+#[tokio::test]
+async fn test_rfc8693_resource_uris_rejects_inherited_narrowed_audience_access_token() {
+    // When no `audience` parameter is supplied and the subject token is
+    // narrowed (its `aud` differs from its own `client_id`), the
+    // access-token fork inherits the subject's audience into the issued
+    // token. That inherited audience must still be checked against the
+    // exchanging client's `resource_uris` allowlist — omitting `audience`
+    // must not step around the allowlist that an explicit request faces.
+    // RFC 8693 §2.2.2: a subject token "unacceptable based on policy" gets
+    // "the "invalid_request" error code".
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "inherited-aud@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+
+    // Permissive client (empty resource_uris) — issues the narrowed subject.
+    let client_a = create_test_oauth_client(&state.store, &user.id).await;
+
+    // Subject token narrowed to an audience outside the restricted client's
+    // registration.
+    let subject = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            client_id: Some(&client_a.client_id),
+            audience: Some("https://forbidden.example"),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // Restricted client: resource_uris = ["https://api.example.com"]
+    let client_c = make_restricted_client(&state, &user.id).await;
+    let auth_header = client_c.basic_auth_header();
+
+    // Leg 1: no audience parameter — inherited audience path.
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={subject}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "restricted client must not mint a token for an unregistered \
+         inherited audience: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        error["error"], "invalid_request",
+        "inherited audience not on resource_uris must report invalid_request: {body}"
+    );
+
+    // Leg 2: explicit audience=https://forbidden.example — must also be
+    // rejected (this path was already guarded by resolve_exchange_audience).
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={subject}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &audience=https%3A%2F%2Fforbidden.example"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "restricted client must not mint a token for an unregistered \
+         audience: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        error["error"], "invalid_target",
+        "unregistered audience must report invalid_target: {body}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc8693_resource_uris_allows_inherited_audience_when_registered() {
+    // Happy path for the inherited-audience guard: a restricted client
+    // exchanges a narrowed subject whose `aud` is on the client's
+    // `resource_uris` allowlist. The guard must not over-reject this
+    // case — the issued token should carry the inherited audience.
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "inherited-ok@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+
+    // Permissive client issues the narrowed subject.
+    let client_a = create_test_oauth_client(&state.store, &user.id).await;
+
+    let subject = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            client_id: Some(&client_a.client_id),
+            audience: Some("https://api.example.com"),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // Restricted client whose allowlist includes the subject's audience.
+    let client_c = make_restricted_client(&state, &user.id).await;
+    let auth_header = client_c.basic_auth_header();
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={subject}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "restricted client must accept an inherited audience that is on \
+         its resource_uris allowlist: {body}"
+    );
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let access_token = response["access_token"]
+        .as_str()
+        .expect("access_token present");
+    let claims = decode_jwt_payload(access_token);
+    assert_eq!(
+        claims["aud"], "https://api.example.com",
+        "issued access token's aud must be the inherited audience"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc8693_resource_uris_permissive_client_allows_inherited_narrowed_audience() {
+    // A permissive client (empty resource_uris) must still be able to
+    // inherit a narrowed subject's audience with no `audience` parameter —
+    // `is_valid_resource_uri` short-circuits to `true` when the allowlist is
+    // empty. Guards against the fix breaking the permissive inherited path.
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "inherited-perm@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+
+    let client_a = create_test_oauth_client(&state.store, &user.id).await;
+
+    let subject = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            client_id: Some(&client_a.client_id),
+            audience: Some("https://forbidden.example"),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // Permissive client (empty resource_uris) — any audience is allowed.
+    let client_b = create_test_oauth_client(&state.store, &user.id).await;
+    let auth_header = client_b.basic_auth_header();
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={subject}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "permissive client must accept inherited narrowed audience: {body}"
+    );
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let access_token = response["access_token"]
+        .as_str()
+        .expect("access_token present");
+    let claims = decode_jwt_payload(access_token);
+    assert_eq!(
+        claims["aud"], "https://forbidden.example",
+        "permissive client's inherited token aud must be the subject's audience"
+    );
+}
+
 // ========================================================================
 // `logout_invalidates_exchange` applied to the actor token (the temporal
 // half of the #550 "mirroring" gap).
