@@ -401,6 +401,7 @@ async fn test_oidc_callback_rejects_replayed_state() {
         "test-client",
         expires_at,
         5,
+        None,
     )
     .await
     .expect("create_device_auth_request");
@@ -1150,6 +1151,7 @@ async fn test_cli_enroll_returning_user_requires_assertion_before_approval() {
         "test-client",
         expires_at,
         0,
+        None,
     )
     .await
     .expect("create_device_auth_request");
@@ -1257,6 +1259,7 @@ async fn test_cli_enroll_returning_user_fails_closed_on_authenticator_read_error
         "test-client",
         expires_at,
         0,
+        None,
     )
     .await
     .expect("create_device_auth_request");
@@ -1703,6 +1706,7 @@ async fn seed_pending_device_auth(state: &AppState, user_code: &str) {
         "test-client",
         expires_at,
         5,
+        None,
     )
     .await
     .expect("seed device_auth_request");
@@ -2959,6 +2963,7 @@ async fn finalize_enrollment_audit_records_both_events_when_cli_release_succeeds
         "test-client",
         expires_at,
         5,
+        None,
     )
     .await
     .expect("seed pending device auth request");

@@ -855,6 +855,7 @@ async fn setup_authorized_device_for_client(
         client_id,
         expires_at,
         0,
+        None,
     )
     .await
     .expect("create device authorization request");

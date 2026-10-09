@@ -93,6 +93,7 @@ async fn test_store_delete_expired_cleans_up_indexes() {
         "test-client",
         "2020-01-01T00:00:00Z".parse().unwrap(), // past
         5,
+        None,
     )
     .await
     .expect("create failed");

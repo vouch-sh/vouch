@@ -1125,6 +1125,7 @@ async fn setup_authorized_device(
         client_id,
         expires_at,
         0, // no rate limit for test
+        None,
     )
     .await
     .expect("create device auth");
@@ -1937,6 +1938,7 @@ async fn test_fapi2_device_flow_pending_polls_reuse_one_nonce() {
         &client.client_id,
         expires_at,
         0,
+        None,
     )
     .await
     .expect("create device authorization request");

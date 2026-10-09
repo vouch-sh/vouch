@@ -13,11 +13,11 @@ use crate::services::auth::{
     CreateOAuthTokenParams, GrantProof, SenderConstraintProof, TokenBinding, TokenIssuanceProof,
     create_oauth_access_token,
 };
-use crate::services::oidc::ScopeSet;
 use crate::services::oidc::ValidatedDpopProof;
 use crate::services::oidc::fapi::SenderConstraints;
 use crate::services::oidc::grant_type::OAuthGrantType;
 use crate::services::oidc::validated_client::ValidatedOAuthClient;
+use crate::services::oidc::{OAuthScope, ScopeSet};
 use aws_lc_rs::digest::{self, SHA256};
 use axum::{
     Json,
@@ -185,7 +185,13 @@ pub(crate) async fn device_code(
         Err(resp) => return resp,
     };
 
-    match create_device_authorization(&state, &device_client.client.client_id).await {
+    match create_device_authorization(
+        &state,
+        &device_client.client.client_id,
+        req.scope.as_deref(),
+    )
+    .await
+    {
         Ok(resp) => Json(resp).into_response(),
         Err(e) => e.into_oauth_response().into_response(),
     }
@@ -196,6 +202,7 @@ pub(crate) async fn device_code(
 async fn create_device_authorization(
     state: &Arc<AppState>,
     client_id: &str,
+    scope: Option<&str>,
 ) -> Result<DeviceCodeResponse, ServiceError> {
     let device_code = generate_device_code().map_err(|_| {
         ServiceError::api(
@@ -233,6 +240,7 @@ async fn create_device_authorization(
         client_id,
         expires_at,
         interval_seconds,
+        scope,
     )
     .await?;
 
@@ -497,7 +505,23 @@ pub(crate) async fn device_token(
                 user_email,
                 authenticator_id,
                 verification,
+                scope: requested_scope,
             } = approval;
+
+            // Honor the scope the client requested at the device authorization
+            // endpoint (RFC 8628 §3.1 `scope`, referenced by RFC 8628 §3.4 /
+            // RFC 6749 §3.3: granted scope MUST NOT exceed requested scope). A
+            // request that omitted `scope` defaults to the full scope set,
+            // matching the FIDO2 grant's `map_or_else(ScopeSet::all, ...)`
+            // posture — every other grant honors the request, and the device
+            // grant is no longer the outlier that ignores it. Read from the
+            // atomic-consume `StoredApproval`, not the raceable top-of-handler
+            // fetch, since scope is immutable after creation but the grant's
+            // attribution posture is "issue from the authoritative row".
+            let granted_scope = requested_scope
+                .as_deref()
+                .map_or_else(ScopeSet::all, ScopeSet::parse);
+            let has_email_scope = granted_scope.contains(OAuthScope::Email);
 
             let client_id = oauth_client.client_id.clone();
 
@@ -565,7 +589,7 @@ pub(crate) async fn device_token(
                     email: &user_email,
                     authenticator_id: Some(&authenticator_id),
                     client_id: &client_id,
-                    scope: Some(ScopeSet::all()),
+                    scope: Some(granted_scope),
                     binding: TokenBinding::new(dpop_proof.as_ref(), mtls_cert_thumbprint.as_ref()),
                     act: None,
                     audience: None,
@@ -644,7 +668,18 @@ pub(crate) async fn device_token(
                 access_token: token.clone(),
                 token_type: token_type.to_string(),
                 expires_in,
-                email: user_email,
+                // Gate the email body field on the granted scope, the same
+                // `has_email_scope` check `create_oauth_access_token` applies
+                // to the JWT `email`/`email_verified` claims. Without this the
+                // non-standard `DeviceTokenResponse.email` field would disclose
+                // the resource owner's email to a `scope=openid`-only client
+                // even once the JWT claim gating is fixed (RFC 6749 §3.3:
+                // granted scope must not exceed requested scope).
+                email: if has_email_scope {
+                    user_email
+                } else {
+                    String::new()
+                },
             }))
         }
     }
@@ -668,6 +703,7 @@ mod tests {
         self, AuditEventFilter, AuthorizeDeviceAuthParams, CreateSessionParams, DeviceApproval,
         DeviceAuthStatus, OAuthClientType, SessionPurpose, TokenEndpointAuthMethod,
     };
+    use crate::services::auth::AccessTokenClaims;
     use crate::test_utils::{self, *};
 
     /// A public client (RFC 6749 §2.1) that identifies itself with
@@ -922,6 +958,7 @@ mod tests {
             &client_id,
             expires_at,
             5,
+            None,
         )
         .await
         .expect("Failed to create device auth request");
@@ -964,6 +1001,7 @@ mod tests {
             &client_id,
             expires_at,
             5,
+            None,
         )
         .await
         .expect("Failed to create device auth request");
@@ -1014,6 +1052,7 @@ mod tests {
             &client_id,
             expires_at,
             0,
+            None,
         )
         .await
         .expect("create device auth");
@@ -1096,6 +1135,7 @@ mod tests {
             &client_id,
             expires_at,
             5,
+            None,
         )
         .await
         .expect("Failed to create device auth request");
@@ -1347,6 +1387,7 @@ mod tests {
             &client_id,
             expires_at,
             0, // no rate limit for test
+            None,
         )
         .await
         .expect("create device auth");
@@ -1405,6 +1446,7 @@ mod tests {
             &client_id,
             expires_at,
             0,
+            None,
         )
         .await
         .expect("create device auth");
@@ -1464,6 +1506,7 @@ mod tests {
             &client_id,
             expires_at,
             0,
+            None,
         )
         .await
         .expect("create device auth");
@@ -1535,6 +1578,7 @@ mod tests {
             &client_id,
             expires_at,
             0,
+            None,
         )
         .await
         .expect("create device auth");
@@ -1601,6 +1645,7 @@ mod tests {
             &client_id,
             expires_at,
             0,
+            None,
         )
         .await
         .expect("create device auth");
@@ -1848,6 +1893,7 @@ mod tests {
             &client_id,
             expires_at,
             5,
+            None,
         )
         .await
         .expect("create device auth");
@@ -1887,6 +1933,7 @@ mod tests {
             &client_id,
             expires_at,
             0,
+            None,
         )
         .await
         .expect("create device auth");
@@ -1947,6 +1994,7 @@ mod tests {
             &client_id,
             expires_at,
             0,
+            None,
         )
         .await
         .expect("create device auth");
@@ -2102,5 +2150,217 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ========================================================================
+    // Device-flow scope honoring (RFC 8628 §3.4 / RFC 6749 §3.3)
+    // ========================================================================
+
+    /// Run a full device flow for the requested `scope` and return the app
+    /// state, the token-endpoint JSON, and the issued access-token JWT.
+    ///
+    /// `scope_query` is `None` to omit the `scope` parameter (the default path
+    /// the CLI uses), or `Some("openid")` / `Some("openid email")` to request a
+    /// narrower scope. Each call gets a fresh in-memory app and user.
+    async fn issue_device_token_with_scope(
+        scope_query: Option<&str>,
+    ) -> (Arc<AppState>, serde_json::Value, String) {
+        let (app, state) = test_app().await;
+        let client_id = public_device_client(&state).await;
+
+        let request_body = match scope_query {
+            Some(s) => format!("client_id={client_id}&scope={s}"),
+            None => format!("client_id={client_id}"),
+        };
+        let (status, body) = http_post_form(&app, "/oauth/device", &request_body, &[]).await;
+        assert_eq!(status, StatusCode::OK, "device request: {body}");
+        let code_resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        let device_code = code_resp["device_code"]
+            .as_str()
+            .expect("device_code")
+            .to_string();
+
+        let device_code_hash = hash_device_code(&device_code);
+        let device_auth = db::get_device_auth_by_code_hash(&state.store, &device_code_hash)
+            .await
+            .expect("lookup")
+            .expect("device auth request exists");
+
+        let user = create_test_user(&state.store, "device-scope@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        db::authorize_device_auth(
+            &state.store,
+            AuthorizeDeviceAuthParams {
+                id: &device_auth.id,
+                user_id: &user.id,
+                user_email: &user.email,
+                authenticator_id: &auth_id,
+                verification: DeviceApproval::Observed(AuthTime::for_test(
+                    Timestamp::now().as_second(),
+                )),
+            },
+        )
+        .await
+        .expect("authorize");
+
+        let (status, body) = http_post_form(
+            &app,
+            "/oauth/token",
+            &device_poll_body(&device_code, &client_id),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "poll: {body}");
+        let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        let token = json["access_token"]
+            .as_str()
+            .expect("access_token")
+            .to_string();
+        (state, json, token)
+    }
+
+    /// Decode the issued access-token JWT and return its claims.
+    fn decode_access_token_claims(state: &AppState, token: &str) -> AccessTokenClaims {
+        use crate::services::auth::{DecodedToken, decode_token};
+        let config = state.config();
+        let decoded = decode_token(token, &state.oidc_key, &config.base_url, test_arrival())
+            .expect("issued token must decode and verify");
+        let DecodedToken::AccessToken(claims) = decoded;
+        claims
+    }
+
+    /// A device-flow request for `scope=openid` only must NOT yield a token
+    /// carrying the `email` scope or the `email` claim, and the
+    /// non-standard `DeviceTokenResponse.email` body field must be empty
+    /// (RFC 6749 §3.3, referenced by RFC 8628 §3.1: granted scope must not
+    /// exceed requested scope).
+    #[tokio::test]
+    async fn device_grant_does_not_grant_email_when_only_openid_requested() {
+        let (state, json, token) = issue_device_token_with_scope(Some("openid")).await;
+
+        // Channel 2: the response-body `email` field is gated on the granted
+        // scope, so it must NOT carry the resource owner's address.
+        assert_eq!(
+            json["email"].as_str(),
+            Some(""),
+            "DeviceTokenResponse.email must be empty when the email scope was not granted"
+        );
+
+        // Channel 1: the JWT grants exactly `openid` and omits the email
+        // claim.
+        let claims = decode_access_token_claims(&state, &token);
+        assert_eq!(
+            claims
+                .scope
+                .as_ref()
+                .map(|s| s.to_space_separated())
+                .as_deref(),
+            Some("openid"),
+            "device flow must grant exactly the requested scope, got: {:?}",
+            claims.scope
+        );
+        assert!(
+            !claims
+                .scope
+                .as_ref()
+                .is_some_and(|s| s.contains(OAuthScope::Email)),
+            "device flow must not grant the email scope for a scope=openid-only request"
+        );
+        assert!(
+            claims.email.is_none(),
+            "device flow must not include the email claim for a scope=openid-only request"
+        );
+        assert!(
+            claims.email_verified.is_none(),
+            "device flow must not include email_verified for a scope=openid-only request"
+        );
+    }
+
+    /// A device-flow request for `scope=openid email` grants the email scope,
+    /// carries the `email`/`email_verified` claims, and populates the
+    /// `DeviceTokenResponse.email` body field — confirming the gating does not
+    /// suppress email a client actually requested.
+    #[tokio::test]
+    async fn device_grant_grants_email_when_email_scope_requested() {
+        let (state, json, token) = issue_device_token_with_scope(Some("openid email")).await;
+
+        assert_eq!(
+            json["email"].as_str(),
+            Some("device-scope@example.com"),
+            "DeviceTokenResponse.email must carry the address when the email scope is granted"
+        );
+
+        let claims = decode_access_token_claims(&state, &token);
+        assert!(
+            claims
+                .scope
+                .as_ref()
+                .is_some_and(|s| s.contains(OAuthScope::Email)),
+            "device flow must grant the email scope when it was requested"
+        );
+        assert_eq!(
+            claims.email.as_deref(),
+            Some("device-scope@example.com"),
+            "device flow must include the email claim when the email scope is granted"
+        );
+        assert_eq!(claims.email_verified, Some(true));
+    }
+
+    /// Omitting `scope` (the path the CLI enrolls with) defaults to the full
+    /// scope set, preserving the previous behavior so existing clients keep
+    /// receiving the email — no least-privilege regression for the default.
+    #[tokio::test]
+    async fn device_grant_defaults_to_full_scope_when_scope_omitted() {
+        let (state, json, token) = issue_device_token_with_scope(None).await;
+
+        assert_eq!(
+            json["email"].as_str(),
+            Some("device-scope@example.com"),
+            "omitting scope must keep the previous default of granting the email scope"
+        );
+
+        let claims = decode_access_token_claims(&state, &token);
+        assert!(
+            claims
+                .scope
+                .as_ref()
+                .is_some_and(|s| s.contains(OAuthScope::Email)),
+            "omitting scope must default to the full scope set, got: {:?}",
+            claims.scope
+        );
+        assert!(claims.email.is_some());
+    }
+
+    /// An unknown scope in the request is silently filtered (RFC 6749 §3.3,
+    /// matching FIDO2/client-credentials): `scope=openid admin` grants only
+    /// `openid`, the JWT carries no `email` claim, and the
+    /// `DeviceTokenResponse.email` body field is empty. The endpoint does not
+    /// answer `invalid_scope` for the unknown value.
+    #[tokio::test]
+    async fn device_grant_filters_unknown_scope_and_does_not_leak_email() {
+        let (state, json, token) = issue_device_token_with_scope(Some("openid admin")).await;
+
+        assert_eq!(
+            json["email"].as_str(),
+            Some(""),
+            "an unknown scope mixed with openid must not leak the email body field"
+        );
+
+        let claims = decode_access_token_claims(&state, &token);
+        assert_eq!(
+            claims
+                .scope
+                .as_ref()
+                .map(|s| s.to_space_separated())
+                .as_deref(),
+            Some("openid"),
+            "unknown scopes must be filtered, leaving only openid, got: {:?}",
+            claims.scope
+        );
+        assert!(
+            claims.email.is_none(),
+            "the email claim must be absent when email was not granted"
+        );
+        let _ = state;
     }
 }

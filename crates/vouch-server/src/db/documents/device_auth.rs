@@ -49,6 +49,15 @@ pub(crate) struct DeviceAuthRequestDoc {
     /// epoch (step-up or re-authentication required).
     #[serde(default)]
     pub authenticated_at: Option<Timestamp>,
+    /// OAuth scope string the client requested at the device authorization
+    /// endpoint (RFC 8628 §3.1 `scope`), stored verbatim so the device-code
+    /// grant honors it at token issuance like every other grant. `None` means
+    /// the client omitted `scope`, which the grant defaults to the full scope
+    /// set (matching the FIDO2 grant), and is also the shape written by an
+    /// older server during a rolling deploy — the default keeps those rows
+    /// deserializable and preserves their previous "maximum scope" behavior.
+    #[serde(default)]
+    pub scope: Option<String>,
     pub expires_at: Timestamp,
     pub interval_seconds: i32,
     pub last_poll_at: Option<Timestamp>,

@@ -34,6 +34,7 @@ async fn test_device_auth_request_lifecycle() {
         "test-client",
         expires_at,
         interval,
+        None,
     )
     .await
     .expect("Failed to create device auth request");
@@ -106,6 +107,7 @@ async fn test_device_auth_authorization_flow() {
         "test-client",
         "2099-12-31T23:59:59Z".parse().unwrap(),
         5,
+        None,
     )
     .await
     .expect("Failed to create device auth request");
@@ -170,6 +172,7 @@ async fn test_authorized_row_with_cleared_authenticator_reads_denied() {
         interval_seconds: 5,
         last_poll_at: None,
         consumed_at: None,
+        scope: None,
     };
     store.insert(&doc).await.expect("insert legacy-shaped row");
 
@@ -206,6 +209,7 @@ async fn test_device_auth_polling_rate_limit() {
         "test-client",
         "2099-12-31T23:59:59Z".parse().unwrap(),
         interval,
+        None,
     )
     .await
     .expect("Failed to create device auth request");
@@ -246,6 +250,7 @@ async fn test_device_auth_poll_interval_boundary_at_full_precision() {
         "test-client",
         "2099-12-31T23:59:59Z".parse().unwrap(),
         interval,
+        None,
     )
     .await
     .unwrap();
@@ -294,6 +299,7 @@ async fn test_device_auth_poll_straddling_a_second_boundary_is_slowed() {
         "test-client",
         "2099-12-31T23:59:59Z".parse().unwrap(),
         interval,
+        None,
     )
     .await
     .unwrap();
@@ -349,6 +355,7 @@ async fn test_try_consume_device_auth_authorized_succeeds() {
         "test-client",
         expires_at,
         5,
+        None,
     )
     .await
     .expect("create");
@@ -414,6 +421,7 @@ async fn test_try_consume_device_auth_already_consumed_returns_false() {
         "test-client",
         "2099-12-31T23:59:59Z".parse().unwrap(),
         5,
+        None,
     )
     .await
     .expect("create");
@@ -475,6 +483,7 @@ async fn test_try_consume_device_auth_pending_returns_false() {
         "test-client",
         "2099-12-31T23:59:59Z".parse().unwrap(),
         5,
+        None,
     )
     .await
     .expect("create");
@@ -501,6 +510,7 @@ async fn test_try_consume_device_auth_expired_returns_false() {
         "test-client",
         expired_at,
         5,
+        None,
     )
     .await
     .expect("create");
@@ -596,6 +606,7 @@ async fn test_double_authorization_should_fail() {
         "test-client",
         "2099-12-31T23:59:59Z".parse().unwrap(),
         5,
+        None,
     )
     .await
     .expect("create");
@@ -654,6 +665,7 @@ async fn test_authorize_after_deny_should_fail() {
         "test-client",
         "2099-12-31T23:59:59Z".parse().unwrap(),
         5,
+        None,
     )
     .await
     .expect("create");
@@ -693,6 +705,7 @@ async fn test_deny_after_authorize_should_fail() {
         "test-client",
         "2099-12-31T23:59:59Z".parse().unwrap(),
         5,
+        None,
     )
     .await
     .expect("create");
@@ -738,6 +751,7 @@ async fn test_double_deny_should_fail() {
         "test-client",
         "2099-12-31T23:59:59Z".parse().unwrap(),
         5,
+        None,
     )
     .await
     .expect("create");
@@ -778,6 +792,7 @@ async fn test_row_without_client_id_is_unreadable() {
             interval_seconds: 5,
             last_poll_at: None,
             consumed_at: None,
+            scope: None,
         })
         .await
         .unwrap();
@@ -799,5 +814,36 @@ async fn test_row_without_client_id_is_unreadable() {
             .await
             .unwrap()
             .is_none()
+    );
+}
+
+/// A device-auth document written by an older server (before the `scope` field
+/// was added) lacks the key entirely. `#[serde(default)]` on `scope` must keep
+/// those rows deserializable, reading back as `None` so the grant defaults to
+/// `ScopeSet::all()` — preserving the previous "maximum scope" behavior for
+/// in-flight rows during a rolling deploy.
+#[tokio::test]
+async fn test_legacy_doc_without_scope_field_deserializes_to_none() {
+    let legacy_json = r#"{
+        "device_code_hash": "rolling-deploy-hash",
+        "user_code": "ROLL-OLD",
+        "status": "pending",
+        "client_id": "client_a",
+        "user_id": null,
+        "user_email": null,
+        "authenticator_id": null,
+        "hardware_verified": false,
+        "authenticated_at": null,
+        "expires_at": "2099-12-31T23:59:59Z",
+        "interval_seconds": 5,
+        "last_poll_at": null,
+        "consumed_at": null
+    }"#;
+    let doc: DeviceAuthRequestDoc = serde_json::from_str(legacy_json)
+        .expect("legacy doc without scope field must deserialize for rolling deploy");
+    assert!(
+        doc.scope.is_none(),
+        "legacy doc scope must read back as None, got: {:?}",
+        doc.scope
     );
 }

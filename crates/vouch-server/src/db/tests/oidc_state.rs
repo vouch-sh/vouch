@@ -25,6 +25,7 @@ async fn seed_oidc_state(
         "test-client",
         expires_at,
         5,
+        None,
     )
     .await
     .expect("create_device_auth_request");

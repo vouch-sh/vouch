@@ -1504,6 +1504,7 @@ mod tests {
             "test-client",
             expires,
             0,
+            None,
         )
         .await
         .expect("create device auth");

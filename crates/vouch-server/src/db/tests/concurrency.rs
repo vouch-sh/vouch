@@ -77,6 +77,7 @@ async fn test_device_auth_consume_concurrent() {
         "test-client",
         expires_at,
         5,
+        None,
     )
     .await
     .expect("create device auth");
@@ -253,6 +254,7 @@ async fn test_authorize_device_auth_concurrent() {
         "test-client",
         expires_at,
         5,
+        None,
     )
     .await
     .expect("create device auth");
@@ -346,6 +348,7 @@ async fn test_deny_device_auth_concurrent() {
         "test-client",
         expires_at,
         5,
+        None,
     )
     .await
     .expect("create device auth");
@@ -1606,6 +1609,7 @@ async fn test_delete_authenticator_clears_device_auth_reference() {
         "test-client",
         "2099-12-31T23:59:59Z".parse().unwrap(),
         5,
+        None,
     )
     .await
     .expect("create device auth request");
@@ -1691,6 +1695,7 @@ async fn test_authorize_retries_over_concurrent_poll_version_bump() {
         "test-client",
         expires_at,
         5,
+        None,
     )
     .await
     .expect("create device auth");
@@ -1804,6 +1809,7 @@ async fn test_authorize_bounded_retries_exhausts_on_persistent_version_bump() {
         "test-client",
         expires_at,
         5,
+        None,
     )
     .await
     .expect("create device auth");
@@ -1908,6 +1914,7 @@ async fn test_consume_retries_over_concurrent_poll_version_bump() {
         "test-client",
         expires_at,
         5,
+        None,
     )
     .await
     .expect("create device auth");
@@ -2038,6 +2045,7 @@ async fn test_consume_stale_now_lets_expired_code_be_redeemed() {
         "test-client",
         expires_at,
         5,
+        None,
     )
     .await
     .expect("create device auth");
@@ -2217,6 +2225,7 @@ async fn test_delete_authenticator_preserves_consumed_device_auth_for_replay_rev
         "test-client",
         "2099-12-31T23:59:59Z".parse().unwrap(),
         5,
+        None,
     )
     .await
     .expect("create device auth request");

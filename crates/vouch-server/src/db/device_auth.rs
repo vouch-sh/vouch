@@ -59,6 +59,13 @@ pub struct StoredApproval {
     /// Rows written before the instant was recorded read as
     /// `Verified { auth_time: None }`, which freshness gates treat as epoch.
     pub verification: HardwareVerification,
+    /// OAuth scope the client requested at the device authorization endpoint,
+    /// stored verbatim (RFC 8628 §3.1 `scope`). `None` for a request that
+    /// omitted `scope`, which the grant defaults to the full scope set. Read
+    /// back in the same atomic consume step as the approval fields above, so
+    /// token issuance takes its scope from the authoritative row version
+    /// rather than the raceable top-of-handler read.
+    pub scope: Option<String>,
 }
 
 /// Domain state of a device authorization request. The stored document
@@ -102,6 +109,7 @@ fn state_from_stored(data: &DeviceAuthRequestDoc) -> DeviceAuthState {
                         } else {
                             HardwareVerification::NotVerified
                         },
+                        scope: data.scope.clone(),
                     })
                 }
                 _ => DeviceAuthState::Denied,
@@ -192,6 +200,12 @@ pub struct OidcStateClaim {
 }
 
 /// Create a new device authorization request.
+///
+/// `scope` is the OAuth scope the client requested at the device
+/// authorization endpoint (RFC 8628 §3.1 `scope`), stored verbatim and honored
+/// at token issuance like every other grant. `None` means the client omitted
+/// `scope`; the grant then defaults to the full scope set, matching the
+/// FIDO2 grant's `map_or_else(ScopeSet::all, ...)` posture.
 pub async fn create_device_auth_request(
     store: &DocumentStore,
     device_code_hash: &str,
@@ -199,6 +213,7 @@ pub async fn create_device_auth_request(
     client_id: &str,
     expires_at: Timestamp,
     interval_seconds: i32,
+    scope: Option<&str>,
 ) -> Result<String> {
     let doc = DeviceAuthRequestDoc {
         device_code_hash: device_code_hash.to_string(),
@@ -210,6 +225,7 @@ pub async fn create_device_auth_request(
         authenticator_id: None,
         hardware_verified: false,
         authenticated_at: None,
+        scope: scope.map(|s| s.to_string()),
         expires_at,
         interval_seconds,
         last_poll_at: None,

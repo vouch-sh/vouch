@@ -131,6 +131,7 @@ async fn setup_authorized_device(
         client_id,
         expires_at,
         0,
+        None,
     )
     .await
     .expect("create device authorization request");
@@ -210,6 +211,7 @@ async fn test_device_grant_auth_time_is_ceremony_instant_not_poll_instant() {
         &client.client_id,
         expires_at,
         0,
+        None,
     )
     .await
     .expect("create device authorization request");
@@ -276,6 +278,7 @@ async fn test_device_grant_preserves_absent_auth_time_on_legacy_approval() {
         interval_seconds: 0,
         last_poll_at: None,
         consumed_at: None,
+        scope: None,
     };
     state
         .store
@@ -1019,6 +1022,7 @@ async fn test_device_grant_other_client_sees_only_invalid_grant() {
         &owner.client_id,
         expires_at,
         0,
+        None,
     )
     .await
     .expect("create expired row");
