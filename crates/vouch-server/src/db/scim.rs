@@ -1230,12 +1230,18 @@ async fn try_indexed_group_lookup(
     filter: &GroupListFilter,
 ) -> Result<Option<Vec<ScimGroupRecord>>> {
     let docs = match filter {
-        // `displayName` is `caseExact: false` per RFC 7643 Section 8.7.2, and
-        // `ScimGroupDoc::index_entries` stores the value ASCII-lowercased. Normalize
-        // the filter value to match the lowercased index; otherwise a mixed-case
-        // filter like `displayName eq "engineering"` misses a group stored as
-        // "Engineering". The `co`/`sw` operators are already case-insensitive via
-        // the in-memory fallback in `list_scim_groups`.
+        // `displayName` is `caseExact: false` per RFC 7643 §2.2 (the default;
+        // not overridden in the §4.2 group schema), and
+        // `ScimGroupDoc::index_entries` stores the value Unicode-lowercased.
+        // Normalize the filter value with the same `to_lowercase` so a
+        // mixed-case filter like `displayName eq "engineering"` still matches
+        // a group stored as "Engineering", and — because `displayName` is a
+        // free-form Unicode string (RFC 7643 §2.3.1) — a recased non-ASCII
+        // filter like `displayName eq "équipe"` matches a group stored as
+        // "ÉQUIPE". `to_ascii_lowercase` would leave É/Ü/Ñ unfolded and miss
+        // the latter. The `co`/`sw` operators are already case-insensitive via
+        // the in-memory fallback in `list_scim_groups`, which uses the same
+        // `to_lowercase`, so all three operators now agree for non-ASCII.
         //
         // An empty result is returned as `Some(vec![])`, matching the `externalId`
         // branch below and the user lookup: the indexed path is authoritative, so
@@ -1246,7 +1252,7 @@ async fn try_indexed_group_lookup(
         // whether a group exists before creating it, so above 10k groups the
         // common provisioning path would start returning 400.
         GroupListFilter::DisplayName(f) if f.op == ScimFilterOp::Eq => {
-            let display_name_lower = f.value.to_ascii_lowercase();
+            let display_name_lower = f.value.to_lowercase();
             store
                 .find_by_indexes::<ScimGroupDoc>(&[
                     ("display_name", &display_name_lower),
