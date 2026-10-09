@@ -316,6 +316,18 @@ pub(crate) async fn exchange_token(
         ));
     }
 
+    // RFC 8693 §2.2.1: `scope` is "OPTIONAL if the scope of the issued
+    // security token is identical to the scope requested by the client;
+    // otherwise, it is REQUIRED." An ID token carries no scope, so no
+    // requested scope can be issued or reported: RFC 6749 §5.2
+    // `invalid_scope`.
+    if params.requested_token_type == Some(RequestedTokenType::IdToken) && params.scope.is_some() {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidScope,
+            "scope is not supported with requested_token_type=id_token",
+        ));
+    }
+
     // Decode and validate the subject token (supports both HS256 and ES256)
     let config = state.config();
     let subject_token = params.subject.token.expose_secret();
