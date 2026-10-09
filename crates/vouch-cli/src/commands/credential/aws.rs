@@ -104,8 +104,15 @@ fn extract_sub_from_jwt(token: &str) -> Result<String> {
     let claims: JwtIdTokenClaims = serde_json::from_slice(&decoded)
         .context(tr!("err-invalid-jwt-payload-missing-required-sub-claim"))?;
     anyhow::ensure!(!claims.sub.is_empty(), "invalid JWT: 'sub' claim is empty");
-    // AWS RoleSessionName max is 64 chars.
-    Ok(claims.sub.chars().take(64).collect())
+    // AWS RoleSessionName: max 64 chars, pattern [\w+=,.@-] (\w is ASCII-only).
+    let session: String = claims.sub.chars().take(64).collect();
+    anyhow::ensure!(
+        session.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ',' | '+' | '=' | '@' | '-')
+        }),
+        tr!("err-invalid-jwt-rolesessionname-disallowed-chars")
+    );
+    Ok(session)
 }
 
 /// Extract the `email` claim from a JWT payload without signature
@@ -1335,6 +1342,52 @@ mod tests {
         let result = extract_sub_from_jwt(&token).unwrap();
         assert_eq!(result.len(), 64);
         assert_eq!(result, long_sub.chars().take(64).collect::<String>());
+    }
+
+    /// An apostrophe in the email local part is legal under RFC 5322 but is
+    /// outside the AWS `RoleSessionName` pattern `[\w+=,.@-]`, so the function
+    /// must reject it with a message naming `RoleSessionName`.
+    #[test]
+    fn test_extract_sub_from_jwt_rejects_forbidden_chars() {
+        // JWT with sub = "o'malley@example.com" — apostrophe is not in [\w+=,.@-]
+        let payload = serde_json::json!({"sub": "o'malley@example.com"});
+        let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap());
+        let token = format!("eyJhbGciOiJFUzI1NiJ9.{encoded}.fake");
+
+        let err = extract_sub_from_jwt(&token).unwrap_err();
+        assert!(
+            err.to_string().contains("RoleSessionName"),
+            "error should mention RoleSessionName: {err}"
+        );
+    }
+
+    /// Every character AWS allows in `RoleSessionName` (`\w` = ASCII
+    /// alphanumeric, plus `_ . , + = @ -`) round-trips unchanged.
+    #[test]
+    fn test_extract_sub_from_jwt_accepts_aws_compatible_chars() {
+        // sub with all AWS-allowed special chars: =,.@_+-
+        let payload = serde_json::json!({"sub": "user+tag=1,2.3@example.com"});
+        let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap());
+        let token = format!("eyJhbGciOiJFUzI1NiJ9.{encoded}.fake");
+
+        let session = extract_sub_from_jwt(&token).unwrap();
+        assert_eq!(session, "user+tag=1,2.3@example.com");
+    }
+
+    /// `\w` in the AWS pattern is ASCII-only, so a non-ASCII local part
+    /// (e.g. an umlaut) must be rejected with a message naming `RoleSessionName`.
+    #[test]
+    fn test_extract_sub_from_jwt_rejects_non_ascii() {
+        // sub with non-ASCII local part — \w in [\w+=,.@-] is ASCII-only
+        let payload = serde_json::json!({"sub": "müller@example.com"});
+        let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap());
+        let token = format!("eyJhbGciOiJFUzI1NiJ9.{encoded}.fake");
+
+        let err = extract_sub_from_jwt(&token).unwrap_err();
+        assert!(
+            err.to_string().contains("RoleSessionName"),
+            "error should mention RoleSessionName: {err}"
+        );
     }
 
     /// Verify the cached credential JSON can be round-tripped through the

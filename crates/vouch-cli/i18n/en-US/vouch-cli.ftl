@@ -1853,6 +1853,7 @@ err-invalid-http-method = invalid HTTP method
 err-invalid-jwt-expected-3-dot-separated-parts = invalid JWT: expected 3 dot-separated parts
 err-invalid-jwt-payload-is-not-valid-base64url = invalid JWT: payload is not valid base64url
 err-invalid-jwt-payload-missing-required-sub-claim = invalid JWT: payload missing required 'sub' claim
+err-invalid-jwt-rolesessionname-disallowed-chars = invalid JWT: 'sub' contains characters not allowed in AWS RoleSessionName (allowed: A-Z a-z 0-9 _ . , + = @ -)
 err-invalid-token-exchange-response-from-vouch-server-ex = invalid token-exchange response from Vouch server: expected access_token
 err-invalid-uri-in-test-client-request = invalid URI in test client request
 err-invalid-url = invalid URL
