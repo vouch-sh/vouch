@@ -68,6 +68,15 @@ impl JwtAudience {
         }
     }
 
+    /// Check that every audience value is `expected` and there is at least
+    /// one, so no audience beyond `expected` is present.
+    pub fn is_only(&self, expected: &str) -> bool {
+        match self {
+            Self::Single(s) => s == expected,
+            Self::Multiple(v) => !v.is_empty() && v.iter().all(|s| s == expected),
+        }
+    }
+
     /// Returns true if the audience is a single string (not an array).
     pub fn is_single(&self) -> bool {
         matches!(self, Self::Single(_))
@@ -353,6 +362,19 @@ mod tests {
         assert!(aud.contains("https://example.com/token"));
         assert!(aud.contains("https://example.com"));
         assert!(!aud.contains("https://other.com"));
+    }
+
+    // OIDC Core §3.1.3.7 step 3: an audience list holding anything beyond the
+    // trusted value, or nothing at all, is not "only" that value.
+    #[test]
+    fn test_jwt_audience_is_only() {
+        let client = "client".to_string();
+        assert!(JwtAudience::Single(client.clone()).is_only("client"));
+        assert!(JwtAudience::Multiple(vec![client.clone()]).is_only("client"));
+        assert!(JwtAudience::Multiple(vec![client.clone(), client.clone()]).is_only("client"));
+        assert!(!JwtAudience::Multiple(vec![client, "other".to_string()]).is_only("client"));
+        assert!(!JwtAudience::Multiple(vec![]).is_only("client"));
+        assert!(!JwtAudience::Single("Client".to_string()).is_only("client"));
     }
 
     // RFC 8725 §3.1: the algorithm is checked against what the client registered.

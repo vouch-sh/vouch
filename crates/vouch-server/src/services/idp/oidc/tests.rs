@@ -966,6 +966,134 @@ async fn verify_id_token_missing_sub_rejected() {
     );
 }
 
+// OIDC Core §2, `aud`: "REQUIRED." §3.1.3.7 step 3: "The ID Token MUST be
+// rejected if the ID Token does not list the Client as a valid audience".
+#[tokio::test]
+async fn verify_id_token_missing_aud_rejected() {
+    use wiremock::MockServer;
+
+    let server = MockServer::start().await;
+    let issuer = server.uri();
+    let client_id = "test-client";
+    let nonce = "test-nonce-abc";
+
+    let key = OidcSigningKey::generate().unwrap();
+    mount_jwks(&server, &key).await;
+
+    let mut claims = base_claims(&issuer, client_id);
+    claims["nonce"] = serde_json::json!(nonce);
+    claims["hd"] = serde_json::json!("example.com");
+    claims.as_object_mut().expect("claims object").remove("aud");
+
+    let token = sign_test_jwt(&key, claims).await;
+    let provider = make_test_provider(&issuer);
+    let client = reqwest::Client::new();
+
+    let err = verify_id_token(&client, &provider, &token, client_id, nonce, test_arrival())
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("missing field `aud`"),
+        "expected rejection for missing aud, got: {err}",
+    );
+}
+
+// OIDC Core §3.1.3.7 step 3: "The Client MUST validate that the "aud"
+// (audience) Claim contains its "client_id" value".
+#[tokio::test]
+async fn verify_id_token_wrong_audience_rejected() {
+    use wiremock::MockServer;
+
+    let server = MockServer::start().await;
+    let issuer = server.uri();
+    let client_id = "test-client";
+    let nonce = "test-nonce-abc";
+
+    let key = OidcSigningKey::generate().unwrap();
+    mount_jwks(&server, &key).await;
+
+    let mut claims = base_claims(&issuer, client_id);
+    claims["nonce"] = serde_json::json!(nonce);
+    claims["hd"] = serde_json::json!("example.com");
+    // Audience names a different client than the one vouch registered.
+    claims["aud"] = serde_json::json!("some-other-client");
+
+    let token = sign_test_jwt(&key, claims).await;
+    let provider = make_test_provider(&issuer);
+    let client = reqwest::Client::new();
+
+    let err = verify_id_token(&client, &provider, &token, client_id, nonce, test_arrival())
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("InvalidAudience"),
+        "expected rejection for wrong audience, got: {err}",
+    );
+}
+
+// OIDC Core §3.1.3.7 step 3: "The ID Token MUST be rejected if ... it
+// contains additional audiences not trusted by the Client."
+#[tokio::test]
+async fn verify_id_token_additional_audience_rejected() {
+    use wiremock::MockServer;
+
+    let server = MockServer::start().await;
+    let issuer = server.uri();
+    let client_id = "test-client";
+    let nonce = "test-nonce-abc";
+
+    let key = OidcSigningKey::generate().unwrap();
+    mount_jwks(&server, &key).await;
+
+    let mut claims = base_claims(&issuer, client_id);
+    claims["nonce"] = serde_json::json!(nonce);
+    claims["hd"] = serde_json::json!("example.com");
+    claims["aud"] = serde_json::json!([client_id, "some-other-client"]);
+
+    let token = sign_test_jwt(&key, claims).await;
+    let provider = make_test_provider(&issuer);
+    let client = reqwest::Client::new();
+
+    let err = verify_id_token(&client, &provider, &token, client_id, nonce, test_arrival())
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("audience must be exactly"),
+        "expected rejection for an additional audience, got: {err}",
+    );
+}
+
+// OIDC Core §2, `aud`: "In the general case, the "aud" value is an array of
+// case-sensitive strings." An array holding only the client_id is accepted.
+#[tokio::test]
+async fn verify_id_token_array_audience_of_client_only_accepted() {
+    use wiremock::MockServer;
+
+    let server = MockServer::start().await;
+    let issuer = server.uri();
+    let client_id = "test-client";
+    let nonce = "test-nonce-abc";
+
+    let key = OidcSigningKey::generate().unwrap();
+    mount_jwks(&server, &key).await;
+
+    let mut claims = base_claims(&issuer, client_id);
+    claims["nonce"] = serde_json::json!(nonce);
+    claims["hd"] = serde_json::json!("example.com");
+    claims["aud"] = serde_json::json!([client_id]);
+
+    let token = sign_test_jwt(&key, claims).await;
+    let provider = make_test_provider(&issuer);
+    let client = reqwest::Client::new();
+
+    let result =
+        verify_id_token(&client, &provider, &token, client_id, nonce, test_arrival()).await;
+    assert!(
+        result.is_ok(),
+        "array aud of only the client_id: {result:?}"
+    );
+}
+
 /// Nonce mismatch: JWT has a nonce that differs from expected → error
 /// message must contain "nonce mismatch".
 // OIDC Core §3.1.3.7: the nonce must be the value sent in the request.
@@ -1475,6 +1603,45 @@ async fn verify_id_token_entra_tenant_template_with_per_tenant_token_succeeds() 
     let upstream = result.upstream.expect("upstream identity must be set");
     assert_eq!(upstream.issuer, token_iss);
     assert_eq!(upstream.durable_subject.as_deref(), Some("user-123"));
+}
+
+/// The `{tenantid}` template path skips jsonwebtoken's `iss` check; the
+/// `aud` requirement still applies there.
+// OIDC Core §3.1.3.7 step 3: a missing `aud` claim must be rejected
+// regardless of issuer handling mode.
+#[tokio::test]
+async fn verify_id_token_entra_tenant_template_missing_aud_rejected() {
+    use wiremock::MockServer;
+
+    let server = MockServer::start().await;
+    let tenant_id = "11111111-2222-3333-4444-555555555555";
+    let template_issuer = "https://login.microsoftonline.com/{tenantid}/v2.0".to_string();
+    let token_iss = format!("https://login.microsoftonline.com/{tenant_id}/v2.0");
+    let client_id = "test-client";
+    let nonce = "test-nonce";
+
+    let key = OidcSigningKey::generate().unwrap();
+    mount_jwks(&server, &key).await;
+
+    let mut claims = base_claims(&token_iss, client_id);
+    claims["nonce"] = serde_json::json!(nonce);
+    claims["tid"] = serde_json::json!(tenant_id);
+    claims.as_object_mut().expect("claims object").remove("aud");
+
+    let token = sign_test_jwt(&key, claims).await;
+
+    let mut provider = make_test_provider(&template_issuer);
+    provider.issuer = template_issuer.clone();
+    provider.jwks_uri = url::Url::parse(&format!("{}/jwks", server.uri())).unwrap();
+    let client = reqwest::Client::new();
+
+    let err = verify_id_token(&client, &provider, &token, client_id, nonce, test_arrival())
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("missing field `aud`"),
+        "expected rejection for missing aud on Entra path, got: {err}",
+    );
 }
 
 /// When provider.issuer is the `{tenantid}` template, a token whose tid
