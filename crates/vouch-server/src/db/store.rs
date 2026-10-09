@@ -659,8 +659,10 @@ impl DocumentStore {
     }
 
     /// Install a hook that runs inside `delete_user` / `delete_scim_group`
-    /// after the transaction begins but before the existence check. Lets
-    /// handler tests simulate a concurrent delete that wins the race.
+    /// after the transaction begins but before the existence check, and in
+    /// the expired-document sweep for each selected id before its batch
+    /// transaction begins. Lets tests simulate a concurrent write that wins
+    /// the race.
     #[cfg(test)]
     pub(crate) fn set_delete_test_hook(&mut self, hook: DeleteTestHook) {
         self.delete_test_hook = Some(hook);
@@ -668,8 +670,9 @@ impl DocumentStore {
 
     /// Run the installed `delete_test_hook` for `id`, if any. Invoked by
     /// `delete_user` and `delete_scim_group` after the transaction begins and
-    /// before the existence check. No-op in non-test builds and when no hook
-    /// is installed.
+    /// before the existence check, and by the expired-document sweep before
+    /// each batch transaction. No-op in non-test builds and when no hook is
+    /// installed.
     #[cfg(test)]
     pub(crate) async fn run_delete_test_hook(&self, id: &str) {
         if let Some(hook) = &self.delete_test_hook {
@@ -1766,7 +1769,7 @@ impl DocumentStore {
     /// Delete all expired documents of a given type.
     ///
     /// Batches deletes into transactions of up to 1,000 documents
-    /// each (2 statements per batch) to stay within DSQL's
+    /// each (3 statements per batch) to stay within DSQL's
     /// 3,000-statement transaction limit.
     ///
     /// Returns the number of documents deleted.
@@ -1789,39 +1792,64 @@ impl DocumentStore {
     /// explicit cutoff, so a test can place the cutoff inside the same second
     /// as a row's `expires_at`.
     async fn delete_expired_before(&self, doc_type: &str, now: &Timestamp) -> Result<u64> {
-        let now = TimestampSeconds::from(now);
-
         // Find expired document IDs
         let select_stmt = Query::select()
             .column(Documents::Id)
             .from(Documents::Table)
             .and_where(Expr::col(Documents::DocType).eq(doc_type))
             .and_where(Expr::col(Documents::ExpiresAt).is_not_null())
-            .and_where(Expr::col(Documents::ExpiresAt).lt(now))
+            .and_where(Expr::col(Documents::ExpiresAt).lt(TimestampSeconds::from(now)))
             .to_owned();
 
         let rows: Vec<IdRow> = crate::db_fetch_all!(&self.pool, select_stmt, IdRow)?;
 
-        let total = rows.len() as u64;
-        // Batch deletes: 1,000 docs per tx (2 DELETE statements each)
+        let mut total: u64 = 0;
+        // Batch deletes: 1,000 docs per tx (3 statements each)
         for batch in rows.chunks(1000) {
+            // Test-only seam: a concurrent write renewing a selected row
+            // before the batch transaction starts.
+            #[cfg(test)]
+            for row in batch {
+                self.run_delete_test_hook(&row.id).await;
+            }
+
             let ids: Vec<sea_query::Value> = batch.iter().map(|r| r.id.as_str().into()).collect();
 
             let mut tx = self.pool.begin().await?;
 
-            let del_idx = Query::delete()
-                .from_table(DocumentIndexes::Table)
-                .and_where(Expr::col(DocumentIndexes::DocumentId).is_in(ids.clone()))
-                .to_owned();
-            crate::tx_execute!(tx, del_idx)?;
-
+            // A row renewed since the SELECT (PAR `extend_par_expiration`,
+            // JWKS cache upsert) no longer matches the expiry predicate and
+            // survives along with its index rows.
             let del_doc = Query::delete()
                 .from_table(Documents::Table)
+                .and_where(Expr::col(Documents::Id).is_in(ids.clone()))
+                .and_where(Expr::col(Documents::ExpiresAt).is_not_null())
+                .and_where(Expr::col(Documents::ExpiresAt).lt(TimestampSeconds::from(now)))
+                .to_owned();
+            let deleted = crate::tx_execute!(tx, del_doc)?.rows_affected();
+
+            let survivors_stmt = Query::select()
+                .column(Documents::Id)
+                .from(Documents::Table)
                 .and_where(Expr::col(Documents::Id).is_in(ids))
                 .to_owned();
-            crate::tx_execute!(tx, del_doc)?;
+            let survivors: Vec<IdRow> = crate::tx_fetch_all!(tx, survivors_stmt, IdRow)?;
+            let deleted_ids: Vec<sea_query::Value> = batch
+                .iter()
+                .filter(|r| !survivors.iter().any(|s| s.id == r.id))
+                .map(|r| r.id.as_str().into())
+                .collect();
+
+            if !deleted_ids.is_empty() {
+                let del_idx = Query::delete()
+                    .from_table(DocumentIndexes::Table)
+                    .and_where(Expr::col(DocumentIndexes::DocumentId).is_in(deleted_ids))
+                    .to_owned();
+                crate::tx_execute!(tx, del_idx)?;
+            }
 
             tx.commit().await?;
+            total = total.saturating_add(deleted);
         }
         Ok(total)
     }

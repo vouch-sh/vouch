@@ -263,6 +263,77 @@ async fn delete_expired() {
     assert!(found.is_some());
 }
 
+// Issue #1798: a row renewed between the sweep's SELECT and its DELETE (a
+// deferred-login PAR extended by `extend_par_expiration`) must survive with
+// its index rows, or the renewing flow finds nothing by `request_uri`.
+#[tokio::test]
+async fn delete_expired_keeps_row_renewed_after_selection() {
+    let mut store = test_store().await;
+    let renewed = store
+        .insert(&ExpiringDoc {
+            token: "renewed-token".to_string(),
+            expires: "2020-01-01T00:00:00Z".parse().unwrap(),
+        })
+        .await
+        .unwrap()
+        .id;
+    store
+        .insert(&ExpiringDoc {
+            token: "stale-token".to_string(),
+            expires: "2020-01-01T00:00:00Z".parse().unwrap(),
+        })
+        .await
+        .unwrap();
+
+    let writer = store.clone();
+    let target = renewed.clone();
+    store.set_delete_test_hook(Arc::new(move |id: &str| {
+        let writer = writer.clone();
+        let is_target = id == target;
+        Box::pin(async move {
+            if !is_target {
+                return;
+            }
+            let doc = writer
+                .find_one::<ExpiringDoc>("token", "renewed-token")
+                .await
+                .unwrap()
+                .unwrap();
+            let renewal = ExpiringDoc {
+                expires: "2099-01-01T00:00:00Z".parse().unwrap(),
+                ..doc.data
+            };
+            assert!(
+                writer
+                    .compare_and_update(&doc.id, doc.version, &renewal)
+                    .await
+                    .unwrap()
+            );
+        })
+    }));
+
+    let now: Timestamp = "2030-01-01T00:00:00Z".parse().unwrap();
+    let deleted = store.delete_expired_before("expiring", &now).await.unwrap();
+
+    assert_eq!(deleted, 1, "only the row that is still expired is deleted");
+    let found = store
+        .find_one::<ExpiringDoc>("token", "renewed-token")
+        .await
+        .unwrap();
+    assert_eq!(
+        found.map(|doc| doc.id),
+        Some(renewed),
+        "the renewed row and its index entry survive the sweep"
+    );
+    assert!(
+        store
+            .find_one::<ExpiringDoc>("token", "stale-token")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
 // RFC 3339 text sorts lexically only when both strings render fractional
 // seconds at the same width; jiff trims trailing zeros, so a live row can sort
 // as expired. RFC 9421 leaves nonce lifetime handling to the application
