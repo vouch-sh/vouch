@@ -450,8 +450,13 @@ pub(crate) async fn verify_id_token(
         validation.set_issuer(&[&provider.issuer]);
     }
     validation.set_audience(&[expected_client_id]);
-    // `exp` stays a required claim; it and `nbf` are judged below at the
-    // request's arrival rather than at `jsonwebtoken`'s own clock reading.
+    // `aud` is a mandatory ID Token claim (OIDC Core §2). Without it in
+    // `required_spec_claims`, jsonwebtoken's `validate()` falls through to its
+    // `_ => {}` branch when the claim is absent and silently accepts the
+    // token (OIDC Core §3.1.3.7 step 3 mandates rejecting such tokens). `exp`
+    // is also kept required; it and `nbf` are judged below at the request's
+    // arrival rather than at `jsonwebtoken`'s own clock reading.
+    validation.set_required_spec_claims(&["exp", "aud"]);
     validation.validate_exp = false;
 
     let token_data = jsonwebtoken::decode::<IdTokenClaims>(id_token, &decoding_key, &validation)
