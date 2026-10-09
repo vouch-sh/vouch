@@ -40,7 +40,7 @@ judgement columns come from the batch's record in `.local/`.
 | 2026-10-02 | 25 | 25 | 0 | 4 | 3 | 22 of 25 | 3 merged as-is (#1729, #1735, #1746); 11 amended (#1721, #1722, #1724, #1725, #1726, #1732, #1737, #1742, #1743, #1744, #1745); 8 superseded by class fixes #1747–#1752; 3 closed (#1720, #1730, #1741) | 0 exact; #1733/#1734 in the 10-01 DPoP residue's class | 5 requested (`rcr_3ee858dd…`, `rcr_47c80cbd…`, `rcr_b099c70a…`, `rcr_0a472081…`, `rcr_1145b9ef…`), not synced |
 | 2026-10-03 | 4 | 4 | 0 | 1 | 4 | 4 of 4 | 3 superseded by class fixes #1777 (access-token clock), #1778 (inactive-account refusal scheme), #1779 (request_uri scheme + allowlist); #1776 closed, #1772 wontfix + docs #1780 (RFC 7519 §2 exact `aud`) | 0 exact; all 4 are siblings of 10-02 class fixes #1750, #1725, #1751 | 0 (type-level: `decode_token` takes `ArrivalTime`; one refusal site in `extract_resource_token`) |
 | 2026-10-04 | 1 | 1 | 0 | 0 | 1 | 1 of 1 | #1786 superseded by a class fix: `crypto::validity::NumericDate` (a `jiff::Timestamp`) for every externally minted time claim (ID token, DPoP `iat`, JAR, JWT-bearer), judged against `ArrivalTime::timestamp()` at full precision; `.clippy.toml` reason renamed `TemporalClaims` → `ValidityWindow` | 0 (not recorded; #1782's description had decided the opposite) | 1 description ready (`detail` CLI unavailable) |
-| 2026-10-09 | 11 | 10 | 0 | 1 | 0 | 7 of 10 | 3 merged as-is (#1803, #1804, #1812); #1806 amended (`invalid_request`, RFC 8693 §2.2.2); 4 superseded: #1808 by #1813 (extra-audience MUST), #1805/#1809/#1810 by scope class fix #1815; #1807, #1811 closed wontfix; #1798 (no PR) fixed by #1814; sibling found reviewing #1803 fixed by #1816 (Request Object parameter failures → RFC 6749 codes, RFC 9101 §6.3) | 0 exact; #1796 matches the KB's accepted deactivation window | 0 (user: no rule requests, 2026-10-03) |
+| 2026-10-09 | 11 | 10 | 0 | 1 | 0 | 7 of 10 | 3 merged as-is (#1803, #1804, #1812); #1806 amended (`invalid_request`, RFC 8693 §2.2.2); 4 superseded: #1808 by #1813 (extra-audience MUST), #1805/#1809/#1810 by scope class fix #1815; #1807, #1811 closed wontfix; #1798 (no PR) fixed by #1814; sibling found reviewing #1803 fixed by #1816 (Request Object parameter failures → RFC 6749 codes, RFC 9101 §6.3); follow-ups #1818 (`invalid_scope` on ID-token exchange) and #1819 (AWS claim values STS refuses) | 0 exact; #1796 matches the KB's accepted deactivation window | 0 (user: no rule requests, 2026-10-03) |
 
 Batches before 2026-08-20 have no record, so only their counted columns exist:
 run the script. `escape-unaware-delimiter-normalization` exists on Detail's side
@@ -1008,6 +1008,22 @@ the KB's own #1121 decision, plus a query-`scope` match check no specification r
 FAPI 2.0 §5.3.2 rule that does not exist. Fixed in #1816 after checking every conformance-suite
 condition that demands `invalid_request_object` alone: all are Request-Object-level failures.
 
+Follow-ups, closed the same day rather than left open:
+
+- #1818: a token exchange for an ID token that also sends `scope` is refused with `invalid_scope`.
+  RFC 8693 §2.2.1 makes `scope` "REQUIRED" when the issued scope differs from the request, and an ID
+  token carries none. Spec ambiguous ("service specific"); the user chose refusal.
+- #1819: AWS token claims STS would refuse. Measured with `sts:AssumeRole` against a nonexistent role
+  (format is validated before authorization; no session created): `SourceIdentity` accepts ASCII
+  `[\w+=,.@-]`, 2 to 256 characters (the API reference's 64 is not enforced; the IAM guide's 256 is);
+  tag values accept Unicode letters and spaces, up to 256; both refuse `o'malley@example.com`, so
+  such a user could get no AWS credentials. `AwsSourceIdentity` and `AwsTagValue` hold only values
+  STS accepts, with surrounding whitespace trimmed and nothing inside rewritten (`o'malley` must not
+  become another user's `omalley`); an empty tag value is never set (`parse_optional` omits blank
+  `vouch:Domain`/`vouch:Agent`; a blank email refuses the token). The client-asserted `vouch:Agent`
+  value had never been validated. Refusals are HTTP 422 `aws_identity_unsupported`. The web-identity
+  claim path itself was not exercised: that needs an IAM OIDC provider for a Vouch issuer.
+
 ### Process
 
 - A spec citation in a recorded decision is still a claim. The KB said "omitted scope defaults to
@@ -1017,8 +1033,10 @@ condition that demands `invalid_request_object` alone: all are Request-Object-le
 - Separate what the spec requires from what is a product choice in the recommendation itself.
   Calling email gating a compliance fix overstated it; it is a privacy decision.
 - A subagent reported an AWS STS limit (64 characters) as fact for the web-identity claim path. AWS's
-  pages disagree (AssumeRole API 64, IAM guide 256, web-identity page silent). Vendor limits for one
-  operation do not transfer to another path without a live call.
+  pages disagree (AssumeRole API 64, IAM guide 256, web-identity page silent), and a live call showed
+  256 is enforced. Settle a vendor constraint by probing it: STS validates parameter format before
+  authorization, so `ValidationError` vs `AccessDenied` against a nonexistent role measures the
+  constraint without creating anything.
 - Check every coverage-baseline prune in a fix PR against the code: a test that cites a section can
   prune a row the code still violates.
 - Leaving a spec gap as an "open item" for the user to decide is the wrong default when the spec
