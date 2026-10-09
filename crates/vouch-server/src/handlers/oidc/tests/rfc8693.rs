@@ -3053,7 +3053,8 @@ async fn test_rfc8693_resource_uris_rejects_inherited_narrowed_audience_access_t
     // token. That inherited audience must still be checked against the
     // exchanging client's `resource_uris` allowlist — omitting `audience`
     // must not step around the allowlist that an explicit request faces.
-    // Mirrors the ID-token fork guard added in cf77e5bf (#1751).
+    // RFC 8693 §2.2.2: a subject token "unacceptable based on policy" gets
+    // "the "invalid_request" error code".
     let (app, state) = test_app().await;
     let user = create_test_user(&state.store, "inherited-aud@example.com").await;
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
@@ -3080,7 +3081,7 @@ async fn test_rfc8693_resource_uris_rejects_inherited_narrowed_audience_access_t
     let client_c = make_restricted_client(&state, &user.id).await;
     let auth_header = client_c.basic_auth_header();
 
-    // Leg 1: no audience parameter — inherited audience path (the bug).
+    // Leg 1: no audience parameter — inherited audience path.
     let (status, body) = http_post_form(
         &app,
         "/oauth/token",
@@ -3101,8 +3102,8 @@ async fn test_rfc8693_resource_uris_rejects_inherited_narrowed_audience_access_t
     );
     let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
     assert_eq!(
-        error["error"], "invalid_target",
-        "inherited audience not on resource_uris must report invalid_target: {body}"
+        error["error"], "invalid_request",
+        "inherited audience not on resource_uris must report invalid_request: {body}"
     );
 
     // Leg 2: explicit audience=https://forbidden.example — must also be

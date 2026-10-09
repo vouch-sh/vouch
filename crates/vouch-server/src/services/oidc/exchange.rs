@@ -410,17 +410,16 @@ pub(crate) async fn exchange_token(
             &config.base_url,
         )?
     };
-    // A requested audience was checked against the client's registered
-    // resources by resolve_exchange_audience; the inherited audience (a
-    // narrowed subject with no request) is checked here, so omitting
-    // `audience` cannot step around the allowlist.
-    if params.requested_token_type != Some(RequestedTokenType::IdToken)
-        && params.audience.is_none()
-        && let Some(aud) = audience
+    // `resolve_exchange_audience` already checked a requested audience, so
+    // only an audience inherited from a narrowed subject token can fail here.
+    // RFC 8693 §2.2.2: a subject token "unacceptable based on policy" gets
+    // "the "invalid_request" error code"; `invalid_target` is for targets
+    // "indicated by the "resource" or "audience" parameters", and none was.
+    if let Some(aud) = audience
         && !params.client.is_valid_resource_uri(aud)
     {
         return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidTarget,
+            OAuthErrorCode::InvalidRequest,
             "No audience was requested, and the inherited audience is not \
              registered for this client",
         ));
