@@ -2,9 +2,11 @@
 //! FIDO2 assertion grant flow tests.
 //!
 //! Tests cover the challenge endpoint and the token endpoint error paths for the
-//! `urn:ietf:params:oauth:grant-type:fido2-assertion` grant type. Full happy-path
-//! assertion verification requires a physical YubiKey and has no automated
-//! coverage; it is exercised by running `vouch login` against a real device.
+//! `urn:ietf:params:oauth:grant-type:fido2-assertion` grant type. Happy-path
+//! assertion verification is covered end-to-end in `crates/vouch-tests` using a
+//! software `IntegrationMockDevice`; these handler-level tests cover the
+//! boundary validation, error-path, and audit-seam coverage that run without
+//! the mock-device harness.
 
 use super::helpers::*;
 use crate::db::documents::user::UserDoc;

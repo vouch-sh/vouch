@@ -490,8 +490,21 @@ pub(crate) async fn exchange_fido2_assertion(
         return Err(denied);
     }
 
-    // Create OAuth access token
-    let scope = params.scope.map_or_else(ScopeSet::all, ScopeSet::parse);
+    // Create OAuth access token.
+    //
+    // Default to `openid` only when `scope` is omitted, matching the
+    // token-exchange grant's FIDO2-session default (`calculate_granted_scope`
+    // in `exchange.rs`) and the authorization_code grant's `unwrap_or("openid")`
+    // default in `authorize.rs`. The FIDO2 assertion grant has no user-facing
+    // consent gate — the user's only interaction is a YubiKey touch (proving
+    // possession, not authorizing scope disclosure) — so defaulting to
+    // `ScopeSet::all()` would mint the `email` scope (and embed the user's
+    // email in the JWT / surface it at the userinfo endpoint) without the
+    // user ever seeing or approving an `email` scope request. An explicit
+    // `scope` parameter still grants exactly what was requested.
+    let scope = params
+        .scope
+        .map_or_else(|| ScopeSet::parse("openid"), ScopeSet::parse);
 
     let issued = async {
         // Org domain, read once at session creation for the federation claims.

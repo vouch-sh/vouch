@@ -148,6 +148,7 @@ struct AssertionExchange<'a> {
     client: &'a TestOAuthClient,
     pkcs8: &'a [u8],
     authorization_details: Option<&'a str>,
+    scope: Option<&'a str>,
 }
 
 /// Build the assertion payload and exchange it for an access token.
@@ -161,6 +162,7 @@ async fn exchange_fido2_assertion(
         client,
         pkcs8,
         authorization_details,
+        scope,
     }: AssertionExchange<'_>,
 ) -> (u16, serde_json::Value) {
     // The mock device signs the assertion
@@ -203,6 +205,9 @@ async fn exchange_fido2_assertion(
             "&authorization_details={}",
             urlencoding::encode(ad)
         ));
+    }
+    if let Some(sc) = scope {
+        body.push_str(&format!("&scope={}", urlencoding::encode(sc)));
     }
 
     let response = harness
@@ -291,6 +296,7 @@ async fn test_fido2_grant_windows_24h2_os_recency_passes() {
         client: &client,
         pkcs8: &pkcs8,
         authorization_details: Some(&posture_json),
+        scope: None,
     })
     .await;
 
@@ -351,6 +357,7 @@ async fn test_fido2_grant_windows_23h2_os_recency_denied() {
         client: &client,
         pkcs8: &pkcs8,
         authorization_details: Some(&posture_json),
+        scope: None,
     })
     .await;
 
@@ -411,6 +418,7 @@ async fn test_fido2_grant_macos_15_os_recency_passes() {
         client: &client,
         pkcs8: &pkcs8,
         authorization_details: Some(&posture_json),
+        scope: None,
     })
     .await;
 
@@ -463,6 +471,7 @@ async fn test_fido2_grant_os_recency_no_posture_denied() {
         client: &client,
         pkcs8: &pkcs8,
         authorization_details: None,
+        scope: None,
     })
     .await;
 
@@ -501,6 +510,7 @@ async fn test_fido2_grant_records_token_issued_audit_event() {
         client: &client,
         pkcs8: &pkcs8,
         authorization_details: None,
+        scope: None,
     })
     .await;
     assert_eq!(status, 200, "FIDO2 grant must succeed: {json}");
@@ -574,6 +584,7 @@ async fn test_fido2_grant_issuance_fault_records_server_fault_not_success() {
         client: &client,
         pkcs8: &pkcs8,
         authorization_details: None,
+        scope: None,
     })
     .await;
     assert_eq!(
@@ -649,6 +660,7 @@ async fn test_fido2_grant_access_token_auth_time_is_ceremony_instant() {
         client: &client,
         pkcs8: &pkcs8,
         authorization_details: None,
+        scope: None,
     })
     .await;
     let t_after = jiff::Timestamp::now().as_second();
@@ -728,6 +740,7 @@ async fn test_fido2_grant_records_org_email_domain_on_token_issued_event() {
         client: &client,
         pkcs8: &pkcs8,
         authorization_details: None,
+        scope: None,
     })
     .await;
     assert_eq!(status, 200, "FIDO2 grant must succeed: {json}");
@@ -781,6 +794,7 @@ async fn test_fido2_grant_records_org_email_domain_for_scim_provisioned_user() {
         client: &client,
         pkcs8: &pkcs8,
         authorization_details: None,
+        scope: None,
     })
     .await;
     assert_eq!(status, 200, "FIDO2 grant must succeed: {json}");
@@ -843,6 +857,7 @@ async fn test_posture_denied_grant_records_login_failed_not_success() {
         client: &client,
         pkcs8: &pkcs8,
         authorization_details: Some(&posture_json),
+        scope: None,
     })
     .await;
     assert_eq!(status, 400, "grant must be denied: {json}");
@@ -967,6 +982,7 @@ async fn custom_policy_denial_records_name_in_audit_and_error() {
         client: &client,
         pkcs8: &pkcs8,
         authorization_details: Some(&posture_json),
+        scope: None,
     })
     .await;
 
@@ -1064,6 +1080,7 @@ async fn preconfigured_policy_denial_records_slug_in_audit_and_metrics() {
         client: &client,
         pkcs8: &pkcs8,
         authorization_details: Some(&posture_json),
+        scope: None,
     })
     .await;
 
@@ -1090,5 +1107,276 @@ async fn preconfigured_policy_denial_records_slug_in_audit_and_metrics() {
         metrics_text.contains(r#"outcome="deny""#)
             && metrics_text.contains(r#"policy="disk_encryption""#),
         "metrics must record the deny with the preconfigured slug label, got:\n{metrics_text}"
+    );
+}
+
+// ========================================================================
+// FIDO2 assertion grant — scope defaults
+//
+// The FIDO2 assertion grant mints an access token from a YubiKey touch, which
+// proves device possession but does not constitute user-facing scope consent.
+// Omitting `scope` must default to `openid` only (matching the
+// `calculate_granted_scope` default for FIDO2 sessions in `exchange.rs` and
+// the authorization_code grant's `unwrap_or("openid")` in `authorize.rs`),
+// never to `ScopeSet::all()` — otherwise the user's email is embedded in the
+// JWT and surfaced at the userinfo endpoint without the user ever approving
+// an `email` scope request.
+//
+// These tests decode the issued access token's JWT payload to assert the
+// `scope` claim and the presence/absence of the `email`/`email_verified`
+// claims, following the pattern established by
+// `test_fido2_grant_access_token_auth_time_is_ceremony_instant`.
+// ========================================================================
+
+/// Decode the middle (payload) segment of a JWT into a `serde_json::Value`.
+fn decode_jwt_payload(token: &str) -> serde_json::Value {
+    let parts: Vec<&str> = token.split('.').collect();
+    assert!(
+        parts.len() >= 2,
+        "access_token must be a JWT with at least 2 segments: {token}",
+    );
+    let payload = URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .expect("JWT payload must be valid base64url");
+    serde_json::from_slice(&payload).expect("JWT payload must be valid JSON")
+}
+
+/// A FIDO2 assertion grant with no `scope` parameter must issue a token whose
+/// `scope` claim is `openid` only, and which carries no `email` or
+/// `email_verified` claims — preventing unconsented email disclosure.
+#[tokio::test]
+async fn test_fido2_grant_no_scope_defaults_to_openid_only() {
+    let harness = TestHarness::new().await;
+    let user = harness
+        .create_user("scope-default-openid@example.com")
+        .await
+        .expect("Failed to create user");
+
+    let device = IntegrationMockDevice::new();
+    let _auth_id = register_mock_device_in_db(&harness, &user.id, &device).await;
+    let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
+    let (challenge, state) = get_challenge(&harness, &client, &pkcs8).await;
+
+    let (status, json) = exchange_fido2_assertion(AssertionExchange {
+        harness: &harness,
+        device: &device,
+        challenge: &challenge,
+        state_jwt: &state,
+        user_id: &user.id,
+        client: &client,
+        pkcs8: &pkcs8,
+        authorization_details: None,
+        scope: None,
+    })
+    .await;
+    assert_eq!(status, 200, "FIDO2 grant must succeed: {json}");
+
+    let access_token = json["access_token"]
+        .as_str()
+        .expect("access_token must be a JWT string");
+    let claims = decode_jwt_payload(access_token);
+
+    assert_eq!(
+        claims["scope"].as_str(),
+        Some("openid"),
+        "a no-scope FIDO2 token must carry scope=\"openid\" only, got: {claims}"
+    );
+    assert!(
+        claims.get("email").is_none(),
+        "a no-scope FIDO2 token must not embed the email claim, got: {claims}"
+    );
+    assert!(
+        claims.get("email_verified").is_none(),
+        "a no-scope FIDO2 token must not embed the email_verified claim, got: {claims}"
+    );
+
+    // The token response must also report the granted scope.
+    assert_eq!(
+        json["scope"].as_str(),
+        Some("openid"),
+        "the token response must report scope=\"openid\", got: {json}"
+    );
+}
+
+/// A FIDO2 assertion grant with an explicit `scope=openid email` must issue a
+/// token whose `scope` claim includes both `openid` and `email`, and which
+/// carries the `email` and `email_verified` claims — the first-party CLI's
+/// normal path.
+#[tokio::test]
+async fn test_fido2_grant_explicit_scope_openid_email_includes_email_claim() {
+    let harness = TestHarness::new().await;
+    let user = harness
+        .create_user("scope-explicit-email@example.com")
+        .await
+        .expect("Failed to create user");
+
+    let device = IntegrationMockDevice::new();
+    let _auth_id = register_mock_device_in_db(&harness, &user.id, &device).await;
+    let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
+    let (challenge, state) = get_challenge(&harness, &client, &pkcs8).await;
+
+    let (status, json) = exchange_fido2_assertion(AssertionExchange {
+        harness: &harness,
+        device: &device,
+        challenge: &challenge,
+        state_jwt: &state,
+        user_id: &user.id,
+        client: &client,
+        pkcs8: &pkcs8,
+        authorization_details: None,
+        scope: Some("openid email"),
+    })
+    .await;
+    assert_eq!(status, 200, "FIDO2 grant must succeed: {json}");
+
+    let access_token = json["access_token"]
+        .as_str()
+        .expect("access_token must be a JWT string");
+    let claims = decode_jwt_payload(access_token);
+
+    assert_eq!(
+        claims["scope"].as_str(),
+        Some("openid email"),
+        "an explicit openid email scope must be stamped verbatim, got: {claims}"
+    );
+    assert_eq!(
+        claims["email"].as_str(),
+        Some("scope-explicit-email@example.com"),
+        "an explicit email scope must embed the email claim, got: {claims}"
+    );
+    assert_eq!(
+        claims["email_verified"].as_bool(),
+        Some(true),
+        "an explicit email scope must embed email_verified=true, got: {claims}"
+    );
+
+    assert_eq!(
+        json["scope"].as_str(),
+        Some("openid email"),
+        "the token response must report scope=\"openid email\", got: {json}"
+    );
+}
+
+// ========================================================================
+// FIDO2 assertion grant — userinfo endpoint disclosure
+//
+// The userinfo endpoint gates the `email`/`email_verified` response fields on
+// the access token's scope (`handlers/oidc/userinfo.rs`):
+// `has_email_scope = scope_set.contains(OAuthScope::Email)`. These tests
+// exercise that gate end-to-end through the real HTTP router: issue a
+// FIDO2 assertion grant token, then call `GET /oauth/userinfo` with it as a
+// Bearer credential and assert the email fields are present or absent.
+// ========================================================================
+
+/// Issue a FIDO2 assertion grant token with `scope` and call the userinfo
+/// endpoint; return `(userinfo_status, userinfo_json)`.
+async fn fido2_token_userinfo(
+    harness: &TestHarness,
+    user: &db::User,
+    device: &IntegrationMockDevice,
+    client: &TestOAuthClient,
+    pkcs8: &[u8],
+    scope: Option<&str>,
+) -> (u16, serde_json::Value) {
+    let (challenge, state) = get_challenge(harness, client, pkcs8).await;
+    let (status, json) = exchange_fido2_assertion(AssertionExchange {
+        harness,
+        device,
+        challenge: &challenge,
+        state_jwt: &state,
+        user_id: &user.id,
+        client,
+        pkcs8,
+        authorization_details: None,
+        scope,
+    })
+    .await;
+    assert_eq!(status, 200, "FIDO2 grant must succeed: {json}");
+
+    let access_token = json["access_token"]
+        .as_str()
+        .expect("access_token must be present");
+    let userinfo_resp = harness
+        .get_authenticated("/oauth/userinfo", access_token)
+        .await
+        .expect("userinfo request must succeed");
+    let userinfo_status = userinfo_resp.status.as_u16();
+    let userinfo_json: serde_json::Value =
+        serde_json::from_str(&userinfo_resp.body).unwrap_or(serde_json::Value::Null);
+    (userinfo_status, userinfo_json)
+}
+
+/// A no-scope FIDO2 assertion grant token must NOT surface the user's email
+/// at the userinfo endpoint — the `email` and `email_verified` fields must
+/// be absent, while `sub` is present.
+#[tokio::test]
+async fn test_fido2_grant_no_scope_userinfo_withholds_email() {
+    let harness = TestHarness::new().await;
+    let user = harness
+        .create_user("userinfo-noscope@example.com")
+        .await
+        .expect("Failed to create user");
+
+    let device = IntegrationMockDevice::new();
+    let _auth_id = register_mock_device_in_db(&harness, &user.id, &device).await;
+    let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
+
+    let (userinfo_status, userinfo) =
+        fido2_token_userinfo(&harness, &user, &device, &client, &pkcs8, None).await;
+
+    assert_eq!(userinfo_status, 200, "userinfo must return 200: {userinfo}");
+    assert!(
+        userinfo.get("sub").is_some(),
+        "userinfo must contain sub: {userinfo}"
+    );
+    assert!(
+        userinfo.get("email").is_none(),
+        "a no-scope FIDO2 token must not surface email at userinfo: {userinfo}"
+    );
+    assert!(
+        userinfo.get("email_verified").is_none(),
+        "a no-scope FIDO2 token must not surface email_verified at userinfo: {userinfo}"
+    );
+}
+
+/// An explicit `scope=openid email` FIDO2 assertion grant token must surface
+/// the user's email at the userinfo endpoint — both `email` and
+/// `email_verified` are present, and `sub` matches.
+#[tokio::test]
+async fn test_fido2_grant_explicit_scope_userinfo_includes_email() {
+    let harness = TestHarness::new().await;
+    let user = harness
+        .create_user("userinfo-explicit@example.com")
+        .await
+        .expect("Failed to create user");
+
+    let device = IntegrationMockDevice::new();
+    let _auth_id = register_mock_device_in_db(&harness, &user.id, &device).await;
+    let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
+
+    let (userinfo_status, userinfo) = fido2_token_userinfo(
+        &harness,
+        &user,
+        &device,
+        &client,
+        &pkcs8,
+        Some("openid email"),
+    )
+    .await;
+
+    assert_eq!(userinfo_status, 200, "userinfo must return 200: {userinfo}");
+    assert!(
+        userinfo.get("sub").is_some(),
+        "userinfo must contain sub: {userinfo}"
+    );
+    assert_eq!(
+        userinfo["email"].as_str(),
+        Some("userinfo-explicit@example.com"),
+        "an explicit email scope must surface email at userinfo: {userinfo}"
+    );
+    assert_eq!(
+        userinfo["email_verified"].as_bool(),
+        Some(true),
+        "an explicit email scope must surface email_verified=true at userinfo: {userinfo}"
     );
 }
