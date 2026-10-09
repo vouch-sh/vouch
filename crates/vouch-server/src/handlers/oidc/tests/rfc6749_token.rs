@@ -581,6 +581,96 @@ fn test_token_response_wire_shape_with_and_without_id_token() {
 }
 
 #[test]
+fn test_token_response_scope_omitted_when_none_present_when_some() {
+    // RFC 6749 Section 5.1: `scope` is an OPTIONAL parameter. When no scope
+    // was granted (e.g. a `client_credentials` grant with no `scope` request,
+    // or only `openid`/`email` which are filtered out for M2M), the field
+    // MUST be omitted — not serialized as an explicit JSON `null`. This
+    // matches `TokenExchangeResponse.scope`, `IntrospectionResult.scope`,
+    // and `AccessTokenClaims.scope`, all of which use
+    // `#[serde(skip_serializing_if = "Option::is_none")]`.
+    let raw = serde_json::to_string(&TokenResponse {
+        access_token: "at-secret".into(),
+        token_type: "Bearer".to_string(),
+        expires_in: 3600,
+        id_token: None,
+        scope: None,
+        email: None,
+        authorization_details: None,
+    })
+    .expect("serialize TokenResponse");
+    assert!(
+        !raw.contains("\"scope\""),
+        "scope must be omitted when None, got: {raw}"
+    );
+
+    // When a scope was granted, the field MUST be present as a
+    // space-delimited string (RFC 6749 Section 3.3), not null/absent.
+    let json = serde_json::to_value(TokenResponse {
+        access_token: "at-secret".into(),
+        token_type: "Bearer".to_string(),
+        expires_in: 3600,
+        id_token: None,
+        scope: Some(ScopeSet::all()),
+        email: None,
+        authorization_details: None,
+    })
+    .expect("serialize TokenResponse");
+    assert_eq!(
+        json["scope"], "openid email",
+        "scope must serialize as a space-delimited string when Some: {json}"
+    );
+}
+
+/// End-to-end counterpart to the serialization unit test above: a
+/// `client_credentials` grant requested with no `scope` parameter grants no
+/// scope (`openid`/`email` are filtered out for M2M, and nothing else was
+/// asked for), so the field MUST be omitted from the success body — never
+/// serialized as an explicit JSON `null`.
+#[tokio::test]
+async fn test_rfc6749_client_credentials_scope_omitted_when_no_scope_requested() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "cc-no-scope@example.com").await;
+    let client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            grant_types: Some(vec!["client_credentials".to_string()]),
+            ..Default::default()
+        },
+    )
+    .await;
+    let auth_header = client.basic_auth_header();
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        "grant_type=client_credentials",
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "client_credentials succeeds: {body}"
+    );
+
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert!(
+        response.get("scope").is_none(),
+        "scope must be omitted (not null) when no scope was granted: {body}"
+    );
+    // Belt-and-braces on the raw wire body: the literal `"scope"` key must
+    // not appear at all — not even as `"scope": null`.
+    assert!(
+        !body.contains("\"scope\""),
+        "scope must not appear in the wire body when None: {body}"
+    );
+}
+
+#[test]
 fn test_token_request_debug_never_prints_credential_material() {
     // Every credential-bearing field must be absent from `{:?}` output —
     // the manual Debug impl prints [REDACTED] and the SecretString fields

@@ -63,6 +63,7 @@ pub(super) struct TokenResponse {
     #[serde(serialize_with = "vouch_common::serialize_opt_secret_string")]
     pub id_token: Option<SecretString>,
     /// RFC 6749 Section 3.3: The scope of the access token.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<ScopeSet>,
     /// User email (included in FIDO2 assertion grant responses).
     #[serde(skip_serializing_if = "Option::is_none")]
