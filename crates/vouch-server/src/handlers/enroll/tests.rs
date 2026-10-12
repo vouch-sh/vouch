@@ -15,9 +15,10 @@ use crate::db::{
 use crate::services::idp::oidc::OidcProvider;
 use crate::services::idp::{ConfiguredIdp, ConfiguredOidcProvider};
 use crate::test_utils::{
-    self, TestSessionSpec, build_test_app_state, create_test_authenticator,
-    create_test_session_with, create_test_user, http_delete_full, http_get_full, http_post_json,
-    test_app, test_app_state, test_app_with_modify_hook, test_arrival, test_config, test_domain,
+    self, TestSessionSpec, build_test_app_state, create_test_authenticator, create_test_org,
+    create_test_session_with, create_test_user, create_test_user_in_org, http_delete_full,
+    http_get_full, http_post_json, test_app, test_app_state, test_app_with_modify_hook,
+    test_arrival, test_config, test_domain,
 };
 use axum::http::StatusCode;
 use base64::Engine;
@@ -1468,6 +1469,86 @@ async fn test_identity_conflict_renders_error_and_audits() {
 }
 
 #[tokio::test]
+async fn test_org_mismatch_renders_error_and_audits() {
+    // An IdP login whose verified email matches an organization account
+    // but which resolves to no organization — the shape of a Google
+    // consumer account carrying a corporate address — must be refused
+    // the same way a subject conflict is: no session cookie, the
+    // account-linking error page, and one identity_bind_refused event on
+    // the targeted account naming the issuer.
+    let state = test_app_state().await;
+    // The default test config restricts `allowed_domains` to example.com,
+    // which would stop a domain-less login before account matching. Open
+    // enrollment is the production default and the case under test.
+    {
+        let mut config = state.config().as_ref().clone();
+        config.allowed_domains = None;
+        state.config.store(std::sync::Arc::new(config));
+    }
+    let victim = db::enroll_user_with_org(
+        &state.store,
+        "shared@example.com",
+        None,
+        Some(&test_domain("example.com")),
+        Some(&db::UpstreamLogin {
+            issuer: "https://idp.home.example".to_string(),
+            durable_subject: Some("victim-subject".to_string()),
+        }),
+    )
+    .await
+    .expect("seed org-bound victim");
+
+    let (stored, claim) = seed_and_consume_oidc_state(&state, "org-mismatch-state", None).await;
+
+    let consumer_issuer = "https://accounts.consumer.example";
+    let identity = IdentityResult {
+        email: "shared@example.com".to_string(),
+        domain: None,
+        upstream: Some(db::UpstreamLogin {
+            issuer: consumer_issuer.to_string(),
+            durable_subject: Some("attacker-subject".to_string()),
+        }),
+    };
+
+    let resp = complete_enrollment_after_identity(
+        &state,
+        &stored,
+        identity,
+        claim,
+        ClientInfo::default(),
+        test_arrival(),
+    )
+    .await;
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(
+        resp.headers().get(header::SET_COOKIE).is_none(),
+        "a refused login must not set a session cookie"
+    );
+    let events = audit_events_for(&state, "identity_bind_refused", &victim.id).await;
+    assert_eq!(events.len(), 1, "one refusal -> one audit event");
+    let event = events.first().expect("identity_bind_refused event");
+    let data: serde_json::Value = serde_json::from_str(&event.data).expect("event data JSON");
+    assert_eq!(data["idp_issuer"], consumer_issuer);
+    assert!(
+        data.get("email").is_none() && data.get("subject").is_none(),
+        "audit payload must not carry raw email or subject: {data}"
+    );
+
+    let doc = state
+        .store
+        .get::<db::documents::user::UserDoc>(&victim.id)
+        .await
+        .expect("get user")
+        .expect("user exists");
+    assert_eq!(
+        doc.data.idp_identities.len(),
+        1,
+        "the consumer issuer must not be bound"
+    );
+}
+
+#[tokio::test]
 async fn test_non_durable_login_refused_once_issuer_is_bound() {
     // Bugbot finding on PR #837: an account bound to a durable
     // (issuer, subject) — e.g. via a persistent-format SAML NameID —
@@ -1532,7 +1613,10 @@ async fn test_lazy_bind_emits_identity_bound_event() {
     // first time is lazily bound and emits identity_bound with the
     // issuer; the sign-in itself succeeds (redirects to the keys page).
     let state = test_app_state().await;
-    let user = create_test_user(&state.store, "legacy@example.com").await;
+    // The account belongs to the org the login will resolve to; an
+    // org-less account would be refused as an org mismatch instead.
+    let org = create_test_org(&state.store, "example.com").await;
+    let user = create_test_user_in_org(&state.store, "legacy@example.com", &org.id, false).await;
 
     let (stored, claim) = seed_and_consume_oidc_state(&state, "lazy-bind-state", None).await;
 

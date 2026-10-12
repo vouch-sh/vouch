@@ -67,6 +67,19 @@ pub enum EnrollUserError {
         /// The issuer whose bound subject differed.
         issuer: String,
     },
+    /// The email matched an existing account with no binding for this
+    /// issuer, but the login resolved to a different organization than the
+    /// one the account belongs to. A verified email only proves the person
+    /// controls the inbox at that issuer; it says nothing about whether the
+    /// issuer speaks for the account's organization. Refuse rather than
+    /// attach a foreign issuer's subject to the account.
+    #[error("login organization does not match the account's organization for issuer {issuer}")]
+    OrgMismatch {
+        /// ID of the existing account the email matched.
+        user_id: String,
+        /// The issuer whose login resolved to the wrong organization.
+        issuer: String,
+    },
     /// The email matched an existing account that is deactivated (SCIM
     /// `active: false` or admin deactivation). SSO sign-in must not mint a
     /// session or mutate the account; re-entry requires SCIM or admin
@@ -93,6 +106,7 @@ impl super::pool::RetryableError for EnrollUserError {
     fn is_retryable(&self) -> bool {
         match self {
             Self::IdentityConflict { .. } => false,
+            Self::OrgMismatch { .. } => false,
             Self::Deactivated { .. } => false,
             Self::Service(e) => super::pool::RetryableError::is_retryable(e),
         }
@@ -297,7 +311,21 @@ async fn resolve_user(
             // login leaves the account exactly as it was, so a
             // legitimately rotating NameID never creates a binding that a
             // later login could conflict with (the #837 lockout).
+            //
+            // The email match is only a hint. The login must also resolve
+            // to the organization the account belongs to: a verified email
+            // proves inbox control at the issuer, not that the issuer
+            // speaks for the account's org. Org ids, not domains, are
+            // compared because a login through a verified additional
+            // domain resolves to the same org under its primary domain.
+            // Two org-less parties (no `hd`, no domain) still match.
             None => {
+                if org.map(|o| o.id) != doc.data.org_id.as_deref() {
+                    return Err(EnrollUserError::OrgMismatch {
+                        user_id: doc.id,
+                        issuer: login.issuer.clone(),
+                    });
+                }
                 if let Some(subject) = &login.durable_subject {
                     // CAS against the version read in this transaction; a
                     // lost race aborts with OccConflict and
