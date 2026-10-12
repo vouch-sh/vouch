@@ -892,6 +892,40 @@ pub(crate) async fn complete_enrollment_after_identity(
             }
             .into_response();
         }
+        Err(db::EnrollUserError::OrgMismatch { user_id, issuer }) => {
+            // The email matched an account that belongs to a different
+            // organization than this login resolved to. The issuer verified
+            // the inbox, not its standing for the account's organization —
+            // a Google consumer account carrying a corporate address, or a
+            // second IdP serving another org, both land here. Refuse to
+            // link and leave an audit trail on the targeted account.
+            tracing::warn!(
+                user_id = %user_id,
+                issuer = %issuer,
+                email = %redact_email(&identity.email),
+                "Refusing IdP login: the login's organization is not the \
+                 organization of the account with this email"
+            );
+            let event = db::AuthEventParams {
+                user_id: db::Principal::Verified(user_id),
+                event_type: db::AuthEventType::IdentityBindRefused,
+                success: false,
+                failure_reason: Some(
+                    "login organization did not match the account's organization".to_string(),
+                ),
+                idp_issuer: Some(issuer),
+                client: client_info,
+                authenticator_id: None,
+                client_id: None,
+            };
+            db::record_auth_event(&state.audit, event, Some(identity.email.clone())).await;
+            return ErrorTemplate {
+                title: Tr::new("enroll-error-identity-conflict-title"),
+                message: Tr::new("enroll-error-identity-conflict"),
+                back_url: None,
+            }
+            .into_response();
+        }
         Err(db::EnrollUserError::Deactivated { user_id, email }) => {
             // The account exists but is deactivated (SCIM `active: false` or
             // admin deactivation). Every other login path refuses these

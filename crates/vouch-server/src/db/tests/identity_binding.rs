@@ -433,11 +433,14 @@ async fn test_enroll_scim_user_binds_on_first_idp_login() {
     };
     // First IdP login for the SCIM-provisioned account, email in a
     // different casing than SCIM stored — must find by email and bind.
+    // The login carries the org's domain, so it resolves to the org the
+    // SCIM user belongs to.
+    let domain = test_domain(TEST_ORG_DOMAIN);
     let enrolled = enroll_user_with_org(
         &store,
         "PROVISIONED@example.com",
         None,
-        None,
+        Some(&domain),
         Some(&upstream),
     )
     .await
@@ -451,4 +454,119 @@ async fn test_enroll_scim_user_binds_on_first_idp_login() {
         .await
         .expect("count users");
     assert_eq!(count, 1);
+}
+
+// An email match alone must not attach an identity to an organization
+// account. A Google consumer account can carry any verified address and
+// resolves to no organization (no `hd` claim), so a login with no org must
+// be refused for an account that has one — the row stays unbound and no
+// duplicate is created.
+#[tokio::test]
+async fn test_enroll_refuses_email_bind_without_org() {
+    use crate::db::documents::user::UserDoc;
+    use crate::db::{EnrollUserError, UpstreamLogin, create_scim_user, enroll_user_with_org};
+
+    let (store, _audit) = test_db().await;
+    seed_test_org(&store).await;
+
+    let scim_user = create_scim_user(
+        &store,
+        Some(TEST_ORG_ID),
+        "victim@example.com",
+        Some("Victim"),
+        Some("ext-victim"),
+        true,
+    )
+    .await
+    .expect("SCIM create");
+
+    let consumer = UpstreamLogin {
+        issuer: "https://accounts.google.example".to_string(),
+        durable_subject: Some("consumer-subject".to_string()),
+    };
+    let err = enroll_user_with_org(&store, "victim@example.com", None, None, Some(&consumer))
+        .await
+        .expect_err("org-less login must not bind to an org account");
+    match err {
+        EnrollUserError::OrgMismatch { user_id, issuer } => {
+            assert_eq!(user_id, scim_user.id);
+            assert_eq!(issuer, "https://accounts.google.example");
+        }
+        other => panic!("expected OrgMismatch, got {other:?}"),
+    }
+
+    let doc = store
+        .get::<UserDoc>(&scim_user.id)
+        .await
+        .expect("get user")
+        .expect("user exists");
+    assert!(
+        doc.data.idp_identities.is_empty(),
+        "refused login must not bind"
+    );
+    let count = store
+        .count::<UserDoc>("email", "victim@example.com")
+        .await
+        .expect("count users");
+    assert_eq!(count, 1, "refused login must not create a duplicate");
+}
+
+// A second configured IdP may bind to an account only when its login
+// resolves to the same organization. An issuer whose login lands in a
+// different org must be refused even with a matching verified email.
+#[tokio::test]
+async fn test_enroll_refuses_email_bind_from_other_org() {
+    use crate::db::documents::user::UserDoc;
+    use crate::db::{EnrollUserError, UpstreamLogin, enroll_user_with_org};
+
+    let (store, _audit) = test_db().await;
+    let home = test_domain("home.example.com");
+    let other = test_domain("other.example.com");
+
+    let idp_a = UpstreamLogin {
+        issuer: "https://idp-a.home.example.com".to_string(),
+        durable_subject: Some("subject-a".to_string()),
+    };
+    let owner = enroll_user_with_org(
+        &store,
+        "alice@home.example.com",
+        None,
+        Some(&home),
+        Some(&idp_a),
+    )
+    .await
+    .expect("enrollment via issuer A");
+
+    let idp_b = UpstreamLogin {
+        issuer: "https://idp-b.other.example.com".to_string(),
+        durable_subject: Some("subject-b".to_string()),
+    };
+    let err = enroll_user_with_org(
+        &store,
+        "alice@home.example.com",
+        None,
+        Some(&other),
+        Some(&idp_b),
+    )
+    .await
+    .expect_err("login resolving to another org must not bind");
+    match err {
+        EnrollUserError::OrgMismatch { user_id, issuer } => {
+            assert_eq!(user_id, owner.id);
+            assert_eq!(issuer, "https://idp-b.other.example.com");
+        }
+        other => panic!("expected OrgMismatch, got {other:?}"),
+    }
+
+    let doc = store
+        .get::<UserDoc>(&owner.id)
+        .await
+        .expect("get user")
+        .expect("user exists");
+    assert_eq!(
+        doc.data.idp_identities.len(),
+        1,
+        "only issuer A stays bound"
+    );
+    assert_eq!(doc.data.org_domain.as_deref(), Some("home.example.com"));
 }

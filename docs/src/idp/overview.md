@@ -148,9 +148,16 @@ When an IdP sign-in completes, Vouch resolves the account in this order:
 2. **Email match with lazy binding.** An account with a matching email and *no binding for
    this issuer* is bound to the asserted issuer + subject on the spot (audit event
    `identity_bound`), provided the sign-in asserts a subject at all — see the SAML caveat
-   below. This is how accounts that predate identity binding, and SCIM-provisioned
-   accounts, acquire their binding — there is no batch backfill; each account binds on its
-   first eligible IdP sign-in.
+   below — and resolves to the organization the account belongs to. The sign-in's
+   organization comes from the Google `hd` claim, the email domain, or the SAML domain
+   attribute; a verified email only proves the person controls that inbox at the issuer,
+   not that the issuer speaks for the account's organization. A sign-in that lands in a
+   different organization, or in none (a Google consumer account carrying a corporate
+   address has no `hd` claim), is refused with the same error page and
+   `identity_bind_refused` audit event as step 3, and the account is left unchanged. This
+   is how accounts that predate identity binding, and SCIM-provisioned accounts, acquire
+   their binding — there is no batch backfill; each account binds on its first eligible
+   IdP sign-in.
 3. **Refusal when the bound subject can't be reasserted.** If the email matches an account
    already bound for this issuer, and the sign-in either asserts a *different* subject or
    asserts none at all (e.g. a SAML NameID format identity binding doesn't trust — see
