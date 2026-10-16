@@ -1374,3 +1374,136 @@ async fn test_rfc6749_authorization_code_grant_records_transport_metadata() {
         "oauth_client_id must identify the authenticating client (got {data})"
     );
 }
+
+// ========================================================================
+// jti uniqueness — two codes issued in the same second with identical
+// parameters must be distinct, both redeemable, and must not revoke
+// each other's tokens (GH bug: authorization code collisions within
+// 1 second cause false replay errors and token revocations).
+// ========================================================================
+
+/// `issue_authorization_code` stamps a per-issuance `jti`, so two calls
+/// with identical `AuthorizationCodeParams` in the same second produce
+/// distinct code strings.
+#[tokio::test]
+async fn test_jti_makes_same_second_codes_distinct() {
+    let (_app, state) = test_app().await;
+    let user = create_test_user(&state.store, "jti-distinct@example.com").await;
+    let auth = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let code_a = issue_code(
+        &state,
+        &user,
+        &auth,
+        &client.client_id,
+        TestCodeSpec::default(),
+    )
+    .await;
+    let code_b = issue_code(
+        &state,
+        &user,
+        &auth,
+        &client.client_id,
+        TestCodeSpec::default(),
+    )
+    .await;
+
+    assert_ne!(
+        code_a, code_b,
+        "two codes issued with identical params in the same second must differ"
+    );
+}
+
+/// Two identical codes (same `TestCodeSpec`, no nonce, no PKCE — the
+/// collision window) issued in the same second are both redeemable at
+/// `/oauth/token`. Before the `jti` fix they were byte-identical, so the
+/// second exchange was misclassified as a replay.
+#[tokio::test]
+async fn test_two_identical_codes_same_second_both_redeemable() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "jti-dup-flow@example.com").await;
+    let auth = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let code_a = issue_code(
+        &state,
+        &user,
+        &auth,
+        &client.client_id,
+        TestCodeSpec::default(),
+    )
+    .await;
+    let code_b = issue_code(
+        &state,
+        &user,
+        &auth,
+        &client.client_id,
+        TestCodeSpec::default(),
+    )
+    .await;
+
+    let (status_a, body_a) = exchange_code(&app, &client, &code_a).await;
+    assert_eq!(
+        status_a,
+        StatusCode::OK,
+        "first code exchange must succeed: {body_a}"
+    );
+
+    let (status_b, body_b) = exchange_code(&app, &client, &code_b).await;
+    assert_eq!(
+        status_b,
+        StatusCode::OK,
+        "second code exchange must succeed (not a replay): {body_b}"
+    );
+}
+
+/// Exchanging the second of two identical same-second codes must NOT
+/// revoke the first flow's access token. Before the `jti` fix, both codes
+/// shared one `code_hash`, so the second exchange was classified as a
+/// replay and `delete_for_code_replay` revoked the first flow's token.
+#[tokio::test]
+async fn test_duplicate_flow_does_not_revoke_other_flow_token() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "jti-no-revoke@example.com").await;
+    let auth = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let code_a = issue_code(
+        &state,
+        &user,
+        &auth,
+        &client.client_id,
+        TestCodeSpec::default(),
+    )
+    .await;
+    let code_b = issue_code(
+        &state,
+        &user,
+        &auth,
+        &client.client_id,
+        TestCodeSpec::default(),
+    )
+    .await;
+
+    let token_a = token_from_code(&app, &client, &code_a).await;
+    assert_eq!(
+        userinfo_status(&app, &token_a).await,
+        StatusCode::OK,
+        "token A must be live before the second exchange"
+    );
+
+    let token_b = token_from_code(&app, &client, &code_b).await;
+
+    assert_eq!(
+        userinfo_status(&app, &token_a).await,
+        StatusCode::OK,
+        "token A must still be live after the second code's exchange — \
+         the jti makes it a distinct code, not a replay"
+    );
+    assert_eq!(
+        userinfo_status(&app, &token_b).await,
+        StatusCode::OK,
+        "token B must be live after its own exchange"
+    );
+}

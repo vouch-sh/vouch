@@ -63,6 +63,33 @@ async fn test_authorization_code_consume_concurrent() {
     }
 }
 
+/// Two authorization codes issued in the same second with identical
+/// parameters but distinct `jti` values produce distinct `code_hash` rows.
+/// Each can be independently consumed — the first consumption of one does
+/// NOT mark the other as consumed. Before the `jti` fix, both codes were
+/// byte-identical and shared one `code_hash`, so `find_one` could only see
+/// one row and the second exchange was misclassified as a replay.
+#[tokio::test]
+async fn test_authorization_code_distinct_hashes_both_consumable() {
+    let (store, _audit) = test_db().await;
+
+    let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().unwrap();
+
+    store_authorization_code(&store, "hash-a", "client-jti", "user-jti", expires_at, None)
+        .await
+        .expect("seed authorization code A");
+    store_authorization_code(&store, "hash-b", "client-jti", "user-jti", expires_at, None)
+        .await
+        .expect("seed authorization code B");
+
+    let _claim_a = try_consume_authorization_code(&store, "hash-a", jiff::Timestamp::now())
+        .await
+        .expect("code A must be consumable");
+    let _claim_b = try_consume_authorization_code(&store, "hash-b", jiff::Timestamp::now())
+        .await
+        .expect("code B must be consumable independently of A");
+}
+
 #[tokio::test]
 async fn test_device_auth_consume_concurrent() {
     use crate::db::claim::ClaimError;
