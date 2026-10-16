@@ -896,9 +896,10 @@ pub(crate) async fn complete_enrollment_after_identity(
             // The email matched an account that belongs to a different
             // organization than this login resolved to. The issuer verified
             // the inbox, not its standing for the account's organization —
-            // a Google consumer account carrying a corporate address, or a
-            // second IdP serving another org, both land here. Refuse to
-            // link and leave an audit trail on the targeted account.
+            // a Google consumer account carrying a corporate address, a
+            // Google `hd` naming another org, or a SAML `domain_attribute`
+            // naming another org lands here. Refuse to link and leave an
+            // audit trail on the targeted account.
             tracing::warn!(
                 user_id = %user_id,
                 issuer = %issuer,
