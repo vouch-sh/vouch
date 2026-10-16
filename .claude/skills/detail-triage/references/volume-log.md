@@ -41,6 +41,8 @@ judgement columns come from the batch's record in `.local/`.
 | 2026-10-03 | 4 | 4 | 0 | 1 | 4 | 4 of 4 | 3 superseded by class fixes #1777 (access-token clock), #1778 (inactive-account refusal scheme), #1779 (request_uri scheme + allowlist); #1776 closed, #1772 wontfix + docs #1780 (RFC 7519 §2 exact `aud`) | 0 exact; all 4 are siblings of 10-02 class fixes #1750, #1725, #1751 | 0 (type-level: `decode_token` takes `ArrivalTime`; one refusal site in `extract_resource_token`) |
 | 2026-10-04 | 1 | 1 | 0 | 0 | 1 | 1 of 1 | #1786 superseded by a class fix: `crypto::validity::NumericDate` (a `jiff::Timestamp`) for every externally minted time claim (ID token, DPoP `iat`, JAR, JWT-bearer), judged against `ArrivalTime::timestamp()` at full precision; `.clippy.toml` reason renamed `TemporalClaims` → `ValidityWindow` | 0 (not recorded; #1782's description had decided the opposite) | 1 description ready (`detail` CLI unavailable) |
 | 2026-10-09 | 11 | 10 | 0 | 1 | 0 | 7 of 10 | 3 merged as-is (#1803, #1804, #1812); #1806 amended (`invalid_request`, RFC 8693 §2.2.2); 4 superseded: #1808 by #1813 (extra-audience MUST), #1805/#1809/#1810 by scope class fix #1815; #1807, #1811 closed wontfix; #1798 (no PR) fixed by #1814; sibling found reviewing #1803 fixed by #1816 (Request Object parameter failures → RFC 6749 codes, RFC 9101 §6.3); follow-ups #1818 (`invalid_scope` on ID-token exchange) and #1819 (AWS claim values STS refuses) | 0 exact; #1796 matches the KB's accepted deactivation window | 0 (user: no rule requests, 2026-10-03) |
+| 2026-10-13 | 1 | 0 | 1 | 0 | 1 | 0 of 0 | #1825 (no PR) closed won't fix: configured IdPs are trusted for the emails they verify; #1823's docs and comments corrected in #1833; dead-code #1824 queued, carrying the rustls 0.23.46 bump | 0 | 0 |
+| 2026-10-16 | 2 | 2 | 0 | 0 | 0 | 2 of 2 | #1831 amended (citation RFC 7519 §4.1.7); #1830 superseded by class fix #1832 (every grant carries `resource`/`authorization_details`; RFC 9396 §5 type gate; `ErrorDescription` for RFC 6749 §5.2's charset) | 0 | 0 (not requested) |
 
 Batches before 2026-08-20 have no record, so only their counted columns exist:
 run the script. `escape-unaware-delimiter-normalization` exists on Detail's side
@@ -1042,3 +1044,37 @@ Follow-ups, closed the same day rather than left open:
 - Leaving a spec gap as an "open item" for the user to decide is the wrong default when the spec
   answers it. The user's direction for this batch: when the text is clear, follow it in the same
   pass; ask only where the spec is genuinely silent or ambiguous.
+
+## 2026-10-13 and 2026-10-16
+
+Three issues over two days. #1825 is fix-generated (PR≤3d, against #1823 merged the day before);
+#1828 and #1829 attribute to #130 (March) and the first OIDC commit (January). October so far:
+n 49, median 87d, p90 224d, `<30d` 17, `>90d` 22.
+
+#1825: #1823's org-agreement check compares the account's org with the sign-in's, but outside
+Google `hd` and a SAML domain attribute the sign-in's org is the asserted email's own domain, so the
+check never refuses. A real gap only on a server hosting several organizations through non-Google
+IdPs. Closed won't fix by user choice; #1833 states the trust model in the docs and comments that
+had claimed otherwise.
+
+#1828 was a class: client_credentials and device_code dropped both `resource` and
+`authorization_details` after parsing them, and FIDO2 dropped `resource`. #1830 fixed one grant and
+pruned the seven `rfc9396#5` coverage rows while §5's "MUST refuse to process any unknown
+authorization details type" was violated everywhere (`parse` accepted any type, and the KB's
+"omission means any type is accepted" is not in RFC 9396 §10). #1832 carries both parameters to
+every grant in one struct destructured in each handler signature (an ignored parameter fails
+`unused_variables`; verified), accepts only `device_posture` validated against `DevicePosture`, and
+makes `error_description` an `ErrorDescription` type filtered to RFC 6749 §5.2's character set.
+
+#1829 isolated (single-use artifacts other than the auth code are keyed by random values). Detail's
+fix was right; only its RFC 8725 §3.4 citation was wrong.
+
+### Process
+
+- Rolling-deploy compatibility is not a review concern while Vouch has no outside users and ships
+  CLI and server together (user, 2026-10-16).
+- A baseline prune in a fix PR was again unsupported by the code: check each pruned row's statement
+  against the tree, not against the PR's tests.
+- `cargo deny` started failing repo-wide on rustls 0.23.45 (RUSTSEC-2026-0346 to 0349; fixed in
+  0.23.46, published 2026-10-14). #1824 was dropped from the queue on that check; the bump rode on
+  it, as the first PR to re-queue (user, 2026-10-16), with `fuzz/Cargo.lock` refreshed too.
