@@ -29,7 +29,12 @@ use vouch_server::test_utils::build_client_assertion;
 use vouch_server::test_utils::{self, TestOAuthClient};
 
 /// Create an OAuth client configured for `private_key_jwt` with inline JWKS.
-async fn create_jwt_client(harness: &TestHarness, user_id: &str) -> (TestOAuthClient, Vec<u8>) {
+/// `resource_uris` is the client's RFC 8707 resource allowlist.
+async fn create_jwt_client(
+    harness: &TestHarness,
+    user_id: &str,
+    resource_uris: &[&str],
+) -> (TestOAuthClient, Vec<u8>) {
     use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, KeyPair};
     use vouch_server::test_utils::{TestClientSpec, TestJwks};
 
@@ -63,6 +68,7 @@ async fn create_jwt_client(harness: &TestHarness, user_id: &str) -> (TestOAuthCl
             name: "FIDO2 Grant Test Client".to_string(),
             jwks: TestJwks::Custom(jwks),
             token_endpoint_auth_method: Some(TokenEndpointAuthMethod::PrivateKeyJwt),
+            resource_uris: resource_uris.iter().map(|r| (*r).to_string()).collect(),
             ..Default::default()
         },
     )
@@ -148,6 +154,7 @@ struct AssertionExchange<'a> {
     client: &'a TestOAuthClient,
     pkcs8: &'a [u8],
     authorization_details: Option<&'a str>,
+    resource: Option<&'a str>,
 }
 
 /// Build the assertion payload and exchange it for an access token.
@@ -161,6 +168,7 @@ async fn exchange_fido2_assertion(
         client,
         pkcs8,
         authorization_details,
+        resource,
     }: AssertionExchange<'_>,
 ) -> (u16, serde_json::Value) {
     // The mock device signs the assertion
@@ -198,6 +206,9 @@ async fn exchange_fido2_assertion(
          &client_assertion_type=urn%3Aietf%3Aparams%3Aoauth%3Aclient-assertion-type%3Ajwt-bearer\
          &client_assertion={client_assertion}"
     );
+    if let Some(resource) = resource {
+        body.push_str(&format!("&resource={}", urlencoding::encode(resource)));
+    }
     if let Some(ad) = authorization_details {
         body.push_str(&format!(
             "&authorization_details={}",
@@ -266,7 +277,7 @@ async fn test_fido2_grant_windows_24h2_os_recency_passes() {
     .expect("Failed to activate OsRecency");
 
     // Create a JWT client for private_key_jwt auth
-    let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
+    let (client, pkcs8) = create_jwt_client(&harness, &user.id, &[]).await;
 
     // Get a challenge
     let (challenge, state) = get_challenge(&harness, &client, &pkcs8).await;
@@ -291,6 +302,7 @@ async fn test_fido2_grant_windows_24h2_os_recency_passes() {
         client: &client,
         pkcs8: &pkcs8,
         authorization_details: Some(&posture_json),
+        resource: None,
     })
     .await;
 
@@ -329,7 +341,7 @@ async fn test_fido2_grant_windows_23h2_os_recency_denied() {
     .await
     .expect("Failed to activate OsRecency");
 
-    let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
+    let (client, pkcs8) = create_jwt_client(&harness, &user.id, &[]).await;
     let (challenge, state) = get_challenge(&harness, &client, &pkcs8).await;
 
     // Windows 11 23H2 (build 22631) — below the 26100 threshold
@@ -351,6 +363,7 @@ async fn test_fido2_grant_windows_23h2_os_recency_denied() {
         client: &client,
         pkcs8: &pkcs8,
         authorization_details: Some(&posture_json),
+        resource: None,
     })
     .await;
 
@@ -390,7 +403,7 @@ async fn test_fido2_grant_macos_15_os_recency_passes() {
     .await
     .expect("Failed to activate OsRecency");
 
-    let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
+    let (client, pkcs8) = create_jwt_client(&harness, &user.id, &[]).await;
     let (challenge, state) = get_challenge(&harness, &client, &pkcs8).await;
 
     // macOS 15.3.1 posture — os_build is absent on macOS (not collected)
@@ -411,6 +424,7 @@ async fn test_fido2_grant_macos_15_os_recency_passes() {
         client: &client,
         pkcs8: &pkcs8,
         authorization_details: Some(&posture_json),
+        resource: None,
     })
     .await;
 
@@ -450,7 +464,7 @@ async fn test_fido2_grant_os_recency_no_posture_denied() {
     .await
     .expect("Failed to activate OsRecency");
 
-    let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
+    let (client, pkcs8) = create_jwt_client(&harness, &user.id, &[]).await;
     let (challenge, state) = get_challenge(&harness, &client, &pkcs8).await;
 
     // No authorization_details — posture data is required
@@ -463,6 +477,7 @@ async fn test_fido2_grant_os_recency_no_posture_denied() {
         client: &client,
         pkcs8: &pkcs8,
         authorization_details: None,
+        resource: None,
     })
     .await;
 
@@ -489,7 +504,7 @@ async fn test_fido2_grant_records_token_issued_audit_event() {
 
     let device = IntegrationMockDevice::new();
     let _auth_id = register_mock_device_in_db(&harness, &user.id, &device).await;
-    let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
+    let (client, pkcs8) = create_jwt_client(&harness, &user.id, &[]).await;
     let (challenge, state) = get_challenge(&harness, &client, &pkcs8).await;
 
     let (status, json) = exchange_fido2_assertion(AssertionExchange {
@@ -501,6 +516,7 @@ async fn test_fido2_grant_records_token_issued_audit_event() {
         client: &client,
         pkcs8: &pkcs8,
         authorization_details: None,
+        resource: None,
     })
     .await;
     assert_eq!(status, 200, "FIDO2 grant must succeed: {json}");
@@ -561,7 +577,7 @@ async fn test_fido2_grant_issuance_fault_records_server_fault_not_success() {
 
     let device = IntegrationMockDevice::new();
     let _auth_id = register_mock_device_in_db(&harness, &user.id, &device).await;
-    let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
+    let (client, pkcs8) = create_jwt_client(&harness, &user.id, &[]).await;
     let (challenge, state) = get_challenge(&harness, &client, &pkcs8).await;
     test_utils::corrupt_document(&harness.state.store, &org.id).await;
 
@@ -574,6 +590,7 @@ async fn test_fido2_grant_issuance_fault_records_server_fault_not_success() {
         client: &client,
         pkcs8: &pkcs8,
         authorization_details: None,
+        resource: None,
     })
     .await;
     assert_eq!(
@@ -631,7 +648,7 @@ async fn test_fido2_grant_access_token_auth_time_is_ceremony_instant() {
 
     let device = IntegrationMockDevice::new();
     let _auth_id = register_mock_device_in_db(&harness, &user.id, &device).await;
-    let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
+    let (client, pkcs8) = create_jwt_client(&harness, &user.id, &[]).await;
     let (challenge, state) = get_challenge(&harness, &client, &pkcs8).await;
 
     // Bracket the exchange with integer-second wall-clock captures.
@@ -649,6 +666,7 @@ async fn test_fido2_grant_access_token_auth_time_is_ceremony_instant() {
         client: &client,
         pkcs8: &pkcs8,
         authorization_details: None,
+        resource: None,
     })
     .await;
     let t_after = jiff::Timestamp::now().as_second();
@@ -716,7 +734,7 @@ async fn test_fido2_grant_records_org_email_domain_on_token_issued_event() {
 
     let device = IntegrationMockDevice::new();
     let _auth_id = register_mock_device_in_db(&harness, &user.id, &device).await;
-    let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
+    let (client, pkcs8) = create_jwt_client(&harness, &user.id, &[]).await;
     let (challenge, state) = get_challenge(&harness, &client, &pkcs8).await;
 
     let (status, json) = exchange_fido2_assertion(AssertionExchange {
@@ -728,6 +746,7 @@ async fn test_fido2_grant_records_org_email_domain_on_token_issued_event() {
         client: &client,
         pkcs8: &pkcs8,
         authorization_details: None,
+        resource: None,
     })
     .await;
     assert_eq!(status, 200, "FIDO2 grant must succeed: {json}");
@@ -769,7 +788,7 @@ async fn test_fido2_grant_records_org_email_domain_for_scim_provisioned_user() {
 
     let device = IntegrationMockDevice::new();
     let _auth_id = register_mock_device_in_db(&harness, &user.id, &device).await;
-    let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
+    let (client, pkcs8) = create_jwt_client(&harness, &user.id, &[]).await;
     let (challenge, state) = get_challenge(&harness, &client, &pkcs8).await;
 
     let (status, json) = exchange_fido2_assertion(AssertionExchange {
@@ -781,6 +800,7 @@ async fn test_fido2_grant_records_org_email_domain_for_scim_provisioned_user() {
         client: &client,
         pkcs8: &pkcs8,
         authorization_details: None,
+        resource: None,
     })
     .await;
     assert_eq!(status, 200, "FIDO2 grant must succeed: {json}");
@@ -822,7 +842,7 @@ async fn test_posture_denied_grant_records_login_failed_not_success() {
     )
     .await
     .expect("Failed to activate OsRecency");
-    let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
+    let (client, pkcs8) = create_jwt_client(&harness, &user.id, &[]).await;
     let (challenge, state) = get_challenge(&harness, &client, &pkcs8).await;
 
     // Windows 23H2 fails the os_recency floor (build < 26100).
@@ -843,6 +863,7 @@ async fn test_posture_denied_grant_records_login_failed_not_success() {
         client: &client,
         pkcs8: &pkcs8,
         authorization_details: Some(&posture_json),
+        resource: None,
     })
     .await;
     assert_eq!(status, 400, "grant must be denied: {json}");
@@ -945,7 +966,7 @@ async fn custom_policy_denial_records_name_in_audit_and_error() {
     .await
     .expect("Failed to activate custom policy");
 
-    let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
+    let (client, pkcs8) = create_jwt_client(&harness, &user.id, &[]).await;
     let (challenge, state) = get_challenge(&harness, &client, &pkcs8).await;
 
     // Posture without disk encryption → denied by the custom policy.
@@ -967,6 +988,7 @@ async fn custom_policy_denial_records_name_in_audit_and_error() {
         client: &client,
         pkcs8: &pkcs8,
         authorization_details: Some(&posture_json),
+        resource: None,
     })
     .await;
 
@@ -1042,7 +1064,7 @@ async fn preconfigured_policy_denial_records_slug_in_audit_and_metrics() {
     .await
     .expect("Failed to activate disk_encryption");
 
-    let (client, pkcs8) = create_jwt_client(&harness, &user.id).await;
+    let (client, pkcs8) = create_jwt_client(&harness, &user.id, &[]).await;
     let (challenge, state) = get_challenge(&harness, &client, &pkcs8).await;
 
     // Posture without disk encryption → denied by the preconfigured policy.
@@ -1064,6 +1086,7 @@ async fn preconfigured_policy_denial_records_slug_in_audit_and_metrics() {
         client: &client,
         pkcs8: &pkcs8,
         authorization_details: Some(&posture_json),
+        resource: None,
     })
     .await;
 
@@ -1091,4 +1114,76 @@ async fn preconfigured_policy_denial_records_slug_in_audit_and_metrics() {
             && metrics_text.contains(r#"policy="disk_encryption""#),
         "metrics must record the deny with the preconfigured slug label, got:\n{metrics_text}"
     );
+}
+
+// RFC 8707 §2.2: `resource` on an access token request applies "for all grant
+// types", and §2 says the AS "SHOULD audience-restrict issued access tokens
+// to the resource(s) indicated".
+#[tokio::test]
+async fn test_fido2_grant_resource_sets_audience() {
+    let harness = TestHarness::new().await;
+    let user = harness
+        .create_user("fido2-resource@example.com")
+        .await
+        .expect("Failed to create user");
+    let device = IntegrationMockDevice::new();
+    let _auth_id = register_mock_device_in_db(&harness, &user.id, &device).await;
+    let resource = "https://api.example.com/";
+    let (client, pkcs8) = create_jwt_client(&harness, &user.id, &[resource]).await;
+    let (challenge, state) = get_challenge(&harness, &client, &pkcs8).await;
+
+    let (status, json) = exchange_fido2_assertion(AssertionExchange {
+        harness: &harness,
+        device: &device,
+        challenge: &challenge,
+        state_jwt: &state,
+        user_id: &user.id,
+        client: &client,
+        pkcs8: &pkcs8,
+        authorization_details: None,
+        resource: Some(resource),
+    })
+    .await;
+    assert_eq!(status, 200, "FIDO2 grant must succeed: {json}");
+
+    let access_token = json["access_token"].as_str().expect("access_token");
+    let payload = access_token.split('.').nth(1).expect("JWT payload");
+    let claims: serde_json::Value = serde_json::from_slice(
+        &URL_SAFE_NO_PAD
+            .decode(payload)
+            .expect("JWT payload must be valid base64url"),
+    )
+    .expect("JWT payload must be valid JSON");
+    assert_eq!(claims["aud"], resource, "{claims}");
+}
+
+// RFC 8707 §2: a resource the client did not register is rejected with
+// `invalid_target`.
+#[tokio::test]
+async fn test_fido2_grant_unregistered_resource_is_invalid_target() {
+    let harness = TestHarness::new().await;
+    let user = harness
+        .create_user("fido2-bad-resource@example.com")
+        .await
+        .expect("Failed to create user");
+    let device = IntegrationMockDevice::new();
+    let _auth_id = register_mock_device_in_db(&harness, &user.id, &device).await;
+    let (client, pkcs8) =
+        create_jwt_client(&harness, &user.id, &["https://other.example.com/"]).await;
+    let (challenge, state) = get_challenge(&harness, &client, &pkcs8).await;
+
+    let (status, json) = exchange_fido2_assertion(AssertionExchange {
+        harness: &harness,
+        device: &device,
+        challenge: &challenge,
+        state_jwt: &state,
+        user_id: &user.id,
+        client: &client,
+        pkcs8: &pkcs8,
+        authorization_details: None,
+        resource: Some("https://api.example.com/"),
+    })
+    .await;
+    assert_eq!(status, 400, "{json}");
+    assert_eq!(json["error"], "invalid_target", "{json}");
 }

@@ -16,7 +16,7 @@ use vouch_common::protocol;
 use crate::AppState;
 use crate::crypto::alg::JwsAlgorithm;
 use crate::db::OAuthClient;
-use crate::error::OAuthErrorCode;
+use crate::error::{ErrorDescription, OAuthErrorCode};
 
 /// JARM JWT lifetime in seconds (10 minutes per the specification).
 const JARM_JWT_LIFETIME_SECONDS: i64 = 600;
@@ -40,7 +40,7 @@ struct JarmErrorClaims {
     exp: i64,
     error: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    error_description: Option<String>,
+    error_description: Option<ErrorDescription>,
     #[serde(skip_serializing_if = "Option::is_none")]
     state: Option<String>,
 }
@@ -111,7 +111,7 @@ pub async fn build_jarm_error_jwt(
     state: &Arc<AppState>,
     client: &OAuthClient,
     error: OAuthErrorCode,
-    description: Option<&str>,
+    description: Option<&ErrorDescription>,
     state_param: Option<&str>,
 ) -> Result<String> {
     let now = Timestamp::now().as_second();
@@ -123,7 +123,7 @@ pub async fn build_jarm_error_jwt(
         aud: client.client_id.clone(),
         exp,
         error: error.as_str().to_string(),
-        error_description: description.map(str::to_string),
+        error_description: description.cloned(),
         state: state_param.map(str::to_string),
     };
 

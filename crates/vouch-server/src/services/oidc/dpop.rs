@@ -27,7 +27,7 @@ use crate::crypto::jwk::Jwk;
 use crate::crypto::jwt::{HeaderAlg, Jws, JwsError};
 use crate::crypto::validity::{ValidityWindow, numeric_date};
 use crate::db::{self, store::DocumentStore};
-use crate::error::{OAuthErrorCode, OAuthErrorResponse, ServiceError};
+use crate::error::{ErrorDescription, OAuthErrorCode, OAuthErrorResponse, ServiceError};
 use crate::http;
 use crate::services::oidc::claims::PossessionError;
 use axum::http::StatusCode;
@@ -284,7 +284,7 @@ impl DpopChallenge {
             StatusCode::UNAUTHORIZED,
             Json(OAuthErrorResponse {
                 error: self.error.as_str().to_string(),
-                error_description: Some(self.description),
+                error_description: Some(ErrorDescription::new(&self.description)),
                 error_uri: None,
             }),
         )

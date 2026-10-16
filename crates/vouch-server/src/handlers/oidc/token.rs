@@ -12,7 +12,7 @@ use crate::db::{
     self, ClientInfo, ClientType, OAuthClient, OAuthEventType, RecordOAuthEventParams,
     RecordedOrgDomain,
 };
-use crate::error::OAuthErrorResponse;
+use crate::error::{ErrorDescription, OAuthErrorResponse};
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use crate::handlers::device;
 use crate::handlers::extractors::{OAuthForm, OptionalClientCert};
@@ -25,6 +25,7 @@ use crate::services::oidc::mtls::CertThumbprint;
 use crate::services::oidc::validated_client::ValidatedOAuthClient;
 use crate::services::oidc::{
     ResourceUri, ScopeSet,
+    authorization_details::AuthorizationDetails,
     client_credentials::exchange_client_credentials,
     dpop::DpopError,
     exchange::{ActorToken, RequestedTokenType, SubjectToken, TokenExchangeParams, exchange_token},
@@ -191,14 +192,23 @@ struct ClientAuthParams {
     client_assertion_type: Option<String>,
 }
 
+/// The parameters that say what an issued token is for, which every grant
+/// carries: RFC 8707 §2.2 defines `resource` "for all grant types", and RFC
+/// 9396 §6 has the AS check `authorization_details` against "the underlying
+/// grant ... or the client's policy". Held beside the per-grant value so no
+/// grant can drop them, and destructured in each handler's signature so a
+/// handler that ignores either one fails `unused_variables`.
+struct TokenTargetParams {
+    resource: Option<String>,
+    authorization_details: Option<String>,
+}
+
 /// RFC 6749 §4.1.3 authorization code grant parameters.
 struct AuthorizationCodeParams {
     /// REQUIRED.
     code: String,
     redirect_uri: Option<String>,
     code_verifier: Option<String>,
-    resource: Option<String>,
-    authorization_details: Option<String>,
 }
 
 /// RFC 6749 §4.4 client credentials grant parameters.
@@ -222,9 +232,7 @@ struct TokenExchangeRequestParams {
     actor_token_type: Option<String>,
     requested_token_type: Option<String>,
     audience: Option<String>,
-    resource: Option<String>,
     scope: Option<String>,
-    authorization_details: Option<String>,
 }
 
 /// FIDO2 assertion grant parameters (RFC 6749 §4.5 extension grant).
@@ -232,7 +240,24 @@ struct Fido2AssertionParams {
     /// REQUIRED.
     assertion: SecretString,
     scope: Option<String>,
-    authorization_details: Option<String>,
+}
+
+/// What a grant handler receives: the shared client authentication and token
+/// target parameters beside that grant's own.
+struct GrantRequest<P> {
+    auth: ClientAuthParams,
+    target: TokenTargetParams,
+    params: P,
+}
+
+impl<P> GrantRequest<P> {
+    fn new(auth: ClientAuthParams, target: TokenTargetParams, params: P) -> Self {
+        Self {
+            auth,
+            target,
+            params,
+        }
+    }
 }
 
 /// The parameters of one grant. A grant's parameters are reachable only
@@ -246,10 +271,11 @@ enum GrantParams {
 }
 
 /// A token request resolved to the grant it names, carrying only that grant's
-/// parameters plus the shared client authentication ones. Built by
-/// [`TokenRequestForm::parse`], which is the only way to obtain one.
+/// parameters plus the shared client authentication and token target ones.
+/// Built by [`TokenRequestForm::parse`], which is the only way to obtain one.
 struct TokenRequest {
     auth: ClientAuthParams,
+    target: TokenTargetParams,
     grant: GrantParams,
 }
 
@@ -301,6 +327,10 @@ impl TokenRequestForm {
             client_assertion: self.client_assertion,
             client_assertion_type: self.client_assertion_type,
         };
+        let target = TokenTargetParams {
+            resource: self.resource,
+            authorization_details: self.authorization_details,
+        };
 
         let grant = match grant_type {
             OAuthGrantType::AuthorizationCode => {
@@ -310,8 +340,6 @@ impl TokenRequestForm {
                         .ok_or(TokenRequestRejection::MissingParameter("code"))?,
                     redirect_uri: self.redirect_uri,
                     code_verifier: self.code_verifier,
-                    resource: self.resource,
-                    authorization_details: self.authorization_details,
                 })
             }
             OAuthGrantType::ClientCredentials => {
@@ -334,9 +362,7 @@ impl TokenRequestForm {
                     actor_token_type: self.actor_token_type,
                     requested_token_type: self.requested_token_type,
                     audience: self.audience,
-                    resource: self.resource,
                     scope: self.scope,
-                    authorization_details: self.authorization_details,
                 })
             }
             OAuthGrantType::Fido2Assertion => GrantParams::Fido2Assertion(Fido2AssertionParams {
@@ -344,11 +370,14 @@ impl TokenRequestForm {
                     .assertion
                     .ok_or(TokenRequestRejection::MissingParameter("assertion"))?,
                 scope: self.scope,
-                authorization_details: self.authorization_details,
             }),
         };
 
-        Ok(TokenRequest { auth, grant })
+        Ok(TokenRequest {
+            auth,
+            target,
+            grant,
+        })
     }
 }
 
@@ -490,7 +519,11 @@ pub(crate) async fn token(
 
     // RFC 6749 Section 5.2: unknown grant, or a REQUIRED parameter the named
     // grant did not carry.
-    let TokenRequest { auth, grant } = match params.parse() {
+    let TokenRequest {
+        auth,
+        target,
+        grant,
+    } = match params.parse() {
         Ok(typed) => typed,
         Err(rejection) => return rejection.into_response(presentation),
     };
@@ -503,8 +536,7 @@ pub(crate) async fn token(
                 client_info,
                 client_cert,
                 headers,
-                auth,
-                params,
+                GrantRequest::new(auth, target, params),
             )
             .await
         }
@@ -515,8 +547,7 @@ pub(crate) async fn token(
                 client_info,
                 client_cert,
                 headers,
-                auth,
-                params,
+                GrantRequest::new(auth, target, params),
             )
             .await
         }
@@ -527,8 +558,7 @@ pub(crate) async fn token(
                 client_info,
                 client_cert,
                 headers,
-                auth,
-                params,
+                GrantRequest::new(auth, target, params),
             )
             .await
         }
@@ -539,8 +569,7 @@ pub(crate) async fn token(
                 client_info,
                 client_cert,
                 headers,
-                auth,
-                params,
+                GrantRequest::new(auth, target, params),
             )
             .await
         }
@@ -551,8 +580,7 @@ pub(crate) async fn token(
                 client_info,
                 client_cert,
                 headers,
-                auth,
-                params,
+                GrantRequest::new(auth, target, params),
             )
             .await
         }
@@ -667,8 +695,15 @@ async fn handle_authorization_code_grant(
     client_info: ClientInfo,
     client_cert: OptionalClientCert,
     headers: HeaderMap,
-    auth: ClientAuthParams,
-    params: AuthorizationCodeParams,
+    GrantRequest {
+        auth,
+        target:
+            TokenTargetParams {
+                resource,
+                authorization_details,
+            },
+        params,
+    }: GrantRequest<AuthorizationCodeParams>,
 ) -> Response {
     // RFC 9449 §8: "The client will typically retry the request with the new
     // nonce value supplied upon receiving a use_dpop_nonce error". The proof
@@ -807,8 +842,8 @@ async fn handle_authorization_code_grant(
         client: &authenticated_client,
         code_verifier: params.code_verifier.as_deref(),
         binding: TokenBinding::new(dpop_proof.as_ref(), mtls_thumbprint.as_ref()),
-        resource: params.resource.as_deref(),
-        authorization_details: params.authorization_details.as_deref(),
+        resource: resource.as_deref(),
+        authorization_details: authorization_details.as_deref(),
         client_info: &client_info,
     };
 
@@ -850,8 +885,15 @@ async fn handle_client_credentials_grant(
     client_info: ClientInfo,
     client_cert: OptionalClientCert,
     headers: HeaderMap,
-    auth: ClientAuthParams,
-    params: ClientCredentialsParams,
+    GrantRequest {
+        auth,
+        target:
+            TokenTargetParams {
+                resource,
+                authorization_details,
+            },
+        params,
+    }: GrantRequest<ClientCredentialsParams>,
 ) -> Response {
     // RFC 9449 §8: "The client will typically retry the request with the new
     // nonce value supplied upon receiving a use_dpop_nonce error". The proof
@@ -922,6 +964,14 @@ async fn handle_client_credentials_grant(
         Err(e) => return e.into_oauth_response().into_response(),
     };
 
+    if let Err(e) = refuse_authorization_details(authorization_details.as_deref()) {
+        return e.into_oauth_response().into_response();
+    }
+    let audience = match resolve_token_audience(None, resource.as_deref(), &authenticated_client) {
+        Ok(aud) => aud,
+        Err(e) => return e.into_oauth_response().into_response(),
+    };
+
     // RFC 8705 Section 3: Bind access token to cert thumbprint only when opted in.
     let mtls_thumbprint = extract_mtls_thumbprint(&authenticated_client, &client_cert);
 
@@ -952,6 +1002,7 @@ async fn handle_client_credentials_grant(
         &state,
         &authenticated_client,
         params.scope.as_deref(),
+        audience.as_deref(),
         TokenBinding::new(dpop_proof.as_ref(), mtls_thumbprint.as_ref()),
         proof,
         arrival,
@@ -1005,8 +1056,15 @@ async fn handle_device_code_grant(
     client_info: ClientInfo,
     client_cert: OptionalClientCert,
     headers: HeaderMap,
-    auth: ClientAuthParams,
-    params: DeviceCodeParams,
+    GrantRequest {
+        auth,
+        target:
+            TokenTargetParams {
+                resource,
+                authorization_details,
+            },
+        params,
+    }: GrantRequest<DeviceCodeParams>,
 ) -> Response {
     // RFC 9449 §8: "The client will typically retry the request with the new
     // nonce value supplied upon receiving a use_dpop_nonce error". The proof
@@ -1041,11 +1099,21 @@ async fn handle_device_code_grant(
             Ok(client) => client,
             Err(resp) => return resp,
         };
+    if let Err(e) = refuse_authorization_details(authorization_details.as_deref()) {
+        return e.into_oauth_response().into_response();
+    }
+    let audience = match resolve_token_audience(None, resource.as_deref(), device_client.client()) {
+        Ok(aud) => aud,
+        Err(e) => return e.into_oauth_response().into_response(),
+    };
     match device::device_token(
         State(state),
         client_info,
         client_cert,
-        &params.device_code,
+        device::DeviceGrant {
+            device_code: &params.device_code,
+            audience: audience.as_deref(),
+        },
         device_client,
         dpop_proof,
         arrival,
@@ -1091,25 +1159,46 @@ impl<'a> ExchangeTokens<'a> {
     }
 }
 
-/// Resolve the effective audience for an RFC 8693 token-exchange request.
+/// RFC 9396 §6: the AS checks requested `authorization_details` against "the
+/// underlying grant ... or the client's policy (in case of grant type
+/// client_credentials)"; "Otherwise, the AS refuses the request with the
+/// error code invalid_authorization_details". A device authorization carries
+/// no authorization details, and no client policy grants any, so the client
+/// credentials and device code grants refuse every request that sends the
+/// parameter. It is parsed first so a malformed value is reported as such.
+fn refuse_authorization_details(raw: Option<&str>) -> Result<(), ServiceError> {
+    let Some(raw) = raw else {
+        return Ok(());
+    };
+    AuthorizationDetails::parse(raw)?;
+    Err(ServiceError::oauth(
+        OAuthErrorCode::InvalidAuthorizationDetails,
+        "authorization_details is not supported for this grant type",
+    ))
+}
+
+/// Resolve the effective audience for a token request that names no
+/// authorization grant of its own to inherit one from: token exchange (which
+/// also takes an RFC 8693 `audience`), client credentials, device code, and
+/// FIDO2 assertion. Those without an `audience` parameter pass `None`.
 ///
 /// Enforces, in order:
-/// - RFC 8693 §2.1: `resource`, when present, must be an absolute URI without
-///   a fragment (syntax only; the raw string is preserved as the audience
-///   because `ResourceUri::parse` normalizes host-only URIs).
+/// - RFC 8707 §2: `resource`, when present, "MUST be an absolute URI" and
+///   "MUST NOT include a fragment component" (syntax only; the raw string is
+///   preserved as the audience because `ResourceUri::parse` normalizes
+///   host-only URIs).
 /// - RFC 8707: when both `audience` and `resource` are present they must match.
-/// - RFC 8707: the resolved audience must be on the authenticated client's
-///   registered `resource_uris` allowlist — the same `is_valid_resource_uri`
-///   check enforced at the `/authorize` (handlers/oidc/authorize.rs) and `/par`
-///   (handlers/oidc/par.rs) front doors. Token exchange has no front door: it
-///   is reachable directly at `/oauth/token`, so the allowlist must be gated
-///   here, at the chokepoint for both the RFC 9068 access-token and OIDC
-///   ID-token issuance forks.
+/// - RFC 8707 §2.2: the resolved audience must be on the authenticated
+///   client's registered `resource_uris` allowlist — the same
+///   `is_valid_resource_uri` check enforced at the `/authorize`
+///   (handlers/oidc/authorize.rs) and `/par` (handlers/oidc/par.rs) front
+///   doors. These grants are reachable directly at `/oauth/token`, so the
+///   allowlist is gated here.
 ///
 /// Returns `Ok(Some(aud))` for an allowed audience, `Ok(None)` when neither
 /// `audience` nor `resource` was supplied, or `Err` with an `invalid_target`
 /// [`ServiceError`] for the caller to render as an OAuth response.
-fn resolve_exchange_audience(
+fn resolve_token_audience(
     audience: Option<&str>,
     resource: Option<&str>,
     client: &OAuthClient,
@@ -1158,8 +1247,15 @@ async fn handle_token_exchange_grant(
     client_info: ClientInfo,
     client_cert: OptionalClientCert,
     headers: HeaderMap,
-    auth: ClientAuthParams,
-    params: TokenExchangeRequestParams,
+    GrantRequest {
+        auth,
+        target:
+            TokenTargetParams {
+                resource,
+                authorization_details,
+            },
+        params,
+    }: GrantRequest<TokenExchangeRequestParams>,
 ) -> Response {
     // Extract client authentication (supports secret-based and JWT assertion)
     // RFC 9449 §8: "The client will typically retry the request with the new
@@ -1251,9 +1347,9 @@ async fn handle_token_exchange_grant(
     // enforces the client's `resource_uris` allowlist (RFC 8707) on the
     // token-exchange back door, which (unlike /authorize and /par) has no
     // front door to gate it earlier.
-    let effective_audience = match resolve_exchange_audience(
+    let effective_audience = match resolve_token_audience(
         params.audience.as_deref(),
-        params.resource.as_deref(),
+        resource.as_deref(),
         &authenticated_client,
     ) {
         Ok(aud) => aud,
@@ -1273,7 +1369,7 @@ async fn handle_token_exchange_grant(
         requested_token_type: tokens.requested_token_type,
         client: &authenticated_client,
         presented: sender_constraints,
-        authorization_details: params.authorization_details.as_deref(),
+        authorization_details: authorization_details.as_deref(),
         client_info: &client_info,
     };
 
@@ -1359,8 +1455,15 @@ async fn handle_fido2_assertion_grant(
     client_info: ClientInfo,
     client_cert: OptionalClientCert,
     headers: HeaderMap,
-    auth: ClientAuthParams,
-    params: Fido2AssertionParams,
+    GrantRequest {
+        auth,
+        target:
+            TokenTargetParams {
+                resource,
+                authorization_details,
+            },
+        params,
+    }: GrantRequest<Fido2AssertionParams>,
 ) -> Response {
     let assertion = params.assertion;
     let presentation = ClientAuthPresentation::of(&headers, &auth);
@@ -1431,6 +1534,11 @@ async fn handle_fido2_assertion_grant(
             Err(e) => return e.into_oauth_response().into_response(),
         };
 
+    let audience = match resolve_token_audience(None, resource.as_deref(), &jwt_authenticated) {
+        Ok(aud) => aud,
+        Err(e) => return e.into_oauth_response().into_response(),
+    };
+
     // FAPI 2.0: Require sender-constrained tokens (DPoP or mTLS)
     let sender_constraint = match SenderConstraintProof::validate(
         &jwt_authenticated,
@@ -1452,7 +1560,8 @@ async fn handle_fido2_assertion_grant(
         client: &jwt_authenticated,
         binding: TokenBinding::new(dpop_proof.as_ref(), mtls_thumbprint.as_ref()),
         scope: params.scope.as_deref(),
-        authorization_details: params.authorization_details.as_deref(),
+        audience: audience.as_deref(),
+        authorization_details: authorization_details.as_deref(),
         client_info,
     };
 
@@ -1554,9 +1663,9 @@ pub(crate) fn dpop_use_nonce_response(nonce: &str) -> Response {
         )],
         Json(OAuthErrorResponse {
             error: OAuthErrorCode::UseDpopNonce.as_str().to_string(),
-            error_description: Some(
-                "Authorization server requires nonce in DPoP proof".to_string(),
-            ),
+            error_description: Some(ErrorDescription::new(
+                "Authorization server requires nonce in DPoP proof",
+            )),
             error_uri: None,
         }),
     )
@@ -1590,7 +1699,7 @@ fn token_error_response(
         code.status_code(),
         Json(OAuthErrorResponse {
             error: code.as_str().to_string(),
-            error_description: Some(description.to_string()),
+            error_description: Some(ErrorDescription::new(description)),
             error_uri: None,
         }),
     )

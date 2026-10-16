@@ -2504,13 +2504,6 @@ rfc9396#2.1#f688de60	SHOULD	If an application or API is expected to be deployed 
 rfc9396#3.1#48487b2c	SHOULD	It is RECOMMENDED that a given API use only one form of requirement specification.
 rfc9396#3.1#6e6e6410	MUST	When gathering user consent, the AS MUST present the merged set of requirements represented by the authorization request.
 rfc9396#3.1#dbbc6767	MUST	The AS MUST process both sets of requirements in combination with each other for the given authorization request.
-rfc9396#5#119dfc46	MUST	The AS MUST refuse to process any unknown authorization details type or authorization details not conforming to the respective type definition. The AS MUST abor
-rfc9396#5#40238e75	MUST	The AS MUST refuse to process any unknown authorization details type or authorization details not conforming to the respective type definition. The AS MUST abor
-rfc9396#5#5706f269	MUST	The AS MUST refuse to process any unknown authorization details type or authorization details not conforming to the respective type definition. The AS MUST abor
-rfc9396#5#8bed4d1a	MUST	The AS MUST refuse to process any unknown authorization details type or authorization details not conforming to the respective type definition.
-rfc9396#5#8db0e2a6	MUST	The AS MUST refuse to process any unknown authorization details type or authorization details not conforming to the respective type definition. The AS MUST abor
-rfc9396#5#a9888287	MUST	The AS MUST abort processing and respond with an error invalid_authorization_details to the client if any of the following are true of the objects in the author
-rfc9396#5#d03476a3	MUST	The AS MUST refuse to process any unknown authorization details type or authorization details not conforming to the respective type definition. The AS MUST abor
 rfc9396#8#5b1fe622	MUST	The Token Error Response MUST conform to the rules given in Section 5.
 rfc9396#9.1#ff431747	SHOULD	If the access token is a JWT [RFC7519], the AS is RECOMMENDED to add the authorization details object, filtered to the specific audience, as a top-level claim.
 rfc9421#1.4#1b75ed93	MUST	HTTP message signatures are designed to be a general-purpose tool applicable in a wide variety of circumstances and applications. In order to properly and safel

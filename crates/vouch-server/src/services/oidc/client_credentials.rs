@@ -37,12 +37,15 @@ pub struct ClientCredentialsResult {
 /// * `state` - Application state
 /// * `client` - The authenticated OAuth client
 /// * `requested_scope` - Optional scope requested by the client
-/// * `mtls_cert_thumbprint` - RFC 8705 certificate thumbprint for token binding (if applicable)
+/// * `audience` - RFC 8707 `resource`, already checked against the client's
+///   `resource_uris` allowlist
+/// * `binding` - RFC 8705 / RFC 9449 token binding
 ///
 pub(crate) async fn exchange_client_credentials(
     state: &Arc<AppState>,
     client: &ValidatedOAuthClient,
     requested_scope: Option<&str>,
+    audience: Option<&str>,
     binding: TokenBinding<'_>,
     proof: TokenIssuanceProof,
     arrival: ArrivalTime,
@@ -69,7 +72,7 @@ pub(crate) async fn exchange_client_credentials(
             scope: scope.clone(),
             binding,
             act: None,
-            audience: None,
+            audience,
             max_lifetime_secs: None,
             hardware_verification: HardwareVerification::NotVerified,
             authorization_details: None,
@@ -185,6 +188,7 @@ mod tests {
         let result = exchange_client_credentials(
             &state,
             &ValidatedOAuthClient::for_test(client),
+            None,
             None,
             TokenBinding::MutualTls(&thumbprint),
             TokenIssuanceProof {

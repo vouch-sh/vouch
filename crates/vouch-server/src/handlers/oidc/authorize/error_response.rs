@@ -15,6 +15,7 @@
 //! obliged to discard.
 
 use super::*;
+use crate::error::ErrorDescription;
 use crate::services::oidc::jarm;
 
 /// Build an authorization redirect URL with the given query parameters.
@@ -41,6 +42,7 @@ pub(crate) async fn oauth_error_response(
     oauth_state: Option<&str>,
     response_mode: ResponseMode,
 ) -> Response {
+    let description = ErrorDescription::new(description);
     match response_mode {
         ResponseMode::Jwt => {
             oauth_error_redirect_jarm(
@@ -48,7 +50,7 @@ pub(crate) async fn oauth_error_response(
                 client,
                 redirect_uri,
                 error,
-                description,
+                &description,
                 oauth_state,
             )
             .await
@@ -56,7 +58,10 @@ pub(crate) async fn oauth_error_response(
         ResponseMode::FormPost => {
             let mut params = vec![
                 ("error".to_string(), error.as_str().to_string()),
-                ("error_description".to_string(), description.to_string()),
+                (
+                    "error_description".to_string(),
+                    description.as_str().to_string(),
+                ),
                 ("iss".to_string(), app_state.config().base_url.to_string()),
             ];
             if let Some(s) = oauth_state {
@@ -72,7 +77,7 @@ pub(crate) async fn oauth_error_response(
             let issuer = &app_state.config().base_url;
             let mut params = vec![
                 ("error", error.as_str()),
-                ("error_description", description),
+                ("error_description", description.as_str()),
             ];
             if let Some(state_param) = oauth_state {
                 params.push(("state", state_param));
@@ -92,7 +97,7 @@ pub(super) async fn oauth_error_redirect_jarm(
     client: &OAuthClient,
     redirect_uri: &str,
     error: OAuthErrorCode,
-    description: &str,
+    description: &ErrorDescription,
     oauth_state: Option<&str>,
 ) -> Response {
     match jarm::build_jarm_error_jwt(state, client, error, Some(description), oauth_state).await {

@@ -10,7 +10,7 @@ use crate::arrival::ArrivalTime;
 use crate::crypto::alg::JwsAlgorithm;
 use crate::db::{self};
 use crate::error::OAuthErrorCode;
-use crate::error::OAuthErrorResponse;
+use crate::error::{ErrorDescription, OAuthErrorResponse};
 use crate::handlers::extractors::OptionalClientCert;
 use crate::services::auth::{DecodedToken, decode_token};
 use crate::services::oidc::OAuthScope;
@@ -371,7 +371,7 @@ fn oauth_error(status: StatusCode, error: OAuthErrorCode, description: &str) -> 
     let error = error.as_str();
     let body = Json(OAuthErrorResponse {
         error: error.to_string(),
-        error_description: Some(description.to_string()),
+        error_description: Some(ErrorDescription::new(description)),
         error_uri: None,
     });
 

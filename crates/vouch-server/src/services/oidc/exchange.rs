@@ -422,7 +422,7 @@ pub(crate) async fn exchange_token(
             &config.base_url,
         )?
     };
-    // `resolve_exchange_audience` already checked a requested audience, so
+    // `resolve_token_audience` already checked a requested audience, so
     // only an audience inherited from a narrowed subject token can fail here.
     // RFC 8693 §2.2.2: a subject token "unacceptable based on policy" gets
     // "the "invalid_request" error code"; `invalid_target` is for targets

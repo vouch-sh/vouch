@@ -16,8 +16,10 @@ async fn test_authorization_details_in_token_response() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
-    let ad_value: serde_json::Value =
-        serde_json::from_str(r#"[{"type":"payment_initiation","amount":100}]"#).unwrap();
+    let ad_value: serde_json::Value = serde_json::from_str(
+        r#"[{"type":"device_posture","posture_version":1,"os_version":"pi-100"}]"#,
+    )
+    .unwrap();
 
     let code = issue_code(
         &state,
@@ -53,8 +55,8 @@ async fn test_authorization_details_in_token_response() {
     assert!(ad.is_array(), "authorization_details must be a JSON array");
     let arr = ad.as_array().unwrap();
     assert_eq!(arr.len(), 1);
-    assert_eq!(arr[0]["type"], "payment_initiation");
-    assert_eq!(arr[0]["amount"], 100);
+    assert_eq!(arr[0]["os_version"], "pi-100");
+    assert_eq!(arr[0]["posture_version"], 1);
 }
 
 #[tokio::test]
@@ -109,7 +111,7 @@ async fn test_token_request_downscoping_subset_accepted() {
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let granted: serde_json::Value =
-        serde_json::from_str(r#"[{"type":"a","v":1},{"type":"b","v":2}]"#).unwrap();
+        serde_json::from_str(r#"[{"type":"device_posture","posture_version":1,"os_version":"a1"},{"type":"device_posture","posture_version":1,"os_version":"b2"}]"#).unwrap();
 
     let code = issue_code(
         &state,
@@ -125,7 +127,7 @@ async fn test_token_request_downscoping_subset_accepted() {
     .await;
 
     // Downscope to just one entry
-    let requested = r#"[{"type":"a","v":1}]"#;
+    let requested = r#"[{"type":"device_posture","posture_version":1,"os_version":"a1"}]"#;
     let auth_header = client.basic_auth_header();
     let (status, body) = http_post_form(
         &app,
@@ -146,7 +148,7 @@ async fn test_token_request_downscoping_subset_accepted() {
     let resp: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
     let ad = resp["authorization_details"].as_array().unwrap();
     assert_eq!(ad.len(), 1, "Should have downscoped to 1 entry");
-    assert_eq!(ad[0]["type"], "a");
+    assert_eq!(ad[0]["os_version"], "a1");
 }
 
 #[tokio::test]
@@ -158,7 +160,10 @@ async fn test_token_request_downscoping_non_subset_rejected() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
-    let granted: serde_json::Value = serde_json::from_str(r#"[{"type":"a","v":1}]"#).unwrap();
+    let granted: serde_json::Value = serde_json::from_str(
+        r#"[{"type":"device_posture","posture_version":1,"os_version":"a1"}]"#,
+    )
+    .unwrap();
 
     let code = issue_code(
         &state,
@@ -174,7 +179,7 @@ async fn test_token_request_downscoping_non_subset_rejected() {
     .await;
 
     // Request something not in the granted set
-    let requested = r#"[{"type":"b","v":99}]"#;
+    let requested = r#"[{"type":"device_posture","posture_version":1,"os_version":"b99"}]"#;
     let auth_header = client.basic_auth_header();
     let (status, body) = http_post_form(
         &app,
@@ -217,7 +222,7 @@ async fn test_token_request_ad_when_none_granted_rejected() {
     )
     .await;
 
-    let requested = r#"[{"type":"payment"}]"#;
+    let requested = r#"[{"type":"device_posture","posture_version":1,"os_version":"payment"}]"#;
     let auth_header = client.basic_auth_header();
     let (status, body) = http_post_form(
         &app,
@@ -251,7 +256,9 @@ async fn test_invalid_authorization_details_json() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
-    let ad_value: serde_json::Value = serde_json::from_str(r#"[{"type":"a"}]"#).unwrap();
+    let ad_value: serde_json::Value =
+        serde_json::from_str(r#"[{"type":"device_posture","posture_version":1,"os_version":"a"}]"#)
+            .unwrap();
     let code = issue_code(
         &state,
         &user,
@@ -295,7 +302,9 @@ async fn test_authorization_details_must_be_array() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
-    let ad_value: serde_json::Value = serde_json::from_str(r#"[{"type":"a"}]"#).unwrap();
+    let ad_value: serde_json::Value =
+        serde_json::from_str(r#"[{"type":"device_posture","posture_version":1,"os_version":"a"}]"#)
+            .unwrap();
     let code = issue_code(
         &state,
         &user,
@@ -320,7 +329,9 @@ async fn test_authorization_details_must_be_array() {
              &authorization_details={}",
             code,
             "https://example.com/callback",
-            urlencoding::encode(r#"{"type":"a"}"#),
+            urlencoding::encode(
+                r#"{"type":"device_posture","posture_version":1,"os_version":"a"}"#
+            ),
         ),
         &[("Authorization", &auth_header)],
     )
@@ -344,8 +355,10 @@ async fn test_introspection_includes_authorization_details() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
-    let ad_value: serde_json::Value =
-        serde_json::from_str(r#"[{"type":"credential","format":"jwt_vc"}]"#).unwrap();
+    let ad_value: serde_json::Value = serde_json::from_str(
+        r#"[{"type":"device_posture","posture_version":1,"os_version":"credential"}]"#,
+    )
+    .unwrap();
 
     let code = issue_code(
         &state,
@@ -392,8 +405,8 @@ async fn test_introspection_includes_authorization_details() {
     assert!(intro_ad.is_array());
     let arr = intro_ad.as_array().unwrap();
     assert_eq!(arr.len(), 1);
-    assert_eq!(arr[0]["type"], "credential");
-    assert_eq!(arr[0]["format"], "jwt_vc");
+    assert_eq!(arr[0]["os_version"], "credential");
+    assert_eq!(arr[0]["type"], "device_posture");
 }
 
 #[tokio::test]
@@ -437,8 +450,10 @@ async fn test_token_exchange_inherits_authorization_details() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
-    let ad_value: serde_json::Value =
-        serde_json::from_str(r#"[{"type":"api_access","actions":["read"]}]"#).unwrap();
+    let ad_value: serde_json::Value = serde_json::from_str(
+        r#"[{"type":"device_posture","posture_version":1,"os_version":"api"}]"#,
+    )
+    .unwrap();
 
     let code = issue_code(
         &state,
@@ -491,7 +506,7 @@ async fn test_token_exchange_inherits_authorization_details() {
         .expect("exchanged token must inherit authorization_details");
     assert!(exch_ad.is_array());
     assert_eq!(exch_ad.as_array().unwrap().len(), 1);
-    assert_eq!(exch_ad[0]["type"], "api_access");
+    assert_eq!(exch_ad[0]["os_version"], "api");
 }
 
 #[tokio::test]
@@ -503,7 +518,7 @@ async fn test_token_exchange_narrows_authorization_details() {
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let ad_value: serde_json::Value =
-        serde_json::from_str(r#"[{"type":"x","v":1},{"type":"y","v":2}]"#).unwrap();
+        serde_json::from_str(r#"[{"type":"device_posture","posture_version":1,"os_version":"x1"},{"type":"device_posture","posture_version":1,"os_version":"y2"}]"#).unwrap();
 
     let code = issue_code(
         &state,
@@ -534,7 +549,7 @@ async fn test_token_exchange_narrows_authorization_details() {
     let access_token = token_resp["access_token"].as_str().unwrap();
 
     // Narrow to just one entry during exchange
-    let narrowed = r#"[{"type":"x","v":1}]"#;
+    let narrowed = r#"[{"type":"device_posture","posture_version":1,"os_version":"x1"}]"#;
     let (exch_status, exch_body) = http_post_form(
         &app,
         "/oauth/token",
@@ -557,7 +572,7 @@ async fn test_token_exchange_narrows_authorization_details() {
     let exch_resp: serde_json::Value = serde_json::from_str(&exch_body).expect("valid JSON");
     let ad = exch_resp["authorization_details"].as_array().unwrap();
     assert_eq!(ad.len(), 1);
-    assert_eq!(ad[0]["type"], "x");
+    assert_eq!(ad[0]["os_version"], "x1");
 }
 
 #[tokio::test]
@@ -568,7 +583,9 @@ async fn test_token_exchange_narrow_non_subset_rejected() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
-    let ad_value: serde_json::Value = serde_json::from_str(r#"[{"type":"x"}]"#).unwrap();
+    let ad_value: serde_json::Value =
+        serde_json::from_str(r#"[{"type":"device_posture","posture_version":1,"os_version":"x"}]"#)
+            .unwrap();
 
     let code = issue_code(
         &state,
@@ -599,7 +616,7 @@ async fn test_token_exchange_narrow_non_subset_rejected() {
     let access_token = token_resp["access_token"].as_str().unwrap();
 
     // Try to narrow to something not in the original set
-    let bad = r#"[{"type":"z"}]"#;
+    let bad = r#"[{"type":"device_posture","posture_version":1,"os_version":"z"}]"#;
     let (exch_status, exch_body) = http_post_form(
         &app,
         "/oauth/token",
@@ -632,7 +649,7 @@ async fn test_multiple_authorization_detail_entries() {
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let ad_value: serde_json::Value = serde_json::from_str(
-        r#"[{"type":"payment","amount":50},{"type":"account_info","actions":["list"]},{"type":"payment","amount":200}]"#,
+        r#"[{"type":"device_posture","posture_version":1,"os_version":"pay50"},{"type":"device_posture","posture_version":1,"os_version":"acct"},{"type":"device_posture","posture_version":1,"os_version":"pay200"}]"#,
     )
     .unwrap();
 
@@ -675,8 +692,10 @@ async fn test_scope_and_authorization_details_coexist() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
-    let ad_value: serde_json::Value =
-        serde_json::from_str(r#"[{"type":"payment","amount":100}]"#).unwrap();
+    let ad_value: serde_json::Value = serde_json::from_str(
+        r#"[{"type":"device_posture","posture_version":1,"os_version":"pay100"}]"#,
+    )
+    .unwrap();
 
     let code = issue_code(
         &state,
@@ -722,7 +741,10 @@ async fn test_authorization_details_size_limit_at_token_endpoint() {
     // The token endpoint should reject oversized authorization_details.
     let (app, _state) = test_app().await;
 
-    let big = format!(r#"[{{"type":"x","data":"{}"}}]"#, "a".repeat(9000));
+    let big = format!(
+        r#"[{{"type":"device_posture","posture_version":1,"os_version":"{}"}}]"#,
+        "a".repeat(9000)
+    );
     let (status, body) = http_post_form(
         &app,
         "/oauth/token",
@@ -740,5 +762,119 @@ async fn test_authorization_details_size_limit_at_token_endpoint() {
     assert_eq!(
         err["error"], "invalid_authorization_details",
         "Should reject oversized authorization_details"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Section 6: grants with no authorization details to grant
+// ---------------------------------------------------------------------------
+
+// RFC 9396 §6: the AS checks requested authorization details against "the
+// client's policy (in case of grant type client_credentials)"; "Otherwise, the
+// AS refuses the request with the error code invalid_authorization_details".
+// No client policy grants any, so the request is refused rather than issued a
+// token that silently omits what was asked for.
+#[tokio::test]
+async fn test_client_credentials_authorization_details_refused() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "ad-cc@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let details = r#"[{"type":"device_posture","posture_version":1}]"#;
+    let (status, json) = client_credentials_request(
+        &app,
+        &client,
+        &format!("&authorization_details={}", urlencoding::encode(details)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert_eq!(json["error"], "invalid_authorization_details", "{json}");
+    assert!(json.get("access_token").is_none(), "{json}");
+}
+
+// RFC 9396 §5: malformed details are reported as such on the refusing grant
+// too, before the grant-level refusal.
+#[tokio::test]
+async fn test_client_credentials_malformed_authorization_details_refused() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "ad-cc-bad@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let (status, json) =
+        client_credentials_request(&app, &client, "&authorization_details=not-json").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert_eq!(json["error"], "invalid_authorization_details", "{json}");
+    let description = json["error_description"].as_str().unwrap_or_default();
+    assert!(
+        description.contains("JSON"),
+        "the description must name the parse failure, not the grant refusal: {description}"
+    );
+}
+
+// The grant still issues when the parameter is absent.
+#[tokio::test]
+async fn test_client_credentials_without_authorization_details_issues() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "ad-cc-none@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let (status, json) = client_credentials_request(&app, &client, "").await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert!(json.get("authorization_details").is_none(), "{json}");
+}
+
+// RFC 9396 §5: "The AS MUST refuse to process any unknown authorization
+// details type". Pinned at a grant that otherwise accepts the parameter.
+#[tokio::test]
+async fn test_token_exchange_unknown_authorization_details_type_refused() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "ad-unknown@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let (access_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
+
+    let unknown = r#"[{"type":"payment_initiation","amount":100}]"#;
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={access_token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &authorization_details={}",
+            urlencoding::encode(unknown),
+        ),
+        &[("Authorization", client.basic_auth_header().as_str())],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+    assert_eq!(json["error"], "invalid_authorization_details", "{body}");
+}
+
+// RFC 6749 §5.2: "Values for the "error_description" parameter MUST NOT
+// include characters outside the set %x20-21 / %x23-5B / %x5D-7E." The serde
+// message for an unknown enum value quotes it, and must not reach the wire.
+#[tokio::test]
+async fn test_authorization_details_error_description_is_rfc6749_charset() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "ad-charset@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let details = r#"[{"type":"device_posture","posture_version":1,"mdm":["acme"]}]"#;
+    let (status, json) = client_credentials_request(
+        &app,
+        &client,
+        &format!("&authorization_details={}", urlencoding::encode(details)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    let description = json["error_description"].as_str().expect("description");
+    assert!(description.contains("acme"), "{description}");
+    assert!(
+        description
+            .chars()
+            .all(|c| (' '..='~').contains(&c) && c != '"' && c != '\\'),
+        "error_description outside RFC 6749 §5.2's set: {description}"
     );
 }

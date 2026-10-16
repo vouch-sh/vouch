@@ -3139,7 +3139,7 @@ async fn test_rfc8693_resource_uris_rejects_inherited_narrowed_audience_access_t
     );
 
     // Leg 2: explicit audience=https://forbidden.example — must also be
-    // rejected (this path was already guarded by resolve_exchange_audience).
+    // rejected (this path was already guarded by resolve_token_audience).
     let (status, body) = http_post_form(
         &app,
         "/oauth/token",

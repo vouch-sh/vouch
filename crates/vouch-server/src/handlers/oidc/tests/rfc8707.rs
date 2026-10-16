@@ -971,3 +971,105 @@ async fn test_rfc8707_pending_resume_retry_re_renders_access_denied_not_session_
         retry.body
     );
 }
+
+// RFC 8707 §2.2: `resource` on an access token request applies "for all grant
+// types", and §2 says the AS "SHOULD audience-restrict issued access tokens
+// to the resource(s) indicated".
+#[tokio::test]
+async fn test_rfc8707_client_credentials_resource_sets_audience() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "cc-resource@example.com").await;
+    let resource = "https://api.example.com/";
+    let client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            resource_uris: vec![resource.to_string()],
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let (status, json) = client_credentials_request(
+        &app,
+        &client,
+        &format!("&resource={}", urlencoding::encode(resource)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let claims = decode_jwt_payload(json["access_token"].as_str().expect("access_token"));
+    assert_eq!(claims["aud"], resource, "{claims}");
+}
+
+// RFC 8707 §2: an unacceptable resource "should" be rejected with
+// `invalid_target`. Acceptability is local policy (§2.2): a client that
+// registered `resource_uris` may request only those.
+#[tokio::test]
+async fn test_rfc8707_client_credentials_unregistered_resource_is_invalid_target() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "cc-bad-resource@example.com").await;
+    let client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            resource_uris: vec!["https://other.example.com/".to_string()],
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let (status, json) = client_credentials_request(
+        &app,
+        &client,
+        &format!(
+            "&resource={}",
+            urlencoding::encode("https://api.example.com/")
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert_eq!(json["error"], "invalid_target", "{json}");
+}
+
+// RFC 8707 §2: the value "MUST be an absolute URI" and "MUST NOT include a
+// fragment component".
+#[tokio::test]
+async fn test_rfc8707_client_credentials_malformed_resource_is_invalid_target() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "cc-frag-resource@example.com").await;
+    let resource = "https://api.example.com/#frag";
+    let client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            resource_uris: vec![resource.to_string()],
+            ..Default::default()
+        },
+    )
+    .await;
+
+    for value in [resource, "relative/path"] {
+        let (status, json) = client_credentials_request(
+            &app,
+            &client,
+            &format!("&resource={}", urlencoding::encode(value)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{value}: {json}");
+        assert_eq!(json["error"], "invalid_target", "{value}: {json}");
+    }
+}
+
+// Without `resource` the token carries the default audience, the client's
+// own id, as before.
+#[tokio::test]
+async fn test_rfc8707_client_credentials_without_resource_keeps_default_audience() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "cc-no-resource@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let (status, json) = client_credentials_request(&app, &client, "").await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let claims = decode_jwt_payload(json["access_token"].as_str().expect("access_token"));
+    assert_eq!(claims["aud"], client.client_id.as_str(), "{claims}");
+}

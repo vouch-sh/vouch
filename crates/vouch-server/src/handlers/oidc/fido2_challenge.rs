@@ -199,14 +199,12 @@ pub(crate) async fn fido2_challenge(
     let challenge = match generate_challenge() {
         Ok(c) => c,
         Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": OAuthErrorCode::ServerError.as_str(),
-                    "error_description": "Failed to generate challenge"
-                })),
+            return ServiceError::oauth(
+                OAuthErrorCode::ServerError,
+                "Failed to generate challenge",
             )
-                .into_response();
+            .into_oauth_response()
+            .into_response();
         }
     };
 
@@ -234,14 +232,12 @@ pub(crate) async fn fido2_challenge(
         Ok(t) => t,
         Err(e) => {
             tracing::error!("Failed to encode FIDO2 challenge state: {e}");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": OAuthErrorCode::ServerError.as_str(),
-                    "error_description": "Failed to create challenge state"
-                })),
+            return ServiceError::oauth(
+                OAuthErrorCode::ServerError,
+                "Failed to create challenge state",
             )
-                .into_response();
+            .into_oauth_response()
+            .into_response();
         }
     };
 

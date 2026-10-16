@@ -271,7 +271,11 @@ impl<'de> Deserialize<'de> for PostureTypeTag {
 /// independently verify these claims without MDM attestation or device
 /// certificates. Treat posture data as advisory — useful for policy hints
 /// and audit trails, but not a substitute for server-side enforcement.
+///
+/// Unknown fields are refused: RFC 9396 §5 has the AS abort on "an object of
+/// known type but containing unknown fields".
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DevicePosture {
     /// RFC 9396: the authorization detail type (always "device_posture").
     #[serde(rename = "type")]

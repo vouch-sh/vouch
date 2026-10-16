@@ -53,9 +53,10 @@ audience equals the requesting `client_id` and the token is valid at every
 Vouch resource endpoint — this covers all standard flows (`vouch login`,
 browser sessions, device flow, client credentials).
 
-A client may instead narrow a token to a specific resource, either with the
-RFC 8707 `resource` parameter at the authorization endpoint or with the
-`audience`/`resource` parameters at token exchange (RFC 8693). Vouch's
+A client may instead narrow a token to a specific resource with the RFC 8707
+`resource` parameter: at the authorization endpoint, on any token request
+(client credentials, device code, and FIDO2 assertion), or with
+`audience`/`resource` at token exchange (RFC 8693). Vouch's
 resource endpoints (`/v1/credentials/*`, `/v1/keys`, `/api/v1/*`, RFC 7592
 client management) enforce that narrowing: a narrowed token is accepted only
 when its audience names this deployment (same scheme, host, and port as the

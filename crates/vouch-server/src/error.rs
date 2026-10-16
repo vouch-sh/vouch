@@ -286,6 +286,28 @@ impl OAuthErrorCode {
     }
 }
 
+/// An OAuth `error_description` value. RFC 6749 §4.1.2.1 and §5.2: "Values
+/// for the "error_description" parameter MUST NOT include characters outside
+/// the set %x20-21 / %x23-5B / %x5D-7E." The only constructor drops every
+/// other character, so a description built from a serde message or a
+/// client-supplied value cannot carry a quote, backslash, control character,
+/// or non-ASCII text onto the wire.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct ErrorDescription(String);
+
+impl ErrorDescription {
+    #[must_use]
+    pub fn new(text: &str) -> Self {
+        Self(http::sanitize_challenge_value(text))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// OAuth 2.0 error response (RFC 6749 Section 5.2).
 #[derive(Debug, Serialize)]
 pub struct OAuthErrorResponse {
@@ -293,7 +315,7 @@ pub struct OAuthErrorResponse {
     pub error: String,
     /// RFC 6749 Section 5.2: Human-readable ASCII text providing additional information.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub error_description: Option<String>,
+    pub error_description: Option<ErrorDescription>,
     /// RFC 6749 Section 5.2: A URI identifying a human-readable web page with error information.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_uri: Option<String>,
@@ -385,7 +407,7 @@ impl ServiceError {
                 code.status_code(),
                 Json(OAuthErrorResponse {
                     error: code.as_str().to_string(),
-                    error_description: Some(description),
+                    error_description: Some(ErrorDescription::new(&description)),
                     error_uri: None,
                 }),
             ),
@@ -393,7 +415,7 @@ impl ServiceError {
                 StatusCode::NOT_FOUND,
                 Json(OAuthErrorResponse {
                     error: OAuthErrorCode::InvalidRequest.as_str().to_string(),
-                    error_description: Some(format!("{entity} not found")),
+                    error_description: Some(ErrorDescription::new(&format!("{entity} not found"))),
                     error_uri: None,
                 }),
             ),
@@ -401,7 +423,7 @@ impl ServiceError {
                 StatusCode::BAD_REQUEST,
                 Json(OAuthErrorResponse {
                     error: OAuthErrorCode::InvalidRequest.as_str().to_string(),
-                    error_description: Some(msg),
+                    error_description: Some(ErrorDescription::new(&msg)),
                     error_uri: None,
                 }),
             ),
@@ -419,7 +441,7 @@ impl ServiceError {
                 status,
                 Json(OAuthErrorResponse {
                     error: code,
-                    error_description: Some(message),
+                    error_description: Some(ErrorDescription::new(&message)),
                     error_uri: None,
                 }),
             ),
@@ -427,7 +449,7 @@ impl ServiceError {
                 StatusCode::UNAUTHORIZED,
                 Json(OAuthErrorResponse {
                     error: INACTIVE_ACCOUNT_CODE.to_string(),
-                    error_description: Some(reason.to_string()),
+                    error_description: Some(ErrorDescription::new(&reason.to_string())),
                     error_uri: None,
                 }),
             ),
@@ -449,7 +471,7 @@ impl ServiceError {
                 status,
                 Json(OAuthErrorResponse {
                     error: code,
-                    error_description: Some(message),
+                    error_description: Some(ErrorDescription::new(&message)),
                     error_uri: None,
                 }),
             ),
@@ -457,7 +479,7 @@ impl ServiceError {
                 StatusCode::FORBIDDEN,
                 Json(OAuthErrorResponse {
                     error: OAuthErrorCode::AccessDenied.as_str().to_string(),
-                    error_description: Some("Access denied".to_string()),
+                    error_description: Some(ErrorDescription::new("Access denied")),
                     error_uri: None,
                 }),
             ),
@@ -467,7 +489,9 @@ impl ServiceError {
                     error: OAuthErrorCode::InsufficientUserAuthentication
                         .as_str()
                         .to_string(),
-                    error_description: Some("A recent authentication is required".to_string()),
+                    error_description: Some(ErrorDescription::new(
+                        "A recent authentication is required",
+                    )),
                     error_uri: None,
                 }),
             ),
@@ -475,7 +499,7 @@ impl ServiceError {
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(OAuthErrorResponse {
                     error: OAuthErrorCode::ServerError.as_str().to_string(),
-                    error_description: Some("Internal server error".to_string()),
+                    error_description: Some(ErrorDescription::new("Internal server error")),
                     error_uri: None,
                 }),
             ),
@@ -597,6 +621,26 @@ pub(crate) type ServiceResult<T> = Result<T, ServiceError>;
 mod tests {
     use super::*;
 
+    // RFC 6749 §5.2: "Values for the "error_description" parameter MUST NOT
+    // include characters outside the set %x20-21 / %x23-5B / %x5D-7E."
+    #[test]
+    fn error_description_drops_characters_outside_rfc6749_set() {
+        let description = ErrorDescription::new("say \"hi\" \\ tab\there é\u{7f} ok!#[]~");
+        assert_eq!(description.as_str(), "say hi  tabhere  ok!#[]~");
+    }
+
+    #[test]
+    fn oauth_error_response_filters_service_error_description() {
+        let (_, json) = ServiceError::oauth(OAuthErrorCode::InvalidRequest, "bad \"value\"")
+            .into_oauth_response();
+        assert_eq!(
+            json.error_description
+                .as_ref()
+                .map(ErrorDescription::as_str),
+            Some("bad value")
+        );
+    }
+
     #[test]
     fn test_oauth_error_codes() {
         assert_eq!(OAuthErrorCode::InvalidRequest.as_str(), "invalid_request");
@@ -625,7 +669,10 @@ mod tests {
         let (status, json) = err.into_oauth_response();
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(json.error, "invalid_grant");
-        assert_eq!(json.error_description, Some("Token expired".to_string()));
+        assert_eq!(
+            json.error_description,
+            Some(ErrorDescription::new("Token expired"))
+        );
     }
 
     #[test]
@@ -953,7 +1000,7 @@ mod tests {
         assert_eq!(json.error, "invalid_token");
         assert_eq!(
             json.error_description,
-            Some("Invalid or expired access token".to_string())
+            Some(ErrorDescription::new("Invalid or expired access token"))
         );
     }
 
@@ -974,7 +1021,8 @@ mod tests {
         assert_eq!(json.error, "server_error");
         assert!(
             json.error_description
-                .as_deref()
+                .as_ref()
+                .map(ErrorDescription::as_str)
                 .is_none_or(|d| !d.contains("issuer")),
             "internal error detail must not leak: {json:?}"
         );
@@ -1000,7 +1048,9 @@ mod tests {
         assert_eq!(json.error, "use_dpop_nonce");
         assert_eq!(
             json.error_description,
-            Some("Authorization server requires nonce in DPoP proof".to_string())
+            Some(ErrorDescription::new(
+                "Authorization server requires nonce in DPoP proof"
+            ))
         );
     }
 
@@ -1020,7 +1070,8 @@ mod tests {
         assert_eq!(json.error, "server_error");
         assert!(
             json.error_description
-                .as_deref()
+                .as_ref()
+                .map(ErrorDescription::as_str)
                 .is_none_or(|d| !d.contains("issuer")),
             "internal error detail must not leak: {json:?}"
         );

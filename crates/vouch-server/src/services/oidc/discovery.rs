@@ -17,6 +17,7 @@ use crate::services::oidc::authorization::CodeChallengeMethod;
 use crate::services::oidc::grant_type::OAuthGrantType;
 use serde::Serialize;
 use std::sync::Arc;
+use vouch_common::posture::POSTURE_TYPE;
 
 /// OpenID Connect Discovery document (OIDC Discovery 1.0 Section 3).
 ///
@@ -121,7 +122,7 @@ pub struct OidcDiscoveryDocument {
     /// Set to `false` so the OIDC conformance suite (which does not pre-register
     /// `request_uris`) can use URL-based request_uri without registration.
     pub require_request_uri_registration: bool,
-    /// RFC 9396 §11.3: Supported authorization detail types.
+    /// RFC 9396 §10: Supported authorization details types.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub authorization_details_types_supported: Option<Vec<String>>,
     /// OAuth 2.0 Mutual TLS Client Authentication (RFC 8705 Section 3).
@@ -288,8 +289,9 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
         } else {
             vec![JwsAlgorithm::Es256]
         }),
-        // RFC 9396 §11.3: Server accepts any authorization detail type (opaque)
-        authorization_details_types_supported: None,
+        // RFC 9396 §10: the types `AuthorizationDetails::parse` accepts; §5
+        // refuses every other.
+        authorization_details_types_supported: Some(vec![POSTURE_TYPE.to_string()]),
         // RFC 8705: advertise mTLS support when TLS is fully configured.
         tls_client_certificate_bound_access_tokens: state.config().tls_configured(),
         mtls_endpoint_aliases: build_mtls_aliases(state, base_url),
