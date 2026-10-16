@@ -15,6 +15,7 @@ use crate::services::oidc::ScopeSet;
 use jiff::{SignedDuration, Timestamp};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use uuid::Uuid;
 
 use super::token::validate_session_token;
 use crate::crypto;
@@ -549,6 +550,19 @@ pub struct AuthorizationCode {
     /// presented at token exchange uses the same key (RFC 9449 Section 10).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dpop_jkt: Option<String>,
+    /// Per-issuance unique identifier. RFC 7519 §4.1.7: "The identifier value
+    /// MUST be assigned in a manner that ensures that there is a negligible
+    /// probability that the same value will be accidentally assigned to a
+    /// different data object". The code JWT is
+    /// deterministically encoded (HS256 HMAC over the serialized claims), so
+    /// without a `jti` two authorization requests for the same client + user
+    /// with identical parameters issued within the same whole second would
+    /// produce byte-identical code strings — and therefore duplicate
+    /// `code_hash` rows, breaking the 1:1 mapping between code string,
+    /// issuance, and single-use record that RFC 6749 §10.5 replay detection
+    /// relies on. The `jti` restores that mapping the same way the access-token
+    /// path already does (RFC 9068 §2.2 `jti`).
+    pub jti: String,
     #[serde(with = "numeric_date")]
     pub iat: Timestamp,
     #[serde(with = "numeric_date")]
@@ -952,6 +966,7 @@ pub async fn issue_authorization_code(
         resource: params.resource.map(String::from),
         acr_values: params.acr_values.map(String::from),
         dpop_jkt: params.dpop_jkt.map(String::from),
+        jti: Uuid::now_v7().to_string(),
         iat: now,
         exp,
         authenticated_at: params.authenticated_at,
@@ -1269,6 +1284,7 @@ mod tests {
             resource: None,
             acr_values: None,
             dpop_jkt: None,
+            jti: "test-jti".to_string(),
             iat: at_second(1_000_000_000),
             exp: at_second(9_999_999_999),
             authenticated_at: None,
@@ -1295,6 +1311,32 @@ mod tests {
         assert_eq!(decoded.aud, "client-a");
         assert_eq!(decoded.user_id, "user-1");
         assert_eq!(decoded.email, "test@example.com");
+        assert_eq!(decoded.jti, "test-jti");
+    }
+
+    // RFC 7519 §4.1.7: the `jti` claim makes otherwise-identical codes
+    // issued in the same second produce distinct JWT strings and distinct
+    // code hashes, so the single-use record maps 1:1 onto one issuance.
+    #[tokio::test]
+    async fn test_authorization_code_jti_makes_identical_codes_distinct() {
+        let signer = StateTokenSigner::local(TEST_JWT_SECRET.to_vec());
+        let mut code_a = test_auth_code("https://example.com", "client-a");
+        let mut code_b = test_auth_code("https://example.com", "client-a");
+        code_a.jti = "jti-one".to_string();
+        code_b.jti = "jti-two".to_string();
+
+        let token_a = code_a.encode(&signer).await.unwrap();
+        let token_b = code_b.encode(&signer).await.unwrap();
+
+        assert_ne!(
+            token_a, token_b,
+            "codes with different jti must produce different JWT strings"
+        );
+        assert_ne!(
+            crypto::hash_token(&token_a),
+            crypto::hash_token(&token_b),
+            "codes with different jti must produce different code hashes"
+        );
     }
 
     #[tokio::test]

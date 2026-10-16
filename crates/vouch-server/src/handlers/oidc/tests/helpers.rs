@@ -99,10 +99,11 @@ pub(super) struct TestCodeSpec<'a> {
     pub scope: &'a str,
     /// OIDC nonce. Default: `None`.
     ///
-    /// The code is an HS256 JWT over an `iat` at second granularity and carries
-    /// no `jti`, so two codes issued in the same second for the same subject,
-    /// client, scope and redirect URI are byte-identical. A distinct nonce is
-    /// what makes them distinct codes with distinct hashes.
+    /// The code JWT carries a per-issuance `jti`, so two codes issued in the
+    /// same second for the same subject, client, scope and redirect URI are
+    /// already distinct codes with distinct hashes. A distinct nonce is no
+    /// longer required for uniqueness, but tests that issue multiple codes
+    /// may still set one to mirror real OIDC flows.
     pub nonce: Option<&'a str>,
     /// PKCE challenge (RFC 7636). Setting it selects the `S256` method.
     /// Default: `None`.
