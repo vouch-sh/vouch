@@ -154,7 +154,12 @@ When an IdP sign-in completes, Vouch resolves the account in this order:
    not that the issuer speaks for the account's organization. A sign-in that lands in a
    different organization, or in none (a Google consumer account carrying a corporate
    address has no `hd` claim), is refused with the same error page and
-   `identity_bind_refused` audit event as step 3, and the account is left unchanged. This
+   `identity_bind_refused` audit event as step 3, and the account is left unchanged. For
+   any other OIDC provider, and SAML without a domain attribute, the organization comes
+   from the asserted email's own domain, so the check always passes: **every configured
+   IdP is trusted for the email addresses it marks verified.** On a server hosting several
+   organizations, an administrator of one organization's IdP can bind to another
+   organization's accounts by creating a user with their address. This
    is how accounts that predate identity binding, and SCIM-provisioned accounts, acquire
    their binding — there is no batch backfill; each account binds on its first eligible
    IdP sign-in.

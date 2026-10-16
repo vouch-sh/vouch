@@ -319,6 +319,10 @@ async fn resolve_user(
             // compared because a login through a verified additional
             // domain resolves to the same org under its primary domain.
             // Two org-less parties (no `hd`, no domain) still match.
+            // Outside Google `hd` and a SAML `domain_attribute`, the login's
+            // org comes from the asserted email's own domain, so an email
+            // match always agrees: every configured IdP is trusted for the
+            // addresses it verifies.
             None => {
                 if org.map(|o| o.id) != doc.data.org_id.as_deref() {
                     return Err(EnrollUserError::OrgMismatch {
