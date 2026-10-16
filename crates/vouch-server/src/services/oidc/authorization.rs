@@ -577,7 +577,10 @@ pub struct AuthorizationCode {
     /// presented at token exchange uses the same key (RFC 9449 Section 10).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dpop_jkt: Option<String>,
-    /// Per-issuance unique identifier (RFC 8725 §3.4 analog). The code JWT is
+    /// Per-issuance unique identifier. RFC 7519 §4.1.7: "The identifier value
+    /// MUST be assigned in a manner that ensures that there is a negligible
+    /// probability that the same value will be accidentally assigned to a
+    /// different data object". The code JWT is
     /// deterministically encoded (HS256 HMAC over the serialized claims), so
     /// without a `jti` two authorization requests for the same client + user
     /// with identical parameters issued within the same whole second would
@@ -1338,7 +1341,7 @@ mod tests {
         assert_eq!(decoded.jti, "test-jti");
     }
 
-    // RFC 8725 §3.4 analog: the `jti` claim makes otherwise-identical codes
+    // RFC 7519 §4.1.7: the `jti` claim makes otherwise-identical codes
     // issued in the same second produce distinct JWT strings and distinct
     // code hashes, so the single-use record maps 1:1 onto one issuance.
     #[tokio::test]
