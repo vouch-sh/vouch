@@ -14,7 +14,6 @@ use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use crate::services::oidc::ScopeSet;
 use jiff::{SignedDuration, Timestamp};
 use serde::{Deserialize, Serialize};
-use std::fmt;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -57,12 +56,6 @@ impl CodeChallengeMethod {
         match self {
             Self::S256 => "S256",
         }
-    }
-}
-
-impl fmt::Display for CodeChallengeMethod {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
     }
 }
 
@@ -130,12 +123,6 @@ impl Prompt {
             Self::Silent => "none",
             Self::Consent => "consent",
         }
-    }
-}
-
-impl fmt::Display for Prompt {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
     }
 }
 
@@ -252,12 +239,6 @@ impl PromptSet {
             }
         }
         values.join(" ")
-    }
-}
-
-impl fmt::Display for PromptSet {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.to_space_separated())
     }
 }
 
@@ -498,14 +479,6 @@ impl ValidatedAuthRequest {
     #[must_use]
     pub fn dpop_jkt(&self) -> Option<&str> {
         self.dpop_jkt.as_deref()
-    }
-
-    /// RFC 9396: Validated authorization details.
-    #[must_use]
-    pub fn authorization_details(
-        &self,
-    ) -> Option<&super::authorization_details::AuthorizationDetails> {
-        self.authorization_details.as_ref()
     }
 
     /// RFC 9396: Validated authorization details as a JSON value.
@@ -2010,7 +1983,7 @@ mod tests {
     /// Extract the OAuth error code from a failed [`PromptSet::parse`].
     fn prompt_error(raw: &str) -> OAuthErrorCode {
         match PromptSet::parse(raw) {
-            Ok(set) => panic!("{raw:?} should have been rejected, parsed as {set}"),
+            Ok(set) => panic!("{raw:?} should have been rejected, parsed as {set:?}"),
             Err(ServiceError::OAuth { code, .. }) => code,
             Err(e) => panic!("expected an OAuth error for {raw:?}, got {e:?}"),
         }
@@ -2027,7 +2000,7 @@ mod tests {
             assert_eq!(
                 PromptSet::parse(raw).unwrap(),
                 PromptSet::of(prompt),
-                "{raw:?} should parse as the {prompt} behavior"
+                "{raw:?} should parse as the {prompt:?} behavior"
             );
         }
     }
@@ -2135,13 +2108,6 @@ mod tests {
     fn test_prompt_as_str() {
         assert_eq!(Prompt::Login.as_str(), "login");
         assert_eq!(Prompt::Silent.as_str(), "none");
-    }
-
-    // OIDC Core §3.1.2.1: prompt values are the strings the specification names.
-    #[test]
-    fn test_prompt_display() {
-        assert_eq!(format!("{}", Prompt::Login), "login");
-        assert_eq!(format!("{}", Prompt::Silent), "none");
     }
 
     // OIDC Core §3.1.2.1: prompt values round-trip through their wire form.
