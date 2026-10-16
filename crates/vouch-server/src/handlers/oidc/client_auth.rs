@@ -7,7 +7,7 @@
 use crate::AppState;
 use crate::arrival::ArrivalTime;
 use crate::db::{JwtAssertionJtiClaim, OAuthClient, TokenEndpointAuthMethod};
-use crate::error::{OAuthErrorCode, OAuthErrorResponse, ServiceError};
+use crate::error::{ErrorDescription, OAuthErrorCode, OAuthErrorResponse, ServiceError};
 use crate::handlers::extractors::OptionalClientCert;
 use crate::services::auth::{ClientAuthProof, JwtClientAuthProof, NoClientAuth};
 use crate::services::oidc::{
@@ -493,7 +493,7 @@ fn oauth_error_response(code: OAuthErrorCode, description: &str) -> Response {
         StatusCode::BAD_REQUEST,
         Json(OAuthErrorResponse {
             error: code.as_str().to_string(),
-            error_description: Some(description.to_string()),
+            error_description: Some(ErrorDescription::new(description)),
             error_uri: None,
         }),
     )

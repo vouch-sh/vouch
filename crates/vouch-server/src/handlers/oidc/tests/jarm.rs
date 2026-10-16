@@ -11,6 +11,7 @@
 use crate::OAuthErrorCode;
 use crate::crypto::alg::JwsAlgorithm;
 use crate::db::{self, OAuthClient};
+use crate::error::ErrorDescription;
 use crate::services::oidc::jarm::{build_jarm_error_jwt, build_jarm_success_jwt};
 use crate::test_utils;
 use crate::test_utils::TestHarness;
@@ -124,7 +125,7 @@ async fn rs256_without_rsa_key_returns_error() {
         &harness.state,
         &client,
         OAuthErrorCode::InvalidRequest,
-        Some("bad request"),
+        Some(&ErrorDescription::new("bad request")),
         None,
     )
     .await
@@ -145,7 +146,7 @@ async fn error_jwt_carries_error_claims() {
         &harness.state,
         &client,
         OAuthErrorCode::InvalidGrant,
-        Some("unknown grant"),
+        Some(&ErrorDescription::new("unknown grant")),
         Some("abc"),
     )
     .await

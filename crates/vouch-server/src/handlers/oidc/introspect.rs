@@ -8,7 +8,7 @@
 use crate::AppState;
 use crate::arrival::ArrivalTime;
 use crate::db::ClientInfo;
-use crate::error::{OAuthErrorCode, OAuthErrorResponse, ServiceError};
+use crate::error::{ErrorDescription, OAuthErrorCode, OAuthErrorResponse, ServiceError};
 use crate::handlers::extractors::{OAuthForm, OptionalClientCert};
 use crate::services::oidc::introspection::{
     introspect_token as svc_introspect, revoke_token as svc_revoke, sign_introspection_jwt,
@@ -204,9 +204,9 @@ pub(crate) async fn revoke(
                 [(header::RETRY_AFTER, "5")],
                 Json(OAuthErrorResponse {
                     error: OAuthErrorCode::ServerError.as_str().to_string(),
-                    error_description: Some(
-                        "Token revocation is temporarily unavailable".to_string(),
-                    ),
+                    error_description: Some(ErrorDescription::new(
+                        "Token revocation is temporarily unavailable",
+                    )),
                     error_uri: None,
                 }),
             )

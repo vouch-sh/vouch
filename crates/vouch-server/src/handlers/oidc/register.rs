@@ -13,7 +13,7 @@
 //!   with a valid FIDO2 key (hardware-bound) to obtain any token.
 
 use crate::db::ClientInfo;
-use crate::error::ServiceError;
+use crate::error::{ErrorDescription, ServiceError};
 use crate::handlers::session::{AuthenticatedToken, OptionalAuthenticatedToken};
 use crate::services::oidc::registration::{
     RegistrationRequest, delete_client_configuration, read_client_configuration, register_client,
@@ -210,13 +210,13 @@ fn into_registration_response(err: ServiceError) -> Response {
     let mut response = if status == StatusCode::UNAUTHORIZED && !carries_challenge {
         let description = json
             .error_description
-            .clone()
-            .unwrap_or_else(|| "Invalid or expired token".to_string());
+            .as_ref()
+            .map_or("Invalid or expired token", ErrorDescription::as_str);
         // The `error` and `error_description` parameters mirror the JSON body
         // so OAuth client libraries can rely on either source (RFC 6750 §3.1).
         let www_auth = http::bearer_challenge(&[
             ("error", json.error.as_str()),
-            ("error_description", description.as_str()),
+            ("error_description", description),
         ]);
         (
             status,

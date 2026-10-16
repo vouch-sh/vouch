@@ -67,6 +67,10 @@ Three properties are worth understanding before you enable anything:
   policy therefore also requires every user to be on a CLI version that reports posture.
 - **Evaluation is fail-closed.** An expression that errors at runtime, or returns a non-boolean,
   counts as a failure, not a pass.
+- **Posture data is validated on every login, policy or not.** A login whose posture carries a
+  field or value Vouch does not define is refused with `invalid_authorization_details` (RFC 9396
+  §5), as is any `authorization_details` entry whose type is not `device_posture`. The CLI and
+  server ship together, so this only affects a mismatched CLI build.
 
 > **Roll out carefully.** Turning on a policy takes effect at the next login for every user in the
 > organization. Announce it, and check what your fleet actually reports first — a policy that

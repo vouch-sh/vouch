@@ -111,6 +111,22 @@ pub(crate) struct DeviceClient {
     witnesses: ClientAuthWitnesses,
 }
 
+impl DeviceClient {
+    /// The authenticated client.
+    pub(crate) fn client(&self) -> &ValidatedOAuthClient {
+        &self.client
+    }
+}
+
+/// The device code grant's token request parameters.
+pub(crate) struct DeviceGrant<'a> {
+    /// RFC 8628 §3.4 `device_code`, REQUIRED.
+    pub(crate) device_code: &'a str,
+    /// RFC 8707 `resource`, already checked against the client's
+    /// `resource_uris` allowlist.
+    pub(crate) audience: Option<&'a str>,
+}
+
 /// Authenticate the caller of a device-flow endpoint.
 ///
 /// RFC 8628 §3.1: "The client authentication requirements of Section 3.2.1
@@ -322,7 +338,10 @@ pub(crate) async fn device_token(
     State(state): State<Arc<AppState>>,
     client_info: db::ClientInfo,
     client_cert: OptionalClientCert,
-    device_code: &str,
+    DeviceGrant {
+        device_code,
+        audience,
+    }: DeviceGrant<'_>,
     device_client: DeviceClient,
     dpop_proof: Option<ValidatedDpopProof>,
     arrival: ArrivalTime,
@@ -571,7 +590,7 @@ pub(crate) async fn device_token(
                     scope: Some(scope.clone()),
                     binding: TokenBinding::new(dpop_proof.as_ref(), mtls_cert_thumbprint.as_ref()),
                     act: None,
-                    audience: None,
+                    audience,
                     max_lifetime_secs: None,
                     // Verbatim from the approval, so the claims the credential
                     // endpoints gate on reflect what the browser actually did

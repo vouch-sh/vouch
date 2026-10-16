@@ -216,6 +216,9 @@ pub struct Fido2AssertionParams<'a> {
     pub binding: TokenBinding<'a>,
     /// Requested scope.
     pub scope: Option<&'a str>,
+    /// RFC 8707 `resource`, already checked against the client's
+    /// `resource_uris` allowlist.
+    pub audience: Option<&'a str>,
     /// RFC 9396: Raw authorization_details JSON string.
     pub authorization_details: Option<&'a str>,
     /// Client metadata extracted from HTTP headers.
@@ -531,7 +534,7 @@ pub(crate) async fn exchange_fido2_assertion(
                 scope: Some(scope.clone()),
                 binding: params.binding,
                 act: None,
-                audience: None,
+                audience: params.audience,
                 max_lifetime_secs: None,
                 // The ceremony-receipt instant from `verify_login_assertion` —
                 // the `auth_time` any token resting on this ceremony must report

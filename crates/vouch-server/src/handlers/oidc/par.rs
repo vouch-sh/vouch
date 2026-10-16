@@ -9,8 +9,8 @@ use crate::AppState;
 use crate::arrival::ArrivalTime;
 use crate::db::{self, CreateParParams, PAR_EXPIRES_IN};
 use crate::error::OAuthErrorCode;
-use crate::error::OAuthErrorResponse;
 use crate::error::ServiceError;
+use crate::error::{ErrorDescription, OAuthErrorResponse};
 use crate::handlers::extractors::{OAuthForm, OptionalClientCert};
 use crate::services::auth::{ClientAuthProof, JwtClientAuthProof, NoClientAuth, ParCreationProof};
 use crate::services::oidc::DpopError;
@@ -236,9 +236,9 @@ pub(crate) async fn par(
                 )],
                 Json(OAuthErrorResponse {
                     error: OAuthErrorCode::UseDpopNonce.as_str().to_string(),
-                    error_description: Some(
-                        "Authorization server requires nonce in DPoP proof".to_string(),
-                    ),
+                    error_description: Some(ErrorDescription::new(
+                        "Authorization server requires nonce in DPoP proof",
+                    )),
                     error_uri: None,
                 }),
             )
@@ -556,7 +556,7 @@ fn par_error_response(
         error.status_code(),
         Json(OAuthErrorResponse {
             error: error.as_str().to_string(),
-            error_description: Some(description.to_string()),
+            error_description: Some(ErrorDescription::new(description)),
             error_uri: None,
         }),
     )

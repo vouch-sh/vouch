@@ -1530,3 +1530,160 @@ async fn test_token_grant_rejection_commits_jti_replay_rejected_at_introspect() 
     let (status, resp) = http_post_form(&app, "/oauth/introspect", &body, &[]).await;
     assert_eq!(status, StatusCode::OK, "fresh assertion control: {resp}");
 }
+
+/// Seed an approved device authorization for `client` and return its
+/// device code.
+async fn approved_device_code(
+    state: &crate::AppState,
+    user: &User,
+    client: &TestOAuthClient,
+    device_code: &str,
+) -> String {
+    let auth = create_test_authenticator(&state.store, &user.id).await;
+    let expires_at = jiff::Timestamp::now()
+        .checked_add(jiff::Span::new().hours(1))
+        .expect("device code expiry");
+    let id = db::create_device_auth_request(
+        &state.store,
+        &sha256_base64url(device_code),
+        &device_code.to_uppercase(),
+        &client.client_id,
+        expires_at,
+        0,
+    )
+    .await
+    .expect("create device authorization request");
+    db::authorize_device_auth(
+        &state.store,
+        AuthorizeDeviceAuthParams {
+            id: &id,
+            user_id: &user.id,
+            user_email: &user.email,
+            authenticator_id: &auth,
+            verification: DeviceApproval::Observed(AuthTime::for_test(1_700_000_000)),
+        },
+    )
+    .await
+    .expect("approve device authorization");
+    device_code.to_string()
+}
+
+/// Poll the device code grant with extra form parameters appended.
+async fn poll_device_token_with(
+    app: &axum::Router,
+    device_code: &str,
+    client: &TestOAuthClient,
+    extra: &str,
+) -> (StatusCode, String) {
+    http_post_form(
+        app,
+        "/oauth/token",
+        &format!("grant_type={GRANT_TYPE_DEVICE_CODE}&device_code={device_code}{extra}"),
+        &[("Authorization", client.basic_auth_header().as_str())],
+    )
+    .await
+}
+
+// RFC 8707 §2.2: `resource` on an access token request applies "for all grant
+// types", and §2 says the AS "SHOULD audience-restrict issued access tokens
+// to the resource(s) indicated".
+#[tokio::test]
+async fn test_device_grant_resource_sets_audience() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "device-resource@example.com").await;
+    let resource = "https://api.example.com/";
+    let client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            resource_uris: vec![resource.to_string()],
+            ..Default::default()
+        },
+    )
+    .await;
+    let device_code = approved_device_code(&state, &user, &client, "dev_resource").await;
+
+    let (status, body) = poll_device_token_with(
+        &app,
+        &device_code,
+        &client,
+        &format!("&resource={}", urlencoding::encode(resource)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "device grant should issue: {body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("token response is JSON");
+    let claims = decode_jwt_payload(json["access_token"].as_str().expect("access_token"));
+    assert_eq!(
+        claims["aud"], resource,
+        "the access token must be audience-restricted to the requested resource"
+    );
+}
+
+// RFC 8707 §2: a resource the client did not register is rejected with
+// `invalid_target`, and nothing is issued or consumed.
+#[tokio::test]
+async fn test_device_grant_unregistered_resource_is_invalid_target() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "device-bad-resource@example.com").await;
+    let client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            resource_uris: vec!["https://api.example.com/".to_string()],
+            ..Default::default()
+        },
+    )
+    .await;
+    let device_code = approved_device_code(&state, &user, &client, "dev_bad_resource").await;
+
+    let (status, body) = poll_device_token_with(
+        &app,
+        &device_code,
+        &client,
+        &format!(
+            "&resource={}",
+            urlencoding::encode("https://other.example.com/")
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("error is JSON");
+    assert_eq!(json["error"], "invalid_target", "{body}");
+
+    let (status, body) = poll_device_token(&app, &device_code, &client).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the refused poll must leave the device code redeemable: {body}"
+    );
+}
+
+// RFC 9396 §6: the AS checks requested authorization details against "the
+// underlying grant" and "Otherwise, the AS refuses the request with the error
+// code invalid_authorization_details". A device authorization carries none.
+#[tokio::test]
+async fn test_device_grant_authorization_details_refused() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "device-ad@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let device_code = approved_device_code(&state, &user, &client, "dev_ad").await;
+
+    let details = r#"[{"type":"device_posture","posture_version":1}]"#;
+    let (status, body) = poll_device_token_with(
+        &app,
+        &device_code,
+        &client,
+        &format!("&authorization_details={}", urlencoding::encode(details)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("error is JSON");
+    assert_eq!(json["error"], "invalid_authorization_details", "{body}");
+
+    let (status, body) = poll_device_token(&app, &device_code, &client).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the refused poll must leave the device code redeemable: {body}"
+    );
+}

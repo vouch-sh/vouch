@@ -7,6 +7,7 @@
 
 use crate::error::{OAuthErrorCode, ServiceError, ServiceResult};
 use serde::{Deserialize, Serialize};
+use vouch_common::posture::{DevicePosture, POSTURE_TYPE};
 
 /// Maximum allowed size of the raw `authorization_details` JSON string (bytes).
 const MAX_SIZE: usize = 8192;
@@ -16,9 +17,9 @@ const MAX_DEPTH: usize = 5;
 
 /// RFC 9396 Section 2: A single authorization detail object.
 ///
-/// Wraps `serde_json::Value`, validated to be a JSON object with a required
-/// string `type` field. The inner value is opaque — Vouch does not interpret
-/// type-specific fields.
+/// Wraps `serde_json::Value`, validated at [`AuthorizationDetails::parse`] to
+/// be a well-formed object of a type Vouch defines. Stored and compared as the
+/// JSON the client sent.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AuthorizationDetail(serde_json::Value);
 
@@ -32,7 +33,8 @@ impl AuthorizationDetails {
     /// Enforces:
     /// - Size limit ([`MAX_SIZE`] bytes)
     /// - Must be a JSON array
-    /// - Each element must be a JSON object with a non-empty string `type` field
+    /// - Each element must be a JSON object whose `type` is `device_posture`
+    ///   and whose fields are those of [`DevicePosture`] (RFC 9396 §5)
     /// - Nesting depth ≤ [`MAX_DEPTH`]
     /// - No control characters in string values (RFC 9396 Section 12)
     ///
@@ -92,10 +94,16 @@ impl AuthorizationDetails {
                 )
             })?;
 
-            if type_str.is_empty() {
+            // RFC 9396 §5: "The AS MUST refuse to process any unknown
+            // authorization details type". The only type Vouch defines is the
+            // CLI's device posture.
+            if type_str != POSTURE_TYPE {
                 return Err(ServiceError::oauth(
                     OAuthErrorCode::InvalidAuthorizationDetails,
-                    format!("authorization_details[{i}] 'type' must not be empty"),
+                    format!(
+                        "authorization_details[{i}] has an unsupported type; \
+                         supported types: {POSTURE_TYPE}"
+                    ),
                 ));
             }
 
@@ -112,6 +120,17 @@ impl AuthorizationDetails {
                 return Err(ServiceError::oauth(
                     OAuthErrorCode::InvalidAuthorizationDetails,
                     format!("authorization_details[{i}] contains control characters"),
+                ));
+            }
+
+            // RFC 9396 §5: abort if an object of known type has "unknown
+            // fields", "fields of the wrong type", or "fields with invalid
+            // values". `DevicePosture` denies unknown fields and its enums
+            // are closed, so deserializing it checks all three.
+            if let Err(e) = serde_json::from_value::<DevicePosture>(item.clone()) {
+                return Err(ServiceError::oauth(
+                    OAuthErrorCode::InvalidAuthorizationDetails,
+                    format!("authorization_details[{i}] is not a valid {POSTURE_TYPE} object: {e}"),
                 ));
             }
 
@@ -210,142 +229,208 @@ fn validate_no_control_chars(value: &serde_json::Value) -> bool {
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
-    clippy::indexing_slicing,
+    clippy::panic,
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
     use super::*;
 
+    /// A `device_posture` entry whose `os_version` distinguishes it from
+    /// another.
+    fn posture(os_version: &str) -> String {
+        format!(r#"{{"type":"device_posture","posture_version":1,"os_version":"{os_version}"}}"#)
+    }
+
+    fn error_code(raw: &str) -> OAuthErrorCode {
+        match AuthorizationDetails::parse(raw) {
+            Ok(details) => panic!("{raw} should have been rejected, parsed as {details:?}"),
+            Err(ServiceError::OAuth { code, .. }) => code,
+            Err(e) => panic!("expected an OAuth error for {raw}, got {e:?}"),
+        }
+    }
+
     #[test]
     fn test_parse_valid_array() {
-        let raw = r#"[{"type":"payment_initiation","amount":100}]"#;
+        let raw =
+            r#"[{"type":"device_posture","posture_version":1,"os":"macos","edr":["crowdstrike"]}]"#;
         let details = AuthorizationDetails::parse(raw).unwrap();
         assert_eq!(details.0.len(), 1);
     }
 
     #[test]
     fn test_parse_multiple_entries() {
-        let raw = r#"[{"type":"a"},{"type":"b","extra":true}]"#;
-        let details = AuthorizationDetails::parse(raw).unwrap();
+        let raw = format!("[{},{}]", posture("1"), posture("2"));
+        let details = AuthorizationDetails::parse(&raw).unwrap();
         assert_eq!(details.0.len(), 2);
     }
 
     #[test]
     fn test_parse_non_array() {
-        let raw = r#"{"type":"payment_initiation"}"#;
-        let err = AuthorizationDetails::parse(raw).unwrap_err();
-        assert!(
-            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidAuthorizationDetails)
+        assert_eq!(
+            error_code(&posture("1")),
+            OAuthErrorCode::InvalidAuthorizationDetails
         );
     }
 
     #[test]
     fn test_parse_missing_type() {
-        let raw = r#"[{"amount":100}]"#;
-        assert!(AuthorizationDetails::parse(raw).is_err());
+        let raw = r#"[{"posture_version":1}]"#;
+        assert_eq!(error_code(raw), OAuthErrorCode::InvalidAuthorizationDetails);
     }
 
     #[test]
     fn test_parse_non_string_type() {
-        let raw = r#"[{"type":42}]"#;
-        assert!(AuthorizationDetails::parse(raw).is_err());
+        let raw = r#"[{"type":42,"posture_version":1}]"#;
+        assert_eq!(error_code(raw), OAuthErrorCode::InvalidAuthorizationDetails);
     }
 
     #[test]
     fn test_parse_empty_type() {
-        let raw = r#"[{"type":""}]"#;
-        assert!(AuthorizationDetails::parse(raw).is_err());
+        let raw = r#"[{"type":"","posture_version":1}]"#;
+        assert_eq!(error_code(raw), OAuthErrorCode::InvalidAuthorizationDetails);
+    }
+
+    // RFC 9396 §5: the AS MUST abort with invalid_authorization_details if an
+    // object "contains an unknown authorization details type value".
+    #[test]
+    fn test_parse_unknown_type_rejected() {
+        let raw = r#"[{"type":"payment_initiation","amount":100}]"#;
+        assert_eq!(error_code(raw), OAuthErrorCode::InvalidAuthorizationDetails);
+    }
+
+    // RFC 9396 §5: one unknown entry aborts the whole request, even beside a
+    // known one.
+    #[test]
+    fn test_parse_unknown_type_beside_known_rejected() {
+        let raw = format!(r#"[{},{{"type":"account_information"}}]"#, posture("1"));
+        assert_eq!(
+            error_code(&raw),
+            OAuthErrorCode::InvalidAuthorizationDetails
+        );
+    }
+
+    // RFC 9396 §5: "is an object of known type but containing unknown fields".
+    #[test]
+    fn test_parse_known_type_unknown_field_rejected() {
+        let raw = r#"[{"type":"device_posture","posture_version":1,"amount":100}]"#;
+        assert_eq!(error_code(raw), OAuthErrorCode::InvalidAuthorizationDetails);
+    }
+
+    // RFC 9396 §5: "contains fields of the wrong type for the authorization
+    // details type".
+    #[test]
+    fn test_parse_known_type_wrong_field_type_rejected() {
+        let raw = r#"[{"type":"device_posture","posture_version":1,"firewall_enabled":"yes"}]"#;
+        assert_eq!(error_code(raw), OAuthErrorCode::InvalidAuthorizationDetails);
+    }
+
+    // RFC 9396 §5: "contains fields with invalid values for the authorization
+    // details type".
+    #[test]
+    fn test_parse_known_type_invalid_value_rejected() {
+        let raw = r#"[{"type":"device_posture","posture_version":1,"os":"beos"}]"#;
+        assert_eq!(error_code(raw), OAuthErrorCode::InvalidAuthorizationDetails);
+    }
+
+    // RFC 9396 §5: "is missing required fields for the authorization details
+    // type".
+    #[test]
+    fn test_parse_known_type_missing_required_field_rejected() {
+        let raw = r#"[{"type":"device_posture"}]"#;
+        assert_eq!(error_code(raw), OAuthErrorCode::InvalidAuthorizationDetails);
     }
 
     #[test]
     fn test_parse_empty_array() {
-        let raw = "[]";
-        assert!(AuthorizationDetails::parse(raw).is_err());
+        assert_eq!(
+            error_code("[]"),
+            OAuthErrorCode::InvalidAuthorizationDetails
+        );
     }
 
     #[test]
     fn test_parse_oversized() {
-        let big = format!(r#"[{{"type":"x","data":"{}"}}]"#, "a".repeat(MAX_SIZE));
-        assert!(AuthorizationDetails::parse(&big).is_err());
+        let big = format!("[{}]", posture(&"a".repeat(MAX_SIZE)));
+        assert_eq!(
+            error_code(&big),
+            OAuthErrorCode::InvalidAuthorizationDetails
+        );
     }
 
     #[test]
     fn test_parse_control_characters() {
-        let raw = r#"[{"type":"test","value":"hello\u0000world"}]"#;
-        // serde_json parses \u0000 as a null byte in the string
-        let parsed: serde_json::Value = serde_json::from_str(raw).unwrap();
-        let arr = parsed.as_array().unwrap();
-        assert!(!validate_no_control_chars(&arr[0]));
+        let raw = format!("[{}]", posture(r"hello\u0000world"));
+        assert_eq!(
+            error_code(&raw),
+            OAuthErrorCode::InvalidAuthorizationDetails
+        );
     }
 
     #[test]
     fn test_parse_control_chars_in_keys_rejected() {
-        // Control characters in object keys should also be rejected
-        let raw = "[{\"type\":\"test\",\"he\x01llo\":\"world\"}]";
-        assert!(AuthorizationDetails::parse(raw).is_err());
+        let raw = "[{\"type\":\"device_posture\",\"posture_version\":1,\"he\x01llo\":\"world\"}]";
+        assert_eq!(error_code(raw), OAuthErrorCode::InvalidAuthorizationDetails);
     }
 
     #[test]
     fn test_parse_del_character_rejected() {
-        // DEL (0x7F) should be rejected as a control character
-        let raw = "[{\"type\":\"test\",\"value\":\"hello\x7Fworld\"}]";
-        assert!(AuthorizationDetails::parse(raw).is_err());
+        let raw = format!("[{}]", posture("hello\x7Fworld"));
+        assert_eq!(
+            error_code(&raw),
+            OAuthErrorCode::InvalidAuthorizationDetails
+        );
     }
 
     #[test]
     fn test_parse_deep_nesting() {
         // 6 levels of nesting (exceeds MAX_DEPTH=5)
-        let raw = r#"[{"type":"t","a":{"b":{"c":{"d":{"e":{"f":"deep"}}}}}}]"#;
-        assert!(AuthorizationDetails::parse(raw).is_err());
-    }
-
-    #[test]
-    fn test_parse_nesting_at_limit() {
-        // 5 levels: obj -> a:obj -> b:obj -> c:obj -> d:obj -> e:str
-        let raw = r#"[{"type":"t","a":{"b":{"c":{"d":"ok"}}}}]"#;
-        assert!(AuthorizationDetails::parse(raw).is_ok());
+        let raw = r#"[{"type":"device_posture","a":{"b":{"c":{"d":{"e":{"f":"deep"}}}}}}]"#;
+        assert_eq!(error_code(raw), OAuthErrorCode::InvalidAuthorizationDetails);
     }
 
     #[test]
     fn test_is_subset_of_exact_match() {
-        let raw = r#"[{"type":"a","v":1},{"type":"b"}]"#;
-        let granted = AuthorizationDetails::parse(raw).unwrap();
-        let requested = AuthorizationDetails::parse(raw).unwrap();
+        let raw = format!("[{},{}]", posture("1"), posture("2"));
+        let granted = AuthorizationDetails::parse(&raw).unwrap();
+        let requested = AuthorizationDetails::parse(&raw).unwrap();
         assert!(requested.is_subset_of(&granted));
     }
 
     #[test]
     fn test_is_subset_of_proper_subset() {
-        let granted = AuthorizationDetails::parse(r#"[{"type":"a"},{"type":"b"}]"#).unwrap();
-        let requested = AuthorizationDetails::parse(r#"[{"type":"a"}]"#).unwrap();
+        let granted =
+            AuthorizationDetails::parse(&format!("[{},{}]", posture("1"), posture("2"))).unwrap();
+        let requested = AuthorizationDetails::parse(&format!("[{}]", posture("1"))).unwrap();
         assert!(requested.is_subset_of(&granted));
     }
 
     #[test]
     fn test_is_subset_of_extra_entry_fails() {
-        let granted = AuthorizationDetails::parse(r#"[{"type":"a"}]"#).unwrap();
-        let requested = AuthorizationDetails::parse(r#"[{"type":"a"},{"type":"b"}]"#).unwrap();
+        let granted = AuthorizationDetails::parse(&format!("[{}]", posture("1"))).unwrap();
+        let requested =
+            AuthorizationDetails::parse(&format!("[{},{}]", posture("1"), posture("2"))).unwrap();
         assert!(!requested.is_subset_of(&granted));
     }
 
     #[test]
     fn test_is_subset_of_different_fields_fails() {
-        let granted = AuthorizationDetails::parse(r#"[{"type":"a","v":1}]"#).unwrap();
-        let requested = AuthorizationDetails::parse(r#"[{"type":"a","v":2}]"#).unwrap();
+        let granted = AuthorizationDetails::parse(&format!("[{}]", posture("1"))).unwrap();
+        let requested = AuthorizationDetails::parse(&format!("[{}]", posture("2"))).unwrap();
         assert!(!requested.is_subset_of(&granted));
     }
 
     #[test]
     fn test_is_subset_of_reordered_array() {
-        let granted = AuthorizationDetails::parse(r#"[{"type":"a"},{"type":"b"}]"#).unwrap();
-        let requested = AuthorizationDetails::parse(r#"[{"type":"b"},{"type":"a"}]"#).unwrap();
+        let granted =
+            AuthorizationDetails::parse(&format!("[{},{}]", posture("1"), posture("2"))).unwrap();
+        let requested =
+            AuthorizationDetails::parse(&format!("[{},{}]", posture("2"), posture("1"))).unwrap();
         assert!(requested.is_subset_of(&granted));
     }
 
     #[test]
     fn test_round_trip_via_json_value() {
-        let raw = r#"[{"type":"payment","amount":100}]"#;
-        let details = AuthorizationDetails::parse(raw).unwrap();
+        let details = AuthorizationDetails::parse(&format!("[{}]", posture("1"))).unwrap();
         let value = serde_json::Value::from(&details);
         let round_tripped = AuthorizationDetails::try_from(&value).unwrap();
         assert_eq!(details, round_tripped);
@@ -353,8 +438,7 @@ mod tests {
 
     #[test]
     fn test_to_json_value() {
-        let raw = r#"[{"type":"t"}]"#;
-        let details = AuthorizationDetails::parse(raw).unwrap();
+        let details = AuthorizationDetails::parse(&format!("[{}]", posture("1"))).unwrap();
         let value = serde_json::Value::from(&details);
         assert!(value.is_array());
         assert_eq!(value.as_array().unwrap().len(), 1);
@@ -365,19 +449,24 @@ mod tests {
         let details = AuthorizationDetails(vec![]);
         assert!(details.is_empty());
 
-        let non_empty = AuthorizationDetails::parse(r#"[{"type":"a"}]"#).unwrap();
+        let non_empty = AuthorizationDetails::parse(&format!("[{}]", posture("1"))).unwrap();
         assert!(!non_empty.is_empty());
     }
 
     #[test]
     fn test_non_object_element() {
-        let raw = r#"["string"]"#;
-        assert!(AuthorizationDetails::parse(raw).is_err());
+        assert_eq!(
+            error_code(r#"["string"]"#),
+            OAuthErrorCode::InvalidAuthorizationDetails
+        );
     }
 
     #[test]
     fn test_invalid_json() {
-        assert!(AuthorizationDetails::parse("not json").is_err());
+        assert_eq!(
+            error_code("not json"),
+            OAuthErrorCode::InvalidAuthorizationDetails
+        );
     }
 
     #[test]

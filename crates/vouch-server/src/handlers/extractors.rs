@@ -13,7 +13,7 @@ use serde::Deserialize;
 use crate::AppState;
 use crate::arrival::ArrivalTime;
 use crate::db;
-use crate::error::{OAuthErrorCode, OAuthErrorResponse, ServiceError};
+use crate::error::{ErrorDescription, OAuthErrorCode, OAuthErrorResponse, ServiceError};
 use crate::handlers::session::{self, AuthContext, extract_org_admin, get_resource_auth_context};
 use crate::infra::mtls_listener::PeerClientCert;
 use crate::services::oidc::mtls::{self, CertThumbprint, ClientCertificate};
@@ -186,9 +186,9 @@ where
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 axum::Json(OAuthErrorResponse {
                     error: OAuthErrorCode::InvalidRequest.as_str().to_string(),
-                    error_description: Some(
-                        "Expected application/x-www-form-urlencoded request body".to_string(),
-                    ),
+                    error_description: Some(ErrorDescription::new(
+                        "Expected application/x-www-form-urlencoded request body",
+                    )),
                     error_uri: None,
                 }),
             )

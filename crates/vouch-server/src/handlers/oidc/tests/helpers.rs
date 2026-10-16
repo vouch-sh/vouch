@@ -579,3 +579,19 @@ pub(super) async fn authorize_location_with_session(
         .unwrap_or_default()
         .to_string()
 }
+
+/// POST a client_credentials token request as `client` with `extra` appended.
+pub(super) async fn client_credentials_request(
+    app: &axum::Router,
+    client: &TestOAuthClient,
+    extra: &str,
+) -> (StatusCode, serde_json::Value) {
+    let (status, body) = http_post_form(
+        app,
+        "/oauth/token",
+        &format!("grant_type=client_credentials{extra}"),
+        &[("Authorization", client.basic_auth_header().as_str())],
+    )
+    .await;
+    (status, serde_json::from_str(&body).expect("valid JSON"))
+}
