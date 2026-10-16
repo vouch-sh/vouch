@@ -742,3 +742,387 @@ async fn test_authorization_details_size_limit_at_token_endpoint() {
         "Should reject oversized authorization_details"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Section 6: client_credentials grant — authorization_details and resource
+//
+// RFC 9396 §6 explicitly covers the client_credentials grant: the AS checks
+// the request against "the client's policy … in case of grant type
+// client_credentials" and, if not allowed, "refuses the request with the
+// error code invalid_authorization_details". Before the fix, the server
+// silently discarded `authorization_details` (and `resource`) for this grant,
+// issuing a full-policy token with a 200 and no `authorization_details` member.
+// The fix plumbs both parameters through `ClientCredentialsParams` and fails
+// closed: `authorization_details` is parsed and rejected, and `resource` is
+// validated against the client's registered `resource_uris` allowlist
+// (RFC 8707 §2, which applies to all grant types).
+// ---------------------------------------------------------------------------
+
+/// Create a client registered for the `client_credentials` grant.
+async fn machine_client(state: &std::sync::Arc<crate::AppState>, email: &str) -> TestOAuthClient {
+    let user = create_test_user(&state.store, email).await;
+    create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            name: "Machine Client".to_string(),
+            grant_types: Some(vec!["client_credentials".to_string()]),
+            ..Default::default()
+        },
+    )
+    .await
+}
+
+/// Create a client registered for `client_credentials` with a `resource_uris`
+/// allowlist containing `resource_uri`.
+async fn machine_client_with_resources(
+    state: &std::sync::Arc<crate::AppState>,
+    email: &str,
+    resource_uris: Vec<String>,
+) -> TestOAuthClient {
+    let user = create_test_user(&state.store, email).await;
+    create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            name: "Machine Client".to_string(),
+            grant_types: Some(vec!["client_credentials".to_string()]),
+            resource_uris,
+            ..Default::default()
+        },
+    )
+    .await
+}
+
+#[tokio::test]
+async fn test_client_credentials_authorization_details_rejected() {
+    // RFC 9396 §6: The client_credentials grant is explicitly covered by
+    // RFC 9396. No per-client authorization-details policy exists yet, so
+    // the server fails closed: a request carrying `authorization_details`
+    // is rejected with `invalid_authorization_details` rather than silently
+    // issuing a full-policy token.
+    let (app, state) = test_app().await;
+    let client = machine_client(&state, "cc-ad@example.com").await;
+
+    let ad = r#"[{"type":"payment_initiation","actions":["initiate"]}]"#;
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=client_credentials&authorization_details={}",
+            urlencoding::encode(ad),
+        ),
+        &[("Authorization", &client.basic_auth_header())],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "client_credentials with authorization_details must be rejected: {body}"
+    );
+    let err: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+    assert_eq!(
+        err["error"], "invalid_authorization_details",
+        "error must be invalid_authorization_details: {body}"
+    );
+}
+
+#[tokio::test]
+async fn test_client_credentials_malformed_authorization_details_rejected() {
+    // RFC 9396 §5: "The AS MUST refuse to process any unknown authorization
+    // details type or authorization details not conforming to the respective
+    // type definition." Malformed JSON must be rejected with
+    // `invalid_authorization_details` — the same error the authorization_code
+    // and token-exchange grants produce for the same input. Before the fix,
+    // the client_credentials grant never parsed the value at all, so even
+    // malformed JSON was silently accepted with a 200.
+    let (app, state) = test_app().await;
+    let client = machine_client(&state, "cc-ad-malformed@example.com").await;
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=client_credentials&authorization_details={}",
+            urlencoding::encode("not-valid-json"),
+        ),
+        &[("Authorization", &client.basic_auth_header())],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "malformed authorization_details must be rejected: {body}"
+    );
+    let err: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+    assert_eq!(
+        err["error"], "invalid_authorization_details",
+        "error must be invalid_authorization_details for malformed JSON: {body}"
+    );
+}
+
+#[tokio::test]
+async fn test_client_credentials_authorization_details_non_array_rejected() {
+    // RFC 9396 §2: authorization_details MUST be a JSON array. A JSON object
+    // is rejected with `invalid_authorization_details` on the authorization_code
+    // grant; the client_credentials grant must produce the same error.
+    let (app, state) = test_app().await;
+    let client = machine_client(&state, "cc-ad-obj@example.com").await;
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=client_credentials&authorization_details={}",
+            urlencoding::encode(r#"{"type":"payment"}"#),
+        ),
+        &[("Authorization", &client.basic_auth_header())],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let err: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+    assert_eq!(
+        err["error"], "invalid_authorization_details",
+        "non-array authorization_details must be rejected: {body}"
+    );
+}
+
+#[tokio::test]
+async fn test_client_credentials_without_authorization_details_succeeds() {
+    // No regression: a client_credentials request without authorization_details
+    // still succeeds and the response omits the authorization_details member.
+    let (app, state) = test_app().await;
+    let client = machine_client(&state, "cc-no-ad@example.com").await;
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        "grant_type=client_credentials",
+        &[("Authorization", &client.basic_auth_header())],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "client_credentials should succeed: {body}"
+    );
+    let resp: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+    assert!(
+        resp.get("authorization_details").is_none(),
+        "authorization_details should be omitted when not requested: {body}"
+    );
+    assert!(
+        resp.get("access_token").is_some(),
+        "access_token must be present: {body}"
+    );
+}
+
+#[tokio::test]
+async fn test_client_credentials_resource_sets_audience() {
+    // RFC 8707 §2: The `resource` parameter applies to all grant types.
+    // A registered resource URI on a client_credentials request sets the
+    // audience of the issued token, narrowing it from the default self
+    // audience.
+    let (app, state) = test_app().await;
+    let resource_uri = "https://api.example.com";
+    let client = machine_client_with_resources(
+        &state,
+        "cc-resource@example.com",
+        vec![resource_uri.to_string()],
+    )
+    .await;
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!("grant_type=client_credentials&resource={resource_uri}",),
+        &[("Authorization", &client.basic_auth_header())],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "client_credentials with registered resource should succeed: {body}"
+    );
+    let resp: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+    let access_token = resp["access_token"].as_str().expect("access_token");
+
+    // The issued token's `aud` claim must match the requested resource.
+    let claims = decode_jwt_payload(access_token);
+    let aud = claims
+        .get("aud")
+        .expect("access token should have aud claim");
+    let aud_str = aud.as_str().unwrap_or_default();
+    assert_eq!(
+        aud_str, resource_uri,
+        "access token aud should match the registered resource indicator"
+    );
+}
+
+#[tokio::test]
+async fn test_client_credentials_unregistered_resource_rejected() {
+    // RFC 8707 §2: A `resource` parameter that is not on the client's
+    // registered `resource_uris` allowlist must be rejected with
+    // `invalid_target` — the same chokepoint the token-exchange grant uses.
+    let (app, state) = test_app().await;
+    let client = machine_client_with_resources(
+        &state,
+        "cc-resource-unregistered@example.com",
+        vec!["https://api.example.com".to_string()],
+    )
+    .await;
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=client_credentials&resource={}",
+            "https://unregistered.example.com",
+        ),
+        &[("Authorization", &client.basic_auth_header())],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "unregistered resource must be rejected: {body}"
+    );
+    let err: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+    assert_eq!(
+        err["error"], "invalid_target",
+        "error must be invalid_target for unregistered resource: {body}"
+    );
+}
+
+#[tokio::test]
+async fn test_client_credentials_invalid_resource_uri_rejected() {
+    // RFC 8707 §2: The resource parameter must be an absolute URI without a
+    // fragment. A syntactically invalid URI is rejected with `invalid_target`.
+    let (app, state) = test_app().await;
+    let client = machine_client_with_resources(
+        &state,
+        "cc-resource-invalid@example.com",
+        vec!["https://api.example.com".to_string()],
+    )
+    .await;
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        "grant_type=client_credentials&resource=not-a-valid-uri",
+        &[("Authorization", &client.basic_auth_header())],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "invalid resource URI must be rejected: {body}"
+    );
+    let err: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+    assert_eq!(
+        err["error"], "invalid_target",
+        "error must be invalid_target for invalid resource URI: {body}"
+    );
+}
+
+#[tokio::test]
+async fn test_client_credentials_resource_with_fragment_rejected() {
+    // RFC 8707 §2: The resource URI MUST NOT contain a fragment component.
+    let (app, state) = test_app().await;
+    let client = machine_client_with_resources(
+        &state,
+        "cc-resource-fragment@example.com",
+        vec!["https://api.example.com".to_string()],
+    )
+    .await;
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=client_credentials&resource={}",
+            urlencoding::encode("https://api.example.com#fragment"),
+        ),
+        &[("Authorization", &client.basic_auth_header())],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "resource URI with fragment must be rejected: {body}"
+    );
+    let err: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+    assert_eq!(
+        err["error"], "invalid_target",
+        "error must be invalid_target for resource URI with fragment: {body}"
+    );
+}
+
+#[tokio::test]
+async fn test_client_credentials_without_resource_succeeds_no_regression() {
+    // No regression: a client_credentials request without a `resource`
+    // parameter still succeeds and the token carries the default audience
+    // (the client_id), not a narrowed one.
+    let (app, state) = test_app().await;
+    let client = machine_client_with_resources(
+        &state,
+        "cc-no-resource@example.com",
+        vec!["https://api.example.com".to_string()],
+    )
+    .await;
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        "grant_type=client_credentials",
+        &[("Authorization", &client.basic_auth_header())],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "client_credentials without resource should succeed: {body}"
+    );
+    let resp: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+    assert!(
+        resp.get("access_token").is_some(),
+        "access_token must be present: {body}"
+    );
+}
+
+#[tokio::test]
+async fn test_client_credentials_authorization_details_size_limit() {
+    // The global 8192-byte size gate on authorization_details (applied
+    // before grant dispatch) must reject oversized values with
+    // invalid_authorization_details for client_credentials requests.
+    let (app, state) = test_app().await;
+    let client = machine_client(&state, "cc-ad-size@example.com").await;
+
+    let big = format!(r#"[{{"type":"x","data":"{}"}}]"#, "a".repeat(9000));
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=client_credentials&authorization_details={}",
+            urlencoding::encode(&big),
+        ),
+        &[("Authorization", &client.basic_auth_header())],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let err: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+    assert_eq!(
+        err["error"], "invalid_authorization_details",
+        "Should reject oversized authorization_details for client_credentials: {body}"
+    );
+}

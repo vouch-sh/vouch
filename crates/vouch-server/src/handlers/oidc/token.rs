@@ -25,6 +25,7 @@ use crate::services::oidc::mtls::CertThumbprint;
 use crate::services::oidc::validated_client::ValidatedOAuthClient;
 use crate::services::oidc::{
     ResourceUri, ScopeSet,
+    authorization_details::AuthorizationDetails,
     client_credentials::exchange_client_credentials,
     dpop::DpopError,
     exchange::{ActorToken, RequestedTokenType, SubjectToken, TokenExchangeParams, exchange_token},
@@ -204,6 +205,10 @@ struct AuthorizationCodeParams {
 /// RFC 6749 §4.4 client credentials grant parameters.
 struct ClientCredentialsParams {
     scope: Option<String>,
+    /// RFC 8707 §2: Target resource indicator (OPTIONAL).
+    resource: Option<String>,
+    /// RFC 9396 §6: Rich authorization details (OPTIONAL).
+    authorization_details: Option<String>,
 }
 
 /// RFC 8628 §3.4 device authorization grant parameters.
@@ -315,7 +320,11 @@ impl TokenRequestForm {
                 })
             }
             OAuthGrantType::ClientCredentials => {
-                GrantParams::ClientCredentials(ClientCredentialsParams { scope: self.scope })
+                GrantParams::ClientCredentials(ClientCredentialsParams {
+                    scope: self.scope,
+                    resource: self.resource,
+                    authorization_details: self.authorization_details,
+                })
             }
             OAuthGrantType::DeviceCode => GrantParams::DeviceCode(DeviceCodeParams {
                 device_code: self
@@ -938,6 +947,41 @@ async fn handle_client_credentials_grant(
         Err(e) => return e.into_oauth_response().into_response(),
     };
 
+    // RFC 9396 §6: The client_credentials grant is explicitly covered by
+    // RFC 9396 — the AS checks the request against "the client's policy … in
+    // case of grant type client_credentials" and, if not allowed, "refuses the
+    // request with the error code invalid_authorization_details". No per-client
+    // authorization-details policy mechanism exists yet, so fail closed: when
+    // `authorization_details` is present, parse it (to surface malformed JSON
+    // as `invalid_authorization_details` rather than a generic error, matching
+    // the authorization_code and token-exchange grants) and reject the
+    // request. This removes the silent 200-with-omitted-member behavior that
+    // previously issued a full-policy token without any signal to the client.
+    if let Some(ref ad) = params.authorization_details {
+        if let Err(e) = AuthorizationDetails::parse(ad) {
+            return e.into_oauth_response().into_response();
+        }
+        return ServiceError::oauth(
+            OAuthErrorCode::InvalidAuthorizationDetails,
+            "authorization_details is not allowed by the client's policy \
+             for the client_credentials grant",
+        )
+        .into_oauth_response()
+        .into_response();
+    }
+
+    // RFC 8707 §2: The `resource` parameter applies to all grant types.
+    // Validate the URI syntax and check it against the authenticated client's
+    // registered `resource_uris` allowlist — the same `resolve_exchange_audience`
+    // chokepoint used by the token-exchange grant. Unlike token exchange, the
+    // client_credentials grant has no `audience` parameter, so only `resource`
+    // is resolved.
+    let effective_audience =
+        match resolve_exchange_audience(None, params.resource.as_deref(), &authenticated_client) {
+            Ok(aud) => aud,
+            Err(e) => return e.into_oauth_response().into_response(),
+        };
+
     let client_auth = match client_auth_proof(witnesses, &authenticated_client) {
         Ok(proof) => proof,
         Err(resp) => return resp,
@@ -952,6 +996,7 @@ async fn handle_client_credentials_grant(
         &state,
         &authenticated_client,
         params.scope.as_deref(),
+        effective_audience.as_deref(),
         TokenBinding::new(dpop_proof.as_ref(), mtls_thumbprint.as_ref()),
         proof,
         arrival,
@@ -991,6 +1036,9 @@ async fn handle_client_credentials_grant(
                 id_token: None,
                 scope: result.scope,
                 email: None,
+                // RFC 9396 §6: authorization_details is fail-closed for
+                // client_credentials — the handler rejects any request that
+                // carries it, so a successful response never carries it.
                 authorization_details: None,
             })
         }

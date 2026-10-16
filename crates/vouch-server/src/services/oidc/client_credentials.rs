@@ -37,12 +37,17 @@ pub struct ClientCredentialsResult {
 /// * `state` - Application state
 /// * `client` - The authenticated OAuth client
 /// * `requested_scope` - Optional scope requested by the client
-/// * `mtls_cert_thumbprint` - RFC 8705 certificate thumbprint for token binding (if applicable)
+/// * `audience` - Optional audience (RFC 8707 resource indicator), resolved
+///   and allowlisted by the handler before this call
+/// * `binding` - RFC 8705 / RFC 9449 token binding
+/// * `proof` - Token issuance proof
+/// * `arrival` - Request arrival time
 ///
 pub(crate) async fn exchange_client_credentials(
     state: &Arc<AppState>,
     client: &ValidatedOAuthClient,
     requested_scope: Option<&str>,
+    audience: Option<&str>,
     binding: TokenBinding<'_>,
     proof: TokenIssuanceProof,
     arrival: ArrivalTime,
@@ -69,9 +74,15 @@ pub(crate) async fn exchange_client_credentials(
             scope: scope.clone(),
             binding,
             act: None,
-            audience: None,
+            audience,
             max_lifetime_secs: None,
             hardware_verification: HardwareVerification::NotVerified,
+            // RFC 9396 §6: authorization_details is fail-closed for
+            // client_credentials — the handler rejects any request that
+            // carries it before reaching this service. When per-client
+            // authorization-details policy support is added, the handler
+            // will pass the resolved value here and echo it in the response
+            // per RFC 9396 §7.
             authorization_details: None,
             hardware_aaguid: None,
             org_domain: None,
@@ -185,6 +196,7 @@ mod tests {
         let result = exchange_client_credentials(
             &state,
             &ValidatedOAuthClient::for_test(client),
+            None,
             None,
             TokenBinding::MutualTls(&thumbprint),
             TokenIssuanceProof {
