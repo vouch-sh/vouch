@@ -562,6 +562,20 @@ pub struct AuthorizationCode {
     /// issuance, and single-use record that RFC 6749 §10.5 replay detection
     /// relies on. The `jti` restores that mapping the same way the access-token
     /// path already does (RFC 9068 §2.2 `jti`).
+    ///
+    /// `#[serde(default)]` lets an authorization code minted by a server
+    /// version that predates this field — whose payload therefore lacks a
+    /// `jti` key — decode as an empty string rather than fail, so a rolling
+    /// deploy from a pre-`jti` build does not break redemption for codes in
+    /// flight at the version boundary (within the 60s lifetime). The signing
+    /// key (`VOUCH_JWT_SECRET` or a KMS HMAC key) is deployment-wide and
+    /// persists across deploys, so a pre-upgrade code still passes MAC
+    /// verification on a post-upgrade binary; this default keeps it decoding
+    /// too. The token exchange never reads this field — single-use
+    /// enforcement keys on `hash_token(code)`, a SHA-256 of the code string,
+    /// which matches the row stored at issuance regardless of `jti` — so an
+    /// empty `jti` is observably inert; issuance still stamps `Uuid::now_v7`.
+    #[serde(default)]
     pub jti: String,
     #[serde(with = "numeric_date")]
     pub iat: Timestamp,
@@ -1336,6 +1350,136 @@ mod tests {
             crypto::hash_token(&token_a),
             crypto::hash_token(&token_b),
             "codes with different jti must produce different code hashes"
+        );
+    }
+
+    // =========================================================================
+    // Rolling-deploy decode across the `jti` version boundary
+    // =========================================================================
+    //
+    // Authorization codes are HS256 state-token JWTs signed with a
+    // deployment-wide key (`VOUCH_JWT_SECRET` or a KMS HMAC key) that persists
+    // across deploys, so a code minted by a pre-upgrade binary verifies under
+    // a post-upgrade binary's key. The `jti` field was added in commit
+    // 20aa8ad7; with no `#[serde(default)]` on the new field, codes minted
+    // just before the deploy (whose payload lacks a `jti` key) would fail
+    // claims deserialization after MAC verification and surface to the client
+    // as `invalid_grant` (HTTP 400), indistinguishable from a tampered or
+    // expired code. The `#[serde(default)]` on `jti` keeps them decoding.
+    //
+    // These mirror the precedent set by `authenticated_at` on this struct and
+    // `Fido2ChallengeState.client_id`: a field added to a state-JWT payload
+    // carries `#[serde(default)]` so a token minted by a server version that
+    // predates it decodes rather than fails — see
+    // `.claude/skills/detail-rules/references/wire-format-compat-on-persisted-structs.md`.
+
+    /// The `AuthorizationCode` claims shape as it existed at `20aa8ad7^`, the
+    /// parent of the commit that added `jti`: every field, every serde
+    /// attribute, identical — and no `jti`. Used only to mint the pre-upgrade
+    /// token shape through the real signer; production code never sees it.
+    #[derive(Debug, Serialize)]
+    struct PreJtiAuthorizationCode {
+        iss: String,
+        aud: String,
+        client_id: String,
+        redirect_uri: String,
+        user_id: String,
+        email: String,
+        authenticator_id: String,
+        aaguid: Option<String>,
+        scope: ScopeSet,
+        nonce: Option<String>,
+        code_challenge: Option<String>,
+        code_challenge_method: Option<CodeChallengeMethod>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        resource: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        acr_values: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        dpop_jkt: Option<String>,
+        #[serde(with = "numeric_date")]
+        iat: Timestamp,
+        #[serde(with = "numeric_date")]
+        exp: Timestamp,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        authenticated_at: Option<Timestamp>,
+    }
+
+    impl PreJtiAuthorizationCode {
+        /// Build a pre-`jti` claims payload from a working `AuthorizationCode`,
+        /// dropping only the `jti` field. The result is the shape a
+        /// pre-upgrade binary would have minted from the same inputs.
+        fn from_post(code: &AuthorizationCode) -> Self {
+            Self {
+                iss: code.iss.clone(),
+                aud: code.aud.clone(),
+                client_id: code.client_id.clone(),
+                redirect_uri: code.redirect_uri.clone(),
+                user_id: code.user_id.clone(),
+                email: code.email.clone(),
+                authenticator_id: code.authenticator_id.clone(),
+                aaguid: code.aaguid.clone(),
+                scope: code.scope.clone(),
+                nonce: code.nonce.clone(),
+                code_challenge: code.code_challenge.clone(),
+                code_challenge_method: code.code_challenge_method,
+                resource: code.resource.clone(),
+                acr_values: code.acr_values.clone(),
+                dpop_jkt: code.dpop_jkt.clone(),
+                iat: code.iat,
+                exp: code.exp,
+                authenticated_at: code.authenticated_at,
+            }
+        }
+    }
+
+    // Rolling deploy: a code minted by a pre-`jti` binary — whose payload
+    // lacks the `jti` key added in commit 20aa8ad7 — must still decode on a
+    // post-upgrade binary that shares the deployment-wide HS256 key, instead
+    // of failing with `missing field \`jti\`` and surfacing as `invalid_grant`.
+    // `#[serde(default)]` on `jti` makes the old shape decode with an empty
+    // `jti`; the exchange never reads this field, so an empty value is inert.
+    #[tokio::test]
+    async fn test_authorization_code_minted_without_jti_decodes_during_rolling_deploy() {
+        let signer = StateTokenSigner::local(TEST_JWT_SECRET.to_vec());
+        let post = test_auth_code("https://example.com", "client-a");
+        let pre_jti = PreJtiAuthorizationCode::from_post(&post);
+
+        // Mint the pre-upgrade token shape through the real signer (HS256,
+        // `typ: vouch-authz+jwt`, no `jti` key in the payload).
+        let token = signer
+            .encode_state_token(&pre_jti, JwtType::AuthorizationCode)
+            .await
+            .unwrap();
+
+        // The post-upgrade decoder must accept it.
+        let decoded = AuthorizationCode::decode(
+            &token,
+            &signer,
+            "https://example.com",
+            "client-a",
+            test_arrival(),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("rolling-deploy decode error: {e}"));
+
+        // Every claim the issuance path stamped must roundtrip unchanged.
+        assert_eq!(decoded.iss, post.iss);
+        assert_eq!(decoded.aud, post.aud);
+        assert_eq!(decoded.client_id, post.client_id);
+        assert_eq!(decoded.redirect_uri, post.redirect_uri);
+        assert_eq!(decoded.user_id, post.user_id);
+        assert_eq!(decoded.email, post.email);
+        assert_eq!(decoded.authenticator_id, post.authenticator_id);
+        assert_eq!(decoded.scope, post.scope);
+        assert_eq!(decoded.iat, post.iat);
+        assert_eq!(decoded.exp, post.exp);
+        // `#[serde(default)]` fills the missing `jti` with an empty `String`;
+        // nothing in the exchange reads it.
+        assert!(
+            decoded.jti.is_empty(),
+            "pre-upgrade token has no jti; decoded jti must default to empty, got {:?}",
+            decoded.jti,
         );
     }
 
