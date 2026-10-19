@@ -176,22 +176,19 @@ async fn check_git_remote_codecommit_invocation(argv0: &str) -> Result<bool> {
 
 /// Check if invoked as `keyring` (pip/uv keyring subprocess protocol).
 ///
-/// pip/uv call `keyring get <url> <username>` when `keyring-provider = subprocess`
-/// is configured. When invoked via symlink, argv[0] ends with "keyring".
+/// pip/uv run the `keyring` CLI when `keyring-provider = subprocess` is
+/// configured. When invoked via symlink, argv[0] ends with "keyring", and the
+/// rest of argv follows keyring's own grammar.
 async fn check_keyring_invocation(argv0: &str) -> Result<bool> {
     if is_keyring_argv0(argv0) {
-        let operation = std::env::args().nth(1).unwrap_or_default();
-        let service_url = std::env::args().nth(2);
-        let username = std::env::args().nth(3);
+        let keyring_error =
+            |e: &dyn std::fmt::Display| anyhow::anyhow!(tr_args!("err-keyring", e = e.to_string()));
+        let args = commands::credential::pip::KeyringArgs::try_parse_from(std::env::args_os())
+            .map_err(|e| keyring_error(&e))?;
 
-        commands::credential::pip::run(
-            &operation,
-            service_url.as_deref(),
-            username.as_deref(),
-            InsecureOptIn::Env,
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!(tr_args!("err-keyring", e = e.to_string())))?;
+        commands::credential::pip::run(&args, InsecureOptIn::Env)
+            .await
+            .map_err(|e| keyring_error(&e))?;
 
         return Ok(true);
     }
@@ -772,19 +769,7 @@ async fn run() -> Result<()> {
             CredentialCommands::Codecommit { operation, profile } => {
                 commands::credential::codecommit::run(&operation, profile.as_deref(), opt_in).await
             }
-            CredentialCommands::Pip {
-                operation,
-                service_url,
-                username,
-            } => {
-                commands::credential::pip::run(
-                    &operation,
-                    service_url.as_deref(),
-                    username.as_deref(),
-                    opt_in,
-                )
-                .await
-            }
+            CredentialCommands::Pip(args) => commands::credential::pip::run(&args, opt_in).await,
             CredentialCommands::Eks {
                 cluster_name,
                 region,
