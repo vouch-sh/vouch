@@ -16,7 +16,7 @@ use vouch_cli::tr;
 
 use crate::commands::credential::aws::{StsRequest, exchange_for_sts_credentials};
 use crate::commands::credential::{aws, cache};
-use crate::config::Config;
+use crate::config::{CodeArtifactProfile, Config};
 use crate::integrations::aws::codeartifact::{
     CodeArtifactRegistry, CodeArtifactToken, get_authorization_token,
 };
@@ -49,26 +49,7 @@ impl CodeArtifactTarget {
     pub(crate) fn new(domain: String, domain_owner: String, region: String) -> Self {
         let profile = match Config::load() {
             Ok(config) => config.codeartifact().and_then(|ca| {
-                let mut anchors: Vec<&String> = Vec::new();
-                for saved in ca.domain_profiles.values() {
-                    let matches = saved.domain == domain
-                        && saved.domain_owner == domain_owner
-                        && saved.region == region;
-                    if let Some(anchor) = saved.aws_profile.as_ref()
-                        && matches
-                        && !anchors.contains(&anchor)
-                    {
-                        anchors.push(anchor);
-                    }
-                }
-                // Several saved domain profiles naming this domain but
-                // disagreeing on the account is exactly the case the resolver
-                // refuses to guess at; hand it back none rather than picking
-                // one by map order.
-                match anchors.as_slice() {
-                    [only] => Some((*only).clone()),
-                    _ => None,
-                }
+                anchor_for(ca.domain_profiles.values(), &domain, &domain_owner, &region)
             }),
             Err(_) => None,
         };
@@ -78,6 +59,37 @@ impl CodeArtifactTarget {
             region,
             profile,
         }
+    }
+}
+
+/// The AWS profile anchored to this domain by the saved domain profiles.
+///
+/// The domain and region come from a URL host, which is lowercased, while a
+/// saved profile may have been typed in any case, so those two compare
+/// case-insensitively. Several profiles naming this domain but disagreeing on
+/// the account is exactly the case the resolver refuses to guess at; it gets
+/// none rather than one picked by map order.
+fn anchor_for<'a>(
+    saved: impl Iterator<Item = &'a CodeArtifactProfile>,
+    domain: &str,
+    domain_owner: &str,
+    region: &str,
+) -> Option<String> {
+    let mut anchors: Vec<&String> = Vec::new();
+    for profile in saved {
+        let matches = profile.domain.eq_ignore_ascii_case(domain)
+            && profile.domain_owner == domain_owner
+            && profile.region.eq_ignore_ascii_case(region);
+        if let Some(anchor) = profile.aws_profile.as_ref()
+            && matches
+            && !anchors.contains(&anchor)
+        {
+            anchors.push(anchor);
+        }
+    }
+    match anchors.as_slice() {
+        [only] => Some((*only).clone()),
+        _ => None,
     }
 }
 
@@ -318,7 +330,8 @@ async fn fetch_token(
     reason = "test code: panic on assertion failure is acceptable"
 )]
 mod tests {
-    use super::{CodeArtifactTarget, build_cache_key};
+    use super::{CodeArtifactTarget, anchor_for, build_cache_key};
+    use crate::config::CodeArtifactProfile;
 
     const PROD_ROLE: &str = "arn:aws:iam::111111111111:role/vouch-prod";
     const DEMO_ROLE: &str = "arn:aws:iam::222222222222:role/vouch-demo";
@@ -330,6 +343,47 @@ mod tests {
             region: "us-east-1".to_string(),
             profile: profile.map(str::to_string),
         }
+    }
+
+    fn saved(domain: &str, owner: &str, region: &str, aws_profile: &str) -> CodeArtifactProfile {
+        CodeArtifactProfile {
+            domain: domain.to_string(),
+            domain_owner: owner.to_string(),
+            region: region.to_string(),
+            aws_profile: Some(aws_profile.to_string()),
+        }
+    }
+
+    // The parsed URL host is lowercased, so a domain saved in another case must
+    // still find its anchor.
+    #[test]
+    fn test_anchor_matches_domain_and_region_case_insensitively() {
+        let profiles = [saved("My-Domain", "123456789012", "US-East-1", "prod")];
+        assert_eq!(
+            anchor_for(profiles.iter(), "my-domain", "123456789012", "us-east-1"),
+            Some("prod".to_string())
+        );
+    }
+
+    #[test]
+    fn test_anchor_requires_the_same_owner() {
+        let profiles = [saved("my-domain", "111111111111", "us-east-1", "prod")];
+        assert_eq!(
+            anchor_for(profiles.iter(), "my-domain", "123456789012", "us-east-1"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_anchor_is_none_when_profiles_disagree() {
+        let profiles = [
+            saved("my-domain", "123456789012", "us-east-1", "prod"),
+            saved("MY-DOMAIN", "123456789012", "us-east-1", "demo"),
+        ];
+        assert_eq!(
+            anchor_for(profiles.iter(), "my-domain", "123456789012", "us-east-1"),
+            None
+        );
     }
 
     /// Agent and non-agent invocations must never share a cached token:

@@ -15,6 +15,7 @@
 
 use anyhow::{Context, Result};
 use secrecy::ExposeSecret;
+use std::borrow::Cow;
 use vouch_cli::tr;
 
 use crate::integrations::aws::codeartifact::parse_codeartifact_url;
@@ -49,9 +50,21 @@ pub(crate) async fn run(
     }
 }
 
+/// pip's keyring fallback and 401 paths pass the bare network location
+/// (`host`, no scheme) as the service; add `https://` to those. An argument
+/// that names a scheme is left alone, so the shared parser still rejects any
+/// that is not `https`.
+fn with_default_scheme(service: &str) -> Cow<'_, str> {
+    if service.contains("://") {
+        Cow::Borrowed(service)
+    } else {
+        Cow::Owned(format!("https://{service}"))
+    }
+}
+
 /// Handle `keyring get <url> <username>` — return a fresh CodeArtifact token.
 async fn handle_get(url: &str, opt_in: InsecureOptIn) -> Result<()> {
-    let registry = parse_codeartifact_url(url).ok_or_else(|| {
+    let registry = parse_codeartifact_url(&with_default_scheme(url)).ok_or_else(|| {
         anyhow::anyhow!(
             "URL does not appear to be a CodeArtifact registry: {url}\n\
              Expected format: https://{{domain}}-{{owner}}.d.codeartifact.{{region}}.amazonaws.com/..."
@@ -103,6 +116,43 @@ mod tests {
         assert_eq!(r.domain, "my-domain");
         assert_eq!(r.domain_owner, "123456789012");
         assert_eq!(r.region, "us-east-1");
+    }
+
+    // pip `network/auth.py` passes the bare netloc to the keyring helper.
+    #[test]
+    fn test_bare_host_gets_https() {
+        let host = "my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com";
+        let registry = parse_codeartifact_url(&with_default_scheme(host)).unwrap();
+        assert_eq!(registry.domain, "my-domain");
+        assert_eq!(registry.region, "us-east-1");
+    }
+
+    #[test]
+    fn test_explicit_non_https_scheme_is_still_rejected() {
+        let host = "my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com";
+        for service in [
+            format!("http://{host}"),
+            format!("http://{host}/pypi/r/simple/"),
+        ] {
+            assert_eq!(with_default_scheme(&service), service);
+            assert!(parse_codeartifact_url(&with_default_scheme(&service)).is_none());
+        }
+    }
+
+    #[test]
+    fn test_bare_lookalike_host_is_rejected() {
+        for host in [
+            "my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.evil.com",
+            "evil.com@my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com",
+            "my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com:8443",
+            "pypi.org",
+            "",
+        ] {
+            assert!(
+                parse_codeartifact_url(&with_default_scheme(host)).is_none(),
+                "{host}"
+            );
+        }
     }
 
     #[test]

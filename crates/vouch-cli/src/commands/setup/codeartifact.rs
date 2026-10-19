@@ -156,7 +156,7 @@ fn configure_cargo_registry(registry_name: &str, index_url: &str, vouch_path: &s
     }
 
     // Set the credential provider and index URL for this registry
-    config.set_registry_provider(registry_name, &[vouch_path, "credential", "cargo", "--"]);
+    config.set_registry_provider(registry_name, &[vouch_path]);
     config.set_registry_index(registry_name, index_url);
 
     config.save()?;
@@ -666,7 +666,7 @@ fn parse_npmrc_codeartifact_entries(content: &str) -> Vec<(String, CodeArtifactR
             }
             // prefix is e.g. "//host/npm/repo/"
             let host_and_path = prefix.strip_prefix("//").unwrap_or(prefix);
-            if let Some(registry) = parse_codeartifact_url(host_and_path) {
+            if let Some(registry) = parse_codeartifact_url(&format!("https://{host_and_path}")) {
                 entries.push((prefix.to_string(), registry));
             }
         }
@@ -843,6 +843,7 @@ mod tests {
     use super::*;
     use clap::ValueEnum;
     use proptest::prelude::*;
+    use vouch_common::aws::Partition;
 
     #[test]
     fn test_tool_value_enum() {
@@ -872,6 +873,27 @@ mod tests {
         let suffix =
             domain_suffix_from_role_arn("arn:aws-cn:iam::123456789012:role/MyRole").unwrap();
         assert_eq!(suffix, "amazonaws.com.cn");
+    }
+
+    // Every host `vouch setup codeartifact` can write must be one the Cargo
+    // provider (and the pip/npm helpers) accept, in every AWS partition.
+    #[test]
+    fn test_setup_host_is_accepted_by_the_parser_in_every_partition() {
+        for partition in Partition::ALL {
+            let role_arn = format!("arn:{}:iam::123456789012:role/MyRole", partition.as_str());
+            let suffix = domain_suffix_from_role_arn(&role_arn).unwrap();
+            let host = format!("my-domain-123456789012.d.codeartifact.r-1.{suffix}");
+            for url in [
+                format!("sparse+https://{host}/cargo/my-repo/"),
+                format!("https://{host}/pypi/my-repo/simple/"),
+                format!("https://{host}/npm/my-repo/"),
+            ] {
+                let registry =
+                    parse_codeartifact_url(&url).expect("setup-written host should parse");
+                assert_eq!(registry.domain_suffix, suffix, "{url}");
+                assert_eq!(registry.domain, "my-domain", "{url}");
+            }
+        }
     }
 
     #[test]

@@ -1,28 +1,35 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-//! Cargo credential provider for private registries.
+//! Cargo credential provider for AWS CodeArtifact registries.
 //!
 //! This module implements Cargo's credential provider protocol (RFC 2730/3139).
-//! It provides authentication tokens for private Cargo registries using Vouch.
+//! It answers for CodeArtifact registries through the Vouch → STS → CodeArtifact
+//! flow. Every other registry gets `url-not-supported`, so Cargo moves on to its
+//! next provider and the Vouch session token never reaches Cargo.
 //!
 //! Protocol: Cargo communicates with credential providers via stdin/stdout JSON.
-//! See: https://doc.rust-lang.org/cargo/reference/credential-provider-protocol.html
+//! See: <https://doc.rust-lang.org/cargo/reference/credential-provider-protocol.html>
 //!
-//! Usage: Configure Cargo to use this provider in ~/.cargo/config.toml:
-//!   [registry]
-//!   global-credential-providers = ["vouch credential cargo --"]
+//! Cargo runs `<credential-provider[0]> --cargo-plugin` and nothing else; the
+//! remaining `credential-provider` entries arrive in the request's `args`
+//! field, which this provider ignores. `main.rs` dispatches `--cargo-plugin`
+//! here before clap parses.
 //!
-//! Or for a specific registry:
-//!   [registries.my-registry]
-//!   credential-provider = ["vouch", "credential", "cargo", "--"]
+//! Usage: configure Cargo to use this provider for one registry in
+//! `~/.cargo/config.toml`:
+//!
+//! ```toml
+//! [registries.my-registry]
+//! credential-provider = ["/path/to/vouch"]
+//! ```
 
 use anyhow::{Context, Result};
-use secrecy::{ExposeSecret, SecretString};
+use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Write};
-use vouch_cli::{tr, tr_eprintln};
+use vouch_cli::tr;
 
-use crate::integrations::aws::codeartifact;
-use crate::server_url::{InsecureOptIn, ServerUrlError};
+use crate::integrations::aws::codeartifact::{self, CodeArtifactToken};
+use crate::server_url::InsecureOptIn;
 use crate::session;
 
 /// Protocol version supported by this credential provider.
@@ -41,6 +48,10 @@ struct CredentialHello {
 }
 
 /// Request from Cargo to credential provider.
+///
+/// The action fields (`kind`, `operation`, ...) sit beside `v` and `registry`
+/// in the same JSON object. Fields this provider does not read, such as `args`
+/// and `registry.headers`, are ignored.
 #[derive(Debug, Deserialize)]
 struct CredentialRequest {
     /// Negotiated protocol version.
@@ -48,31 +59,19 @@ struct CredentialRequest {
     /// Registry information.
     registry: RegistryInfo,
     /// Action to perform.
+    #[serde(flatten)]
     action: Action,
-    /// Additional command-line arguments (after `--`).
-    #[serde(default)]
-    #[expect(
-        dead_code,
-        reason = "deserialized from cargo credential protocol; not consumed"
-    )]
-    args: Vec<String>,
 }
 
 /// Registry information from Cargo.
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 struct RegistryInfo {
-    /// Registry index URL.
-    #[serde(rename = "index-url")]
+    /// Registry index URL, as Cargo serializes it (`sparse+https://…/` for
+    /// sparse registries).
     index_url: String,
     /// Registry name from config (if any).
     name: Option<String>,
-    /// Headers from HTTP 401 response (if any).
-    #[serde(default)]
-    #[expect(
-        dead_code,
-        reason = "deserialized from cargo credential protocol; not consumed"
-    )]
-    headers: Vec<String>,
 }
 
 /// Action requested by Cargo.
@@ -82,7 +81,7 @@ enum Action {
     /// Get a token for authentication.
     Get(Operation),
     /// Store/login with credentials.
-    Login(LoginOptions),
+    Login,
     /// Remove stored credentials.
     Logout,
     /// Unknown action (forward compatibility).
@@ -91,53 +90,28 @@ enum Action {
 }
 
 /// Operation details for "get" action.
+///
+/// Vouch issues the same token for every operation, so the operation payloads
+/// (`name`, `vers`, `cksum`) are not read.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "operation", rename_all = "kebab-case")]
-#[expect(
-    dead_code,
-    reason = "enum variants deserialized from cargo credential protocol"
-)]
 enum Operation {
     /// Reading from registry (cargo fetch, build, etc).
     Read,
     /// Publishing a crate.
-    Publish {
-        name: String,
-        vers: String,
-        cksum: String,
-    },
+    Publish,
     /// Yanking a crate version.
-    Yank { name: String, vers: String },
+    Yank,
     /// Unyanking a crate version.
-    Unyank { name: String, vers: String },
+    Unyank,
     /// Managing crate owners.
-    Owners { name: String },
+    Owners,
     /// Unknown operation (forward compatibility).
     #[serde(other)]
     Unknown,
 }
 
-/// Login options from Cargo.
-#[derive(Deserialize)]
-struct LoginOptions {
-    /// Token provided by user (if any).
-    /// We don't use this - vouch manages its own authentication.
-    token: Option<SecretString>,
-    /// URL for browser-based login (if any).
-    #[serde(rename = "login-url")]
-    login_url: Option<String>,
-}
-
-impl std::fmt::Debug for LoginOptions {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LoginOptions")
-            .field("token", &self.token.as_ref().map(|_| "[REDACTED]"))
-            .field("login_url", &self.login_url)
-            .finish()
-    }
-}
-
-/// Response from credential provider to Cargo.
+/// Successful response from credential provider to Cargo.
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 enum CredentialResponse {
@@ -147,18 +121,11 @@ enum CredentialResponse {
         #[serde(serialize_with = "vouch_common::serialize_secret_string")]
         token: SecretString,
         /// Cache control for the token.
+        #[serde(flatten)]
         cache: CacheControl,
         /// Whether the token is independent of the operation.
-        #[serde(rename = "operation-independent")]
         operation_independent: bool,
     },
-    /// Successful login response.
-    /// We don't use this - vouch doesn't support cargo login.
-    #[expect(
-        dead_code,
-        reason = "variant declared for protocol completeness; vouch rejects cargo login"
-    )]
-    Login,
     /// Successful logout response.
     Logout,
 }
@@ -176,36 +143,48 @@ impl std::fmt::Debug for CredentialResponse {
                 .field("cache", cache)
                 .field("operation_independent", operation_independent)
                 .finish(),
-            Self::Login => f.debug_struct("CredentialResponse::Login").finish(),
             Self::Logout => f.debug_struct("CredentialResponse::Logout").finish(),
         }
     }
 }
 
 /// Cache control for tokens.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "kebab-case")]
-#[expect(
-    dead_code,
-    reason = "variants serialized as part of cargo credential protocol"
-)]
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "cache", rename_all = "kebab-case")]
 enum CacheControl {
-    /// Never cache the token.
-    Never,
-    /// Cache for the current Cargo session only.
-    Session,
     /// Cache until a specific expiration time (Unix timestamp).
     Expires { expiration: i64 },
 }
 
-/// Error response from credential provider.
+/// Error response from credential provider to Cargo.
+///
+/// Cargo tries its next provider after `UrlNotSupported` and `NotFound`; the
+/// other kinds are fatal. Cargo discards any message on the payload-free kinds,
+/// so a failure the user needs to read is reported as `Other`.
 #[derive(Debug, Serialize)]
-struct CredentialError {
-    /// Error kind.
-    kind: String,
-    /// Human-readable error message (optional).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    message: Option<String>,
+#[serde(tag = "kind", rename_all = "kebab-case")]
+enum CredentialError {
+    /// This provider does not handle the registry URL.
+    UrlNotSupported,
+    /// This provider does not handle the action.
+    OperationNotSupported,
+    /// Any other failure.
+    Other {
+        message: String,
+        #[serde(rename = "caused-by")]
+        caused_by: Vec<String>,
+    },
+}
+
+impl CredentialError {
+    /// Report `error` with its outermost message first and each cause after it.
+    fn other(error: &anyhow::Error) -> Self {
+        let mut chain = error.chain().map(ToString::to_string);
+        Self::Other {
+            message: chain.next().unwrap_or_default(),
+            caused_by: chain.collect(),
+        }
+    }
 }
 
 // ============================================================================
@@ -217,101 +196,123 @@ struct CredentialError {
 /// This function implements Cargo's credential provider protocol:
 /// 1. Send Hello message with supported versions
 /// 2. Read CredentialRequest from stdin
-/// 3. Handle the request and send response to stdout
-pub(crate) async fn run(opt_in: InsecureOptIn) -> Result<()> {
-    // Send Hello message
-    let hello = CredentialHello {
-        v: vec![PROTOCOL_VERSION],
-    };
-    send_message(&hello)?;
-
-    // Read request from stdin
-    let request_line = read_line()?;
-    let request: CredentialRequest =
-        serde_json::from_str(&request_line).context(tr!("err-failed-parse-credential-request"))?;
-
-    // Verify protocol version
-    if request.v != PROTOCOL_VERSION {
-        return send_error(
-            "unsupported-version",
-            Some(format!(
-                "unsupported protocol version {}, expected {}",
-                request.v, PROTOCOL_VERSION
-            )),
-        );
-    }
-
-    // Handle the action
-    match request.action {
-        Action::Get(_operation) => handle_get(&request.registry, opt_in).await,
-        Action::Login(options) => handle_login(&request.registry, options),
-        Action::Logout => handle_logout(&request.registry),
-        Action::Unknown => send_error("operation-not-supported", None),
-    }
-}
-
-/// Handle "get" action - return authentication token.
-async fn handle_get(registry: &RegistryInfo, opt_in: InsecureOptIn) -> Result<()> {
-    // Check if this is a CodeArtifact registry URL
-    if let Some(ca_registry) = codeartifact::parse_codeartifact_url(&registry.index_url) {
-        return handle_get_codeartifact(&ca_registry, opt_in).await;
-    }
-
-    // Standard Vouch token flow for non-CodeArtifact registries
-    // Resolve token from agent or config
-    let token = match session::resolve_token().await {
-        Ok(t) => t,
-        Err(_) => {
-            return send_error(
-                "not-found",
-                Some(format!(
-                    "not authenticated for registry '{}' - run 'vouch login' first",
-                    registry.name.as_deref().unwrap_or(&registry.index_url)
-                )),
-            );
-        }
-    };
-
-    // Calculate expiration from JWT if possible, otherwise use session cache
-    let token_str = token.expose_secret();
-    let cache = parse_jwt_expiration(token_str).map_or(CacheControl::Session, |exp| {
-        CacheControl::Expires { expiration: exp }
-    });
-
-    let response = CredentialResponse::Get {
-        token: SecretString::from(token_str.to_string()),
-        cache,
-        // Token works for any operation (read, publish, yank, etc.)
-        operation_independent: true,
-    };
-
-    send_message(&response)
-}
-
-/// Handle "get" for a CodeArtifact registry.
+/// 3. Handle the request and send the `Ok`/`Err` response to stdout
 ///
-/// Uses the Vouch → STS → CodeArtifact flow to obtain a bearer token
-/// that Cargo can use for the CodeArtifact Cargo registry.
-async fn handle_get_codeartifact(
+/// A response line is always followed by a successful return, including an
+/// `Err` response. Cargo replaces the response with "credential process failed
+/// with status N" when the child exits nonzero, so the exit status must be 0
+/// for the user to see the message.
+///
+/// `init` sets up process-wide services (locale, DNS, keyring). It runs after
+/// the hello so a failure reaches Cargo as an `other` error instead of
+/// "failed to deserialize hello". A failure to read the request is answered the
+/// same way.
+pub(crate) async fn run(opt_in: InsecureOptIn, init: impl FnOnce() -> Result<()>) -> Result<()> {
+    send_message(&CredentialHello {
+        v: vec![PROTOCOL_VERSION],
+    })?;
+
+    send_message(&answer(opt_in, init).await)
+}
+
+/// Initialize, read the request line, and answer it. Every failure along the
+/// way, including a broken stdin, becomes the `Err` response.
+async fn answer(
+    opt_in: InsecureOptIn,
+    init: impl FnOnce() -> Result<()>,
+) -> Result<CredentialResponse, CredentialError> {
+    init().map_err(|e| CredentialError::other(&e))?;
+    let request_line = read_line().map_err(|e| CredentialError::other(&e))?;
+    let request: CredentialRequest = serde_json::from_str(&request_line)
+        .with_context(|| tr!("err-failed-parse-credential-request"))
+        .map_err(|e| CredentialError::other(&e))?;
+    let fetch = async |registry: &codeartifact::CodeArtifactRegistry| {
+        fetch_codeartifact_token(registry, opt_in).await
+    };
+    handle_request(&request, fetch).await
+}
+
+/// Answer one request. The registry is routed before the action, so a registry
+/// Vouch does not serve gets `url-not-supported` for every action.
+///
+/// `fetch` mints the CodeArtifact token for a `get`; it is a parameter so tests
+/// can supply a result without a session or network.
+async fn handle_request(
+    request: &CredentialRequest,
+    fetch: impl AsyncFnOnce(&codeartifact::CodeArtifactRegistry) -> Result<CodeArtifactToken>,
+) -> Result<CredentialResponse, CredentialError> {
+    if request.v != PROTOCOL_VERSION {
+        return Err(CredentialError::other(&anyhow::anyhow!(
+            "unsupported protocol version {}, expected {PROTOCOL_VERSION}",
+            request.v
+        )));
+    }
+
+    // The parser accepts only HTTPS indexes: Cargo sends credentials to
+    // `sparse+http` registries too, and a token minted for one would travel in
+    // the clear.
+    let Some(registry) = codeartifact::parse_codeartifact_url(&request.registry.index_url) else {
+        return Err(CredentialError::UrlNotSupported);
+    };
+
+    let registry_name = request
+        .registry
+        .name
+        .as_deref()
+        .unwrap_or(&request.registry.index_url);
+
+    match &request.action {
+        Action::Get(Operation::Unknown) | Action::Unknown => {
+            Err(CredentialError::OperationNotSupported)
+        }
+        Action::Get(
+            Operation::Read
+            | Operation::Publish
+            | Operation::Yank
+            | Operation::Unyank
+            | Operation::Owners,
+        ) => {
+            // Mint the token through the Vouch -> STS -> CodeArtifact flow.
+            let token = fetch(&registry)
+                .await
+                .map_err(|e| CredentialError::other(&e))?;
+            Ok(CredentialResponse::Get {
+                token: token.authorization_token,
+                cache: CacheControl::Expires {
+                    expiration: token.expiration,
+                },
+                operation_independent: true,
+            })
+        }
+        // Vouch manages authentication via `vouch login`, not `cargo login`.
+        // This is consistent with AWS/SSH integrations where the user
+        // authenticates with Vouch once, and native tools use credential
+        // helpers.
+        Action::Login => {
+            eprintln!();
+            vouch_cli::tr_eprintln!("credential-cargo-login-needed", registry = registry_name);
+            Err(CredentialError::OperationNotSupported)
+        }
+        // Vouch's session is not cleared on `cargo logout`, as the user might
+        // want to keep using Vouch for other purposes. Just acknowledge.
+        Action::Logout => {
+            vouch_cli::tr_eprintln!("credential-cargo-logout", registry = registry_name);
+            Ok(CredentialResponse::Logout)
+        }
+    }
+}
+
+/// Mint the CodeArtifact token through the Vouch session.
+///
+/// Errors keep their own message: it names the right next step (`vouch login`
+/// for a lapsed session, `vouch enroll` when nothing is configured, the
+/// refusal reason for a rejected server URL).
+async fn fetch_codeartifact_token(
     registry: &codeartifact::CodeArtifactRegistry,
     opt_in: InsecureOptIn,
-) -> Result<()> {
+) -> Result<CodeArtifactToken> {
     // Resolve session to get server URL (tries agent first, then config)
-    let resolved = match session::resolve_session(opt_in).await {
-        Ok(s) => s,
-        // A refused server URL is configured, just not allowed for this
-        // invocation; pass its own message on rather than "not configured".
-        Err(e) if ServerUrlError::is_in(&e) => {
-            return send_error("not-found", Some(e.to_string()));
-        }
-        Err(_) => {
-            return send_error(
-                "not-found",
-                Some("not configured - run 'vouch enroll' first".to_string()),
-            );
-        }
-    };
-    let server = resolved.server_url;
+    let resolved = session::resolve_session(opt_in).await?;
 
     // Use the shared CodeArtifact credential flow
     let target = super::codeartifact::CodeArtifactTarget::new(
@@ -319,70 +320,20 @@ async fn handle_get_codeartifact(
         registry.domain_owner.clone(),
         registry.region.clone(),
     );
-    let result = match super::codeartifact::get_token(&server, &target).await {
-        Ok(r) => r,
-        Err(e) => {
-            return send_error(
-                "not-found",
-                Some(format!("CodeArtifact authentication failed: {e}")),
-            );
-        }
-    };
-
-    let response = CredentialResponse::Get {
-        token: result.authorization_token,
-        cache: CacheControl::Expires {
-            expiration: result.expiration,
-        },
-        operation_independent: true,
-    };
-
-    send_message(&response)
-}
-
-/// Handle "login" action - direct users to vouch login.
-fn handle_login(registry: &RegistryInfo, _options: LoginOptions) -> Result<()> {
-    // Vouch manages authentication via `vouch login`, not cargo login.
-    // This is consistent with AWS/SSH integrations where the user
-    // authenticates with Vouch once, and native tools use credential helpers.
-    let registry_name = registry.name.as_deref().unwrap_or(&registry.index_url);
-    eprintln!();
-    tr_eprintln!("credential-cargo-login-needed", registry = registry_name);
-
-    // Return url-not-supported to indicate we don't support cargo login
-    send_error(
-        "url-not-supported",
-        Some(tr!("credential-cargo-login-hint")),
-    )
-}
-
-/// Handle "logout" action - remove stored credentials.
-fn handle_logout(registry: &RegistryInfo) -> Result<()> {
-    // We don't clear Vouch's session on cargo logout, as the user might
-    // want to keep using Vouch for other purposes. Just acknowledge.
-    let registry_name = registry.name.as_deref().unwrap_or(&registry.index_url);
-    tr_eprintln!("credential-cargo-logout", registry = registry_name);
-
-    send_message(&CredentialResponse::Logout)
+    super::codeartifact::get_token(&resolved.server_url, &target)
+        .await
+        .context("CodeArtifact authentication failed")
 }
 
 /// Send a JSON message to stdout.
 fn send_message<T: Serialize>(message: &T) -> Result<()> {
-    let json = serde_json::to_string(message).context(tr!("err-failed-serialize-message"))?;
+    let json =
+        serde_json::to_string(message).with_context(|| tr!("err-failed-serialize-message"))?;
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     writeln!(out, "{json}")?;
     out.flush()?;
     Ok(())
-}
-
-/// Send an error response to stdout.
-fn send_error(kind: &str, message: Option<String>) -> Result<()> {
-    let error = CredentialError {
-        kind: kind.to_string(),
-        message,
-    };
-    send_message(&error)
 }
 
 /// Read a line from stdin.
@@ -392,30 +343,8 @@ fn read_line() -> Result<String> {
     stdin
         .lock()
         .read_line(&mut line)
-        .context(tr!("err-failed-read-from-stdin"))?;
+        .with_context(|| tr!("err-failed-read-from-stdin"))?;
     Ok(line.trim().to_string())
-}
-
-/// Parse JWT expiration time (exp claim).
-/// Returns the expiration as Unix timestamp, or None if parsing fails.
-fn parse_jwt_expiration(token: &str) -> Option<i64> {
-    // JWT format: header.payload.signature
-    let parts: Vec<&str> = token.split('.').collect();
-    if parts.len() != 3 {
-        return None;
-    }
-
-    // Decode the payload (second part)
-    use base64::Engine;
-    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(parts.get(1)?)
-        .ok()?;
-
-    // Parse as JSON
-    let claims: serde_json::Value = serde_json::from_slice(&payload).ok()?;
-
-    // Get expiration
-    claims.get("exp")?.as_i64()
 }
 
 #[cfg(test)]
@@ -427,116 +356,325 @@ fn parse_jwt_expiration(token: &str) -> Option<i64> {
 mod tests {
     use super::*;
 
+    const CODEARTIFACT_INDEX: &str = "sparse+https://my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com/cargo/my-repo/";
+
+    /// Fetcher for tests where reaching the token flow is itself a failure.
+    async fn unexpected_fetch(
+        _registry: &codeartifact::CodeArtifactRegistry,
+    ) -> Result<CodeArtifactToken> {
+        Err(anyhow::anyhow!("fetch must not be called"))
+    }
+
+    fn read_request(registry_index: &str) -> CredentialRequest {
+        request(&format!(
+            r#"{{"v":1,"kind":"get","operation":"read","registry":{{"index-url":"{registry_index}"}}}}"#
+        ))
+    }
+
+    fn request(json: &str) -> CredentialRequest {
+        serde_json::from_str(json).unwrap()
+    }
+
+    fn json_of<T: Serialize>(value: &T) -> String {
+        serde_json::to_string(value).unwrap()
+    }
+
+    // Cargo credential provider protocol, "Credential hello".
+    // https://doc.rust-lang.org/cargo/reference/credential-provider-protocol.html
     #[test]
     fn test_hello_serialization() {
         let hello = CredentialHello { v: vec![1] };
-        let json = serde_json::to_string(&hello).unwrap();
-        assert_eq!(json, r#"{"v":[1]}"#);
+        assert_eq!(json_of(&hello), r#"{"v":[1]}"#);
     }
 
+    // cargo-credential `credential_request` test: the action fields are
+    // flattened beside `v` and `registry`, and unknown fields are ignored.
+    // https://github.com/rust-lang/cargo/blob/master/credential/cargo-credential/src/lib.rs
+    #[test]
+    fn test_cargo_owners_request_deserialization() {
+        let req = request(
+            r#"{"extra-1":true,"v":1,"registry":{"index-url":"url","extra-2":true},"kind":"get","operation":"owners","name":"pkg","args":[]}"#,
+        );
+        assert_eq!(req.v, 1);
+        assert_eq!(req.registry.index_url, "url");
+        assert!(matches!(req.action, Action::Get(Operation::Owners)));
+    }
+
+    // Credential provider protocol, "Read request".
+    #[test]
+    fn test_doc_read_request_deserialization() {
+        let req = request(
+            r#"{"v":1,"kind":"get","operation":"read","registry":{"index-url":"sparse+https://registry-url/index/","name":"my-registry"},"args":[]}"#,
+        );
+        assert_eq!(req.registry.index_url, "sparse+https://registry-url/index/");
+        assert_eq!(req.registry.name.as_deref(), Some("my-registry"));
+        assert!(matches!(req.action, Action::Get(Operation::Read)));
+    }
+
+    // Credential provider protocol, "Publish request".
+    #[test]
+    fn test_doc_publish_request_deserialization() {
+        let req = request(
+            r#"{"v":1,"kind":"get","operation":"publish","name":"sample","vers":"0.1.0","cksum":"...","registry":{"index-url":"sparse+https://registry-url/index/","name":"my-registry"},"args":[]}"#,
+        );
+        assert!(matches!(req.action, Action::Get(Operation::Publish)));
+    }
+
+    // Credential provider protocol, "Login request".
+    #[test]
+    fn test_doc_login_request_deserialization() {
+        let req = request(
+            r#"{"v":1,"kind":"login","registry":{"index-url":"sparse+https://registry-url/index/","name":"my-registry"},"token":"<the token value>","login-url":"http://registry-url/login","args":[]}"#,
+        );
+        assert!(matches!(req.action, Action::Login));
+    }
+
+    // cargo-credential `credential_request_logout` test.
+    #[test]
+    fn test_cargo_logout_request_deserialization() {
+        let req = request(
+            r#"{"v":1,"registry":{"index-url":"url"},"kind":"logout","extra-1":true,"args":[]}"#,
+        );
+        assert!(matches!(req.action, Action::Logout));
+    }
+
+    // cargo-credential `credential_request_unknown` test.
+    #[test]
+    fn test_cargo_unknown_kind_request_deserialization() {
+        let req = request(
+            r#"{"v":1,"registry":{"index-url":""},"kind":"unexpected-1","extra-1":true,"args":[]}"#,
+        );
+        assert!(matches!(req.action, Action::Unknown));
+    }
+
+    // Registry information: `headers` is optional and unused.
+    #[test]
+    fn test_doc_registry_info_with_headers_deserialization() {
+        let req = request(
+            r#"{"v":1,"kind":"get","operation":"read","registry":{"index-url":"https://github.com/rust-lang/crates.io-index","name":"crates-io","headers":["WWW-Authenticate: cargo"]}}"#,
+        );
+        assert_eq!(req.registry.name.as_deref(), Some("crates-io"));
+    }
+
+    #[test]
+    fn test_unknown_operation_deserialization() {
+        let req = request(
+            r#"{"v":1,"kind":"get","operation":"frobnicate","registry":{"index-url":"url"}}"#,
+        );
+        assert!(matches!(req.action, Action::Get(Operation::Unknown)));
+    }
+
+    #[test]
+    fn test_request_without_kind_is_rejected() {
+        let result = serde_json::from_str::<CredentialRequest>(
+            r#"{"v":1,"registry":{"index-url":"url"},"args":[]}"#,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_request_without_registry_is_rejected() {
+        let result = serde_json::from_str::<CredentialRequest>(r#"{"v":1,"kind":"logout"}"#);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_request_with_wrong_version_type_is_rejected() {
+        let result = serde_json::from_str::<CredentialRequest>(
+            r#"{"v":"1","registry":{"index-url":"url"},"kind":"logout"}"#,
+        );
+        assert!(result.is_err());
+    }
+
+    // cargo-credential `cache_control` and `credential_response` tests: the
+    // cache fields are flattened into the get response, and
+    // `operation_independent` keeps its underscore.
     #[test]
     fn test_get_response_serialization() {
         let response = CredentialResponse::Get {
-            token: SecretString::from("secret".to_string()),
-            cache: CacheControl::Session,
+            token: SecretString::from("value".to_string()),
+            cache: CacheControl::Expires {
+                expiration: 1_693_928_537,
+            },
             operation_independent: true,
         };
-        let json = serde_json::to_string(&response).unwrap();
-        assert!(json.contains(r#""kind":"get""#));
-        assert!(json.contains(r#""token":"secret""#));
-        assert!(json.contains(r#""cache":"session""#));
-        assert!(json.contains(r#""operation-independent":true"#));
+        assert_eq!(
+            json_of(&response),
+            r#"{"kind":"get","token":"value","cache":"expires","expiration":1693928537,"operation_independent":true}"#
+        );
     }
 
+    // Credential provider protocol, "Get success response": wrapped in `Ok`.
     #[test]
-    fn test_expires_cache_serialization() {
-        let cache = CacheControl::Expires {
-            expiration: 1700000000,
-        };
-        let json = serde_json::to_string(&cache).unwrap();
-        assert_eq!(json, r#"{"expires":{"expiration":1700000000}}"#);
+    fn test_ok_response_is_wrapped() {
+        let outcome: Result<CredentialResponse, CredentialError> = Ok(CredentialResponse::Logout);
+        assert_eq!(json_of(&outcome), r#"{"Ok":{"kind":"logout"}}"#);
     }
 
+    // Credential provider protocol, "Failure response (URL not supported)".
     #[test]
-    fn test_error_serialization() {
-        let error = CredentialError {
-            kind: "not-found".to_string(),
-            message: Some("no token".to_string()),
-        };
-        let json = serde_json::to_string(&error).unwrap();
-        assert!(json.contains(r#""kind":"not-found""#));
-        assert!(json.contains(r#""message":"no token""#));
+    fn test_url_not_supported_is_wrapped() {
+        let outcome: Result<CredentialResponse, CredentialError> =
+            Err(CredentialError::UrlNotSupported);
+        assert_eq!(json_of(&outcome), r#"{"Err":{"kind":"url-not-supported"}}"#);
     }
 
+    // Credential provider protocol, "Failure response (operation not supported)".
     #[test]
-    fn test_request_deserialization() {
-        let json = r#"{
-            "v": 1,
-            "registry": {
-                "index-url": "https://index.crates.io/",
-                "name": "crates-io"
-            },
-            "action": {
-                "kind": "get",
-                "operation": "read"
-            },
-            "args": []
-        }"#;
-        let request: CredentialRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(request.v, 1);
-        assert_eq!(request.registry.index_url, "https://index.crates.io/");
-        assert_eq!(request.registry.name.as_deref(), Some("crates-io"));
+    fn test_operation_not_supported_is_wrapped() {
+        let outcome: Result<CredentialResponse, CredentialError> =
+            Err(CredentialError::OperationNotSupported);
+        assert_eq!(
+            json_of(&outcome),
+            r#"{"Err":{"kind":"operation-not-supported"}}"#
+        );
     }
 
+    // cargo-credential error.rs `roundtrip` test: `other` carries the
+    // outermost message and the causes, outermost first.
     #[test]
-    fn test_publish_operation_deserialization() {
-        let json = r#"{
-            "v": 1,
-            "registry": {
-                "index-url": "https://index.crates.io/"
-            },
-            "action": {
-                "kind": "get",
-                "operation": "publish",
-                "name": "my-crate",
-                "vers": "1.0.0",
-                "cksum": "abc123"
-            }
-        }"#;
-        let request: CredentialRequest = serde_json::from_str(json).unwrap();
-        match request.action {
-            Action::Get(Operation::Publish { name, vers, cksum }) => {
-                assert_eq!(name, "my-crate");
-                assert_eq!(vers, "1.0.0");
-                assert_eq!(cksum, "abc123");
-            }
-            _ => panic!("expected Get(Publish)"),
+    fn test_other_error_serialization_matches_cargo() {
+        let error = anyhow::anyhow!("inner").context("middle").context("outer");
+        let outcome: Result<CredentialResponse, CredentialError> =
+            Err(CredentialError::other(&error));
+        assert_eq!(
+            json_of(&outcome),
+            r#"{"Err":{"kind":"other","message":"outer","caused-by":["middle","inner"]}}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn test_non_codeartifact_registry_is_url_not_supported() {
+        for json in [
+            r#"{"v":1,"kind":"get","operation":"read","registry":{"index-url":"sparse+https://index.crates.io/"}}"#,
+            r#"{"v":1,"kind":"login","registry":{"index-url":"https://example.com/index"}}"#,
+            r#"{"v":1,"kind":"logout","registry":{"index-url":"https://example.com/index"}}"#,
+            r#"{"v":1,"kind":"unexpected","registry":{"index-url":"https://example.com/index"}}"#,
+        ] {
+            let outcome = handle_request(&request(json), unexpected_fetch).await;
+            assert!(
+                matches!(outcome, Err(CredentialError::UrlNotSupported)),
+                "{json}: {outcome:?}"
+            );
         }
     }
 
-    #[test]
-    fn test_login_with_token_deserialization() {
-        let json = r#"{
-            "v": 1,
-            "registry": {
-                "index-url": "https://my-registry.example.com/"
-            },
-            "action": {
-                "kind": "login",
-                "token": "secret-token"
-            }
-        }"#;
-        let request: CredentialRequest = serde_json::from_str(json).unwrap();
-        match request.action {
-            Action::Login(opts) => {
-                assert_eq!(
-                    opts.token
-                        .as_ref()
-                        .map(secrecy::ExposeSecret::expose_secret),
-                    Some("secret-token")
-                );
-            }
-            _ => panic!("expected Login"),
+    #[tokio::test]
+    async fn test_unknown_actions_on_codeartifact_are_operation_not_supported() {
+        for action in [
+            r#""kind":"get","operation":"frobnicate""#,
+            r#""kind":"unexpected""#,
+            r#""kind":"login""#,
+        ] {
+            let json =
+                format!(r#"{{"v":1,{action},"registry":{{"index-url":"{CODEARTIFACT_INDEX}"}}}}"#);
+            let outcome = handle_request(&request(&json), unexpected_fetch).await;
+            assert!(
+                matches!(outcome, Err(CredentialError::OperationNotSupported)),
+                "{json}: {outcome:?}"
+            );
         }
+    }
+
+    #[tokio::test]
+    async fn test_logout_on_codeartifact_acknowledges() {
+        let json = format!(
+            r#"{{"v":1,"kind":"logout","registry":{{"index-url":"{CODEARTIFACT_INDEX}"}}}}"#
+        );
+        let outcome = handle_request(&request(&json), unexpected_fetch).await;
+        assert!(matches!(outcome, Ok(CredentialResponse::Logout)));
+    }
+
+    #[tokio::test]
+    async fn test_wrong_protocol_version_is_other() {
+        let outcome = handle_request(
+            &request(r#"{"v":2,"kind":"logout","registry":{"index-url":"url"}}"#),
+            unexpected_fetch,
+        )
+        .await;
+        match outcome {
+            Err(CredentialError::Other { message, .. }) => {
+                assert_eq!(message, "unsupported protocol version 2, expected 1");
+            }
+            other => panic!("expected Other, got {other:?}"),
+        }
+    }
+
+    // Cargo sends credentials to `sparse+http` registries, so plain-HTTP
+    // CodeArtifact lookalikes must not get a token.
+    #[tokio::test]
+    async fn test_plain_http_codeartifact_is_url_not_supported() {
+        for index in [
+            "sparse+http://my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com/cargo/r/",
+            "http://my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com/cargo/r/",
+            "my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com/cargo/r/",
+        ] {
+            let outcome = handle_request(&read_request(index), unexpected_fetch).await;
+            assert!(
+                matches!(outcome, Err(CredentialError::UrlNotSupported)),
+                "{index}: {outcome:?}"
+            );
+        }
+    }
+
+    // A failed token flow is `other` carrying the error and its causes; Cargo
+    // drops the message of `not-found`.
+    #[tokio::test]
+    async fn test_token_failure_is_other_with_causes() {
+        let outcome = handle_request(
+            &read_request(CODEARTIFACT_INDEX),
+            async |_: &codeartifact::CodeArtifactRegistry| -> Result<CodeArtifactToken> {
+                Err(anyhow::anyhow!("boom").context("CodeArtifact authentication failed"))
+            },
+        )
+        .await;
+        match outcome {
+            Err(CredentialError::Other { message, caused_by }) => {
+                assert_eq!(message, "CodeArtifact authentication failed");
+                assert_eq!(caused_by, ["boom"]);
+            }
+            other => panic!("expected Other, got {other:?}"),
+        }
+    }
+
+    // A lapsed session's own message names the right next step and must reach
+    // the user unchanged.
+    #[tokio::test]
+    async fn test_session_error_message_is_passed_through() {
+        let outcome = handle_request(
+            &read_request(CODEARTIFACT_INDEX),
+            async |_: &codeartifact::CodeArtifactRegistry| -> Result<CodeArtifactToken> {
+                Err(anyhow::anyhow!("no session token - run 'vouch login'"))
+            },
+        )
+        .await;
+        match outcome {
+            Err(CredentialError::Other { message, .. }) => {
+                assert_eq!(message, "no session token - run 'vouch login'");
+            }
+            other => panic!("expected Other, got {other:?}"),
+        }
+    }
+
+    // Credential provider protocol, "Get success response".
+    #[tokio::test]
+    async fn test_token_success_is_get_expires() {
+        let outcome = handle_request(
+            &read_request(CODEARTIFACT_INDEX),
+            async |registry: &codeartifact::CodeArtifactRegistry| -> Result<CodeArtifactToken> {
+                assert_eq!(registry.domain, "my-domain");
+                assert_eq!(registry.domain_owner, "123456789012");
+                assert_eq!(registry.region, "us-east-1");
+                Ok(CodeArtifactToken {
+                    authorization_token: SecretString::from("tok".to_string()),
+                    expiration: 1_693_942_857,
+                })
+            },
+        )
+        .await;
+        assert_eq!(
+            json_of(&outcome),
+            r#"{"Ok":{"kind":"get","token":"tok","cache":"expires","expiration":1693942857,"operation_independent":true}}"#
+        );
     }
 }

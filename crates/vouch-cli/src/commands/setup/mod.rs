@@ -6,7 +6,6 @@ use vouch_cli::tr;
 
 pub(crate) mod anthropic;
 pub(crate) mod aws;
-pub(crate) mod cargo;
 pub(crate) mod codeartifact;
 pub(crate) mod codecommit;
 pub(crate) mod docker;
@@ -133,16 +132,6 @@ pub(crate) enum SetupCommands {
         /// AWS profile whose role mints ECR credentials for these registries.
         #[arg(long, help = tr!("arg-setup-docker-profile-help"))]
         profile: Option<String>,
-    },
-    /// Configure Cargo to use Vouch for private registry authentication.
-    #[command(about = tr!("cmd-setup-cargo-about"))]
-    Cargo {
-        /// Registry name to configure (if not specified, configures global provider).
-        #[arg(long, help = tr!("arg-setup-cargo-registry-help"))]
-        registry: Option<String>,
-        /// Write the configuration (otherwise just show instructions).
-        #[arg(long, help = tr!("arg-setup-cargo-configure-help"))]
-        configure: bool,
     },
     /// Configure Git to use Vouch for AWS CodeCommit credentials.
     #[command(about = tr!("cmd-setup-codecommit-about"))]
