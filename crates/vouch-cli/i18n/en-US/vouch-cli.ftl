@@ -268,11 +268,6 @@ cmd-credential-docker-long-about =
 arg-credential-docker-operation-help = Docker credential operation (get, store, erase, list).
 arg-credential-docker-profile-help = AWS profile in ~/.aws/config whose role mints ECR credentials.
 
-cmd-credential-cargo-about = Cargo credential provider for private registries
-cmd-credential-cargo-long-about =
-    This implements Cargo's credential provider protocol. Users should not call
-    this directly. Instead, use `{ -cmd } setup cargo` to configure Cargo.
-
 cmd-credential-codecommit-about = Git credential helper for AWS CodeCommit
 cmd-credential-codecommit-long-about =
     This is used by git as a credential helper. Users should not call this
@@ -916,8 +911,6 @@ credential-github-err-fetch-token = vouch: failed to get { -github } token: { $e
 
 ## credential/cargo
 
-# Emitted when cargo invokes the credential helper for an unsupported login
-# action ({ -cmd } manages auth, not `cargo login`).
 # Full block when cargo asks the helper to log in (which vouch doesn't
 # support — auth happens via `{ -cmd } login`). The shell snippet lives in
 # the message so translators see the "do this instead" instruction
@@ -927,7 +920,6 @@ credential-cargo-login-needed =
 
         { -cmd } login
 
-credential-cargo-login-hint = use '{ -cmd } login' to authenticate
 credential-cargo-logout =
     Note: 'cargo logout' does not affect your { -product } session for registry '{ $registry }'.
     To fully log out, run: { -cmd } logout
@@ -940,7 +932,6 @@ cmd-setup-github-about = Configure Git to use { -product } for GitHub credential
 cmd-setup-eks-about = Configure kubectl to use { -product } credentials for Amazon EKS clusters
 cmd-setup-k8s-about = Configure kubectl to use { -product } OIDC credentials for generic Kubernetes clusters
 cmd-setup-docker-about = Configure Docker to use { -product } for container registry authentication
-cmd-setup-cargo-about = Configure Cargo to use { -product } for private registry authentication
 cmd-setup-codecommit-about = Configure Git to use { -product } for AWS CodeCommit credentials
 cmd-setup-ssm-about = Configure SSH for AWS Systems Manager Session Manager
 cmd-setup-anthropic-about = Configure Anthropic (Claude) Workload Identity Federation
@@ -1002,10 +993,6 @@ arg-setup-docker-registries-help = Container registries to configure (e.g., ghcr
 setup-docker-anchored-profile = Registry { $registry } will use AWS profile { $profile }.
 arg-setup-docker-profile-help = AWS profile in ~/.aws/config whose role mints ECR credentials for these registries.
 arg-setup-docker-configure-help = Automatically configure Docker (otherwise just show instructions).
-
-# setup/cargo arg help
-arg-setup-cargo-registry-help = Registry name to configure (if not specified, configures global provider).
-arg-setup-cargo-configure-help = Write the configuration (otherwise just show instructions).
 
 # setup/codecommit arg help
 arg-setup-codecommit-region-help = AWS region (default: wildcard matching all regions).
@@ -1235,49 +1222,6 @@ setup-anthropic-success-block =
         -H "anthropic-version: 2023-06-01" \
         -H "content-type: application/json" \
         -d '{"{"}"model":"claude-sonnet-4-6","max_tokens":64,"messages":[{"{"}"role":"user","content":"hi"{"}"}]{"}"}'
-
-## setup/cargo
-
-setup-cargo-header =
-    Cargo Credential Provider Setup
-    ================================
-setup-cargo-already-registry = { -product } is already configured for registry '{ $name }'
-setup-cargo-already-global = { -product } is already configured as global credential provider
-setup-cargo-config-file = Configuration file: { $path }
-setup-cargo-configured-registry = Cargo configured for registry '{ $name }'
-setup-cargo-configured-global = Cargo configured with global credential provider
-setup-cargo-config-added = Configuration added to: { $path }
-# Full "show me what to add" block for a specific registry. The TOML stanza
-# is part of the message so translators see (and can adjust spacing of) the
-# whole config-instructions flow in one place. Indented `[…]` lines start with
-# `{""}` because Fluent treats a leading `[` on a continuation line as a
-# variant key — the empty placeable forces TextElement parsing.
-setup-cargo-instructions-specific =
-    Add to ~/.cargo/config.toml:
-
-    {""}[registries.{ $registry }]
-    credential-provider = { $command }
-
-    Or run: { -cmd } setup cargo --configure
-
-# Full block for global credential-providers configuration. Same shape as
-# `setup-cargo-instructions-specific`; the per-registry commented example
-# lives inside the message so translators can rephrase the "Or for a
-# specific registry" hint without coordinating with a sibling key.
-setup-cargo-instructions-global =
-    Add to ~/.cargo/config.toml:
-
-    {""}[registry]
-    global-credential-providers = { $command }
-
-    {""}# Or for a specific registry:
-    {""}# [registries.my-private-registry]
-    {""}# credential-provider = { $command }
-
-    Or run: { -cmd } setup cargo --configure
-setup-cargo-more-info =
-    For more information, see:
-      https://doc.rust-lang.org/cargo/reference/registry-authentication.html
 
 ## setup/github
 

@@ -26,6 +26,21 @@ pub enum Partition {
 }
 
 impl Partition {
+    /// Every partition, for callers that match a value against all of them.
+    ///
+    /// `tests::all_lists_every_partition_in_order` fails when a variant is
+    /// added to the enum but not listed here.
+    pub const ALL: [Self; 8] = [
+        Self::Aws,
+        Self::AwsCn,
+        Self::AwsUsGov,
+        Self::AwsEusc,
+        Self::AwsIso,
+        Self::AwsIsoB,
+        Self::AwsIsoE,
+        Self::AwsIsoF,
+    ];
+
     /// Parse a partition string from an ARN segment.
     ///
     /// # Errors
@@ -342,6 +357,33 @@ impl Arn {
 )]
 mod tests {
     use super::*;
+
+    /// Position of each variant. The exhaustive match makes adding a variant a
+    /// compile error here, which forces `VARIANT_COUNT` and `Partition::ALL`
+    /// to be updated together.
+    fn ordinal(partition: Partition) -> usize {
+        match partition {
+            Partition::Aws => 0,
+            Partition::AwsCn => 1,
+            Partition::AwsUsGov => 2,
+            Partition::AwsEusc => 3,
+            Partition::AwsIso => 4,
+            Partition::AwsIsoB => 5,
+            Partition::AwsIsoE => 6,
+            Partition::AwsIsoF => 7,
+        }
+    }
+
+    /// Number of variants, one more than the highest `ordinal`.
+    const VARIANT_COUNT: usize = 8;
+
+    #[test]
+    fn all_lists_every_partition_in_order() {
+        assert_eq!(Partition::ALL.len(), VARIANT_COUNT);
+        for (index, partition) in Partition::ALL.iter().enumerate() {
+            assert_eq!(ordinal(*partition), index, "{partition} is out of place");
+        }
+    }
 
     #[test]
     fn test_parse_all_valid() {

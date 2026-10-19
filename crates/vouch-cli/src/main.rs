@@ -52,6 +52,15 @@ fn is_docker_credential_argv0(argv0: &str) -> bool {
     argv0.ends_with("docker-credential-vouch") || argv0.ends_with("docker-credential-vouch.exe")
 }
 
+/// Test if argv1 is the marker Cargo passes to a credential provider.
+///
+/// Cargo runs `<provider> --cargo-plugin` and delivers the remaining
+/// `credential-provider` entries in the request JSON, not on the command line.
+/// <https://doc.rust-lang.org/cargo/reference/credential-provider-protocol.html>
+fn is_cargo_plugin_argv1(argv1: Option<&std::ffi::OsStr>) -> bool {
+    argv1 == Some(std::ffi::OsStr::new("--cargo-plugin"))
+}
+
 /// Test if argv0 indicates invocation as `git-remote-codecommit`.
 fn is_git_remote_codecommit_argv0(argv0: &str) -> bool {
     argv0.ends_with("git-remote-codecommit") || argv0.ends_with("git-remote-codecommit.exe")
@@ -90,6 +99,29 @@ async fn check_docker_credential_invocation(argv0: &str) -> Result<bool> {
     }
 
     Ok(false)
+}
+
+/// Check if invoked by Cargo as a credential provider and handle accordingly.
+/// Returns `Ok(true)` if this was a Cargo credential provider invocation (handled),
+/// `Ok(false)` if not, or an error if the provider failed.
+///
+/// Runs before the process-wide initialization so the provider can send its
+/// hello first and report an initialization failure to Cargo as a protocol
+/// error, not as "failed to deserialize hello".
+async fn check_cargo_plugin_invocation(config: Option<&config::Config>) -> Result<bool> {
+    let argv1 = std::env::args_os().nth(1);
+    if !is_cargo_plugin_argv1(argv1.as_deref()) {
+        return Ok(false);
+    }
+
+    // The provider speaks JSON on stdout, so it returns before clap parses and
+    // takes no flags; `VOUCH_ALLOW_INSECURE` is the only opt-in.
+    commands::credential::cargo::run(InsecureOptIn::Env, || {
+        i18n::init(i18n::preresolve_lang_from_argv_and_env())?;
+        init_process_services(config)
+    })
+    .await?;
+    Ok(true)
 }
 
 /// Whether this invocation should be treated as a `git-remote-codecommit`
@@ -144,22 +176,19 @@ async fn check_git_remote_codecommit_invocation(argv0: &str) -> Result<bool> {
 
 /// Check if invoked as `keyring` (pip/uv keyring subprocess protocol).
 ///
-/// pip/uv call `keyring get <url> <username>` when `keyring-provider = subprocess`
-/// is configured. When invoked via symlink, argv[0] ends with "keyring".
+/// pip/uv run the `keyring` CLI when `keyring-provider = subprocess` is
+/// configured. When invoked via symlink, argv[0] ends with "keyring", and the
+/// rest of argv follows keyring's own grammar.
 async fn check_keyring_invocation(argv0: &str) -> Result<bool> {
     if is_keyring_argv0(argv0) {
-        let operation = std::env::args().nth(1).unwrap_or_default();
-        let service_url = std::env::args().nth(2);
-        let username = std::env::args().nth(3);
+        let keyring_error =
+            |e: &dyn std::fmt::Display| anyhow::anyhow!(tr_args!("err-keyring", e = e.to_string()));
+        let args = commands::credential::pip::KeyringArgs::try_parse_from(std::env::args_os())
+            .map_err(|e| keyring_error(&e))?;
 
-        commands::credential::pip::run(
-            &operation,
-            service_url.as_deref(),
-            username.as_deref(),
-            InsecureOptIn::Env,
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!(tr_args!("err-keyring", e = e.to_string())))?;
+        commands::credential::pip::run(&args, InsecureOptIn::Env)
+            .await
+            .map_err(|e| keyring_error(&e))?;
 
         return Ok(true);
     }
@@ -535,19 +564,11 @@ async fn tokio_main() -> ExitCode {
     }
 }
 
-/// Process-wide initialization plus helper-binary dispatch.
-///
-/// Initializes DNS-over-HTTPS and the keyring store, then checks whether
-/// the process was invoked via symlink as one of the helper binaries
-/// (docker credential helper, git-remote-codecommit, keyring, pnpm token
-/// helper). Returns `true` if a helper handled the invocation and the
-/// process should exit.
-async fn init_and_dispatch_helper_binaries(config: Option<&config::Config>) -> Result<bool> {
-    let argv0 = std::env::args().next().unwrap_or_default();
-
+/// Initialize the process-wide DNS-over-HTTPS resolver and the keyring store.
+fn init_process_services(config: Option<&config::Config>) -> Result<()> {
     // Initialize the process-wide DNS-over-HTTPS resolver from config + env
     // before any HTTP client is constructed (including from helper-binary
-    // dispatch below). Hard-fails if DoH is configured but unavailable.
+    // dispatch). Hard-fails if DoH is configured but unavailable.
     dns::init(config)?;
 
     // Register the platform-native keyring store. Non-fatal: keychain access
@@ -555,6 +576,25 @@ async fn init_and_dispatch_helper_binaries(config: Option<&config::Config>) -> R
     if let Err(e) = key_store::init_default_store() {
         tracing::debug!("Could not initialize keyring store: {e}");
     }
+    Ok(())
+}
+
+/// Process-wide initialization plus helper-binary dispatch.
+///
+/// Initializes DNS-over-HTTPS and the keyring store, then checks whether
+/// the process was invoked via symlink as one of the helper binaries
+/// (docker credential helper, git-remote-codecommit, keyring, pnpm token
+/// helper) or by Cargo as its credential provider (`--cargo-plugin`).
+/// Returns `true` if a helper handled the invocation and the process should
+/// exit.
+async fn init_and_dispatch_helper_binaries(config: Option<&config::Config>) -> Result<bool> {
+    if check_cargo_plugin_invocation(config).await? {
+        return Ok(true);
+    }
+
+    let argv0 = std::env::args().next().unwrap_or_default();
+
+    init_process_services(config)?;
 
     if check_docker_credential_invocation(&argv0).await? {
         return Ok(true);
@@ -726,23 +766,10 @@ async fn run() -> Result<()> {
             CredentialCommands::Docker { operation, profile } => {
                 commands::credential::docker::run(&operation, profile.as_deref(), opt_in).await
             }
-            CredentialCommands::Cargo { .. } => commands::credential::cargo::run(opt_in).await,
             CredentialCommands::Codecommit { operation, profile } => {
                 commands::credential::codecommit::run(&operation, profile.as_deref(), opt_in).await
             }
-            CredentialCommands::Pip {
-                operation,
-                service_url,
-                username,
-            } => {
-                commands::credential::pip::run(
-                    &operation,
-                    service_url.as_deref(),
-                    username.as_deref(),
-                    opt_in,
-                )
-                .await
-            }
+            CredentialCommands::Pip(args) => commands::credential::pip::run(&args, opt_in).await,
             CredentialCommands::Eks {
                 cluster_name,
                 region,
@@ -891,10 +918,6 @@ async fn run() -> Result<()> {
                 configure,
                 profile,
             } => commands::setup::docker::run(&registries, configure, profile.as_deref()).await,
-            SetupCommands::Cargo {
-                registry,
-                configure,
-            } => commands::setup::cargo::run(registry.as_deref(), configure).await,
             SetupCommands::Codecommit {
                 region,
                 profile,
@@ -1138,6 +1161,26 @@ mod tests {
         assert!(!is_docker_credential_argv0("vouch"));
         assert!(!is_docker_credential_argv0("docker-credential-ecr"));
         assert!(!is_docker_credential_argv0(""));
+    }
+
+    // -- cargo credential provider --
+
+    #[test]
+    fn test_cargo_plugin_argv1() {
+        use std::ffi::OsStr;
+        assert!(is_cargo_plugin_argv1(Some(OsStr::new("--cargo-plugin"))));
+        assert!(!is_cargo_plugin_argv1(Some(OsStr::new("--cargo-plugin=1"))));
+        assert!(!is_cargo_plugin_argv1(Some(OsStr::new("credential"))));
+        assert!(!is_cargo_plugin_argv1(None));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_cargo_plugin_argv1_non_utf8() {
+        use std::os::unix::ffi::OsStrExt;
+        assert!(!is_cargo_plugin_argv1(Some(std::ffi::OsStr::from_bytes(
+            b"\xff"
+        ))));
     }
 
     // -- git-remote-codecommit --

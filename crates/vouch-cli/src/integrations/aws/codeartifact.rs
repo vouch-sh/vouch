@@ -8,6 +8,7 @@
 use anyhow::{Context, Result};
 use secrecy::SecretString;
 use vouch_cli::tr;
+use vouch_common::aws::Partition;
 
 use super::sigv4::sign_and_send_rest;
 use super::sts::StsCredentials;
@@ -48,36 +49,38 @@ pub(crate) struct CodeArtifactRegistry {
 /// `{domain}-{domainOwner}.d.codeartifact.{region}.{domain_suffix}`
 ///
 /// Examples:
-/// - `my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com`
-/// - `my-domain-123456789012.d.codeartifact.cn-north-1.amazonaws.cn`
+/// - `https://my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com/cargo/r/`
+/// - `sparse+https://my-domain-123456789012.d.codeartifact.eu-west-1.amazonaws.com/cargo/r/`
 ///
-/// The URL may include a scheme (`https://`) and a path (e.g., `/cargo/my-repo/`).
+/// Only HTTPS URLs are accepted: a token minted for any other scheme would
+/// travel in the clear. The host must end in an AWS partition DNS suffix, and
+/// the URL must carry no userinfo or non-default port.
 #[must_use]
 pub(crate) fn parse_codeartifact_url(url: &str) -> Option<CodeArtifactRegistry> {
-    // Strip scheme and path to get just the host
     let url = url.strip_prefix("sparse+").unwrap_or(url);
-    let url = url.strip_prefix("https://").unwrap_or(url);
-    let url = url.strip_prefix("http://").unwrap_or(url);
-    // Take only the host part (before any path)
-    let host = url.split('/').next()?;
+    let parsed = url::Url::parse(url).ok()?;
+    if parsed.scheme() != "https"
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.port().is_some()
+    {
+        return None;
+    }
+    // `Url` lowercases the host. A trailing dot names the same host and does
+    // not change where the token goes.
+    let host = parsed.host_str()?;
+    let host = host.strip_suffix('.').unwrap_or(host);
 
     // Expected: {domain}-{owner}.d.codeartifact.{region}.{suffix}
     let (domain_owner_part, rest) = host.split_once(".d.codeartifact.")?;
 
-    // rest = "{region}.{suffix}" e.g., "us-east-1.amazonaws.com"
-    // Region may contain dots (unlikely but defensive), but the suffix always
-    // starts with "amazonaws." so split on the first "amazonaws." occurrence.
-    let amazonaws_idx = rest.find("amazonaws.")?;
-    if amazonaws_idx == 0 {
-        return None; // No region component
-    }
-    // region is everything before the dot preceding "amazonaws."
-    let region = rest.get(..amazonaws_idx.checked_sub(1)?)?;
-    let domain_suffix = rest.get(amazonaws_idx..)?;
-
-    if region.is_empty() || domain_suffix.is_empty() {
-        return None;
-    }
+    // rest = "{region}.{suffix}"; the suffix must end the host, so
+    // `…amazonaws.evil.com` is rejected.
+    let (region, domain_suffix) = Partition::ALL.iter().find_map(|partition| {
+        let suffix = partition.dns_suffix();
+        let region = rest.strip_suffix(suffix)?.strip_suffix('.')?;
+        Some((region, suffix))
+    })?;
 
     // domain_owner_part = "{domain}-{owner}" where owner is a 12-digit AWS account ID
     // The owner is the last segment after the final hyphen (since domain names can contain hyphens)
@@ -85,7 +88,16 @@ pub(crate) fn parse_codeartifact_url(url: &str) -> Option<CodeArtifactRegistry> 
     let domain = domain_owner_part.get(..last_hyphen)?;
     let domain_owner = domain_owner_part.get(last_hyphen.saturating_add(1)..)?;
 
-    if domain.is_empty() || domain_owner.is_empty() {
+    let is_label = |s: &str| {
+        !s.is_empty()
+            && s.bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    };
+    if !is_label(region)
+        || !is_label(domain)
+        || domain_owner.len() != 12
+        || !domain_owner.bytes().all(|b| b.is_ascii_digit())
+    {
         return None;
     }
 
@@ -187,7 +199,7 @@ mod tests {
 
     #[test]
     fn test_parse_codeartifact_url_basic() {
-        let url = "my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com";
+        let url = "https://my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com";
         let result = parse_codeartifact_url(url).expect("should parse");
         assert_eq!(result.domain, "my-domain");
         assert_eq!(result.domain_owner, "123456789012");
@@ -217,18 +229,8 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_codeartifact_url_china() {
-        let url = "my-domain-123456789012.d.codeartifact.cn-north-1.amazonaws.cn";
-        let result = parse_codeartifact_url(url).expect("should parse");
-        assert_eq!(result.domain, "my-domain");
-        assert_eq!(result.domain_owner, "123456789012");
-        assert_eq!(result.region, "cn-north-1");
-        assert_eq!(result.domain_suffix, "amazonaws.cn");
-    }
-
-    #[test]
     fn test_parse_codeartifact_url_govcloud() {
-        let url = "my-domain-123456789012.d.codeartifact.us-gov-west-1.amazonaws.com";
+        let url = "https://my-domain-123456789012.d.codeartifact.us-gov-west-1.amazonaws.com";
         let result = parse_codeartifact_url(url).expect("should parse");
         assert_eq!(result.domain, "my-domain");
         assert_eq!(result.domain_owner, "123456789012");
@@ -238,7 +240,7 @@ mod tests {
 
     #[test]
     fn test_parse_codeartifact_url_hyphenated_domain() {
-        let url = "my-cool-domain-123456789012.d.codeartifact.eu-west-1.amazonaws.com";
+        let url = "https://my-cool-domain-123456789012.d.codeartifact.eu-west-1.amazonaws.com";
         let result = parse_codeartifact_url(url).expect("should parse");
         assert_eq!(result.domain, "my-cool-domain");
         assert_eq!(result.domain_owner, "123456789012");
@@ -265,7 +267,7 @@ mod tests {
 
     #[test]
     fn test_parse_codeartifact_url_invalid_not_codeartifact() {
-        assert!(parse_codeartifact_url("index.crates.io").is_none());
+        assert!(parse_codeartifact_url("https://index.crates.io").is_none());
         assert!(parse_codeartifact_url("https://registry.npmjs.org").is_none());
         assert!(parse_codeartifact_url("https://pypi.org/simple/").is_none());
     }
@@ -273,12 +275,108 @@ mod tests {
     #[test]
     fn test_parse_codeartifact_url_invalid_missing_parts() {
         // Missing domain owner
-        assert!(parse_codeartifact_url(".d.codeartifact.us-east-1.amazonaws.com").is_none());
+        assert!(
+            parse_codeartifact_url("https://.d.codeartifact.us-east-1.amazonaws.com").is_none()
+        );
         // Missing domain
         assert!(
-            parse_codeartifact_url("-123456789012.d.codeartifact.us-east-1.amazonaws.com")
+            parse_codeartifact_url("https://-123456789012.d.codeartifact.us-east-1.amazonaws.com")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn test_parse_codeartifact_url_rejects_lookalike_hosts() {
+        for host in [
+            "my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.evil.com",
+            "my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com.evil.com",
+            "my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.cn.evil.com",
+            "my-domain-123456789012.d.codeartifact.us-east-1.evil.com/amazonaws.com",
+            "my-domain-123456789012.d.codeartifact.us-east-1.notamazonaws.com",
+            "my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.org",
+            // `amazonaws.cn` is not an AWS partition DNS suffix.
+            "my-domain-123456789012.d.codeartifact.cn-north-1.amazonaws.cn",
+            "my-domain-123456789012.d.codeartifact.amazonaws.com",
+            "evil.com@my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com",
+            "my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com:8443",
+            "my-domain-12345678901.d.codeartifact.us-east-1.amazonaws.com",
+            "my-domain-abcdefghijkl.d.codeartifact.us-east-1.amazonaws.com",
+        ] {
+            for prefix in ["https://", "sparse+https://"] {
+                let url = format!("{prefix}{host}/cargo/my-repo/");
+                assert!(parse_codeartifact_url(&url).is_none(), "{url}");
+            }
+        }
+    }
+
+    // Cargo's URL parser reads `https://http://…` as host `http`, so the token
+    // would go somewhere other than the CodeArtifact host in the path.
+    #[test]
+    fn test_parse_codeartifact_url_rejects_double_scheme() {
+        let host = "victim-123456789012.d.codeartifact.us-east-1.amazonaws.com";
+        for url in [
+            format!("sparse+https://http://{host}/cargo/r/"),
+            format!("https://http://{host}/cargo/r/"),
+            format!("https://https://{host}/cargo/r/"),
+            format!("sparse+sparse+https://{host}/cargo/r/"),
+            format!("https://x@{host}/cargo/r/"),
+            format!("https://user:pw@{host}/cargo/r/"),
+            format!("https://{host}:8443/cargo/r/"),
+            format!("https://{host}:80/cargo/r/"),
+        ] {
+            assert!(parse_codeartifact_url(&url).is_none(), "{url}");
+        }
+    }
+
+    #[test]
+    fn test_parse_codeartifact_url_requires_https() {
+        let host = "my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com";
+        for url in [
+            format!("http://{host}/cargo/r/"),
+            format!("sparse+http://{host}/cargo/r/"),
+            format!("{host}/cargo/r/"),
+            format!("//{host}/npm/r/"),
+            format!("ftp://{host}/"),
+        ] {
+            assert!(parse_codeartifact_url(&url).is_none(), "{url}");
+        }
+    }
+
+    #[test]
+    fn test_parse_codeartifact_url_accepts_default_https_port() {
+        let url =
+            "https://my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com:443/cargo/r/";
+        assert!(parse_codeartifact_url(url).is_some());
+    }
+
+    // Each AWS partition DNS suffix is accepted, taken from `Partition::dns_suffix`.
+    #[test]
+    fn test_parse_codeartifact_url_accepts_partition_suffixes() {
+        for partition in Partition::ALL {
+            let suffix = partition.dns_suffix();
+            let url =
+                format!("https://my-domain-123456789012.d.codeartifact.r-1.{suffix}/cargo/r/");
+            let result = parse_codeartifact_url(&url).expect("should parse");
+            assert_eq!(result.domain_suffix, suffix, "{url}");
+        }
+    }
+
+    #[test]
+    fn test_parse_codeartifact_url_is_case_insensitive() {
+        let url =
+            "sparse+https://My-Domain-123456789012.D.CodeArtifact.US-East-1.AmazonAWS.com/cargo/r/";
+        let result = parse_codeartifact_url(url).expect("should parse");
+        assert_eq!(result.domain, "my-domain");
+        assert_eq!(result.region, "us-east-1");
+        assert_eq!(result.domain_suffix, "amazonaws.com");
+    }
+
+    #[test]
+    fn test_parse_codeartifact_url_trailing_dot() {
+        let url = "https://my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com./cargo/r/";
+        let result = parse_codeartifact_url(url).expect("should parse");
+        assert_eq!(result.region, "us-east-1");
+        assert_eq!(result.domain_suffix, "amazonaws.com");
     }
 
     #[test]

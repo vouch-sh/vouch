@@ -122,17 +122,6 @@ pub(crate) enum CredentialCommands {
         #[arg(long, help = tr!("arg-credential-docker-profile-help"))]
         profile: Option<String>,
     },
-    /// Cargo credential provider. Invoked by Cargo, not by users.
-    #[command(
-        hide = true,
-        about = tr!("cmd-credential-cargo-about"),
-        long_about = tr!("cmd-credential-cargo-long-about"),
-    )]
-    Cargo {
-        /// Cargo plugin marker (always passed by Cargo). Hidden, so no help text.
-        #[arg(long = "cargo-plugin", hide = true)]
-        _cargo_plugin: bool,
-    },
     /// Git credential helper for CodeCommit. Invoked by git, not by users.
     #[command(
         hide = true,
@@ -153,17 +142,7 @@ pub(crate) enum CredentialCommands {
         about = tr!("cmd-credential-pip-about"),
         long_about = tr!("cmd-credential-pip-long-about"),
     )]
-    Pip {
-        /// Keyring operation (get, set, del).
-        #[arg(help = tr!("arg-credential-pip-operation-help"))]
-        operation: String,
-        /// Service URL passed by pip (the CodeArtifact index URL).
-        #[arg(help = tr!("arg-credential-pip-service-url-help"))]
-        service_url: Option<String>,
-        /// Username passed by pip (typically "aws").
-        #[arg(help = tr!("arg-credential-pip-username-help"))]
-        username: Option<String>,
-    },
+    Pip(pip::KeyringArgs),
     /// Generate a Kubernetes bearer token for Amazon EKS authentication.
     #[command(
         about = tr!("cmd-credential-eks-about"),
