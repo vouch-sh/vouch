@@ -139,13 +139,14 @@ issue. CI builds every workspace target, so the compiler proves most removals: a
 function, impl, or constant that still had a caller would not build. Review the
 removals the compiler cannot see:
 
-- **A field on a persisted or wire-format struct** — a `DocumentType` document
-  or a state-token payload. Old and new servers read the same rows during a
-  rolling refresh, so a required field no code reads is still a contract with
-  the previous release (rule `wire-format-compat-on-persisted-structs`). #1379
-  on 2026-09-15 would have made every newly registered authenticator unreadable
-  to old servers. Keep the field with `#[serde(default)]`, write it empty, and
-  delete it a release later.
+- **A field on a persisted or wire-format struct** — sort by how long the data
+  lives. Vouch has no outside users and ships the CLI and server together (user,
+  2026-10-16), so compatibility with the previous release is not a constraint:
+  a state-token payload or short-TTL document may gain, lose, or tighten a field
+  in one release. A long-lived document (users, OAuth clients, authenticators,
+  org keys) is different, because rows written by every earlier release stay in
+  storage: a field it gains needs `#[serde(default)]` or `Option`, and making
+  one required or stricter needs a migration that rewrites existing rows.
 - **Index entries** — find the readers by field name. A write-only index entry
   is dead, and it is rarely alone: #1380 had six siblings.
 - **Anything `fuzz/` uses** — that crate is outside the workspace and CI does
@@ -287,7 +288,10 @@ one, check it against the replacement before treating it as a defect.
 |---|---|---|
 | `rule_cac14e59` no-raw-strings-in-html-pages | `enforce-i18n-catalog-lookups-for-html-page-text` | says ErrorTemplate/GitHubErrorTemplate hold `String`; allows a raw OIDC error passthrough |
 | `rule_6a00bc79`, `rule_76e70d4e` dpop-www-authenticate-single-challenge | `dpop-token-first-single-challenge` | shows the `/v1` proof check before the binding check as correct |
-| `rule_26d9c554` jar-parameter-exclusivity | `jar-parameters-from-request-object-only` | shows a gated duplicate form `dpop_jkt` check as the fix | Hand-editing the pulled file is
+| `rule_26d9c554` jar-parameter-exclusivity | `jar-parameters-from-request-object-only` | shows a gated duplicate form `dpop_jkt` check as the fix |
+| `rule_5bc7d013` wire-format-compat-on-persisted-structs | pending request `rcr_f5eda781` | demands two-release expand/contract on short-lived state tokens and documents; Vouch has no rolling-deploy constraint (user, 2026-10-16). Still right for long-lived rows |
+
+Hand-editing the pulled file is
 forbidden (step 0) and the next sync would overwrite it, and the CLI has
 `create`, `pull`, `show`, `list` and `propose` — no refine verb.
 
@@ -362,12 +366,12 @@ addresses the report:
 - **A new normalizer or parser** — does it alter input it should leave alone?
 - **A new error path** — does it swallow, and does that match how the adjacent
   code treats the same error?
-- **A new server-side requirement** — does the shipped first-party client
-  already satisfy it? #1308 added a grant check the released CLI failed,
-  breaking WIF in v2026.9.3; #1388 required a client assertion `vouch enroll`
-  never sent. Ship the client change first and enforce a release later.
-- **A changed serde shape** — the rolling-deploy constraint under Dead Code PRs
-  (step 2) applies to any field a fix removes, renames, or tightens.
+- **A new server-side requirement** — does the first-party client in the same
+  release satisfy it? #1308 added a grant check the CLI failed, breaking WIF in
+  v2026.9.3; #1388 required a client assertion `vouch enroll` never sent. The
+  CLI and server ship together, so change both in the same PR.
+- **A changed serde shape** — apply the lifetime split under Dead Code PRs
+  (step 2): only long-lived documents need compatibility with old rows.
 
 ### Check the fix against the class it fixes
 

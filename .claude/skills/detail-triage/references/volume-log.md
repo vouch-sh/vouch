@@ -43,6 +43,7 @@ judgement columns come from the batch's record in `.local/`.
 | 2026-10-09 | 11 | 10 | 0 | 1 | 0 | 7 of 10 | 3 merged as-is (#1803, #1804, #1812); #1806 amended (`invalid_request`, RFC 8693 §2.2.2); 4 superseded: #1808 by #1813 (extra-audience MUST), #1805/#1809/#1810 by scope class fix #1815; #1807, #1811 closed wontfix; #1798 (no PR) fixed by #1814; sibling found reviewing #1803 fixed by #1816 (Request Object parameter failures → RFC 6749 codes, RFC 9101 §6.3); follow-ups #1818 (`invalid_scope` on ID-token exchange) and #1819 (AWS claim values STS refuses) | 0 exact; #1796 matches the KB's accepted deactivation window | 0 (user: no rule requests, 2026-10-03) |
 | 2026-10-13 | 1 | 0 | 1 | 0 | 1 | 0 of 0 | #1825 (no PR) closed won't fix: configured IdPs are trusted for the emails they verify; #1823's docs and comments corrected in #1833; dead-code #1824 queued, carrying the rustls 0.23.46 bump | 0 | 0 |
 | 2026-10-16 | 2 | 2 | 0 | 0 | 0 | 2 of 2 | #1831 amended (citation RFC 7519 §4.1.7); #1830 superseded by class fix #1832 (every grant carries `resource`/`authorization_details`; RFC 9396 §5 type gate; `ErrorDescription` for RFC 6749 §5.2's charset) | 0 | 0 (not requested) |
+| 2026-10-19 | 1 | 1 | 0 | 1 | 1 | 1 of 1 | #1838/#1839 closed not planned: contradicts the 10-16 no-rolling-deploy decision | 0 exact; recurrence of a recorded decision | 1 requested (`rcr_f5eda781…`), replaces `rule_5bc7d013`; not synced |
 
 Batches before 2026-08-20 have no record, so only their counted columns exist:
 run the script. `escape-unaware-delimiter-normalization` exists on Detail's side
@@ -1078,3 +1079,21 @@ fix was right; only its RFC 8725 §3.4 citation was wrong.
 - `cargo deny` started failing repo-wide on rustls 0.23.45 (RUSTSEC-2026-0346 to 0349; fixed in
   0.23.46, published 2026-10-14). #1824 was dropped from the queue on that check; the bump rode on
   it, as the first PR to re-queue (user, 2026-10-16), with `fuzz/Cargo.lock` refreshed too.
+
+## 2026-10-19
+
+One finding, #1838 (PR #1839), in the line our #1831 added three days earlier: the auth-code
+`jti` is required, so a code minted by the previous binary fails to decode during a deploy. It
+came from rule `wire-format-compat-on-persisted-structs` and contradicted the 2026-10-16
+decision that Vouch has no rolling-deploy constraint. Both were closed not planned.
+
+The rule cannot be deleted, so a replacement was requested (`rcr_f5eda781`; an earlier request,
+`rcr_d1f10506`, was too broad and is not to be pulled). It splits by data lifetime: state tokens
+and short-TTL documents need no compatibility with the previous release; long-lived documents
+still need `#[serde(default)]` for fields they gain, because old rows stay in storage.
+
+### Process
+
+- A finding that contradicts a recorded user decision is a decision recurrence. Close it, and
+  treat the rule that produced it as stale.
+- The skill's rolling-deploy checks now follow the same lifetime split.
