@@ -25,6 +25,14 @@ ignore = [
     # moves to compact_str/smol_str.
     # https://rustsec.org/advisories/RUSTSEC-2026-0249
     "RUSTSEC-2026-0249",
+    # basic-toml is unmaintained (repository archived 2025-03-02), reached
+    # through `askama_derive` and `i18n-config` (via `i18n-embed-fl`). No safe
+    # upgrade exists and the advisory reports no vulnerability. Both are
+    # proc-macro dependencies that parse our own build-time config files
+    # (askama.toml, i18n.toml), so no untrusted input reaches the parser.
+    # Re-evaluate when askama or i18n-embed-fl moves to `toml`.
+    # https://rustsec.org/advisories/RUSTSEC-2026-0374
+    "RUSTSEC-2026-0374",
 ]
 
 [licenses]
@@ -99,17 +107,10 @@ skip = [
     { crate = "hashbrown@0.16.1", reason = "governor/sqlx use hashbrown 0.16" },
     # heck version split (clap_derive vs other derive macros)
     { crate = "heck:>=0.4,<0.5", reason = "some derive macros still on heck 0.4" },
-    # http/http-body 0.2 vs 1.x (hyper ecosystem transition)
-    { crate = "http:>=0.2,<0.3", reason = "aws-sdk still uses http 0.2 internally" },
-    { crate = "http-body:>=0.4,<0.5", reason = "aws-sdk still uses http-body 0.4 internally" },
-    # itertools version split
-    { crate = "itertools@0.13.0", reason = "some dependencies still on itertools 0.13" },
     # rand 0.9 vs 0.10 (a pinned 0.9.4 skip went stale when 0.9.5 shipped)
     { crate = "rand:>=0.9,<0.10", reason = "some crates still on rand 0.9" },
     { crate = "rand_core:>=0.6,<0.7", reason = "rand 0.8 ecosystem" },
     { crate = "rand_core:>=0.9,<0.10", reason = "rand 0.9 ecosystem" },
-    # shlex version split (build-script dependency)
-    { crate = "shlex@1.3.0", reason = "cc/cmake build dependencies use shlex 1.x" },
     # spin version split
     { crate = "spin:>=0.9,<0.10", reason = "lazy_static/ring transitive" },
     # thiserror 1.x vs 2.x (ecosystem transition)
@@ -139,18 +140,10 @@ skip = [
     { crate = "nom:>=8,<9", reason = "cedar-policy-mcp-schema-generator → iso8601 on nom 8; webauthn stack on nom 7" },
     { crate = "nonempty:>=0.12,<0.13", reason = "dogwood-language on nonempty 0.12; tower_governor on 0.7" },
 ]
-skip-tree = [
-    # windows-sys bumps frequently; many crates lag behind. Rather than tracking
-    # each transitive dep individually, skip the entire tree for older versions.
-    { crate = "windows-sys:<0.61", reason = "foundational Windows crate that bumps frequently; many deps lag behind" },
-]
+skip-tree = []
 
 [sources]
 unknown-registry = "deny"
 unknown-git = "warn"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = [
-    # Dogwood policy engine: not published on crates.io — pinned to an exact
-    # rev in Cargo.toml.
-    "https://github.com/dogwood-policy/dogwood",
-]
+allow-git = []

@@ -464,7 +464,13 @@ mod tests {
             .expect("bind loopback listener");
         let addr = listener.local_addr().expect("local_addr");
         let _join = tokio::spawn(async move {
-            let (stream, _peer) = listener.accept().await.expect("accept connection");
+            let (mut stream, _peer) = listener.accept().await.expect("accept connection");
+            if test_utils::read_mock_request_line(&mut stream)
+                .await
+                .is_none()
+            {
+                return;
+            }
             handle(stream).await;
         });
         addr

@@ -867,15 +867,20 @@ impl GitHubMock {
 
 /// Read one HTTP/1.1 request (headers plus `Content-Length` body) and return
 /// its request line.
-async fn read_mock_request_line(
-    tls: &mut tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
-) -> Option<String> {
+///
+/// A mock server must read the request before it answers: a response that
+/// reaches hyper while it is still writing the request cancels the exchange
+/// with `UnexpectedMessage`.
+pub async fn read_mock_request_line<S>(stream: &mut S) -> Option<String>
+where
+    S: tokio::io::AsyncRead + Unpin,
+{
     use tokio::io::AsyncReadExt as _;
 
     let mut buf: Vec<u8> = Vec::with_capacity(8192);
     let mut tmp = [0u8; 4096];
     loop {
-        let n = tls.read(&mut tmp).await.ok()?;
+        let n = stream.read(&mut tmp).await.ok()?;
         if n == 0 {
             return None;
         }
