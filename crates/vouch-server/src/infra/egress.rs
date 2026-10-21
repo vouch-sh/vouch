@@ -144,6 +144,7 @@ pub(crate) async fn read_capped_json<T: serde::de::DeserializeOwned>(
 )]
 mod tests {
     use super::*;
+    use crate::test_utils;
     use tokio::io::AsyncWriteExt;
 
     /// Serve `body` once over loopback HTTP/1.1 with an explicit
@@ -160,6 +161,12 @@ mod tests {
         let addr = listener.local_addr().expect("local_addr");
         let _join = tokio::spawn(async move {
             let (mut stream, _peer) = listener.accept().await.expect("accept connection");
+            if test_utils::read_mock_request_line(&mut stream)
+                .await
+                .is_none()
+            {
+                return;
+            }
             let header = format!(
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()
