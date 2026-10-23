@@ -1928,9 +1928,6 @@ rfc8628#5.4#978bf787	SHOULD	To mitigate such an attack, it is RECOMMENDED to inf
 rfc8628#5.4#def2895d	SHOULD	The authorization server SHOULD display information about the device so that the user could notice if a software client was attempting to impersonate a hardware
 rfc8628#5.5#fc8dab50	SHOULD	Devices SHOULD take into account the operating environment when considering how to communicate the code to the user to reduce the chances it will be observed by
 rfc8628#5.7#08d60057	SHOULD	To mitigate an attack in which a malicious user can bootstrap their credentials on a device not in their control, it is RECOMMENDED that any chosen communicatio
-rfc8693#6#95614386	MUST	Tokens employed in the context of the functionality described herein may contain privacy-sensitive information and, to prevent disclosure of such information to
-rfc8693#6#e59b1faa	MUST	In cases where it is desirable to prevent disclosure of certain information to the client, the token MUST be encrypted to its intended recipient.
-rfc8693#6#eb946a19	SHOULD	Deployments SHOULD determine the minimally necessary amount of data and only include such information in issued tokens.
 rfc8705#4#895a63d1	SHOULD	When the authorization server issues a refresh token to such a client, it SHOULD also bind the refresh token to the respective certificate and check the binding
 rfc8705#7.4#f9ce43a1	SHOULD	To cope with that threat, the authorization server SHOULD only accept, as trust anchors, a limited number of CAs whose certificate issuance policy meets its sec
 rfc8705#7.5#48dcffa2	SHOULD	For these reasons, implementors SHOULD use an established and well- tested X.509 library (such as one used by an established TLS library) for validation of X.50
