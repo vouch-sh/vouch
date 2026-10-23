@@ -43,18 +43,33 @@ pub(crate) struct CodeArtifactRegistry {
     pub domain_suffix: String,
 }
 
+/// DNS suffix for CodeArtifact dualstack (IPv6) endpoints in the commercial
+/// partition. AWS documents these as `codeartifact.{region}.on.aws`, and the
+/// `GetRepositoryEndpoint` API exposes `endpointType=dualstack` to produce
+/// repository URLs whose hosts end in this suffix.
+const DUALSTACK_DNS_SUFFIX: &str = "on.aws";
+
 /// Parse a CodeArtifact URL into its components.
 ///
-/// CodeArtifact URLs follow the pattern:
-/// `{domain}-{domainOwner}.d.codeartifact.{region}.{domain_suffix}`
+/// CodeArtifact URLs follow one of two host shapes:
+/// - IPv4: `{domain}-{owner}.d.codeartifact.{region}.{domain_suffix}`
+/// - Dualstack: `{domain}-{owner}.codeartifact.{region}.on.aws`
+///
+/// Dualstack repository endpoints omit the `.d.` segment (the `.d.`-style
+/// `.on.aws` name serves a mismatched TLS certificate, so the canonical
+/// dualstack repository host is `{domain}-{owner}.codeartifact.{region}.on.aws`).
+/// See the AWS CodeArtifact user guide: "To use a dualstack endpoint, use the
+/// `codeartifact.{region}.on.aws` endpoint."
 ///
 /// Examples:
 /// - `https://my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com/cargo/r/`
 /// - `sparse+https://my-domain-123456789012.d.codeartifact.eu-west-1.amazonaws.com/cargo/r/`
+/// - `https://my-domain-123456789012.codeartifact.us-east-1.on.aws/npm/my-repo/`
 ///
 /// Only HTTPS URLs are accepted: a token minted for any other scheme would
-/// travel in the clear. The host must end in an AWS partition DNS suffix, and
-/// the URL must carry no userinfo or non-default port.
+/// travel in the clear. The host must end in an AWS partition DNS suffix or
+/// the dualstack `on.aws` suffix, and the URL must carry no userinfo or
+/// non-default port.
 #[must_use]
 pub(crate) fn parse_codeartifact_url(url: &str) -> Option<CodeArtifactRegistry> {
     let url = url.strip_prefix("sparse+").unwrap_or(url);
@@ -66,21 +81,38 @@ pub(crate) fn parse_codeartifact_url(url: &str) -> Option<CodeArtifactRegistry> 
     {
         return None;
     }
-    // `Url` lowercases the host. A trailing dot names the same host and does
+    // `Url` lowercases the host. An trailing dot names the same host and does
     // not change where the token goes.
     let host = parsed.host_str()?;
     let host = host.strip_suffix('.').unwrap_or(host);
 
-    // Expected: {domain}-{owner}.d.codeartifact.{region}.{suffix}
-    let (domain_owner_part, rest) = host.split_once(".d.codeartifact.")?;
-
-    // rest = "{region}.{suffix}"; the suffix must end the host, so
-    // `…amazonaws.evil.com` is rejected.
-    let (region, domain_suffix) = Partition::ALL.iter().find_map(|partition| {
-        let suffix = partition.dns_suffix();
-        let region = rest.strip_suffix(suffix)?.strip_suffix('.')?;
-        Some((region, suffix))
-    })?;
+    // Two host shapes are accepted:
+    //   IPv4:      {domain}-{owner}.d.codeartifact.{region}.{partition_suffix}
+    //   Dualstack: {domain}-{owner}.codeartifact.{region}.on.aws
+    //
+    // The IPv4 shape is tried first; it carries the `.d.` segment and ends in a
+    // partition DNS suffix. The dualstack shape — which omits `.d.` and ends in
+    // `on.aws` — is only reached when the host has no `.d.codeartifact.`, so an
+    // IPv4 host can never be misparsed as dualstack.
+    //
+    // In both cases the suffix is suffix-anchored (`strip_suffix` plus a
+    // required `.`), so lookalike hosts like `…amazonaws.evil.com` and
+    // `…on.aws.evil.com` are rejected.
+    let (domain_owner_part, region, domain_suffix) = match host.split_once(".d.codeartifact.") {
+        Some((owner_part, rest)) => {
+            let (region, suffix) = Partition::ALL.iter().find_map(|partition| {
+                let suffix = partition.dns_suffix();
+                let region = rest.strip_suffix(suffix)?.strip_suffix('.')?;
+                Some((region, suffix))
+            })?;
+            (owner_part, region, suffix)
+        }
+        None => {
+            let (owner_part, rest) = host.split_once(".codeartifact.")?;
+            let region = rest.strip_suffix(DUALSTACK_DNS_SUFFIX)?.strip_suffix('.')?;
+            (owner_part, region, DUALSTACK_DNS_SUFFIX)
+        }
+    };
 
     // domain_owner_part = "{domain}-{owner}" where owner is a 12-digit AWS account ID
     // The owner is the last segment after the final hyphen (since domain names can contain hyphens)
@@ -265,6 +297,47 @@ mod tests {
         assert_eq!(result.domain_owner, "123456789012");
     }
 
+    // Dualstack (IPv6) endpoints: `{domain}-{owner}.codeartifact.{region}.on.aws`
+    // — the `.d.` segment is absent and the host ends in the AWS-owned `on.aws`
+    // suffix. See AWS docs: "To use a dualstack endpoint, use the
+    // `codeartifact.{region}.on.aws` endpoint."
+    #[test]
+    fn test_parse_codeartifact_url_dualstack() {
+        let url = "https://my-domain-123456789012.codeartifact.us-east-1.on.aws";
+        let result = parse_codeartifact_url(url).expect("should parse");
+        assert_eq!(result.domain, "my-domain");
+        assert_eq!(result.domain_owner, "123456789012");
+        assert_eq!(result.region, "us-east-1");
+        assert_eq!(result.domain_suffix, "on.aws");
+    }
+
+    #[test]
+    fn test_parse_codeartifact_url_dualstack_sparse_cargo() {
+        let url =
+            "sparse+https://my-domain-123456789012.codeartifact.us-east-1.on.aws/cargo/my-repo/";
+        let result = parse_codeartifact_url(url).expect("should parse");
+        assert_eq!(result.domain, "my-domain");
+        assert_eq!(result.domain_owner, "123456789012");
+        assert_eq!(result.region, "us-east-1");
+        assert_eq!(result.domain_suffix, "on.aws");
+    }
+
+    // `get_authorization_token` builds `https://codeartifact.{region}.{suffix}`,
+    // so a dualstack registry's suffix must yield the documented dualstack API
+    // endpoint.
+    #[test]
+    fn test_dualstack_domain_suffix_builds_dualstack_api_endpoint() {
+        let registry = parse_codeartifact_url(
+            "https://my-domain-123456789012.codeartifact.us-east-1.on.aws/npm/r/",
+        )
+        .expect("should parse");
+        let endpoint = format!(
+            "https://codeartifact.{}.{}",
+            registry.region, registry.domain_suffix
+        );
+        assert_eq!(endpoint, "https://codeartifact.us-east-1.on.aws");
+    }
+
     #[test]
     fn test_parse_codeartifact_url_invalid_not_codeartifact() {
         assert!(parse_codeartifact_url("https://index.crates.io").is_none());
@@ -301,6 +374,16 @@ mod tests {
             "my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com:8443",
             "my-domain-12345678901.d.codeartifact.us-east-1.amazonaws.com",
             "my-domain-abcdefghijkl.d.codeartifact.us-east-1.amazonaws.com",
+            // Dualstack lookalikes: the suffix must be exactly `on.aws` anchored
+            // at the host tail, preceded by a `.`.
+            "my-domain-123456789012.codeartifact.us-east-1.on.aws.evil.com",
+            "my-domain-123456789012.codeartifact.us-east-1.noton.aws",
+            // An IPv4-shaped host (no `.d.`) with an IPv4 suffix is not dualstack.
+            "my-domain-123456789012.codeartifact.us-east-1.amazonaws.com",
+            // `.d.`-style with the dualstack suffix serves a mismatched cert; the
+            // IPv4-shape parse fails to match a partition suffix and no fallback
+            // applies, so it is rejected.
+            "my-domain-123456789012.d.codeartifact.us-east-1.on.aws",
         ] {
             for prefix in ["https://", "sparse+https://"] {
                 let url = format!("{prefix}{host}/cargo/my-repo/");
