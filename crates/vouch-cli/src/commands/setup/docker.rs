@@ -3,7 +3,7 @@
 //!
 //! Configures Docker to use Vouch for container registry authentication.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use vouch_cli::{tr, tr_args, tr_println};
@@ -41,6 +41,14 @@ pub(crate) async fn run(
     configure: bool,
     profile: Option<&str>,
 ) -> Result<()> {
+    // Reject flag-looking entries before any I/O. With `trailing_var_arg`
+    // removed a well-formed invocation never lands a `-`-prefixed token
+    // here, but the explicit `--` separator (or a future regression) could
+    // still push a flag-like string into `registries` — which would otherwise
+    // be written verbatim as a bogus `credHelpers` key into
+    // ~/.docker/config.json. Fail loudly instead of silently polluting.
+    validate_registries(registries)?;
+
     // Load config to verify enrollment
     let config = Config::load().with_context(|| tr!("setup-err-load-config"))?;
     let _server = config
@@ -105,6 +113,28 @@ pub(crate) async fn run(
     println!();
     tr_println!("setup-docker-supported-block");
 
+    Ok(())
+}
+
+/// Reject `registries` entries that look like command-line flags.
+///
+/// Container registry hostnames never start with `-`, and `--configure` /
+/// `--profile` are consumed by clap before reaching this point (now that
+/// `trailing_var_arg` is gone). A `-`-prefixed entry therefore means the
+/// caller used the explicit `--` separator to force a flag-like token into
+/// the positional list, or some upstream change regressed parsing. Either
+/// way, treating such a string as a registry would silently write a bogus
+/// `credHelpers` key into `~/.docker/config.json` (and silently skip ECR
+/// profile anchoring). Fail fast with a clear message instead.
+fn validate_registries(registries: &[String]) -> Result<()> {
+    for registry in registries {
+        if registry.starts_with('-') {
+            bail!(tr_args!(
+                "setup-docker-err-flag-in-registry",
+                registry = registry
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -349,5 +379,35 @@ mod tests {
     #[test]
     fn docker_config_needs_home_when_env_is_absent() {
         assert_eq!(docker_config_path_from(None, None), None);
+    }
+
+    // --- validate_registries ------------------------------------------------
+    //
+    // Guards the credHelpers pollution path: a `-`-prefixed token must never
+    // be written as a registry key in ~/.docker/config.json.
+
+    /// A flag-looking entry must be rejected, and the error message must
+    /// name the offending token so the user can see what was swallowed.
+    #[test]
+    fn validate_registries_rejects_long_flag() {
+        let result = validate_registries(&["--configure".to_string()]);
+        assert!(
+            result
+                .err()
+                .is_some_and(|e| e.to_string().contains("--configure")),
+            "--configure must be rejected and named in the error"
+        );
+    }
+
+    /// Real registry hostnames — including ECR and ghcr.io — must pass.
+    #[test]
+    fn validate_registries_accepts_real_registries() {
+        assert!(validate_registries(&[]).is_ok());
+        assert!(validate_registries(&["ghcr.io".to_string()]).is_ok());
+        assert!(validate_registries(&["quay.io".to_string()]).is_ok());
+        assert!(
+            validate_registries(&["123456789012.dkr.ecr.us-east-1.amazonaws.com".to_string()])
+                .is_ok()
+        );
     }
 }
