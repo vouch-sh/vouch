@@ -43,15 +43,6 @@ impl CargoConfig {
         Ok(Self { doc, path })
     }
 
-    /// Create an empty config for a specific path.
-    #[must_use]
-    pub(crate) fn empty(path: PathBuf) -> Self {
-        Self {
-            doc: DocumentMut::new(),
-            path,
-        }
-    }
-
     /// Check if vouch is configured for a specific registry.
     #[must_use]
     pub(crate) fn has_registry_vouch(&self, registry: &str) -> bool {
@@ -395,5 +386,50 @@ credential-provider = ["/usr/local/bin/vouch"]
         let mut found = config.vouch_registries();
         found.sort();
         assert_eq!(found, ["registry-a", "registry-c"]);
+    }
+
+    // =========================================================================
+    // load_from error propagation
+    //
+    // `load_from` returns an empty document for a *missing* file, but must
+    // return Err for a *present* file that fails to parse or cannot be read.
+    // The CodeArtifact setup flow relies on this to avoid silently overwriting
+    // a malformed/unreadable ~/.cargo/config.toml. These cover the parse- and
+    // read-failure paths that the original tests (valid config + missing file)
+    // never exercised — see <bug report>.
+    // =========================================================================
+
+    #[test]
+    fn test_load_from_propagates_parse_error() {
+        // Malformed TOML (unclosed table header) must surface a parse error,
+        // not be silently replaced with an empty document.
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[build\njobs = 4\n").expect("failed to write");
+
+        let result = CargoConfig::load_from(path.clone());
+        assert!(result.is_err(), "malformed TOML should fail to parse");
+        let err = result.err().unwrap();
+        assert!(
+            err.to_string().contains(&path.display().to_string()),
+            "parse error should name the file: {err}",
+        );
+    }
+
+    #[test]
+    fn test_load_from_propagates_read_error_for_directory() {
+        // A path that is a directory cannot be read as a file and must surface
+        // a read error, not an empty document.
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let path = dir.path().join("config.toml");
+        std::fs::create_dir(&path).expect("failed to create dir-as-file");
+
+        let result = CargoConfig::load_from(path.clone());
+        assert!(result.is_err(), "a directory should fail to read");
+        let err = result.err().unwrap();
+        assert!(
+            err.to_string().contains(&path.display().to_string()),
+            "read error should name the file: {err}",
+        );
     }
 }
