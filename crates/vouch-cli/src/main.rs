@@ -614,18 +614,28 @@ async fn init_and_dispatch_helper_binaries(config: Option<&config::Config>) -> R
 /// Resolve the server URL from `--server`, config, or the default, and
 /// validate/normalize it.
 ///
-/// Offline commands (completions, init, logout, diag) skip validation but
-/// still normalize for consistency.
+/// Server-using commands receive the validated URL they will contact. Offline
+/// commands — the variants for which [`Commands::uses_server`] is `false`
+/// (`completions`, `init`, `posture`, `diag`) — never contact the server, so
+/// they skip validation entirely: a malformed `--server`, `VOUCH_SERVER`, or
+/// config `server_url` cannot abort them. Their handlers take no server
+/// argument and never read the value, so [`server_url::ServerUrl::default_url`]
+/// stands in for it. (`logout` posts to `/oauth/revoke`, so it is server-using;
+/// a prior revision of this comment listed it as offline, which was stale.)
 fn resolve_server_url(cli: &Cli, config: &config::Config) -> Result<server_url::ServerUrl> {
+    if !cli.command.uses_server() {
+        return Ok(server_url::ServerUrl::default_url());
+    }
+
     let server_raw = cli
         .server
         .clone()
         .or_else(|| config.server_url().map(String::from))
-        .unwrap_or_else(|| "https://us.vouch.sh".to_string());
+        .unwrap_or_else(|| server_url::DEFAULT_SERVER_URL.to_string());
 
     Ok(server_url::ServerUrl::parse(
         &server_raw,
-        cli.allow_insecure || !cli.command.uses_server(),
+        cli.allow_insecure,
     )?)
 }
 
@@ -1413,5 +1423,87 @@ mod tests {
         assert!(!is_pnpm_tokenhelper_argv0("tokenhelper"));
         assert!(!is_pnpm_tokenhelper_argv0("vouch"));
         assert!(!is_pnpm_tokenhelper_argv0(""));
+    }
+
+    // -- resolve_server_url + offline dispatch --
+
+    /// `--server auth.internal` drops the `https://` scheme — the natural typo
+    /// for `VOUCH_SERVER`/`--server`. `url::Url::parse` rejects it as "relative
+    /// URL without a base", which must abort server-using commands but must not
+    /// even be attempted for offline commands. Existing tests pin
+    /// `uses_server()` for `logout`, `completions`, and `posture`; this pins
+    /// `init` too. (`assert!` is avoided here because `panic_in_result_fn` is
+    /// denied: `anyhow::ensure!` fails the test by returning `Err`.)
+    #[test]
+    fn init_does_not_use_server() -> Result<()> {
+        let cli = Cli::try_parse_from(["vouch", "init", "bash"])?;
+        anyhow::ensure!(
+            !cli.command.uses_server(),
+            "Init prints a shell hook; uses_server() must be false"
+        );
+        Ok(())
+    }
+
+    /// Offline commands skip server URL validation: a malformed `--server`
+    /// cannot abort them, and the resolved (never-read) value is the default.
+    #[test]
+    fn resolve_server_url_offline_commands_skip_malformed_url() -> Result<()> {
+        let config = config::Config::default();
+        let cases: &[&[&str]] = &[
+            &["vouch", "--server", "auth.internal", "completions", "bash"],
+            &["vouch", "--server", "auth.internal", "init", "bash"],
+            &["vouch", "--server", "auth.internal", "posture"],
+        ];
+        for args in cases {
+            let cli = Cli::try_parse_from(*args)?;
+            anyhow::ensure!(
+                !cli.command.uses_server(),
+                "{args:?}: offline command must report uses_server() == false"
+            );
+            let server = resolve_server_url(&cli, &config)?;
+            anyhow::ensure!(
+                server.as_str() == server_url::DEFAULT_SERVER_URL,
+                "{args:?}: offline command must skip the malformed --server and resolve the default URL",
+            );
+        }
+        Ok(())
+    }
+
+    /// `diag` bypasses the server entirely and must be treated as offline.
+    /// Unix-only: the command is not built on Windows.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn resolve_server_url_diag_skips_malformed_url() -> Result<()> {
+        let cli = Cli::try_parse_from(["vouch", "--server", "auth.internal", "diag"])?;
+        anyhow::ensure!(
+            !cli.command.uses_server(),
+            "diag bypasses the server; uses_server() must be false"
+        );
+        let config = config::Config::default();
+        let server = resolve_server_url(&cli, &config)?;
+        anyhow::ensure!(
+            server.as_str() == server_url::DEFAULT_SERVER_URL,
+            "diag must skip the malformed --server and resolve the default URL"
+        );
+        Ok(())
+    }
+
+    /// A server-using command must still reject a malformed `--server`: the
+    /// offline-skip fix must not relax validation for commands that contact
+    /// the server. `doctor` is server-using (not on the offline exemption
+    /// list), so it fails inside `resolve_server_url` before any check runs.
+    #[test]
+    fn resolve_server_url_server_command_rejects_malformed_url() -> Result<()> {
+        let cli = Cli::try_parse_from(["vouch", "--server", "auth.internal", "doctor"])?;
+        anyhow::ensure!(
+            cli.command.uses_server(),
+            "doctor contacts the server; uses_server() must be true"
+        );
+        let config = config::Config::default();
+        anyhow::ensure!(
+            resolve_server_url(&cli, &config).is_err(),
+            "server-using commands must still fail on a malformed server URL"
+        );
+        Ok(())
     }
 }
