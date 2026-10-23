@@ -1137,13 +1137,25 @@ pub(crate) async fn complete_enrollment_after_identity(
         // is gone or already settled — the row expired and was reclaimed, or
         // the callback was submitted twice. Continuing would walk the user
         // through a touch that could never release the CLI (#746).
+        //
+        // The expiry comparison is part of this guard, not just the sweeper:
+        // an expired `Pending` row persists until the background sweeper
+        // hard-deletes it (up to ~18 minutes after expiry with defaults), so a
+        // status-only check would let a dead code enter the ceremony, get
+        // authorized, and record a false `DeviceAuthApproved` — the exact
+        // #746 dead-end the re-check exists to prevent. `now` is the
+        // callback's arrival instant (the same one `try_consume_oidc_state`
+        // and the rest of this callback read), so every check in the request
+        // agrees on a single clock. The strict `>` matches
+        // `try_consume_device_auth`'s redemption-side gate: at `expires_at`
+        // the code is already unredeemable.
         let pending = db::get_device_auth_by_id(&state.store, device_auth_id)
             .await
             .ok()
             .flatten()
-            .is_some_and(|r| matches!(r.state, db::DeviceAuthState::Pending));
+            .is_some_and(|r| matches!(r.state, db::DeviceAuthState::Pending) && r.expires_at > now);
         if !pending {
-            tracing::error!("Device auth '{device_auth_id}' is missing or already settled");
+            tracing::error!("Device auth '{device_auth_id}' is missing, settled, or expired");
             return ErrorTemplate {
                 title: Tr::new("error-heading"),
                 message: Tr::new("enroll-error-device-auth-approve-failed"),
