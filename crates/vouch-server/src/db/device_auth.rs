@@ -282,6 +282,17 @@ pub struct AuthorizeDeviceAuthParams<'a> {
 /// `Pending`) whenever the CLI's poll landed inside its read-to-write
 /// window, surfacing as a 500 the user could only clear by re-running the
 /// browser ceremony.
+///
+/// The transition also rejects an expired `Pending` row (its `expires_at` is
+/// compared against a per-OCC-attempt `Timestamp::now()`, mirroring
+/// [`try_consume_device_auth`]), so an expired-but-not-yet-swept row cannot be
+/// promoted to `Authorized`. This is the defense-in-depth backstop for the
+/// `browser_login.rs` path, which calls this with no prior device-row re-check;
+/// the enroll callback's pre-ceremony re-check is the primary gate.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "OCC retry re-reads the clock per attempt"
+)]
 pub async fn authorize_device_auth(
     store: &DocumentStore,
     params: AuthorizeDeviceAuthParams<'_>,
@@ -302,6 +313,17 @@ pub async fn authorize_device_auth(
     let outcome = store
         .transition::<DeviceAuthRequestDoc, (), DeviceAuthStatus, _>(id, |data| {
             if data.status != DeviceAuthStatus::Pending {
+                return Err(data.status);
+            }
+            // Reject an expired request even when the background sweeper has
+            // not yet reclaimed the row. `transition` re-reads and re-runs
+            // this closure against the fresh row on every OCC retry, so a
+            // single entry-time `now` would be stale on retry and could let
+            // an expired code be authorized when a retry lands past
+            // `expires_at` — the same stale-now bug [`try_consume_device_auth`]
+            // guards against.
+            let now = Timestamp::now();
+            if data.expires_at <= now {
                 return Err(data.status);
             }
             data.status = DeviceAuthStatus::Authorized;
