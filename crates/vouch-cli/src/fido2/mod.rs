@@ -263,6 +263,10 @@ impl MockFidoDevice {
         clippy::expect_used,
         reason = "test-utils mock; RNG failure is unrecoverable, panic is the right fail-fast"
     )]
+    #[allow(
+        clippy::new_without_default,
+        reason = "Default would just delegate to new(); the impl was removed as dead code"
+    )]
     pub fn new() -> Self {
         use ed25519_dalek::SigningKey;
 
