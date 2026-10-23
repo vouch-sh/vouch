@@ -267,6 +267,147 @@ async fn test_rfc7591_register_rejects_invalid_jwt() {
     assert_invalid_token_challenge(&response);
 }
 
+// =========================================================================
+// Body rejections — RFC 7591 §3.2.2 `invalid_client_metadata` envelope
+//
+// `POST /oauth/register` is the one `/oauth/*` endpoint that consumes a JSON
+// body. A body that fails JSON parsing or serde deserialization used to be
+// answered by axum's plain `Json` extractor with a `text/plain` 400 (parse) or
+// 422 (deserialization) — not the machine-readable `{"error":"invalid_client_metadata"}`
+// envelope RFC 7591 §3.2.2 requires, and not the envelope every *semantic*
+// metadata error already produced. The `RegistrationJson` extractor maps the
+// rejection into that envelope; these tests pin the contract and the auth
+// precedence (the bearer check is never masked by a malformed body).
+// =========================================================================
+
+/// A shared assertion: a 400 `invalid_client_metadata` JSON envelope, with a
+/// `Content-Type` of `application/json` (never axum's `text/plain`), and no
+/// `WWW-Authenticate` challenge (it is a body error, not an auth error).
+fn assert_invalid_client_metadata_envelope(response: &HttpResponse) {
+    assert_eq!(
+        response.status,
+        StatusCode::BAD_REQUEST,
+        "malformed client metadata must be 400 (RFC 7591 §3.2.2): {}",
+        response.body
+    );
+    let ct = response
+        .headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    assert!(
+        ct.contains("application/json"),
+        "rejection must be a JSON envelope, not axum's text/plain: \
+         Content-Type={ct:?}, body={}",
+        response.body,
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(&response.body).expect("rejection body is the JSON OAuth envelope");
+    assert_eq!(
+        json["error"], "invalid_client_metadata",
+        "malformed metadata must map to invalid_client_metadata (RFC 7591 §3.2.2): {}",
+        response.body
+    );
+    assert!(
+        response.headers.get("www-authenticate").is_none(),
+        "a 400 body error must not carry a WWW-Authenticate challenge: {}",
+        response.body
+    );
+}
+
+/// RFC 7591 §3.2.2: a body that is not valid JSON must be answered with the
+/// `invalid_client_metadata` envelope, not axum's default `text/plain`
+/// "Failed to parse the request body as JSON: …". Open registration (no
+/// Bearer) so the body error is the only failure.
+#[tokio::test]
+async fn test_rfc7591_malformed_json_returns_invalid_client_metadata_envelope() {
+    let (app, _state) = test_app().await;
+
+    let response = http_request_full(
+        &app,
+        "POST",
+        "/oauth/register",
+        Some(r#"{"redirect_uris": "#.to_string()),
+        &[("Content-Type", "application/json")],
+    )
+    .await;
+
+    assert_invalid_client_metadata_envelope(&response);
+}
+
+/// RFC 7591 §3.2.2: a field of the wrong JSON type (`redirect_uris` given as a
+/// string instead of an array) fails serde deserialization. axum's plain
+/// `Json` answered this with a `422` `text/plain` body (a `JsonDataRejection`),
+/// which differs from RFC 7591's required 400 envelope. `RegistrationJson`
+/// maps it to the same `invalid_client_metadata` 400 as any other invalid
+/// metadata.
+#[tokio::test]
+async fn test_rfc7591_wrong_typed_redirect_uris_returns_invalid_client_metadata_envelope() {
+    let (app, _state) = test_app().await;
+
+    let body = serde_json::json!({
+        "redirect_uris": "https://example.com/callback"
+    });
+    let response = http_request_full(
+        &app,
+        "POST",
+        "/oauth/register",
+        Some(body.to_string()),
+        &[("Content-Type", "application/json")],
+    )
+    .await;
+
+    // Must be 400 (RFC 7591 §3.2.2), not axum's 422. assert that the status is
+    // never 422 before asserting the envelope, so a regression to plain `Json`
+    // surfaces as a clear failure instead of a mistaken pass.
+    assert_ne!(
+        response.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "wrong-typed field must not be axum's 422, got {}: {}",
+        response.status,
+        response.body
+    );
+    assert_invalid_client_metadata_envelope(&response);
+}
+
+/// RFC 6750 §3.1: a request carrying an invalid Bearer token MUST be refused
+/// with 401 `invalid_token` and a `WWW-Authenticate` challenge, even when the
+/// body is also malformed. Before the fix, plain `Json` rejected the
+/// malformed body *before* the handler ran, so the 401 challenge was never
+/// produced and the client received a `text/plain` 400 with no challenge. With
+/// the body captured as a `Result`, the token is authenticated first.
+#[tokio::test]
+async fn test_rfc7591_malformed_body_does_not_mask_invalid_bearer() {
+    let (app, _state) = test_app().await;
+
+    let response = http_request_full(
+        &app,
+        "POST",
+        "/oauth/register",
+        Some(r#"{"redirect_uris": "#.to_string()),
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", "Bearer not-a-valid-jwt"),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::UNAUTHORIZED,
+        "invalid token + malformed body must be 401, not a 400 body error: {}",
+        response.body
+    );
+    let json: serde_json::Value = serde_json::from_str(&response.body)
+        .expect("401 body is the JSON OAuth envelope, not text/plain");
+    assert_eq!(
+        json["error"], "invalid_token",
+        "invalid bearer must win over a malformed body: {}",
+        response.body
+    );
+    assert_invalid_token_challenge(&response);
+}
+
 // ========================================================================
 // Happy paths
 // ========================================================================

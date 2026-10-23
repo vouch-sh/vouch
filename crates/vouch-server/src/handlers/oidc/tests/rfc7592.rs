@@ -1974,6 +1974,214 @@ async fn test_rfc7592_put_nonexistent_client() {
 }
 
 // =========================================================================
+// Body rejections on PUT — RFC 7591 §3.2.2 envelope + RFC 6750 §3.1 precedence
+//
+// `PUT /oauth/register/{client_id}` consumes a JSON body. A malformed body used
+// to be answered by axum's plain `Json` extractor with a `text/plain` 400/422
+// *before* the handler ran, which masked the bearer-token check: a request with
+// no `Authorization` header and a malformed body got a 400 with no
+// `WWW-Authenticate` instead of the bare-Bearer 401, and an invalid token got
+// a 400 instead of a 401 `invalid_token` challenge. The `RegistrationJson`
+// extractor captures the rejection as a `Result`, and the handler
+// authenticates the token before reporting a body failure.
+// =========================================================================
+
+/// Assert a 400 `invalid_client_metadata` JSON envelope (never axum's
+/// `text/plain`), with no `WWW-Authenticate` challenge.
+fn assert_put_body_envelope(response: &HttpResponse) {
+    assert_eq!(
+        response.status,
+        StatusCode::BAD_REQUEST,
+        "malformed client metadata on PUT must be 400 (RFC 7591 §3.2.2): {}",
+        response.body
+    );
+    let ct = response
+        .headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    assert!(
+        ct.contains("application/json"),
+        "PUT rejection must be a JSON envelope, not axum's text/plain: \
+         Content-Type={ct:?}, body={}",
+        response.body,
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(&response.body).expect("rejection body is the JSON OAuth envelope");
+    assert_eq!(
+        json["error"], "invalid_client_metadata",
+        "malformed metadata on PUT must map to invalid_client_metadata: {}",
+        response.body
+    );
+    assert!(
+        response.headers.get("www-authenticate").is_none(),
+        "a 400 body error must not carry a WWW-Authenticate challenge: {}",
+        response.body
+    );
+}
+
+/// RFC 7591 §3.2.2 (via RFC 7592 §2.2): with a valid bearer token, a body that
+/// is not valid JSON must be answered with the `invalid_client_metadata`
+/// envelope, not axum's `text/plain` "Failed to parse the request body as
+/// JSON: …".
+#[tokio::test]
+async fn test_rfc7592_put_malformed_json_returns_invalid_client_metadata_envelope() {
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_dynamic_client(&app).await;
+
+    let response = http_request_full(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(r#"{"redirect_uris": "#.to_string()),
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", &format!("Bearer {token}")),
+        ],
+    )
+    .await;
+
+    assert_put_body_envelope(&response);
+}
+
+/// RFC 7591 §3.2.2: a `redirect_uris` value of the wrong JSON type (a string
+/// instead of an array) must be the `invalid_client_metadata` 400 envelope,
+/// not axum's `text/plain` 422.
+#[tokio::test]
+async fn test_rfc7592_put_wrong_typed_redirect_uris_returns_invalid_client_metadata_envelope() {
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_dynamic_client(&app).await;
+
+    let body = serde_json::json!({
+        "redirect_uris": "https://example.com/callback"
+    });
+    let response = http_request_full(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(body.to_string()),
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", &format!("Bearer {token}")),
+        ],
+    )
+    .await;
+
+    assert_ne!(
+        response.status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "wrong-typed field must not be axum's 422, got {}: {}",
+        response.status,
+        response.body
+    );
+    assert_put_body_envelope(&response);
+}
+
+/// RFC 6750 §3.1: a PUT with no `Authorization` header MUST get the bare-Bearer
+/// 401 challenge (with no error information, no JSON body), even when the body
+/// is also malformed. Before the fix, plain `Json` rejected the malformed body
+/// first, so the client got a `text/plain` 400 with no `WWW-Authenticate`.
+#[tokio::test]
+async fn test_rfc7592_put_malformed_body_does_not_mask_missing_bearer() {
+    let (app, _state) = test_app().await;
+    let (client_id, _token) = register_dynamic_client(&app).await;
+
+    let response = http_request_full(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(r#"{"redirect_uris": "#.to_string()),
+        &[("Content-Type", "application/json")],
+    )
+    .await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::UNAUTHORIZED,
+        "missing bearer + malformed body must be 401, not 400: {}",
+        response.body
+    );
+    assert_bare_bearer_challenge(&response);
+    assert!(
+        response.body.is_empty(),
+        "missing-auth must not carry a JSON error body: {}",
+        response.body
+    );
+}
+
+/// RFC 7592 §2.2 / RFC 6750 §3.1: a PUT carrying an invalid bearer token MUST
+/// get a 401 `invalid_token` challenge, even when the body is also malformed.
+/// Before the fix, the malformed body short-circuited the handler and the
+/// invalid-token challenge was never emitted.
+#[tokio::test]
+async fn test_rfc7592_put_malformed_body_does_not_mask_invalid_bearer() {
+    let (app, _state) = test_app().await;
+    let (client_id, _token) = register_dynamic_client(&app).await;
+
+    let response = http_request_full(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(r#"{"redirect_uris": "#.to_string()),
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", "Bearer not-a-valid-token"),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::UNAUTHORIZED,
+        "invalid bearer + malformed body must be 401, not 400: {}",
+        response.body
+    );
+    let json: serde_json::Value = serde_json::from_str(&response.body)
+        .expect("401 body is the JSON OAuth envelope, not text/plain");
+    assert_eq!(
+        json["error"], "invalid_token",
+        "invalid bearer must win over a malformed body: {}",
+        response.body
+    );
+    assert_invalid_token_challenge(&response);
+}
+
+/// RFC 7592 §2.2 / §5: a PUT against a `client_id` that does not exist MUST
+/// return 401 `invalid_token` (never 404), even when the body is also
+/// malformed. The malformed body must not mask the indistinguishability rule.
+#[tokio::test]
+async fn test_rfc7592_put_malformed_body_does_not_mask_nonexistent_client() {
+    let (app, _state) = test_app().await;
+
+    let response = http_request_full(
+        &app,
+        "PUT",
+        "/oauth/register/nonexistent-client-id",
+        Some(r#"{"redirect_uris": "#.to_string()),
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", "Bearer some-token"),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::UNAUTHORIZED,
+        "non-existent client + malformed body must be 401, not 404: {}",
+        response.body
+    );
+    let json: serde_json::Value = serde_json::from_str(&response.body)
+        .expect("401 body is the JSON OAuth envelope, not text/plain");
+    assert_eq!(
+        json["error"], "invalid_token",
+        "non-existent client must return invalid_token over a malformed body: {}",
+        response.body
+    );
+    assert_invalid_token_challenge(&response);
+}
+
+// =========================================================================
 // GET /oauth/register/:client_id — Read Client Configuration
 // =========================================================================
 
