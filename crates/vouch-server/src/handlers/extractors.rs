@@ -116,6 +116,43 @@ where
     }
 }
 
+/// JSON body extractor for the RFC 7591/7592 dynamic-registration endpoints.
+///
+/// The counterpart of [`ValidJson`] for `POST /oauth/register` and
+/// `PUT /oauth/register/{client_id}`. A malformed JSON body or a field of the
+/// wrong JSON type (`redirect_uris` given as a string, say) fails axum's
+/// `Json` extractor before the handler runs; like [`ValidJson`], this captures
+/// the rejection as a [`ServiceError`] so it never reaches the client as
+/// axum's `text/plain` default. Unlike [`ValidJson`], it surfaces the RFC 7591
+/// §3.2.2 error code — `invalid_client_metadata` in the OAuth
+/// `{"error": ...}` envelope — which is the contract these endpoints keep for
+/// every other (semantic) metadata failure.
+///
+/// The [`ServiceError`] rejection lets the handler take the body as
+/// `Result<RegistrationJson<_>, ServiceError>` and authenticate the Bearer
+/// token *before* reporting a body failure, so an invalid or missing token's
+/// RFC 6750 §3.1 `WWW-Authenticate` challenge is never masked by a malformed
+/// body (see `handlers::oidc::register`).
+pub(crate) struct RegistrationJson<T>(pub T);
+
+impl<T, S> FromRequest<S> for RegistrationJson<T>
+where
+    T: serde::de::DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = ServiceError;
+
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
+        match axum::Json::<T>::from_request(req, state).await {
+            Ok(axum::Json(value)) => Ok(Self(value)),
+            Err(rejection) => Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidClientMetadata,
+                rejection.body_text(),
+            )),
+        }
+    }
+}
+
 /// Deserialize form-encoded parameters with the empty-valued ones dropped.
 ///
 /// RFC 6749 §3.1 (authorization endpoint) and §3.2 (token endpoint) carry the
