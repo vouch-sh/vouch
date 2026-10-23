@@ -263,6 +263,10 @@ impl MockFidoDevice {
         clippy::expect_used,
         reason = "test-utils mock; RNG failure is unrecoverable, panic is the right fail-fast"
     )]
+    #[allow(
+        clippy::new_without_default,
+        reason = "Default would just delegate to new(); the impl was removed as dead code"
+    )]
     pub fn new() -> Self {
         use ed25519_dalek::SigningKey;
 
@@ -286,12 +290,6 @@ impl MockFidoDevice {
             user_id,
             counter: std::sync::atomic::AtomicU32::new(0),
         }
-    }
-
-    /// The user handle this device returns from `authenticate`.
-    #[must_use]
-    pub fn user_id(&self) -> &[u8] {
-        &self.user_id
     }
 
     /// Get the public key in COSE format (for server storage).
@@ -335,23 +333,6 @@ impl MockFidoDevice {
         auth_data.push(flags); // 1 byte
         auth_data.extend_from_slice(&counter.to_be_bytes()); // 4 bytes
         auth_data
-    }
-}
-
-#[cfg(feature = "test-utils")]
-impl Default for MockFidoDevice {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[cfg(feature = "test-utils")]
-impl std::fmt::Debug for MockFidoDevice {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MockFidoDevice")
-            .field("credential_id", &hex::encode(&self.credential_id))
-            .field("counter", &self.counter())
-            .finish_non_exhaustive()
     }
 }
 
