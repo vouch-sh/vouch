@@ -143,8 +143,35 @@ fn setup_cargo(ca_host: &str, repository: &str) -> Result<()> {
 /// Configure Cargo registry in ~/.cargo/config.toml.
 fn configure_cargo_registry(registry_name: &str, index_url: &str, vouch_path: &str) -> Result<()> {
     let config_path = CargoConfig::default_path()?;
-    let mut config = CargoConfig::load_from(config_path.clone())
-        .unwrap_or_else(|_| CargoConfig::empty(config_path));
+    configure_cargo_registry_at(&config_path, registry_name, index_url, vouch_path)
+}
+
+/// Add a CodeArtifact registry entry to the Cargo config at `config_path`.
+///
+/// Loads the existing config, adds the `[registries.<name>]` table with the
+/// credential provider and index URL, and atomically saves it.
+///
+/// Propagates read/parse errors from an existing config file instead of
+/// discarding its contents: a malformed or unreadable `~/.cargo/config.toml`
+/// must surface an error and leave the file untouched, matching the pip and
+/// uv flows in this command and matching Cargo itself. The missing-file case
+/// is handled inside [`CargoConfig::load_from`], which returns an empty
+/// document when the path does not exist, so the destructive fallback that
+/// previously swallowed load errors and wrote a minimal config over the real
+/// file is gone: the only way to reach `save()` now is a successfully parsed
+/// (or brand-new) document.
+///
+/// Factored out of [`configure_cargo_registry`] so the error-propagation is
+/// testable against a temp file without mutating `CARGO_HOME`
+/// (`std::env::set_var` is `unsafe` under edition 2024 and the workspace
+/// denies `unsafe_code`).
+fn configure_cargo_registry_at(
+    config_path: &std::path::Path,
+    registry_name: &str,
+    index_url: &str,
+    vouch_path: &str,
+) -> Result<()> {
+    let mut config = CargoConfig::load_from(config_path.to_path_buf())?;
 
     if config.has_registry_vouch(registry_name) {
         vouch_cli::tr_println!(
@@ -1311,5 +1338,82 @@ mod tests {
     #[test]
     fn env_path_treats_unset_as_absent() {
         assert_eq!(env_path("VOUCH_TEST_DEFINITELY_UNSET_VAR"), None);
+    }
+
+    // =========================================================================
+    // configure_cargo_registry_at tests
+    //
+    // Regression coverage for the silent-overwrite bug: when the existing
+    // ~/.cargo/config.toml fails to parse (or cannot be read), setup must
+    // surface the error and leave the file untouched, matching the pip/uv
+    // flows and matching Cargo itself. Previously the load error was swallowed
+    // and `save()` atomically overwrote the file with only the new registry
+    // table, destroying [build], [net], [source] and other registries' tokens.
+    //
+    // The testable seam takes the config path directly: `configure_cargo_registry`
+    // resolves the path via `CARGO_HOME`, which is `unsafe` to set in tests
+    // under edition 2024 (the workspace denies `unsafe_code`).
+    // =========================================================================
+
+    /// Malformed TOML in the existing config surfaces an error naming the file
+    /// and leaves its bytes untouched — the destructive bug would return Ok and
+    /// overwrite it with only the new registry.
+    #[test]
+    fn cargo_setup_propagates_parse_error_and_leaves_file_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+
+        // Unclosed table header — confirmed invalid TOML by toml_edit refusing
+        // to parse it (the regression test asserts `load_from` returns Err).
+        let original = "[build\njobs = 4\n\n[net]\ngit-fetch-with-cli = true\n";
+        std::fs::write(&config_path, original).unwrap();
+
+        let result = configure_cargo_registry_at(
+            &config_path,
+            "codeartifact-repro",
+            "sparse+https://example.com/cargo/repo/",
+            "/usr/local/bin/vouch",
+        );
+
+        assert!(
+            result.is_err(),
+            "malformed config should error, not succeed and overwrite: {result:?}",
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains(&config_path.display().to_string()),
+            "error should name the offending file: {err}",
+        );
+
+        // The destructive bug would have overwritten this with only the registry.
+        let on_disk = std::fs::read_to_string(&config_path).unwrap();
+        assert_eq!(on_disk, original, "malformed config must be left untouched");
+        assert!(
+            !on_disk.contains("codeartifact-repro"),
+            "no registry entry should have been written to a malformed config",
+        );
+    }
+
+    /// An existing config that is present but unreadable (the path is a
+    /// directory) surfaces a read error instead of being clobbered.
+    #[test]
+    fn cargo_setup_propagates_read_error_for_directory_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::create_dir(&config_path).unwrap();
+
+        let result = configure_cargo_registry_at(
+            &config_path,
+            "codeartifact-repro",
+            "sparse+https://example.com/cargo/repo/",
+            "/usr/local/bin/vouch",
+        );
+
+        assert!(
+            result.is_err(),
+            "a directory should fail to read, not succeed: {result:?}",
+        );
+        // The directory is still a directory — no file was written over it.
+        assert!(config_path.is_dir(), "the directory must be left untouched");
     }
 }

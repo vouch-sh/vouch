@@ -60,6 +60,14 @@ impl AwsConfig {
     }
 
     /// Create an empty config for a specific path.
+    ///
+    /// Test-only constructor for fixture configs. The production setup flow
+    /// loads via [`Self::load_from`] (which returns an empty document for a
+    /// missing file and propagates read/parse errors for a present one), so
+    /// `empty` must not be reintroduced into non-test code: it discards a
+    /// load error, which is exactly the footgun that silently overwrote
+    /// malformed `~/.aws/config` files in the setup command.
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn empty(path: PathBuf) -> Self {
         Self {
