@@ -8,6 +8,13 @@ use std::fmt;
 
 use vouch_common::UrlSecurity;
 
+/// The default Vouch server URL.
+///
+/// Used as the fallback when no `--server` / `VOUCH_SERVER` / config
+/// `server_url` is configured, and as the server URL value for offline
+/// commands that never contact the server (see [`ServerUrl::default_url`]).
+pub const DEFAULT_SERVER_URL: &str = "https://us.vouch.sh";
+
 /// A validated, normalized Vouch server URL.
 ///
 /// Guarantees:
@@ -15,7 +22,8 @@ use vouch_common::UrlSecurity;
 /// - HTTPS is used for non-loopback hosts (unless `allow_insecure` was set)
 /// - Trailing slashes are trimmed
 ///
-/// Construct via [`ServerUrl::parse`].
+/// Construct via [`ServerUrl::parse`] (or [`ServerUrl::default_url`] for the
+/// known-valid default).
 #[derive(Debug, Clone)]
 pub struct ServerUrl {
     url: String,
@@ -58,6 +66,24 @@ impl ServerUrl {
         let normalized = url.trim_end_matches('/').to_string();
 
         Ok(Self { url: normalized })
+    }
+
+    /// Construct the default Vouch server URL ([`DEFAULT_SERVER_URL`]).
+    ///
+    /// The default is a fixed, parseable constant whose trailing-slash
+    /// normalization is a no-op, so this wraps it directly rather than going
+    /// through [`ServerUrl::parse`]. That keeps the call site panic-free: a
+    /// value known to be valid never needs the impossible parse-error arm.
+    ///
+    /// Offline commands (those whose subcommand does not contact the server)
+    /// use this as their server URL. They never read the value — their
+    /// handlers take no server argument — so resolving it from the constant
+    /// (rather than the user-configured `--server`/`VOUCH_SERVER`/config
+    /// `server_url`) means a malformed configured URL cannot abort them.
+    pub fn default_url() -> Self {
+        Self {
+            url: DEFAULT_SERVER_URL.to_string(),
+        }
     }
 
     /// Get the URL as a string slice.
