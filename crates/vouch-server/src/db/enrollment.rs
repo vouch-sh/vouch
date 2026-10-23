@@ -125,6 +125,25 @@ impl super::pool::RetryableError for EnrollUserError {
 /// enrollees for the same domain race on the documents primary key, and
 /// exactly one INSERT wins.
 ///
+/// **DSQL OCC retry interaction:** the claim-slot get/insert, org-row
+/// insert, and commit run as one multi-statement transaction inside
+/// [`crate::with_dsql_retry!`]. Under Aurora DSQL's optimistic concurrency
+/// control a race loser first receives a serialization abort (`SQLSTATE
+/// 40001` / `OC000` / `OC001`) — typically at commit — and only a *retry*
+/// surfaces the `23505` unique violation the recovery paths below expect.
+/// The wrapper classifies that abort as retryable via
+/// [`super::pool::is_retryable_db_error`] and re-runs the whole
+/// get-or-create against fresh state, so a retried loser observes the
+/// winner's committed claim/org and converges instead of failing. The
+/// claim insert only treats a *unique violation* as "slot taken"; any
+/// other error (a statement-time OCC abort) aborts the body and is
+/// retried, rather than being folded via `is_ok()` into a misleading
+/// "slot taken by another org". On SQLite/Postgres a losing insert blocks
+/// until the winner commits and then fails with `23505` directly, so the
+/// retry wrapper is a no-op there. See
+/// [`super::challenge_states::try_consume_challenge_state`] for the same
+/// two-phase model.
+///
 /// Lookup falls back from the deterministic ID to the domain index: rows
 /// with random-UUID IDs (created before deterministic IDs) are only
 /// findable by domain, and skipping the fallback would insert a duplicate
@@ -136,18 +155,7 @@ impl super::pool::RetryableError for EnrollUserError {
 /// slot via `compare_and_update`.
 async fn get_or_create_org(store: &DocumentStore, domain: &Domain) -> Result<(String, String)> {
     let id = deterministic_org_id(domain);
-    let existing = match store.get::<OrganizationDoc>(&id).await? {
-        Some(org) => Some(org),
-        None => {
-            store
-                .find_one::<OrganizationDoc>("domain", domain.as_str())
-                .await?
-        }
-    };
-    if let Some(org) = existing {
-        return Ok((org.id, org.data.domain));
-    }
-
+    let claim_id = organizations::deterministic_domain_claim_id(domain.as_str());
     let doc = OrganizationDoc {
         domain: domain.as_str().to_string(),
         name: None,
@@ -156,53 +164,85 @@ async fn get_or_create_org(store: &DocumentStore, domain: &Domain) -> Result<(St
         subdomain: None,
     };
 
-    // Take the domain's claim slot alongside the org row. Two orgs cannot
-    // share a *primary* domain — the org ID is a hash of it, so they collide
-    // on the primary key — but a primary domain and another org's additional
-    // domain can still race: the index read above sees nothing while that
-    // other org is mid-verification, and the two writes touch different rows.
-    // The shared slot is what makes them conflict.
-    let claim_id = organizations::deterministic_domain_claim_id(domain.as_str());
-    let mut tx = store.begin().await?;
-    let slot_taken = match tx.get::<DomainClaimDoc>(&claim_id).await? {
-        None => {
-            let slot = DomainClaimDoc {
-                domain: domain.as_str().to_string(),
-                org_id: id.clone(),
-            };
-            tx.insert_with_id(&claim_id, &slot).await.is_ok()
-        }
-        // Held by another org that verified this domain first; fall through
-        // to the existing-org lookup below rather than creating a duplicate.
-        Some(existing) => existing.data.org_id == id,
-    };
-    if !slot_taken {
-        // Dropping the transaction rolls it back.
-        drop(tx);
-        return store
-            .find_one::<OrganizationDoc>("domain", domain.as_str())
-            .await?
-            .map(|org| (org.id, org.data.domain))
-            .context("domain claimed by an organization that could not be found");
-    }
-    match tx.insert_with_id(&id, &doc).await {
-        Ok(result) => {
-            tx.commit().await?;
-            Ok((result.id, result.data.domain))
-        }
-        Err(e) if super::pool::is_unique_violation(&e) => {
-            // Concurrent enrollee inserted first — re-fetch.
-            let org = match store.get::<OrganizationDoc>(&id).await? {
-                Some(o) => o,
-                None => store
+    // The whole get-or-create runs inside `with_dsql_retry!` because the
+    // claim slot, org row, and commit form one multi-statement transaction.
+    // On DSQL a race loser's commit aborts with 40001/OC000/OC001 and only a
+    // retry surfaces the 23505 the recovery below expects. Each attempt
+    // re-reads fresh state (the winner's committed org short-circuits a
+    // retry) and begins a fresh transaction; `?` propagates DB errors as
+    // `anyhow::Error`, which the macro classifies via `is_retryable_db_error`.
+    crate::with_dsql_retry!(async {
+        // Re-read fresh state on every attempt: a retry after a lost race
+        // observes the winner's committed org row and short-circuits.
+        let existing = match store.get::<OrganizationDoc>(&id).await? {
+            Some(org) => Some(org),
+            None => {
+                store
                     .find_one::<OrganizationDoc>("domain", domain.as_str())
                     .await?
-                    .context("organization vanished after unique violation")?,
-            };
-            Ok((org.id, org.data.domain))
+            }
+        };
+        if let Some(org) = existing {
+            return Ok((org.id, org.data.domain));
         }
-        Err(e) => Err(e),
-    }
+
+        // Take the domain's claim slot alongside the org row. Two orgs cannot
+        // share a *primary* domain — the org ID is a hash of it, so they
+        // collide on the primary key — but a primary domain and another org's
+        // additional domain can still race: the index read above sees nothing
+        // while that other org is mid-verification, and the two writes touch
+        // different rows. The shared slot is what makes them conflict.
+        let mut tx = store.begin().await?;
+        let slot_taken = match tx.get::<DomainClaimDoc>(&claim_id).await? {
+            None => {
+                let slot = DomainClaimDoc {
+                    domain: domain.as_str().to_string(),
+                    org_id: id.clone(),
+                };
+                match tx.insert_with_id(&claim_id, &slot).await {
+                    Ok(_) => true,
+                    // Only a committed winner's row means "slot taken"; a
+                    // DSQL OCC abort (40001/OC000/OC001) must abort the body
+                    // so `with_dsql_retry!` retries it against fresh state,
+                    // instead of being folded into "slot taken by another
+                    // org" and falling through to a misleading lookup-miss.
+                    Err(e) if super::pool::is_unique_violation(&e) => false,
+                    Err(e) => return Err(e),
+                }
+            }
+            // Held by another org that verified this domain first; fall
+            // through to the existing-org lookup below rather than creating
+            // a duplicate.
+            Some(existing) => existing.data.org_id == id,
+        };
+        if !slot_taken {
+            // Dropping the transaction rolls it back.
+            drop(tx);
+            return store
+                .find_one::<OrganizationDoc>("domain", domain.as_str())
+                .await?
+                .map(|org| (org.id, org.data.domain))
+                .context("domain claimed by an organization that could not be found");
+        }
+        match tx.insert_with_id(&id, &doc).await {
+            Ok(result) => {
+                tx.commit().await?;
+                Ok((result.id, result.data.domain))
+            }
+            Err(e) if super::pool::is_unique_violation(&e) => {
+                // Concurrent enrollee inserted first — re-fetch.
+                let org = match store.get::<OrganizationDoc>(&id).await? {
+                    Some(o) => o,
+                    None => store
+                        .find_one::<OrganizationDoc>("domain", domain.as_str())
+                        .await?
+                        .context("organization vanished after unique violation")?,
+                };
+                Ok((org.id, org.data.domain))
+            }
+            Err(e) => Err(e),
+        }
+    })
 }
 
 /// Resolve the enrolling user inside `tx`: match on the bound

@@ -583,6 +583,90 @@ async fn test_enroll_user_with_org_same_domain_converges_on_one_org() {
     assert!(!bob.is_org_admin, "second enrollee must not be admin");
 }
 
+// `get_or_create_org` takes a cross-org domain claim slot alongside the org
+// row (added by #993 to serialize primary-vs-additional-domain races on a
+// shared primary key). This locks in that the claim slot is created and
+// committed by the first enrollment and reused (not duplicated) by the
+// second — guarding the claim-slot transaction body after it was moved
+// inside `with_dsql_retry!` to fix the DSQL OCC-retry bug: a wrapped
+// commit that failed to persist the claim would fail these assertions.
+#[tokio::test]
+async fn test_enroll_creates_and_reuses_domain_claim_slot() {
+    use crate::db::documents::organization::{DomainClaimDoc, OrganizationDoc};
+    use crate::db::enroll_user_with_org;
+    use crate::db::organizations::deterministic_domain_claim_id;
+
+    let (store, _audit) = test_db().await;
+    let domain = test_domain("claim-slot.example.com");
+    let claim_id = deterministic_domain_claim_id(domain.as_str());
+
+    // Precondition: no claim slot exists yet.
+    assert!(
+        store
+            .get::<DomainClaimDoc>(&claim_id)
+            .await
+            .expect("claim slot pre-check")
+            .is_none(),
+        "precondition: no domain claim slot yet"
+    );
+
+    let alice = enroll_user_with_org(
+        &store,
+        "alice@claim-slot.example.com",
+        None,
+        Some(&domain),
+        None,
+    )
+    .await
+    .expect("alice enrollment");
+    let org_id = alice.org_id.clone().expect("alice has an org");
+
+    // The first enrollment must commit the claim slot, stamped with the
+    // deterministic org id — proving the claim-insert committed through the
+    // retried transaction.
+    let claim = store
+        .get::<DomainClaimDoc>(&claim_id)
+        .await
+        .expect("fetch claim slot")
+        .expect("claim slot was committed by the first enrollment");
+    assert_eq!(
+        claim.data.org_id, org_id,
+        "the claim slot must record the deterministic org id"
+    );
+    assert!(alice.is_org_admin, "first enrollee is admin");
+
+    let bob = enroll_user_with_org(
+        &store,
+        "bob@claim-slot.example.com",
+        None,
+        Some(&domain),
+        None,
+    )
+    .await
+    .expect("bob enrollment");
+    assert_eq!(
+        bob.org_id.as_deref(),
+        Some(org_id.as_str()),
+        "second enrollee converges on the same org via the existing claim/org"
+    );
+    assert!(!bob.is_org_admin, "second enrollee is not admin");
+
+    // Exactly one claim slot and exactly one org remain for the domain.
+    assert!(
+        store
+            .get::<DomainClaimDoc>(&claim_id)
+            .await
+            .expect("re-fetch claim slot")
+            .is_some(),
+        "claim slot persists after the second enrollment"
+    );
+    let org_count = store
+        .count::<OrganizationDoc>("domain", domain.as_str())
+        .await
+        .expect("count orgs by domain");
+    assert_eq!(org_count, 1, "no duplicate org created; got {org_count}");
+}
+
 // Enrolling into an existing org that has no admin must promote the
 // enrollee to admin — this exercises the `compare_and_update` repair
 // path in `enroll_user_with_org`.
