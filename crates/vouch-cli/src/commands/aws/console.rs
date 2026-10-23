@@ -370,6 +370,43 @@ mod tests {
         assert!(s.contains("SigninToken=tok-123"));
     }
 
+    /// The EUSC login URL must target the *regional* sign-in host
+    /// (`eusc-de-east-1.signin.amazonaws-eusc.eu`), not the bare
+    /// `signin.amazonaws-eusc.eu` NXDOMAIN — the `getSigninToken` POST and the
+    /// browser login redirect both derive their host from `federation_url`.
+    /// The `Destination` is the partition-wide EUSC console
+    /// (`console.amazonaws-eusc.eu`), which does resolve.
+    #[test]
+    fn test_login_url_construction_eusc_uses_regional_signin_host() {
+        let federation_url = Partition::AwsEusc.federation_endpoint().unwrap();
+        let console_url = Partition::AwsEusc.console_url().unwrap();
+
+        let mut login_url = url::Url::parse(federation_url).unwrap();
+        login_url
+            .query_pairs_mut()
+            .append_pair("Action", "login")
+            .append_pair("Issuer", "https://vouch.example.com")
+            .append_pair("Destination", console_url)
+            .append_pair("SigninToken", "tok-123");
+
+        let s = login_url.as_str();
+        // The POST host and the browser redirect host both come from
+        // `federation_url`; both must be the regional EUSC signin host.
+        assert!(
+            s.starts_with("https://eusc-de-east-1.signin.amazonaws-eusc.eu/federation?"),
+            "login URL must use the regional EUSC sign-in host, got: {s}"
+        );
+        // Regression guard: the bare partition-wide signin host (NXDOMAIN)
+        // must never be the login host.
+        assert!(
+            !s.starts_with("https://signin.amazonaws-eusc.eu/federation"),
+            "bare `signin.amazonaws-eusc.eu` is an NXDOMAIN; EUSC sign-in is regional"
+        );
+        assert!(s.contains("Action=login"));
+        assert!(s.contains("Destination=https%3A%2F%2Fconsole.amazonaws-eusc.eu%2F"));
+        assert!(s.contains("SigninToken=tok-123"));
+    }
+
     // Parse-time validation tests ---------------------------------------------
 
     /// `--idc-application` alone must be rejected: `requires = "account"`.

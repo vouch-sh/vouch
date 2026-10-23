@@ -193,6 +193,11 @@ impl Partition {
     /// `amazonaws.com.cn` (which is the API endpoint DNS suffix from
     /// [`dns_suffix`](Self::dns_suffix)).
     ///
+    /// Note: EUSC's sign-in portal is regional — `eusc-de-east-1.signin.
+    /// amazonaws-eusc.eu` per the docs.aws.eu endpoints reference — whereas
+    /// the bare `signin.amazonaws-eusc.eu` host is an NXDOMAIN. EUSC has a
+    /// single region today.
+    ///
     /// # Errors
     ///
     /// Returns an error for ISO partitions which do not support console
@@ -203,7 +208,12 @@ impl Partition {
             // amazonaws.cn, not amazonaws.com.cn — see doc comment
             Self::AwsCn => Ok("https://signin.amazonaws.cn/federation"),
             Self::AwsUsGov => Ok("https://signin.amazonaws-us-gov.com/federation"),
-            Self::AwsEusc => Ok("https://signin.amazonaws-eusc.eu/federation"),
+            // EUSC sign-in is regional: the bare `signin.amazonaws-eusc.eu`
+            // host is an NXDOMAIN, so the current sole EUSC region's sign-in
+            // host is used (matches docs.aws.eu "Endpoints in AWS European
+            // Sovereign Cloud"). Adopt a region-aware signature if EUSC
+            // launches additional regions.
+            Self::AwsEusc => Ok("https://eusc-de-east-1.signin.amazonaws-eusc.eu/federation"),
             Self::AwsIso | Self::AwsIsoB | Self::AwsIsoE | Self::AwsIsoF => {
                 Err(FederationError(self))
             }
@@ -714,10 +724,35 @@ mod tests {
 
     #[test]
     fn test_federation_endpoint_eusc() {
+        // EUSC sign-in is regional: `eusc-de-east-1.signin.amazonaws-eusc.eu`
+        // (docs.aws.eu "Endpoints in AWS European Sovereign Cloud"). The bare
+        // `signin.amazonaws-eusc.eu` host is an NXDOMAIN.
         assert_eq!(
             Partition::AwsEusc.federation_endpoint().unwrap(),
-            "https://signin.amazonaws-eusc.eu/federation"
+            "https://eusc-de-east-1.signin.amazonaws-eusc.eu/federation"
         );
+    }
+
+    /// Regression guard: the EUSC federation host must be the regional
+    /// `eusc-de-east-1.signin.amazonaws-eusc.eu`, NOT the bare
+    /// `signin.amazonaws-eusc.eu` (an NXDOMAIN). Pinned by the AWS European
+    /// Sovereign Cloud endpoints reference (docs.aws.eu). Mirrors how
+    /// `test_login_url_construction` in `console.rs` parses a federation URL.
+    #[test]
+    fn test_federation_endpoint_eusc_host_is_regional_not_nxdomain() {
+        let endpoint = Partition::AwsEusc.federation_endpoint().unwrap();
+        // The bare partition-wide signin host does not resolve in DNS.
+        assert_ne!(
+            endpoint, "https://signin.amazonaws-eusc.eu/federation",
+            "bare `signin.amazonaws-eusc.eu` is an NXDOMAIN; EUSC sign-in is regional"
+        );
+        let parsed = url::Url::parse(endpoint).unwrap();
+        assert_eq!(parsed.scheme(), "https");
+        assert_eq!(
+            parsed.host_str(),
+            Some("eusc-de-east-1.signin.amazonaws-eusc.eu")
+        );
+        assert_eq!(parsed.path(), "/federation");
     }
 
     #[test]
