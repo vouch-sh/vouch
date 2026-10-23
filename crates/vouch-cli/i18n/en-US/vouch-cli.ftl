@@ -1322,6 +1322,7 @@ setup-docker-err-read = failed to read { $path }
 setup-docker-err-parse = failed to parse { $path }
 setup-docker-err-serialize = failed to serialize Docker config
 setup-docker-err-write = failed to write { $path }
+setup-docker-err-flag-in-registry = '{ $registry }' looks like a command-line flag, not a container registry; remove it from the registry list
 
 ## setup/kubernetes
 
