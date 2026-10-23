@@ -11,13 +11,20 @@
 //!   the client is created without a user association. This is safe because a
 //!   `client_id` alone grants zero access — the client must still authenticate
 //!   with a valid FIDO2 key (hardware-bound) to obtain any token.
+//!
+//! Both body-consuming handlers take the request through [`RegistrationJson`],
+//! which converts axum's `JsonRejection` into the RFC 7591 §3.2.2
+//! `invalid_client_metadata` envelope instead of axum's `text/plain` default,
+//! and as a `Result<_, ServiceError>` so the Bearer-token check runs before a
+//! body failure is reported (see ARCHITECTURE.md "Error paths").
 
 use crate::db::ClientInfo;
 use crate::error::{ErrorDescription, ServiceError};
+use crate::handlers::extractors::RegistrationJson;
 use crate::handlers::session::{AuthenticatedToken, OptionalAuthenticatedToken};
 use crate::services::oidc::registration::{
-    RegistrationRequest, delete_client_configuration, read_client_configuration, register_client,
-    update_client_configuration,
+    RegistrationRequest, delete_client_configuration, lookup_and_verify_registration_token,
+    read_client_configuration, register_client, update_client_configuration,
 };
 use crate::{AppState, http};
 use axum::{
@@ -40,18 +47,32 @@ pub(crate) async fn register(
     State(state): State<Arc<AppState>>,
     client_info: ClientInfo,
     token: Result<OptionalAuthenticatedToken, ServiceError>,
-    Json(request): Json<RegistrationRequest>,
+    body: Result<RegistrationJson<RegistrationRequest>, ServiceError>,
 ) -> Response {
     // Authentication is optional here, but a token that fails validation is an
     // error rather than an anonymous request. RFC 7592 §2 / RFC 6750 §3.1: the
     // rejection carries code `invalid_token` (not `invalid_client`), a 401, and
     // a `WWW-Authenticate` challenge — propagate it rather than falling back to
     // open registration.
+    //
+    // Authenticated BEFORE the body is examined: a malformed request body must
+    // not mask the 401 challenge an invalid token is owed, so the `token`
+    // result is matched first and the `body` result only afterward.
     let user_id = match token {
         // A deactivated account's still-live token is refused by the extractor
         // as `invalid_token` (RFC 6750 §3.1), so it cannot own a client.
         Ok(OptionalAuthenticatedToken(Some(AuthenticatedToken { user, .. }))) => Some(user.id),
         Ok(OptionalAuthenticatedToken(None)) => None,
+        Err(e) => return into_registration_response(e),
+    };
+
+    // RFC 7591 §3.2.2: a body that fails JSON parsing or serde deserialization
+    // (a `redirect_uris` value of the wrong type, malformed JSON, …) is
+    // `invalid_client_metadata`, not axum's `text/plain` `JsonRejection`. The
+    // extractor captured it as a `ServiceError`; this branch runs only after
+    // the token check above, so an invalid token's 401 always wins.
+    let request = match body {
+        Ok(RegistrationJson(request)) => request,
         Err(e) => return into_registration_response(e),
     };
 
@@ -117,11 +138,32 @@ pub(crate) async fn update_client(
     client_info: ClientInfo,
     Path(client_id): Path<String>,
     headers: HeaderMap,
-    Json(request): Json<RegistrationRequest>,
+    body: Result<RegistrationJson<RegistrationRequest>, ServiceError>,
 ) -> Response {
     let token = match http::bearer_token(&headers) {
         Some(t) => t,
         None => return missing_token_response(),
+    };
+
+    let request = match body {
+        Ok(RegistrationJson(request)) => request,
+        Err(body_err) => {
+            // RFC 6750 §3.1: authenticate the Bearer token BEFORE reporting a
+            // body failure. Extractors run before the handler, so the body was
+            // already parsed into this `Result`; the token, though, is only
+            // validated inside `update_client_configuration`. Without this
+            // pre-check, a request carrying an invalid (or non-existent-client)
+            // token *and* a malformed body would get a 400
+            // `invalid_client_metadata` instead of the 401 `invalid_token`
+            // challenge it is owed — the same masking defect plain `Json`
+            // produced, just at a different status.
+            if let Err(auth_err) =
+                lookup_and_verify_registration_token(&state, &client_id, token).await
+            {
+                return into_registration_response(auth_err);
+            }
+            return into_registration_response(body_err);
+        }
     };
 
     match update_client_configuration(&state, &client_id, token, request, &client_info).await {
