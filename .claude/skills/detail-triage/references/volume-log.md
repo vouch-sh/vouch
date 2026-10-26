@@ -44,6 +44,7 @@ judgement columns come from the batch's record in `.local/`.
 | 2026-10-13 | 1 | 0 | 1 | 0 | 1 | 0 of 0 | #1825 (no PR) closed won't fix: configured IdPs are trusted for the emails they verify; #1823's docs and comments corrected in #1833; dead-code #1824 queued, carrying the rustls 0.23.46 bump | 0 | 0 |
 | 2026-10-16 | 2 | 2 | 0 | 0 | 0 | 2 of 2 | #1831 amended (citation RFC 7519 §4.1.7); #1830 superseded by class fix #1832 (every grant carries `resource`/`authorization_details`; RFC 9396 §5 type gate; `ErrorDescription` for RFC 6749 §5.2's charset) | 0 | 0 (not requested) |
 | 2026-10-19 | 1 | 1 | 0 | 1 | 1 | 1 of 1 | #1838/#1839 closed not planned: contradicts the 10-16 no-rolling-deploy decision | 0 exact; recurrence of a recorded decision | 1 requested (`rcr_f5eda781…`), replaces `rule_5bc7d013`; not synced |
+| 2026-10-23 | 11 | 11 | 1 | 0 | 0 | 3 of 11 proposed | pending user decisions (triaged 10-26): #1861 amend (fold `RegistrationJson` into `ValidJson`), #1863 amend (false prune of RFC 8693 §6 rows via the bare-§ trap), #1859 CI rerun (macOS flake); 5 branches carry an unsigned tokio-bump commit; `cargo deny` red on `main` (tokio, ctutils, crypto-bigint via p256 0.13) | 1 of 11 (#1852 extends the 10-16 token-param guardrail residue) | 0 (none requested yet) |
 
 Batches before 2026-08-20 have no record, so only their counted columns exist:
 run the script. `escape-unaware-delimiter-normalization` exists on Detail's side
@@ -1097,3 +1098,31 @@ still need `#[serde(default)]` for fields they gain, because old rows stay in st
 - A finding that contradicts a recorded user decision is a decision recurrence. Close it, and
   treat the rule that produced it as stale.
 - The skill's rolling-deploy checks now follow the same lifetime split.
+
+## 2026-10-23 (triaged 2026-10-26)
+
+Eleven findings, every one with a fix PR, plus one Dead Code PR. The script's PR≤3d column is 0,
+but #1848 is in the suffix allowlist #1842 added four days before detection, so the batch is one
+fix-generated finding and ten from backlog (attributions Feb–Aug). October to date: n 61, median
+91d, p90 228d, `<30d` 19 — the median climbing while `<30d` stays flat is excavation.
+
+Classes: one candidate (#1850, 13 handlers taking a plain `axum::Json` extractor and answering
+malformed bodies with axum's `text/plain`; only the two RFC 7591 registration endpoints have an
+RFC-bound envelope, the rest are first-party bodies), one two-member class fixed by its own PR
+(#1853, cargo and aws config loaders discarding a load `Err`), one residue recurrence (#1852, a
+parameter bound then dropped on the id_token fork — the 10-16 `unused_variables` guardrail cannot
+see it), eight isolated.
+
+Review: #1863 prunes three RFC 8693 §6 Privacy rows ("the token MUST be encrypted to its intended
+recipient") because "RFC 9396 §6" inside `tests/rfc8693.rs` trips the ratchet's bare-§ fallback —
+the KB gotcha's item 3, recurring. #1861 adds a parallel extractor type instead of extending
+`ValidJson`. Five PRs pushed an unsigned tokio-only bump after the advisory check failed; the
+check fails on `main` itself (RUSTSEC-2026-0384/0385/0387), so a deps PR has to land first.
+
+### Process
+
+- A Detail follow-up commit that "fixes CI" for a red check can be red on `main`: run the failing
+  check on `main` before reading the follow-up as part of the fix.
+- When a test file is named for one RFC and cites another, the citation must use "Section N"; a
+  bare § after "RFC NNNN" is attributed to both specs. Check every prune's dropped rows against
+  the test's subject, not against the ratchet's message.
