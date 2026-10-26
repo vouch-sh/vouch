@@ -275,7 +275,7 @@ async fn test_rfc7591_register_rejects_invalid_jwt() {
 // answered by axum's plain `Json` extractor with a `text/plain` 400 (parse) or
 // 422 (deserialization) — not the machine-readable `{"error":"invalid_client_metadata"}`
 // envelope RFC 7591 §3.2.2 requires, and not the envelope every *semantic*
-// metadata error already produced. The `RegistrationJson` extractor maps the
+// metadata error already produced. The `ValidJson` extractor maps the
 // rejection into that envelope; these tests pin the contract and the auth
 // precedence (the bearer check is never masked by a malformed body).
 // =========================================================================
@@ -338,7 +338,7 @@ async fn test_rfc7591_malformed_json_returns_invalid_client_metadata_envelope() 
 /// RFC 7591 §3.2.2: a field of the wrong JSON type (`redirect_uris` given as a
 /// string instead of an array) fails serde deserialization. axum's plain
 /// `Json` answered this with a `422` `text/plain` body (a `JsonDataRejection`),
-/// which differs from RFC 7591's required 400 envelope. `RegistrationJson`
+/// which differs from RFC 7591's required 400 envelope. `ValidJson`
 /// maps it to the same `invalid_client_metadata` 400 as any other invalid
 /// metadata.
 #[tokio::test]

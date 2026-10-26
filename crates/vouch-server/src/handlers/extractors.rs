@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use axum::extract::rejection::PathRejection;
+use axum::extract::rejection::{JsonRejection, PathRejection};
 use axum::extract::{FromRequest, FromRequestParts, Path};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
@@ -86,6 +86,27 @@ where
     }
 }
 
+/// A JSON request body and the error envelope its endpoint answers with when
+/// the body fails to parse.
+///
+/// The default is the API envelope (400 `invalid_request`), which the browser
+/// WebAuthn flows read as `errResp.message`. An endpoint whose protocol names a
+/// different code for a malformed body overrides [`JsonBody::reject`]: the
+/// RFC 7591 registration request answers `invalid_client_metadata`.
+pub(crate) trait JsonBody: serde::de::DeserializeOwned {
+    fn reject(rejection: JsonRejection) -> ServiceError {
+        ServiceError::api(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            rejection.body_text(),
+        )
+    }
+}
+
+impl JsonBody for vouch_common::BrowserRegisterCompleteRequest {}
+impl JsonBody for vouch_common::BrowserLoginCompleteRequest {}
+impl JsonBody for vouch_common::RegisterCompleteRequest {}
+
 /// JSON body extractor that converts `JsonRejection` into `ServiceError`.
 /// Use instead of [`axum::Json`] when the handler returns `ServiceError` and
 /// the caller reads the error out of the JSON envelope.
@@ -94,12 +115,18 @@ where
 /// WebAuthn flows cannot read — they surface `errResp.message` from the JSON.
 /// Body-typed validation (a `credential_id` that is not base64url, a field of
 /// the wrong JSON type) lands here rather than in the handler, so this keeps
-/// the shape of the response the same either way.
+/// the shape of the response the same either way. The body type's
+/// [`JsonBody::reject`] chooses the envelope.
+///
+/// A handler that must authenticate before reporting a body failure takes the
+/// body as `Result<ValidJson<_>, ServiceError>` and matches it after the token
+/// check, so an invalid token's RFC 6750 §3.1 `WWW-Authenticate` challenge is
+/// never masked by a malformed body (see `handlers::oidc::register`).
 pub(crate) struct ValidJson<T>(pub T);
 
 impl<T, S> FromRequest<S> for ValidJson<T>
 where
-    T: serde::de::DeserializeOwned,
+    T: JsonBody,
     S: Send + Sync,
 {
     type Rejection = ServiceError;
@@ -107,48 +134,7 @@ where
     async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
         match axum::Json::<T>::from_request(req, state).await {
             Ok(axum::Json(value)) => Ok(Self(value)),
-            Err(rejection) => Err(ServiceError::api(
-                StatusCode::BAD_REQUEST,
-                "invalid_request",
-                rejection.body_text(),
-            )),
-        }
-    }
-}
-
-/// JSON body extractor for the RFC 7591/7592 dynamic-registration endpoints.
-///
-/// The counterpart of [`ValidJson`] for `POST /oauth/register` and
-/// `PUT /oauth/register/{client_id}`. A malformed JSON body or a field of the
-/// wrong JSON type (`redirect_uris` given as a string, say) fails axum's
-/// `Json` extractor before the handler runs; like [`ValidJson`], this captures
-/// the rejection as a [`ServiceError`] so it never reaches the client as
-/// axum's `text/plain` default. Unlike [`ValidJson`], it surfaces the RFC 7591
-/// §3.2.2 error code — `invalid_client_metadata` in the OAuth
-/// `{"error": ...}` envelope — which is the contract these endpoints keep for
-/// every other (semantic) metadata failure.
-///
-/// The [`ServiceError`] rejection lets the handler take the body as
-/// `Result<RegistrationJson<_>, ServiceError>` and authenticate the Bearer
-/// token *before* reporting a body failure, so an invalid or missing token's
-/// RFC 6750 §3.1 `WWW-Authenticate` challenge is never masked by a malformed
-/// body (see `handlers::oidc::register`).
-pub(crate) struct RegistrationJson<T>(pub T);
-
-impl<T, S> FromRequest<S> for RegistrationJson<T>
-where
-    T: serde::de::DeserializeOwned,
-    S: Send + Sync,
-{
-    type Rejection = ServiceError;
-
-    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
-        match axum::Json::<T>::from_request(req, state).await {
-            Ok(axum::Json(value)) => Ok(Self(value)),
-            Err(rejection) => Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidClientMetadata,
-                rejection.body_text(),
-            )),
+            Err(rejection) => Err(T::reject(rejection)),
         }
     }
 }

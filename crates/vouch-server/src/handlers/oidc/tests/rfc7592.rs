@@ -1981,7 +1981,7 @@ async fn test_rfc7592_put_nonexistent_client() {
 // *before* the handler ran, which masked the bearer-token check: a request with
 // no `Authorization` header and a malformed body got a 400 with no
 // `WWW-Authenticate` instead of the bare-Bearer 401, and an invalid token got
-// a 400 instead of a 401 `invalid_token` challenge. The `RegistrationJson`
+// a 400 instead of a 401 `invalid_token` challenge. The `ValidJson`
 // extractor captures the rejection as a `Result`, and the handler
 // authenticates the token before reporting a body failure.
 // =========================================================================

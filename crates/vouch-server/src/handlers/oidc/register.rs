@@ -12,15 +12,16 @@
 //!   `client_id` alone grants zero access — the client must still authenticate
 //!   with a valid FIDO2 key (hardware-bound) to obtain any token.
 //!
-//! Both body-consuming handlers take the request through [`RegistrationJson`],
-//! which converts axum's `JsonRejection` into the RFC 7591 §3.2.2
-//! `invalid_client_metadata` envelope instead of axum's `text/plain` default,
+//! Both body-consuming handlers take the request through [`ValidJson`],
+//! whose [`JsonBody`] impl below converts axum's `JsonRejection` into the
+//! RFC 7591 §3.2.2 `invalid_client_metadata` envelope instead of axum's
+//! `text/plain` default,
 //! and as a `Result<_, ServiceError>` so the Bearer-token check runs before a
 //! body failure is reported (see ARCHITECTURE.md "Error paths").
 
 use crate::db::ClientInfo;
 use crate::error::{ErrorDescription, ServiceError};
-use crate::handlers::extractors::RegistrationJson;
+use crate::handlers::extractors::{JsonBody, ValidJson};
 use crate::handlers::session::{AuthenticatedToken, OptionalAuthenticatedToken};
 use crate::services::oidc::registration::{
     RegistrationRequest, delete_client_configuration, lookup_and_verify_registration_token,
@@ -34,6 +35,18 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use std::sync::Arc;
+
+/// RFC 7591 §3.2.2: "invalid_client_metadata: The value of one of the client
+/// metadata fields is invalid and the server has rejected this request." A body
+/// that fails to deserialize is a metadata failure in the same envelope.
+impl JsonBody for RegistrationRequest {
+    fn reject(rejection: axum::extract::rejection::JsonRejection) -> ServiceError {
+        ServiceError::oauth(
+            crate::error::OAuthErrorCode::InvalidClientMetadata,
+            rejection.body_text(),
+        )
+    }
+}
 use vouch_common::protocol;
 
 /// POST /oauth/register — RFC 7591 Dynamic Client Registration.
@@ -47,7 +60,7 @@ pub(crate) async fn register(
     State(state): State<Arc<AppState>>,
     client_info: ClientInfo,
     token: Result<OptionalAuthenticatedToken, ServiceError>,
-    body: Result<RegistrationJson<RegistrationRequest>, ServiceError>,
+    body: Result<ValidJson<RegistrationRequest>, ServiceError>,
 ) -> Response {
     // Authentication is optional here, but a token that fails validation is an
     // error rather than an anonymous request. RFC 7592 §2 / RFC 6750 §3.1: the
@@ -72,7 +85,7 @@ pub(crate) async fn register(
     // extractor captured it as a `ServiceError`; this branch runs only after
     // the token check above, so an invalid token's 401 always wins.
     let request = match body {
-        Ok(RegistrationJson(request)) => request,
+        Ok(ValidJson(request)) => request,
         Err(e) => return into_registration_response(e),
     };
 
@@ -138,7 +151,7 @@ pub(crate) async fn update_client(
     client_info: ClientInfo,
     Path(client_id): Path<String>,
     headers: HeaderMap,
-    body: Result<RegistrationJson<RegistrationRequest>, ServiceError>,
+    body: Result<ValidJson<RegistrationRequest>, ServiceError>,
 ) -> Response {
     let token = match http::bearer_token(&headers) {
         Some(t) => t,
@@ -146,7 +159,7 @@ pub(crate) async fn update_client(
     };
 
     let request = match body {
-        Ok(RegistrationJson(request)) => request,
+        Ok(ValidJson(request)) => request,
         Err(body_err) => {
             // RFC 6750 §3.1: authenticate the Bearer token BEFORE reporting a
             // body failure. Extractors run before the handler, so the body was
