@@ -44,7 +44,7 @@ judgement columns come from the batch's record in `.local/`.
 | 2026-10-13 | 1 | 0 | 1 | 0 | 1 | 0 of 0 | #1825 (no PR) closed won't fix: configured IdPs are trusted for the emails they verify; #1823's docs and comments corrected in #1833; dead-code #1824 queued, carrying the rustls 0.23.46 bump | 0 | 0 |
 | 2026-10-16 | 2 | 2 | 0 | 0 | 0 | 2 of 2 | #1831 amended (citation RFC 7519 §4.1.7); #1830 superseded by class fix #1832 (every grant carries `resource`/`authorization_details`; RFC 9396 §5 type gate; `ErrorDescription` for RFC 6749 §5.2's charset) | 0 | 0 (not requested) |
 | 2026-10-19 | 1 | 1 | 0 | 1 | 1 | 1 of 1 | #1838/#1839 closed not planned: contradicts the 10-16 no-rolling-deploy decision | 0 exact; recurrence of a recorded decision | 1 requested (`rcr_f5eda781…`), replaces `rule_5bc7d013`; not synced |
-| 2026-10-23 | 11 | 11 | 1 | 0 | 0 | 3 of 11 proposed | pending user decisions (triaged 10-26): #1861 amend (fold `RegistrationJson` into `ValidJson`), #1863 amend (false prune of RFC 8693 §6 rows via the bare-§ trap), #1859 CI rerun (macOS flake); 5 branches carry an unsigned tokio-bump commit; `cargo deny` red on `main` (tokio, ctutils, crypto-bigint via p256 0.13) | 1 of 11 (#1852 extends the 10-16 token-param guardrail residue) | 0 (none requested yet) |
+| 2026-10-23 | 11 | 11 | 1 | 0 | 0 | 4 of 11 | 5 merged as-is (#1859, #1862, #1864, #1866, #1867); #1860 amended on its branch (new tests parsed `Cli` without `ENV_LOCK`, raced on Windows); 5 superseded by signed rebuilds (#1858→#1872 guard dropped, #1861→#1873 `JsonBody` on `ValidJson`, #1863→#1874 citations fixed and RFC 8693 §6 rows kept, #1865→#1875, #1868→#1876); dead-code #1869 closed; deps #1870 first (tokio, ctutils, crypto-bigint and zstd ignores) | 1 of 11 (#1852 extends the 10-16 token-param guardrail residue) | 0 (user: none) |
 
 Batches before 2026-08-20 have no record, so only their counted columns exist:
 run the script. `escape-unaware-delimiter-normalization` exists on Detail's side
@@ -1117,7 +1117,10 @@ Review: #1863 prunes three RFC 8693 §6 Privacy rows ("the token MUST be encrypt
 recipient") because "RFC 9396 §6" inside `tests/rfc8693.rs` trips the ratchet's bare-§ fallback —
 the KB gotcha's item 3, recurring. #1861 adds a parallel extractor type instead of extending
 `ValidJson`. Five PRs pushed an unsigned tokio-only bump after the advisory check failed; the
-check fails on `main` itself (RUSTSEC-2026-0384/0385/0387), so a deps PR has to land first.
+check fails on `main` itself (RUSTSEC-2026-0384/0385/0387), so a deps PR landed first (#1870,
+which also had to ignore three zstd advisories published between the local check and the
+queue run). All twelve PRs merged the same day; #1860's Windows failure was a real race
+(`Cli::try_parse_from` without `ENV_LOCK`), fixed on Detail's branch.
 
 ### Process
 
