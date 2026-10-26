@@ -221,7 +221,7 @@ sys-locale = { version = "=0.3.2", default-features = false }
 tempfile = { version = "=3.27.0", default-features = false }
 thiserror = { version = "=2.0.21", default-features = false }
 time = { version = "=0.3.55", default-features = false }
-tokio = { version = "=1.54.0", default-features = false }
+tokio = { version = "=1.54.1", default-features = false }
 tokio-rustls = { version = "=0.26.6", default-features = false }
 tokio-util = { version = "=0.7.20", default-features = false }
 toml_edit = { version = "=0.25.17", default-features = false }
