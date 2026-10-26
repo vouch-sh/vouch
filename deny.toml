@@ -33,6 +33,15 @@ ignore = [
     # Re-evaluate when askama or i18n-embed-fl moves to `toml`.
     # https://rustsec.org/advisories/RUSTSEC-2026-0374
     "RUSTSEC-2026-0374",
+    # crypto-bigint 0.5 has secret-dependent branches in operations meant to
+    # be constant-time. The fix is 0.7.6, reached only through p256 0.14 /
+    # elliptic-curve 0.14 / ecdsa 0.17, a RustCrypto-wide major bump that
+    # this workspace cannot take piecemeal. p256 here verifies ES256 and
+    # signs with ephemeral or test keys; production ES256 signing is
+    # aws-lc-rs (`OidcSigningKey`). Re-evaluate when the RustCrypto 0.14
+    # line is adopted across the workspace.
+    # https://rustsec.org/advisories/RUSTSEC-2026-0387
+    "RUSTSEC-2026-0387",
 ]
 
 [licenses]
