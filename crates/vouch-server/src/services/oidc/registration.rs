@@ -2151,7 +2151,11 @@ fn invalid_registration_token() -> ServiceError {
 /// leaked credential; either way it has no legitimate use, and it may still be
 /// live for the client it really belongs to. Revocation is best-effort and never
 /// changes the response — see [`db::revoke_registration_access_token`].
-async fn lookup_and_verify_registration_token(
+///
+/// `pub(crate)` so the RFC 7592 PUT handler can authenticate the Bearer token
+/// *before* deserializing (and rejecting) a malformed body, keeping the 401
+/// challenge from being masked by a `invalid_client_metadata` body error.
+pub(crate) async fn lookup_and_verify_registration_token(
     state: &Arc<AppState>,
     client_id: &str,
     token: &str,
