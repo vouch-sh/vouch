@@ -124,13 +124,8 @@ pub(crate) enum SetupCommands {
     #[command(about = tr!("cmd-setup-docker-about"))]
     Docker {
         /// Container registries to configure (e.g., ghcr.io).
-        //
-        // No `trailing_var_arg`: that attribute made clap stop parsing flags
-        // after the first registry and swallow --configure/--profile verbatim
-        // into this `Vec`, silently polluting ~/.docker/config.json's
-        // credHelpers. The plain positional interleaves flags and values, so
-        // both `--configure ghcr.io` and `ghcr.io --configure` parse as
-        // expected.
+        // A plain positional, so `--configure` and `--profile` parse wherever
+        // they appear; `trailing_var_arg` would capture them as registries.
         #[arg(help = tr!("arg-setup-docker-registries-help"))]
         registries: Vec<String>,
         /// Automatically configure Docker (otherwise just show instructions).
@@ -290,14 +285,6 @@ mod tests {
             }
         ));
     }
-
-    // --- Docker subcommand -------------------------------------------------
-    //
-    // `registries` was declared `trailing_var_arg`, which made clap stop
-    // parsing flags after the first registry and silently swallow
-    // --configure/--profile verbatim into `registries`. The attribute is
-    // gone, so flags must interleave with registries no matter where they
-    // appear.
 
     /// `--configure` placed after a registry must set `configure = true`
     /// instead of being captured as a literal registry string.
