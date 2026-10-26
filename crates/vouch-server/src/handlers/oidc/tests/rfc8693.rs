@@ -2378,6 +2378,93 @@ async fn test_rfc8693_id_token_rejects_scope() {
     assert_eq!(error["error"], "invalid_scope", "{body}");
 }
 
+// RFC 9396 Section 6: "the authorization server ... refuses the request with the
+// error code invalid_authorization_details (similar to invalid_scope)". An
+// ID token carries only the standard OIDC claim set and no
+// `authorization_details`, so a requested set can be neither honored nor
+// reported — the same situation as `scope` one block up. Refusing the
+// combination explicitly, rather than ignoring the input, keeps the
+// ID-token fork's "refuse don't ignore" policy consistent across all three
+// optional parameters (`actor_token`, `scope`, `authorization_details`),
+// and surfaces a client bug that would otherwise be hidden by a 200 OK.
+#[tokio::test]
+async fn test_rfc8693_id_token_rejects_authorization_details() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "id-ad@example.com").await;
+    let auth = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let (subject_token, _) = issue_oauth_access_token(&app, &state, &user, &auth, &client).await;
+
+    // A known authorization details type (`device_posture`) from RFC 9396 —
+    // the same shape the access-token fork narrows. With
+    // `requested_token_type=id_token` the parameter is refused outright.
+    let details = r#"[{"type":"device_posture","posture_version":1}]"#;
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={subject_token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &requested_token_type={ID_TOKEN_TYPE}\
+             &authorization_details={}",
+            urlencoding::encode(details),
+        ),
+        &[("Authorization", &client.basic_auth_header())],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["error"], "invalid_authorization_details", "{body}");
+    // The description must name the unsupported combination so the client is
+    // not left to guess which parameter was refused.
+    assert!(
+        error["error_description"]
+            .as_str()
+            .is_some_and(|d| d.contains("authorization_details")),
+        "Error description must name authorization_details, got: {body}"
+    );
+    // No token may be issued: the parameter must not be silently ignored.
+    assert!(error.get("access_token").is_none(), "{body}");
+}
+
+// RFC 9396 Section 5: "The AS MUST refuse to process any unknown authorization
+// details type." Before the refusal guard was added, the ID-token fork
+// returned before the RFC 9396 block and accepted even an *unknown* type
+// with a 200 OK — bypassing the Section 5 gate enforced on the access-token fork
+// (see `test_token_exchange_unknown_authorization_details_type_refused` in
+// rfc9396.rs). This test pins the gate on the ID-token fork as well.
+#[tokio::test]
+async fn test_rfc8693_id_token_rejects_unknown_authorization_details_type() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "id-ad-unknown@example.com").await;
+    let auth = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let (subject_token, _) = issue_oauth_access_token(&app, &state, &user, &auth, &client).await;
+
+    let unknown = r#"[{"type":"payment_initiation","amount":100}]"#;
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={subject_token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &requested_token_type={ID_TOKEN_TYPE}\
+             &authorization_details={}",
+            urlencoding::encode(unknown),
+        ),
+        &[("Authorization", &client.basic_auth_header())],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["error"], "invalid_authorization_details", "{body}");
+    assert!(error.get("access_token").is_none(), "{body}");
+}
+
 // ========================================================================
 // Issue #550 — Deactivated actor user must be rejected
 //
