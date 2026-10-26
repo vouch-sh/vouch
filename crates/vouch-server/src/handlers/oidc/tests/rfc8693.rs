@@ -2378,7 +2378,7 @@ async fn test_rfc8693_id_token_rejects_scope() {
     assert_eq!(error["error"], "invalid_scope", "{body}");
 }
 
-// RFC 9396 §6: "the authorization server ... refuses the request with the
+// RFC 9396 Section 6: "the authorization server ... refuses the request with the
 // error code invalid_authorization_details (similar to invalid_scope)". An
 // ID token carries only the standard OIDC claim set and no
 // `authorization_details`, so a requested set can be neither honored nor
@@ -2429,10 +2429,10 @@ async fn test_rfc8693_id_token_rejects_authorization_details() {
     assert!(error.get("access_token").is_none(), "{body}");
 }
 
-// RFC 9396 §5: "The AS MUST refuse to process any unknown authorization
+// RFC 9396 Section 5: "The AS MUST refuse to process any unknown authorization
 // details type." Before the refusal guard was added, the ID-token fork
 // returned before the RFC 9396 block and accepted even an *unknown* type
-// with a 200 OK — bypassing the §5 gate enforced on the access-token fork
+// with a 200 OK — bypassing the Section 5 gate enforced on the access-token fork
 // (see `test_token_exchange_unknown_authorization_details_type_refused` in
 // rfc9396.rs). This test pins the gate on the ID-token fork as well.
 #[tokio::test]
