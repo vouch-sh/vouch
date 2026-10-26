@@ -82,10 +82,29 @@ fn config_parent_dir(config_path: &std::path::Path) -> Option<&std::path::Path> 
 /// *resolved* path, whether that is `~/.aws` or the override location.
 fn load_or_create_aws_config() -> Result<AwsConfig> {
     let config_path = AwsConfig::default_path()?;
-    if let Some(parent) = config_parent_dir(&config_path) {
+    load_aws_config_at(&config_path)
+}
+
+/// Open (or create) the AWS config at `config_path`, securing its parent
+/// directory first.
+///
+/// Propagates read/load errors from an existing config file instead of
+/// discarding its contents: a malformed or unreadable `~/.aws/config` must
+/// surface a load error and leave the file untouched, matching the cargo/pip
+/// flows. The missing-file case is handled inside [`AwsConfig::load_from`],
+/// which returns an empty config when the path does not exist, so the
+/// destructive fallback that previously swallowed load errors and let a later
+/// `save()` overwrite the real file is gone.
+///
+/// Factored out of [`load_or_create_aws_config`] so the error-propagation is
+/// testable against a temp path without mutating `AWS_CONFIG_FILE`
+/// (`std::env::set_var` is `unsafe` under edition 2024 and the workspace
+/// denies `unsafe_code`).
+fn load_aws_config_at(config_path: &std::path::Path) -> Result<AwsConfig> {
+    if let Some(parent) = config_parent_dir(config_path) {
         ensure_secure_dir(parent)?;
     }
-    Ok(AwsConfig::load_from(config_path.clone()).unwrap_or_else(|_| AwsConfig::empty(config_path)))
+    AwsConfig::load_from(config_path.to_path_buf())
 }
 
 /// Arguments for `setup aws`, one field per CLI flag. Grouped into a borrow
@@ -2636,6 +2655,42 @@ mod tests {
         let path = std::path::PathBuf::from("/tmp/aws-alt/config");
         let config = super::AwsConfig::empty(path.clone());
         assert_eq!(config.path(), path);
+    }
+
+    // -- load_aws_config_at --------------------------------------------------
+    //
+    // Regression coverage for the silent-overwrite bug's AWS twin: when the
+    // existing ~/.aws/config fails to load (or cannot be read), setup must
+    // surface the error and leave the file untouched rather than returning an
+    // empty config that a later `save()` would write back over the real file.
+    // The missing-file case returns an empty config (handled in
+    // `AwsConfig::load_from`); the destructive case is a *present but
+    // unreadable* path.
+
+    /// A config path that names a directory cannot be read and must surface an
+    /// error, not an empty config that a later `save()` would write back over
+    /// the real file.
+    #[cfg(unix)]
+    #[test]
+    fn load_aws_config_at_propagates_read_error_for_directory() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let config_path = dir.path().join("config");
+        std::fs::create_dir(&config_path)?;
+
+        let result = load_aws_config_at(&config_path);
+        assert!(result.is_err(), "expected an error for a directory config");
+        // `error should name the offending file` — borrow the error without
+        // `unwrap`/`expect` (forbidden in this test module; only
+        // `panic_in_result_fn` is expected).
+        if let Err(e) = &result {
+            assert!(
+                e.to_string().contains(&config_path.display().to_string()),
+                "error should name the offending file: {e}",
+            );
+        }
+        // The directory is still a directory — no file was written over it.
+        assert!(config_path.is_dir(), "the directory must be left untouched");
+        Ok(())
     }
 
     // -- plan_profile / plan_idc_write / plan_entitled_profiles --------------------
