@@ -645,6 +645,144 @@ async fn test_userinfo_unsupported_signing_algorithm_returns_500() {
     );
 }
 
+/// A DB error during the userinfo client lookup must return 500 `server_error`,
+/// not silently downgrade a signed response to unsigned `application/json`.
+///
+/// OIDC Core Section 5.3.4: a client that registered `userinfo_signed_response_alg`
+/// MUST receive a signed JWT or an error; an unsigned JSON body is a response
+/// the client is required to reject. The handler re-looks-up the OAuth client
+/// to read its registered algorithm; when that lookup returns `Err` (a transient
+/// store fault or an un-decryptable/un-deserializable client record) the
+/// `Err` arm must fail closed (500 + `tracing::error!`), matching
+/// `resolve_non_jwt_auth` in `token.rs`. The old catch-all `_ => None` collapsed
+/// `Err` together with `Ok(None)` into "no signed alg" and returned `200
+/// application/json`, masking the infrastructure fault.
+///
+/// Without this test, reverting the split arms back to `_ => None` leaves every
+/// other userinfo test green (they cover no-alg, ES256, RS256-without-key, and
+/// unsupported-alg only) while the DB-error path goes unguarded.
+#[tokio::test]
+async fn test_userinfo_db_error_on_client_lookup_returns_server_error() {
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "userinfo-db-fault@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+
+    // Create a client registered for ES256 signed userinfo.
+    let client = create_test_client(
+        &state.store,
+        &user.id,
+        TestClientSpec {
+            name: "Signed UserInfo DB Fault Client".to_string(),
+            id_token_signed_response_alg: JwsAlgorithm::Es256,
+            userinfo_signed_response_alg: Some(JwsAlgorithm::Es256),
+            with_secret: false,
+            ..Default::default()
+        },
+    )
+    .await;
+    let client_id_str = client.client_id.clone();
+
+    // Token bound to this client so `result.client_id` is populated.
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            client_id: Some(&client_id_str),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // Sanity check: with a healthy store the same token yields a signed JWT.
+    // This also pins the test setup so a future change that makes the client
+    // return `Ok(None)` cannot make the corruption step below a no-op.
+    let response = http_request_full(
+        &app,
+        "GET",
+        "/oauth/userinfo",
+        None,
+        &[("Authorization", &format!("Bearer {token}"))],
+    )
+    .await;
+    assert_eq!(
+        response.status,
+        StatusCode::OK,
+        "pre-corruption userinfo must succeed: {}",
+        response.body
+    );
+    let content_type = response
+        .headers
+        .get("Content-Type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert_eq!(
+        content_type, "application/jwt",
+        "pre-corruption userinfo must be a signed JWT, got: {content_type}"
+    );
+
+    // Corrupt the stored `oauth_client` document so the next
+    // `find_one::<OAuthClientDoc>` fails deserialization and surfaces as `Err`
+    // (not `Ok(None)`). `test_app()` uses `PlaintextDocumentCrypto`, so writing
+    // `'not-json'` into the `data` column makes `raw_to_document` return `Err`.
+    corrupt_document(&state.store, &client.app_id).await;
+
+    // Repeat the identical request. The client lookup now returns `Err`.
+    let response = http_request_full(
+        &app,
+        "GET",
+        "/oauth/userinfo",
+        None,
+        &[("Authorization", &format!("Bearer {token}"))],
+    )
+    .await;
+
+    // Must return 500 — the DB fault is a transient infrastructure error, not
+    // "no signing algorithm registered". Must NOT return 200 application/json.
+    assert_eq!(
+        response.status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "DB error on client lookup must return 500, got: {} — {}",
+        response.status,
+        response.body
+    );
+
+    let content_type = response
+        .headers
+        .get("Content-Type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        !content_type.contains("application/jwt"),
+        "DB error must not produce a signed JWT, got: {content_type}"
+    );
+    assert!(
+        !content_type.starts_with("application/json") || response.body.contains("error"),
+        "DB error must not produce an unsigned userinfo body, got: {content_type} — {}",
+        response.body
+    );
+
+    let error: serde_json::Value = serde_json::from_str(&response.body).expect("Valid JSON");
+    assert_eq!(
+        error["error"], "server_error",
+        "Error code must be server_error, got: {}",
+        response.body
+    );
+    // The fail-closed 500 must not leak the user's claims.
+    assert!(
+        !response.body.contains(&user.email),
+        "DB error response must not leak the user's email: {}",
+        response.body
+    );
+    assert!(
+        !response.body.contains(&user.id),
+        "DB error response must not leak the user's sub: {}",
+        response.body
+    );
+}
+
 #[tokio::test]
 async fn test_id_token_does_not_contain_hardware_claims() {
     // OIDC compliance: standard OIDC id_tokens must not contain hardware_verified
