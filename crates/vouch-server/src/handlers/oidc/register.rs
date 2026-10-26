@@ -20,7 +20,7 @@
 //! body failure is reported (see ARCHITECTURE.md "Error paths").
 
 use crate::db::ClientInfo;
-use crate::error::{ErrorDescription, ServiceError};
+use crate::error::{ErrorDescription, OAuthErrorCode, ServiceError};
 use crate::handlers::extractors::{JsonBody, ValidJson};
 use crate::handlers::session::{AuthenticatedToken, OptionalAuthenticatedToken};
 use crate::services::oidc::registration::{
@@ -28,6 +28,7 @@ use crate::services::oidc::registration::{
     read_client_configuration, register_client, update_client_configuration,
 };
 use crate::{AppState, http};
+use axum::extract::rejection::JsonRejection;
 use axum::{
     Json,
     extract::{Path, State},
@@ -40,11 +41,8 @@ use std::sync::Arc;
 /// metadata fields is invalid and the server has rejected this request." A body
 /// that fails to deserialize is a metadata failure in the same envelope.
 impl JsonBody for RegistrationRequest {
-    fn reject(rejection: axum::extract::rejection::JsonRejection) -> ServiceError {
-        ServiceError::oauth(
-            crate::error::OAuthErrorCode::InvalidClientMetadata,
-            rejection.body_text(),
-        )
+    fn reject(rejection: JsonRejection) -> ServiceError {
+        ServiceError::oauth(OAuthErrorCode::InvalidClientMetadata, rejection.body_text())
     }
 }
 use vouch_common::protocol;
