@@ -158,7 +158,9 @@ async fn fetch_token(url: &str, opt_in: InsecureOptIn) -> Result<SecretString> {
     let registry = parse_codeartifact_url(&with_default_scheme(url)).ok_or_else(|| {
         anyhow::anyhow!(
             "URL does not appear to be a CodeArtifact registry: {url}\n\
-             Expected format: https://{{domain}}-{{owner}}.d.codeartifact.{{region}}.amazonaws.com/..."
+             Expected one of:\n  \
+             https://{{domain}}-{{owner}}.d.codeartifact.{{region}}.amazonaws.com/... (IPv4)\n  \
+             https://{{domain}}-{{owner}}.codeartifact.{{region}}.on.aws/... (dualstack)"
         )
     })?;
 

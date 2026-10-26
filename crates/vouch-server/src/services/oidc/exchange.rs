@@ -328,6 +328,27 @@ pub(crate) async fn exchange_token(
         ));
     }
 
+    // An ID token carries only the standard OIDC claim set and no
+    // authorization_details, so a requested set can be neither honored nor
+    // reported. Refuse the combination explicitly rather than ignore the
+    // input, matching the `actor_token` and `scope` refusals above. RFC 9396
+    // §6 names `invalid_authorization_details` for a request that "the
+    // authorization server ... refuses" (similar to `invalid_scope` for
+    // scope). Without this guard the ID-token fork returns before the RFC
+    // 9396 inheritance/narrowing block below, so the parameter would be
+    // silently discarded — and even an unknown authorization details type
+    // would be accepted here, bypassing the RFC 9396 §5 "The AS MUST refuse
+    // to process any unknown authorization details type" gate that the
+    // access-token fork enforces.
+    if params.requested_token_type == Some(RequestedTokenType::IdToken)
+        && params.authorization_details.is_some()
+    {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidAuthorizationDetails,
+            "authorization_details is not supported with requested_token_type=id_token",
+        ));
+    }
+
     // Decode and validate the subject token (supports both HS256 and ES256)
     let config = state.config();
     let subject_token = params.subject.token.expose_secret();

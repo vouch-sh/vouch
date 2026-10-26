@@ -661,6 +661,134 @@ async fn test_oidc_callback_accepts_well_formed_email_e2e() {
     assert_eq!(user.email, "alice@example.com");
 }
 
+// E2E through the real /oauth/callback route: an expired-but-present `Pending`
+// device-auth row must be refused at the pre-ceremony re-check, rendering the
+// `enroll-error-device-auth-approve-failed` page (200 OK, NOT 303 → /enroll/keys)
+// and never minting a session. This drives the live token-exchange + ID-token
+// verification against a wiremock IdP (the repo's established E2E convention,
+// matching `test_oidc_callback_accepts_well_formed_email_e2e`), so the fix is
+// verified through the full router stack rather than only at the
+// `complete_enrollment_after_identity` function boundary.
+#[tokio::test]
+async fn test_oidc_callback_refuses_expired_device_auth_row_e2e() {
+    use crate::test_utils::{http_get_full, test_app_with_idps};
+
+    let server = wiremock::MockServer::start().await;
+    let issuer = server.uri();
+    let key = OidcSigningKey::generate().expect("generate signing key");
+    let nonce = "e2e-expired-da-nonce";
+    let id_token = key
+        .sign_jwt(&id_token_claims(
+            &issuer,
+            "mock-client",
+            nonce,
+            "bob@example.com",
+        ))
+        .await
+        .expect("sign id token");
+    mount_mock_oidc_idp(&server, &key, id_token).await;
+
+    let (app, state) = test_app_with_idps(vec![mock_oidc_provider(&issuer)]).await;
+    {
+        let mut config = state.config().as_ref().clone();
+        config.allowed_domains = None;
+        state.config.store(std::sync::Arc::new(config));
+    }
+
+    // Seed an EXPIRED `Pending` device-auth row — still present because the
+    // background sweeper is disabled in tests (`cleanup_interval_minutes = 0`),
+    // exactly the production state between expiry and the next sweep (the bug's
+    // trigger window). The OIDC state row is unexpired (2099), modeling a
+    // callback arrival after the device code expired but before the OIDC state
+    // expired.
+    let device_code_hash = "e2e-expired-da-hash";
+    let device_expired_at: jiff::Timestamp =
+        "2020-01-01T00:00:00Z".parse().expect("valid timestamp");
+    let device_auth_id = db::create_device_auth_request(
+        &state.store,
+        device_code_hash,
+        "E2EX-PIRD",
+        "test-client",
+        device_expired_at,
+        5,
+    )
+    .await
+    .expect("create expired device auth request");
+
+    let oidc_expires: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().expect("valid timestamp");
+    let state_value = "e2e-expired-da-state";
+    db::create_oidc_state(
+        &state.store,
+        state_value,
+        Some(&device_auth_id),
+        nonce,
+        "",
+        oidc_expires,
+        "mock-idp",
+    )
+    .await
+    .expect("create_oidc_state");
+
+    // Drive the real /oauth/callback route: the handler consumes the OIDC
+    // state, exchanges the code with the wiremock IdP, verifies the ID token,
+    // and runs `complete_enrollment_after_identity`. The re-check must refuse
+    // the expired device-auth row.
+    let resp = http_get_full(
+        &app,
+        &format!("/oauth/callback?state={state_value}&code=dummy-auth-code"),
+        &[],
+    )
+    .await;
+
+    assert_eq!(
+        resp.status,
+        StatusCode::OK,
+        "E2E: expired device-auth must render the error page (200), not 303; got {}: {}",
+        resp.status,
+        resp.body
+    );
+    assert!(
+        resp.headers.get(header::LOCATION).is_none(),
+        "E2E: no redirect may be issued for an expired device authorization"
+    );
+    assert!(
+        resp.headers.get(header::SET_COOKIE).is_none(),
+        "E2E: no session cookie may be minted for an expired device authorization"
+    );
+    assert!(
+        resp.body
+            .contains(&Tr::new("enroll-error-device-auth-approve-failed").to_string()),
+        "E2E: expected the enroll-error-device-auth-approve-failed page, got: {}",
+        resp.body
+    );
+
+    // The device-auth row stays Pending (NOT promoted to Authorized) — the
+    // ceremony was never reached.
+    let request = db::get_device_auth_by_code_hash(&state.store, device_code_hash)
+        .await
+        .expect("device auth lookup")
+        .expect("device auth exists");
+    assert!(
+        matches!(request.state, DeviceAuthState::Pending),
+        "E2E: an expired row must remain Pending, got: {:?}",
+        request.state
+    );
+
+    // No `DeviceAuthApproved` audit event for the dead code.
+    let approvals = state
+        .audit
+        .query_events(&AuditEventFilter {
+            event_types: Some(vec!["device_auth_approved".to_string()]),
+            ..Default::default()
+        })
+        .await
+        .expect("query audit events");
+    assert!(
+        approvals.is_empty(),
+        "E2E: no approval event may be recorded for an expired device authorization"
+    );
+}
+
 #[tokio::test]
 async fn test_saml_acs_rejects_whitespace_domain_email_e2e() {
     // SAML path E2E: the SAML ACS handler (`POST /saml/acs`) validates a
@@ -1702,6 +1830,126 @@ async fn test_cli_device_auth_failure_renders_error_instead_of_redirect() {
     assert!(
         approvals.is_empty(),
         "no approval event may be recorded when authorization failed"
+    );
+}
+
+// Regression for the expiry gap in the pre-ceremony re-check (#746 hazard).
+// The re-check in `complete_enrollment_after_identity` claimed to cover "the
+// row expired and was reclaimed", but implemented only the reclaimed (missing
+// row) half — the `expires_at` comparison was absent, so an expired-but-still-
+// present `Pending` row (between expiry and the next sweeper run, up to ~18
+// minutes with defaults) passed the check. The callback then minted a session,
+// redirected into the key ceremony, and `authorize_device_auth` committed the
+// dead row to `Authorized` while the CLI could never redeem it. The fix adds
+// the `expires_at` comparison against the callback's arrival instant, so an
+// expired `Pending` row is refused up front with the same
+// `enroll-error-device-auth-approve-failed` page used for a swept or settled
+// row.
+#[tokio::test]
+async fn test_cli_expired_pending_device_auth_recheck_refuses_before_ceremony() {
+    let state = test_app_state().await;
+    let user = create_test_user(&state.store, "cli-expired-da@example.com").await;
+    create_test_authenticator(&state.store, &user.id).await;
+
+    // Seed a `Pending` device-auth row that already expired — still present
+    // because the background sweeper is disabled in tests (`cleanup_interval_minutes
+    // = 0`), exactly the production state between expiry and the next sweep.
+    let device_code_hash = "cli-expired-da-code-hash";
+    let expired_at: jiff::Timestamp = "2020-01-01T00:00:00Z".parse().expect("valid timestamp");
+    let device_auth_id = db::create_device_auth_request(
+        &state.store,
+        device_code_hash,
+        "CLI-EXP",
+        "test-client",
+        expired_at,
+        0,
+    )
+    .await
+    .expect("create_device_auth_request");
+
+    let (stored, claim) =
+        seed_and_consume_oidc_state(&state, "cli-expired-da-state", Some(&device_auth_id)).await;
+
+    let identity = IdentityResult {
+        email: "cli-expired-da@example.com".to_string(),
+        domain: Some(test_domain("example.com")),
+        upstream: None,
+    };
+
+    // `test_arrival()` is `Timestamp::now()`, well after `2020-01-01`. The
+    // re-check must reject the expired row rather than walk the user through
+    // a dead-end key ceremony.
+    let resp = complete_enrollment_after_identity(
+        &state,
+        &stored,
+        identity,
+        claim,
+        ClientInfo::default(),
+        test_arrival(),
+    )
+    .await;
+
+    // The error template renders 200 OK — NOT a 303 SEE_OTHER into the
+    // ceremony — with no redirect and no session cookie.
+    assert_ne!(
+        resp.status(),
+        StatusCode::SEE_OTHER,
+        "an expired device authorization must not redirect into the key ceremony"
+    );
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "the refusal must render the error page"
+    );
+    assert!(
+        resp.headers().get(header::SET_COOKIE).is_none(),
+        "no session cookie may be issued for an expired device authorization"
+    );
+    assert!(
+        resp.headers().get(header::LOCATION).is_none(),
+        "no redirect may be issued for an expired device authorization"
+    );
+
+    // The rendered page must be the `enroll-error-device-auth-approve-failed`
+    // catalog message — the same one used for a swept or settled row — so the
+    // user is told to run the command again rather than seeing a misleading
+    // success.
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    let body = String::from_utf8(body.to_vec()).expect("utf8 body");
+    assert!(
+        body.contains(&Tr::new("enroll-error-device-auth-approve-failed").to_string()),
+        "expected the enroll-error-device-auth-approve-failed page, got: {body}"
+    );
+
+    // The expired `Pending` row must NOT be promoted to `Authorized`: the
+    // re-check refused before the ceremony, so `authorize_device_auth` was
+    // never reached. The CLI poll on this row already rejects with
+    // `expired_token`, and the row stays unredeemable rather than receiving a
+    // false approval.
+    let request = db::get_device_auth_by_code_hash(&state.store, device_code_hash)
+        .await
+        .expect("device auth lookup")
+        .expect("device auth exists");
+    assert!(
+        matches!(request.state, DeviceAuthState::Pending),
+        "an expired row must remain Pending, got: {:?}",
+        request.state
+    );
+
+    // No `DeviceAuthApproved` audit event may be recorded for the dead code.
+    let approvals = state
+        .audit
+        .query_events(&AuditEventFilter {
+            event_types: Some(vec!["device_auth_approved".to_string()]),
+            ..Default::default()
+        })
+        .await
+        .expect("query audit events");
+    assert!(
+        approvals.is_empty(),
+        "no approval event may be recorded for an expired device authorization"
     );
 }
 

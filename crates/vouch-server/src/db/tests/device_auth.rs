@@ -494,10 +494,59 @@ async fn test_try_consume_device_auth_expired_returns_false() {
     let device_code_hash = "expired_consume_hash";
     // Already expired
     let expired_at: jiff::Timestamp = "2020-01-01T00:00:00Z".parse().unwrap();
+
+    // Insert an `Authorized` row that is already expired. `authorize_device_auth`
+    // now refuses an expired `Pending` request (defense in depth for the #746
+    // dead-end-ceremony hazard — see `test_authorize_device_auth_rejects_expired_row`),
+    // so the expired-but-`Authorized` state this consume test exercises is no
+    // longer reachable via that API. Inserting the doc directly verifies
+    // `try_consume_device_auth`'s own `expires_at` gate independently of the
+    // authorization path, the same way `try_consume_device_auth`'s closure
+    // re-stamps `now` per OCC attempt to guard redemption.
+    let doc = super::documents::device_auth::DeviceAuthRequestDoc {
+        device_code_hash: device_code_hash.to_string(),
+        user_code: "EXPD-CNSM".to_string(),
+        status: DeviceAuthStatus::Authorized,
+        client_id: Some("test-client".to_string()),
+        user_id: Some("expired-user".to_string()),
+        user_email: Some("expired@example.com".to_string()),
+        authenticator_id: Some("expired-auth".to_string()),
+        hardware_verified: true,
+        authenticated_at: None,
+        expires_at: expired_at,
+        interval_seconds: 5,
+        last_poll_at: None,
+        consumed_at: None,
+    };
+    store
+        .insert(&doc)
+        .await
+        .expect("insert expired authorized row");
+
+    let consumed = try_consume_device_auth(&store, device_code_hash).await;
+    assert!(
+        matches!(consumed, Err(ClaimError::AlreadyConsumed)),
+        "Expired device code must not be consumable, got: {consumed:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_authorize_device_auth_rejects_expired_row() {
+    // Defense in depth for #746: an expired-but-not-yet-swept `Pending` row
+    // must not be authorized. The CLI can never redeem it — both the device-code
+    // poll handler and `try_consume_device_auth` reject on `expires_at` — so
+    // authorizing it would commit the dead row to `Authorized` and record a
+    // false `DeviceAuthApproved` audit event: the exact dead-end ceremony the
+    // pre-ceremony re-check in `complete_enrollment_after_identity` exists to
+    // prevent. This gate is the backstop for the `browser_login.rs` path, which
+    // calls `authorize_device_auth` with no prior device-row re-check.
+    let (store, _audit) = test_db().await;
+
+    let expired_at: jiff::Timestamp = "2020-01-01T00:00:00Z".parse().unwrap();
     let id = create_device_auth_request(
         &store,
-        device_code_hash,
-        "EXPD-CNSM",
+        "expired_auth_hash",
+        "EXPD-AUTH",
         "test-client",
         expired_at,
         5,
@@ -505,44 +554,33 @@ async fn test_try_consume_device_auth_expired_returns_false() {
     .await
     .expect("create");
 
-    let (user_id, _) = upsert_user(&store, "expired@example.com", Some("Test"))
-        .await
-        .expect("user");
-    let auth_id = create_authenticator(
-        &store,
-        &CreateAuthenticatorParams {
-            user_id: &user_id,
-            name: "Key",
-            credential_id: b"cred-expired",
-            public_key: &[0u8; 32],
-            aaguid: None,
-            user_handle: None,
-            attestation_verified: false,
-            counter: 0,
-        },
-    )
-    .await
-    .expect("auth");
-
-    authorize_device_auth(
+    let result = authorize_device_auth(
         &store,
         AuthorizeDeviceAuthParams {
             id: &id,
-            user_id: &user_id,
+            user_id: "expired-user",
             user_email: "expired@example.com",
-            authenticator_id: &auth_id,
+            authenticator_id: "expired-auth",
             verification: DeviceApproval::Observed(AuthTime::for_test(
                 jiff::Timestamp::now().as_second(),
             )),
         },
     )
-    .await
-    .expect("authorize");
-
-    let consumed = try_consume_device_auth(&store, device_code_hash).await;
+    .await;
     assert!(
-        matches!(consumed, Err(ClaimError::AlreadyConsumed)),
-        "Expired device code must not be consumable, got: {consumed:?}"
+        result.is_err(),
+        "authorize_device_auth must reject an expired Pending row, got: {result:?}"
+    );
+
+    // The row stays Pending — it must not be promoted to Authorized.
+    let req = get_device_auth_by_id(&store, &id)
+        .await
+        .expect("get")
+        .expect("exists");
+    assert!(
+        matches!(req.state, DeviceAuthState::Pending),
+        "an expired row must remain Pending, got: {:?}",
+        req.state
     );
 }
 

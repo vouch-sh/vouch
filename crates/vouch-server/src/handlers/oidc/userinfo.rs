@@ -227,10 +227,21 @@ pub(crate) async fn userinfo(
     };
 
     // OIDC Core Section 5.3.4: Return signed JWT if client registered userinfo_signed_response_alg.
+    // Fail closed on lookup error (matching `resolve_non_jwt_auth` in token.rs):
+    // a DB error is a transient failure (→ 500), not "no signed alg" (→ unsigned
+    // JSON), so a partial DB fault cannot silently downgrade a signed response.
     let signed_alg = if let Some(ref client_id) = result.client_id {
         match db::get_oauth_client_by_client_id(&state.store, client_id).await {
             Ok(Some(client)) => client.userinfo_signed_response_alg,
-            _ => None,
+            Ok(None) => None,
+            Err(e) => {
+                tracing::error!("DB error looking up OAuth client for userinfo: {e}");
+                return oauth_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    OAuthErrorCode::ServerError,
+                    "Database error",
+                );
+            }
         }
     } else {
         None
