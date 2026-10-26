@@ -673,7 +673,20 @@ async fn run() -> Result<()> {
             EnvFilter::new("warn")
         }
     });
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    // Route tracing to stderr so stdout stays pure for subcommands whose
+    // output is parsed by callers. The credential helpers (`credential pip`,
+    // `credential codeartifact`, `credential docker`) print credentials to
+    // stdout; on Windows they are reached through batch wrappers that run the
+    // normal clap subcommand path (after this subscriber is installed),
+    // unlike the Unix argv0-symlink dispatch which returns before init. A
+    // warn-level event emitted mid-fetch (e.g. a corrupt FAPI key on disk,
+    // keychain access failure, or server clock skew) would otherwise land on
+    // stdout ahead of the credential and corrupt pip's `json.loads(stdout)`
+    // / uv's line-split parsing. Mirrors `vouch-server`'s stderr writer.
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(filter)
+        .init();
 
     let config = config?;
     let server = resolve_server_url(&cli, &config)?;
