@@ -295,7 +295,7 @@ jobs:
 
       - name: Build CLI and Agent (Linux)
         if: runner.os == 'Linux'
-        uses: docker/bake-action@018cb6412ab401ebaa809aa5f85966b74628600f # v7.4.0
+        uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
         with:
           targets: cli
         env:
@@ -388,7 +388,7 @@ jobs:
 
       - name: Code sign Windows binaries
         if: runner.os == 'Windows'
-        uses: skeeto/aas-sign@0008af00d4dd2ff2e482ba5ede70831d78f9da59 # v1.1.0
+        uses: skeeto/aas-sign@058700fb89886acfce8d1cc511d69a11eb8f9862 # v1.1.1
         with:
           version: v1.1.0
           endpoint: ${{ secrets.TRUSTED_SIGNING_ENDPOINT }}
@@ -552,7 +552,7 @@ jobs:
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Build server and generate SBOM (musl)
-        uses: docker/bake-action@018cb6412ab401ebaa809aa5f85966b74628600f # v7.4.0
+        uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
         with:
           targets: server
         env:
