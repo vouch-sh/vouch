@@ -1434,8 +1434,9 @@ mod tests {
     /// `uses_server()` for `logout`, `completions`, and `posture`; this pins
     /// `init` too. (`assert!` is avoided here because `panic_in_result_fn` is
     /// denied: `anyhow::ensure!` fails the test by returning `Err`.)
-    #[test]
-    fn init_does_not_use_server() -> Result<()> {
+    #[tokio::test]
+    async fn init_does_not_use_server() -> Result<()> {
+        let _guard = ENV_LOCK.lock().await;
         let cli = Cli::try_parse_from(["vouch", "init", "bash"])?;
         anyhow::ensure!(
             !cli.command.uses_server(),
@@ -1446,8 +1447,9 @@ mod tests {
 
     /// Offline commands skip server URL validation: a malformed `--server`
     /// cannot abort them, and the resolved (never-read) value is the default.
-    #[test]
-    fn resolve_server_url_offline_commands_skip_malformed_url() -> Result<()> {
+    #[tokio::test]
+    async fn resolve_server_url_offline_commands_skip_malformed_url() -> Result<()> {
+        let _guard = ENV_LOCK.lock().await;
         let config = config::Config::default();
         let cases: &[&[&str]] = &[
             &["vouch", "--server", "auth.internal", "completions", "bash"],
@@ -1472,8 +1474,9 @@ mod tests {
     /// `diag` bypasses the server entirely and must be treated as offline.
     /// Unix-only: the command is not built on Windows.
     #[cfg(not(target_os = "windows"))]
-    #[test]
-    fn resolve_server_url_diag_skips_malformed_url() -> Result<()> {
+    #[tokio::test]
+    async fn resolve_server_url_diag_skips_malformed_url() -> Result<()> {
+        let _guard = ENV_LOCK.lock().await;
         let cli = Cli::try_parse_from(["vouch", "--server", "auth.internal", "diag"])?;
         anyhow::ensure!(
             !cli.command.uses_server(),
@@ -1492,8 +1495,9 @@ mod tests {
     /// offline-skip fix must not relax validation for commands that contact
     /// the server. `doctor` is server-using (not on the offline exemption
     /// list), so it fails inside `resolve_server_url` before any check runs.
-    #[test]
-    fn resolve_server_url_server_command_rejects_malformed_url() -> Result<()> {
+    #[tokio::test]
+    async fn resolve_server_url_server_command_rejects_malformed_url() -> Result<()> {
+        let _guard = ENV_LOCK.lock().await;
         let cli = Cli::try_parse_from(["vouch", "--server", "auth.internal", "doctor"])?;
         anyhow::ensure!(
             cli.command.uses_server(),
