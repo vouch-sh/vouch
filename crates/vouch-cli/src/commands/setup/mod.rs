@@ -124,7 +124,9 @@ pub(crate) enum SetupCommands {
     #[command(about = tr!("cmd-setup-docker-about"))]
     Docker {
         /// Container registries to configure (e.g., ghcr.io).
-        #[arg(trailing_var_arg = true, help = tr!("arg-setup-docker-registries-help"))]
+        // A plain positional, so `--configure` and `--profile` parse wherever
+        // they appear; `trailing_var_arg` would capture them as registries.
+        #[arg(help = tr!("arg-setup-docker-registries-help"))]
         registries: Vec<String>,
         /// Automatically configure Docker (otherwise just show instructions).
         #[arg(long, help = tr!("arg-setup-docker-configure-help"))]
@@ -282,5 +284,71 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// `--configure` placed after a registry must set `configure = true`
+    /// instead of being captured as a literal registry string.
+    #[test]
+    fn setup_docker_parses_configure_after_registry() {
+        let cli = TestCli::try_parse_from(["vouch", "docker", "ghcr.io", "--configure"])
+            .expect("flag after registry must parse");
+        assert!(matches!(cli.cmd, SetupCommands::Docker {
+                registries,
+                configure: true,
+                profile: None,
+            } if registries == vec!["ghcr.io".to_string()]));
+    }
+
+    /// `--profile <name>` placed after a registry must set `profile`
+    /// instead of being captured as two literal registry strings.
+    #[test]
+    fn setup_docker_parses_profile_after_registry() {
+        let cli = TestCli::try_parse_from([
+            "vouch",
+            "docker",
+            "123456789012.dkr.ecr.us-east-1.amazonaws.com",
+            "--profile",
+            "myprof",
+        ])
+        .expect("--profile after registry must parse");
+        assert!(matches!(cli.cmd, SetupCommands::Docker {
+                configure: false,
+                profile,
+                registries,
+            } if registries == vec!["123456789012.dkr.ecr.us-east-1.amazonaws.com".to_string()]
+                && profile.as_deref() == Some("myprof")));
+    }
+
+    /// The documented order — flags before registries — must keep working.
+    #[test]
+    fn setup_docker_flags_before_registries_still_parse() {
+        let cli = TestCli::try_parse_from([
+            "vouch",
+            "docker",
+            "--configure",
+            "--profile",
+            "myprof",
+            "ghcr.io",
+        ])
+        .expect("flags before registries must parse");
+        assert!(matches!(cli.cmd, SetupCommands::Docker {
+                configure: true,
+                profile,
+                registries,
+            } if registries == vec!["ghcr.io".to_string()]
+                && profile.as_deref() == Some("myprof")));
+    }
+
+    /// Multiple registries must still be collected into the positional Vec,
+    /// whether or not flags appear among them.
+    #[test]
+    fn setup_docker_collects_multiple_registries() {
+        let cli = TestCli::try_parse_from(["vouch", "docker", "ghcr.io", "quay.io", "--configure"])
+            .expect("multiple registries must parse");
+        assert!(matches!(cli.cmd, SetupCommands::Docker {
+                configure: true,
+                registries,
+                ..
+            } if registries == vec!["ghcr.io".to_string(), "quay.io".to_string()]));
     }
 }
