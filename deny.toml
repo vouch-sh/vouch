@@ -42,6 +42,20 @@ ignore = [
     # line is adopted across the workspace.
     # https://rustsec.org/advisories/RUSTSEC-2026-0387
     "RUSTSEC-2026-0387",
+    # zstd 0.13 / zstd-safe 7 are reached only through `include-flate`
+    # (rust-embed's `compression` feature in vouch-server), which pins
+    # zstd ^0.13 and has no release on 0.14. The three advisories concern
+    # reused decompression contexts after an abandoned stream, `Seekable`
+    # decompression, and failed legacy (v0.4-v0.7) frames. include-flate
+    # decompresses only assets this build compressed itself, in one pass per
+    # asset, with no seekable API and no legacy frames, so none of the
+    # affected paths run. Re-evaluate when include-flate moves to zstd 0.14.
+    # https://rustsec.org/advisories/RUSTSEC-2026-0391
+    # https://rustsec.org/advisories/RUSTSEC-2026-0398
+    # https://rustsec.org/advisories/RUSTSEC-2026-0403
+    "RUSTSEC-2026-0391",
+    "RUSTSEC-2026-0398",
+    "RUSTSEC-2026-0403",
 ]
 
 [licenses]
