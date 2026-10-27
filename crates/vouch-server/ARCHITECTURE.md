@@ -652,9 +652,11 @@ than `application/x-www-form-urlencoded`. It drops empty-valued parameters befor
 deserializing. RFC 6749 §3.2: *"Parameters sent without a value MUST be treated as if
 they were omitted from the request."* (`specs/rfc/rfc6749.txt`). So `scope=` and an
 omitted `scope` arrive identically, a repeated recognized parameter fails, and an
-unrecognized one is ignored. `ValidJson` does the same for JSON bodies. Its callers are
-the browser WebAuthn completion endpoints, which read `errResp.message` from a JSON body
-and cannot see a plain-text rejection, and the CLI's key-registration completion.
+unrecognized one is ignored. `ValidJson` does the same for JSON bodies. Its callers
+include the browser WebAuthn completion endpoints, which read `errResp.message` from a
+JSON body and cannot see a plain-text rejection, the CLI's key-registration completion,
+and the RFC 7591/7592 registration endpoints, whose body failures answer
+`invalid_client_metadata` (RFC 7591 §3.2.2) instead of the default `invalid_request`.
 
 `OccConflict` is the only variant that reports itself retryable. Aurora DSQL uses
 optimistic concurrency control (OCC) and offers no `SELECT … FOR UPDATE`. Code that
