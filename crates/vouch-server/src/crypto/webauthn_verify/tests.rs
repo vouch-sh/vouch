@@ -113,39 +113,6 @@ fn make_attestation_object_none(auth_data: &[u8]) -> Vec<u8> {
 }
 
 // =========================================================================
-// Basic Tests (existing)
-// =========================================================================
-
-// WebAuthn L2 §7.2 step 15: the rpIdHash in authData is the SHA-256 hash of the expected RP ID.
-#[test]
-fn test_rp_id_hash_verification() {
-    // Create minimal valid authenticator data with correct RP ID hash
-    let rp_id = "example.com";
-    let rp_id_hash = digest::digest(&SHA256, rp_id.as_bytes());
-
-    let mut auth_data = Vec::new();
-    auth_data.extend_from_slice(rp_id_hash.as_ref()); // 32 bytes
-    auth_data.push(0x05); // flags: UP + UV
-    auth_data.extend_from_slice(&[0, 0, 0, 1]); // counter = 1
-
-    // This should pass RP ID verification
-    assert_eq!(&auth_data[0..32], rp_id_hash.as_ref());
-}
-
-// WebAuthn L2 §6.1: the UP and UV flags occupy defined bits of authenticator data.
-#[test]
-fn test_flags_parsing() {
-    let flags_up_only: u8 = 0x01;
-    let flags_up_uv: u8 = 0x05;
-
-    assert!((flags_up_only & 0x01) != 0); // UP set
-    assert!((flags_up_only & 0x04) == 0); // UV not set
-
-    assert!((flags_up_uv & 0x01) != 0); // UP set
-    assert!((flags_up_uv & 0x04) != 0); // UV set
-}
-
-// =========================================================================
 // COSE Key Parsing Tests
 // =========================================================================
 
