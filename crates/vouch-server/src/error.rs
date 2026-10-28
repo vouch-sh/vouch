@@ -356,35 +356,6 @@ impl ServiceError {
         }
     }
 
-    /// Create a structured API error that carries an additional response header.
-    ///
-    /// Produces the same `{"code": "...", "message": "..."}` body as
-    /// [`Self::api`] but attaches a header such as
-    /// [`protocol::HEADER_DPOP_NONCE`] (RFC 9449) to the response so the
-    /// client can retry. The header name is parsed with case-insensitive
-    /// matching (`"DPoP-Nonce"` → `dpop-nonce`); the value is stored verbatim
-    /// and must be a valid HTTP header value.
-    #[must_use]
-    pub fn api_with_header(
-        status: StatusCode,
-        code: impl Into<String>,
-        message: impl Into<String>,
-        header: (&'static str, &str),
-    ) -> Self {
-        let (name, value) = header;
-        Self::ApiWithHeaders {
-            status,
-            code: code.into(),
-            message: message.into(),
-            headers: vec![(
-                axum::http::HeaderName::try_from(name)
-                    .unwrap_or_else(|_| axum::http::HeaderName::from_static("x-vouch-header")),
-                axum::http::HeaderValue::from_str(value)
-                    .unwrap_or_else(|_| axum::http::HeaderValue::from_static("")),
-            )],
-        }
-    }
-
     /// Classify a database error from a transactional operation.
     ///
     /// Writer contention (Postgres serialization failure, Aurora DSQL
@@ -1037,12 +1008,15 @@ mod tests {
     /// but the error code and status must survive.
     #[test]
     fn test_api_with_headers_401_preserved_in_oauth_response() {
-        let err = ServiceError::api_with_header(
-            StatusCode::UNAUTHORIZED,
-            "use_dpop_nonce",
-            "Authorization server requires nonce in DPoP proof",
-            ("DPoP-Nonce", "fresh-nonce-value"),
-        );
+        let err = ServiceError::ApiWithHeaders {
+            status: StatusCode::UNAUTHORIZED,
+            code: "use_dpop_nonce".to_string(),
+            message: "Authorization server requires nonce in DPoP proof".to_string(),
+            headers: vec![(
+                axum::http::HeaderName::from_static(protocol::HEADER_DPOP_NONCE),
+                axum::http::HeaderValue::from_str("fresh-nonce-value").unwrap(),
+            )],
+        };
         let (status, json) = err.into_oauth_response();
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(json.error, "use_dpop_nonce");
@@ -1059,12 +1033,15 @@ mod tests {
     /// error codes and must collapse to the generic 500 `server_error`.
     #[test]
     fn test_api_with_headers_non_401_still_collapses_to_server_error() {
-        let err = ServiceError::api_with_header(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "issuer_error",
-            "Failed to construct the organization issuer",
-            ("DPoP-Nonce", "should-not-leak"),
-        );
+        let err = ServiceError::ApiWithHeaders {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "issuer_error".to_string(),
+            message: "Failed to construct the organization issuer".to_string(),
+            headers: vec![(
+                axum::http::HeaderName::from_static(protocol::HEADER_DPOP_NONCE),
+                axum::http::HeaderValue::from_str("should-not-leak").unwrap(),
+            )],
+        };
         let (status, json) = err.into_oauth_response();
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(json.error, "server_error");
@@ -1078,10 +1055,10 @@ mod tests {
     }
 
     // =========================================================================
-    // ServiceError::api_with_header — RFC 9449 DPoP-Nonce on resource 401s
+    // ServiceError::ApiWithHeaders — RFC 9449 DPoP-Nonce on resource 401s
     // =========================================================================
 
-    /// `api_with_header` produces the same `{"code", "message"}` body as `api`,
+    /// `ServiceError::ApiWithHeaders` produces the same `{"code", "message"}` body as `api`,
     /// plus the named response header. This is the shape `extract_resource_token`
     /// relies on to return a `use_dpop_nonce` error with a fresh `DPoP-Nonce`
     /// header (RFC 9449) at a protected resource endpoint.
@@ -1089,12 +1066,15 @@ mod tests {
     async fn test_api_with_header_emits_header_and_body() {
         use axum::body::to_bytes;
 
-        let err = ServiceError::api_with_header(
-            StatusCode::UNAUTHORIZED,
-            "use_dpop_nonce",
-            "Authorization server requires nonce in DPoP proof",
-            ("DPoP-Nonce", "fresh-nonce-value"),
-        );
+        let err = ServiceError::ApiWithHeaders {
+            status: StatusCode::UNAUTHORIZED,
+            code: "use_dpop_nonce".to_string(),
+            message: "Authorization server requires nonce in DPoP proof".to_string(),
+            headers: vec![(
+                axum::http::HeaderName::from_static(protocol::HEADER_DPOP_NONCE),
+                axum::http::HeaderValue::from_str("fresh-nonce-value").unwrap(),
+            )],
+        };
         let response = err.into_response();
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -1117,36 +1097,21 @@ mod tests {
         );
     }
 
-    /// `api_with_header` with an uppercase header name still produces a header
-    /// that clients reading the canonical lowercase form can find (HTTP headers
-    /// are case-insensitive per RFC 9230 §4.4.1).
-    #[test]
-    fn test_api_with_header_name_case_insensitive() {
-        let err = ServiceError::api_with_header(
-            StatusCode::UNAUTHORIZED,
-            "use_dpop_nonce",
-            "nonce required",
-            ("DPoP-Nonce", "abc"),
-        );
-        let response = err.into_response();
-        let headers = response.headers();
-        assert!(headers.get("dpop-nonce").is_some());
-        assert!(headers.get("DPoP-Nonce").is_some());
-        assert!(headers.get("DPOP-NONCE").is_some());
-    }
-
     /// `ApiWithHeaders` is not retryable — only `OccConflict` is. Guards the
     /// retry contract used by `with_dsql_retry!`.
     #[test]
     fn test_api_with_headers_is_not_retryable() {
         use crate::db::pool::RetryableError;
 
-        let err = ServiceError::api_with_header(
-            StatusCode::UNAUTHORIZED,
-            "use_dpop_nonce",
-            "nonce required",
-            ("DPoP-Nonce", "abc"),
-        );
+        let err = ServiceError::ApiWithHeaders {
+            status: StatusCode::UNAUTHORIZED,
+            code: "use_dpop_nonce".to_string(),
+            message: "nonce required".to_string(),
+            headers: vec![(
+                axum::http::HeaderName::from_static(protocol::HEADER_DPOP_NONCE),
+                axum::http::HeaderValue::from_str("abc").unwrap(),
+            )],
+        };
         assert!(!err.is_retryable());
     }
 }
