@@ -402,12 +402,15 @@ mod tests {
     async fn into_registration_response_preserves_api_with_headers_on_401() {
         use axum::body::to_bytes;
 
-        let err = ServiceError::api_with_header(
-            StatusCode::UNAUTHORIZED,
-            "use_dpop_nonce",
-            "Authorization server requires nonce in DPoP proof",
-            ("DPoP-Nonce", "fresh-nonce-value"),
-        );
+        let err = ServiceError::ApiWithHeaders {
+            status: StatusCode::UNAUTHORIZED,
+            code: "use_dpop_nonce".to_string(),
+            message: "Authorization server requires nonce in DPoP proof".to_string(),
+            headers: vec![(
+                axum::http::HeaderName::from_static(protocol::HEADER_DPOP_NONCE),
+                axum::http::HeaderValue::from_str("fresh-nonce-value").unwrap(),
+            )],
+        };
         let response = into_registration_response(err);
 
         // Status preserved — not collapsed to 500.
