@@ -11,7 +11,7 @@ use super::credential::cache;
 use crate::client::VouchClient;
 use crate::integrations::aws::codeartifact::CodeArtifactToken;
 use crate::integrations::aws::redshift::RedshiftCredentials;
-use crate::integrations::aws::{AwsConfig, RoleTarget};
+use crate::integrations::aws::{RoleTarget, vouch_profile_for_role};
 use crate::server_url::ServerUrl;
 use vouch_common::GitHubTokenRequest;
 
@@ -76,10 +76,7 @@ pub(crate) async fn fetch_aws_credentials(
     server: &ServerUrl,
     role_arn: &str,
 ) -> Result<AwsEnvCredentials> {
-    let via = AwsConfig::load()
-        .ok()
-        .and_then(|config| config.find_vouch_profile_for_role(role_arn))
-        .and_then(|profile| profile.via);
+    let via = vouch_profile_for_role(role_arn).and_then(|profile| profile.via);
     let data = super::credential::aws::get_aws_credentials(
         server,
         RoleTarget {
