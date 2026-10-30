@@ -1616,6 +1616,50 @@ fn restates_stored_code_only_pair(request: &RegistrationRequest, client: &OAuthC
         && requested_grants.iter().all(|g| stored_grants.contains(g))
 }
 
+/// On an RFC 7592 §2.2 PUT, snapshot whether `request_field` was omitted and,
+/// when it was, replace it with the *effective* value the client will keep —
+/// the stored column's value, or the RFC 7591 registration default when the
+/// stored column is itself `None` (a legacy row written without the field).
+///
+/// RFC 7592 §2.2 calls a PUT a "full replacement" where "Omitted fields MUST be
+/// treated as null or empty values by the server", which a strict reading would
+/// have us clear `grant_types`/`response_types` on omit. But §2.2 also lets a
+/// server "MAY ignore any null or empty value in the request just as any other
+/// value"; we exercise that MAY for these two fields, preserving the registered
+/// value on an omit so a partial PUT touching only (say) `client_name` does not
+/// erase a machine client's `client_credentials` grant. The db layer takes the
+/// same branch: an omitted field is passed as `None` to the update, whose column
+/// write is skipped, so the stored value survives.
+///
+/// Substituting the effective value into the request before the shared
+/// [`validate_grant_and_response_types`] runs lets the grant/response-type
+/// consistency check see the pair the client actually ends up with (request's
+/// value when sent, stored value when omitted), instead of the RFC 7591
+/// *registration* defaults the shared validator substitutes for a `None`
+/// request field. Those registration defaults — `["authorization_code"]` /
+/// `["code"]` — are correct for [`register_client`] (RFC 7591 §2) but on the
+/// PUT path they would fabricate a grant the client never sent, both making a
+/// `client_credentials` PUT spuriously require `redirect_uris` and silently
+/// rewriting the stored grants on success.
+///
+/// Returns whether the field was omitted in the request, so the caller can
+/// pass `None` to the db layer for an omitted field and `Some` for an
+/// explicit one.
+fn substitute_effective_value_on_omit(
+    request_field: &mut Option<Vec<String>>,
+    stored: Option<&[String]>,
+    default_for_absent: &str,
+) -> bool {
+    let omitted = request_field.is_none();
+    if omitted {
+        *request_field = Some(match stored {
+            Some(v) => v.to_vec(),
+            None => vec![default_for_absent.to_string()],
+        });
+    }
+    omitted
+}
+
 /// The application type to validate this registration's redirect URIs against.
 ///
 /// The client's own `application_type` wins when it sends one, since OIDC
@@ -1858,6 +1902,10 @@ pub async fn delete_client_configuration(
 ///   client (RFC 7592 §2.2/§5 make all of these indistinguishable to avoid
 ///   disclosing client existence).
 /// - `ServiceError::OAuth` if the request body contains invalid metadata.
+#[expect(
+    clippy::too_many_lines,
+    reason = "single-pass RFC 7592 §2.2 client-configuration PUT full replacement"
+)]
 pub async fn update_client_configuration(
     state: &Arc<AppState>,
     client_id: &str,
@@ -1884,7 +1932,35 @@ pub async fn update_client_configuration(
         mutable_request.response_types = Some(vec![]);
     }
 
-    // Validate grant/response types (take() empties the request fields)
+    // RFC 7592 §2.2 also says "Omitted fields MUST be treated as null or empty
+    // values", but for `grant_types`/`response_types` we exercise the §2.2
+    // escape hatch that "The authorization server MAY ignore any null or
+    // empty value in the request just as any other value" and preserve the
+    // stored value on omit — see [`substitute_effective_value_on_omit`]. The
+    // alternative — fabricating the RFC 7591 registration defaults
+    // `["authorization_code"]`/`["code"]` for an omission — silently rewrites a
+    // machine client's `client_credentials` grant on a partial PUT (issue
+    // #1457's report), which §2.2 forbids as an "augmentation". The snapshot
+    // is taken after the legacy restatement carve-out above, so a restated
+    // `response_types: ["code"]` already normalized to `[]` reads as "sent",
+    // not "omitted", and is written back (the migration the carve-out exists
+    // to permit).
+    let grant_types_omitted = substitute_effective_value_on_omit(
+        &mut mutable_request.grant_types,
+        client.grant_types.as_deref(),
+        GRANT_TYPE_AUTHORIZATION_CODE,
+    );
+    let response_types_omitted = substitute_effective_value_on_omit(
+        &mut mutable_request.response_types,
+        client.response_types.as_deref(),
+        super::RESPONSE_TYPE_CODE,
+    );
+
+    // Validate grant/response types (take() empties the request fields). With
+    // the substitutions above, the shared validator sees the *effective* pair
+    // the client ends up with — the request's value when sent, the stored
+    // value when omitted — rather than re-defaulting an omission to the RFC
+    // 7591 registration pair.
     let validated = validate_grant_and_response_types(&mut mutable_request)?;
 
     // Validate redirect URIs (same cardinality + format rules as initial
@@ -2030,17 +2106,27 @@ pub async fn update_client_configuration(
     // them from the client's registration." Every field below therefore takes
     // the request's value, cleared when the request omits it — the exceptions
     // being the immutable fields, which are absent from these params and
-    // whose restatement `reject_immutable_changes` has already checked, and
+    // whose restatement `reject_immutable_changes` has already checked;
     // `client_name`, whose column cannot hold NULL and so falls back to the
-    // registration default.
+    // registration default; and `grant_types`/`response_types`, for which an
+    // omitted field preserves the stored value rather than clearing it (see
+    // [`substitute_effective_value_on_omit`]).
     let updated = db::update_oauth_client_registration(
         &state.store,
         &client.id,
         &hash_token(registration_access_token),
         &UpdateClientRegistrationParams {
             redirect_uris: &redirect_uris,
-            grant_types: Some(&validated.grant_types),
-            response_types: Some(&validated.response_types),
+            grant_types: if grant_types_omitted {
+                None
+            } else {
+                Some(&validated.grant_types)
+            },
+            response_types: if response_types_omitted {
+                None
+            } else {
+                Some(&validated.response_types)
+            },
             keys: keys.as_ref(),
             registration_access_token_hash: &new_reg_token_hash,
             registration_metadata: Some(&registration_metadata),

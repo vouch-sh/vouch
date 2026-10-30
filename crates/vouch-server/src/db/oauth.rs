@@ -1948,8 +1948,23 @@ pub(super) mod test_helpers {
 /// values of client metadata fields in this request MUST replace, not augment,
 /// the values previously associated with this client" and that "Omitted fields
 /// MUST be treated as null or empty values by the server, indicating the
-/// client's request to delete them from the client's registration". A `None`
-/// therefore clears the stored value rather than preserving it.
+/// client's request to delete them from the client's registration." For most
+/// fields below a `None` therefore clears the stored column.
+///
+/// Two fields deviate, both documented as the §2.2 escape hatch that "The
+/// authorization server MAY ignore any null or empty value in the request just
+/// as any other value":
+/// - `client_name` maps to the non-nullable `name` column, so a `None`
+///   reverts to the registration default `"Unnamed Client"` rather than
+///   clearing outright — the same fallback `register_client` applies.
+/// - `grant_types` / `response_types` are written only when `Some`, so a
+///   `None` left the stored value untouched (preserved rather than cleared).
+///   Preserving the registered grants on a partial PUT matches RFC 7591's
+///   "absent means authorization_code" semantics and keeps a routine edit
+///   (e.g. renaming a machine client) from erasing its `client_credentials`
+///   grant. The service layer sets this branch up: it passes `None` for an
+///   omitted field and `Some` for an explicit one — see
+///   `update_client_configuration` / `substitute_effective_value_on_omit`.
 ///
 /// The fields absent from this struct are the ones a PUT may not change:
 /// `client_id`, `token_endpoint_auth_method`, `application_type`,
@@ -1958,7 +1973,16 @@ pub(super) mod test_helpers {
 /// dropping the value silently.
 pub struct UpdateClientRegistrationParams<'a> {
     pub redirect_uris: &'a [String],
+    /// RFC 7591 §2: Array of OAuth 2.0 grant type strings.
+    ///
+    /// `Some` overwrites the stored list; `None` leaves the stored value
+    /// untouched (RFC 7592 §2.2's "MAY ignore any null or empty value"
+    /// applied) — see the struct docstring.
     pub grant_types: Option<&'a [String]>,
+    /// RFC 7591 §2: Array of OAuth 2.0 response type strings.
+    ///
+    /// `Some` overwrites the stored list; `None` leaves the stored value
+    /// untouched — see `grant_types` and the struct docstring.
     pub response_types: Option<&'a [String]>,
     /// RFC 7591 §2 key material, in whichever of the two forms was supplied.
     pub keys: Option<&'a ClientKeys>,

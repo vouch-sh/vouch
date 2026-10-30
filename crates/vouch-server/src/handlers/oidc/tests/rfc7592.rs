@@ -5085,6 +5085,341 @@ async fn test_rfc7592_put_consistent_auth_code_restatement_unaffected() {
 }
 
 // ========================================================================
+// RFC 7592 §2.2 omission: omitted grant_types / response_types preserve the
+// stored value (§2.2's "the authorization server MAY ignore any null or empty
+// value in the request just as any other value"). The shared validator's
+// RFC 7591 *registration* defaults (`["authorization_code"]` / `["code"]`)
+// must NOT be fabricated for an omission on the PUT path, or a partial PUT
+// silently rewrites (or destroys) a machine client's grant — see the
+// #1457 report. These tests pin the preserve-on-omit contract end-to-end.
+// ========================================================================
+
+/// Register a `client_credentials`-only machine client via `POST /oauth/register`
+/// (the same shape the registration-time comment in `validate_grant_and_
+/// response_types` instructs a M2M client to register as, with
+/// `response_types: []`), returning `(client_id, registration_access_token)`.
+async fn register_machine_client(app: &axum::Router) -> (String, String) {
+    let body = serde_json::json!({
+        "grant_types": ["client_credentials"],
+        "response_types": [],
+        "client_name": "Machine Client",
+    });
+    let (status, body) = http_request(
+        app,
+        "POST",
+        "/oauth/register",
+        Some(body.to_string()),
+        &[("Content-Type", "application/json")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "registration failed: {body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        json["grant_types"],
+        serde_json::json!(["client_credentials"])
+    );
+    assert_eq!(json["response_types"], serde_json::json!([]));
+    (
+        json["client_id"].as_str().expect("client_id").to_string(),
+        json["registration_access_token"]
+            .as_str()
+            .expect("registration_access_token")
+            .to_string(),
+    )
+}
+
+/// Scenario A from the #1457 report: a partial PUT that omits both
+/// `grant_types` and `response_types` but includes `redirect_uris` used to
+/// come back `200 OK` with `grant_types` rewritten to `["authorization_code"]`
+/// — silently destroying a machine client's only grant. The PUT must now
+/// return 200 with the stored grants preserved (RFC 7592 §2.2's "MAY
+/// ignore any null or empty value", exercised), and only the fields the
+/// client actually sent (`client_name`, `redirect_uris`) replaced.
+#[tokio::test]
+async fn test_rfc7592_put_preserves_client_credentials_grants_on_omit() {
+    let (app, state) = test_app().await;
+    let (client_id, token) = register_machine_client(&app).await;
+
+    let update_body = serde_json::json!({
+        "client_name": "Renamed Machine Client",
+        "redirect_uris": ["https://example.com/callback"],
+    });
+    let (status, body) = put_client_config(&app, &client_id, &token, &update_body).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a partial PUT omitting grant_types/response_types must succeed and \
+         must NOT 400 (pre-fix it 400'd demanding a redirect_uri once the \
+         materialized authorization_code default was present, and silently \
+         rewrote the grant when one was supplied): {body}"
+    );
+
+    let put_json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        put_json["grant_types"],
+        serde_json::json!(["client_credentials"]),
+        "the 200 OK body must echo the *preserved* grants, not the RFC 7591 \
+         registration defaults the validator used to fabricate on an \
+         omission: {body}"
+    );
+    assert_eq!(
+        put_json["response_types"],
+        serde_json::json!([]),
+        "an omitted response_types must not come back as the fabricated \
+         `['code']` default: {body}"
+    );
+    let new_token = rotated_token(&put_json);
+
+    // Stored row must reflect the same preserved pair, while the explicitly
+    // sent fields (client_name, redirect_uris) replace per RFC 7592 §2.2.
+    let stored = db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup")
+        .expect("client must still exist");
+    assert_eq!(
+        stored.grant_types,
+        Some(vec!["client_credentials".to_string()]),
+        "an omitted grant_types must preserve the stored value, not be \
+         rewritten to ['authorization_code']"
+    );
+    assert_eq!(
+        stored.response_types,
+        Some(vec![]),
+        "an omitted response_types must preserve the stored value, not be \
+         rewritten to ['code']"
+    );
+    assert_eq!(
+        stored.redirect_uris,
+        vec!["https://example.com/callback".to_string()],
+        "an explicitly-sent field must still replace"
+    );
+    assert_eq!(stored.name, "Renamed Machine Client");
+
+    // End-to-end: a subsequent GET with the rotated token echoes the same
+    // preserved pair, locking the contract a management client observes.
+    let get_json = get_client_config(&app, &client_id, &new_token).await;
+    assert_eq!(
+        get_json["grant_types"],
+        serde_json::json!(["client_credentials"])
+    );
+    assert_eq!(get_json["response_types"], serde_json::json!([]));
+    assert_eq!(
+        get_json["client_name"].as_str().unwrap(),
+        "Renamed Machine Client"
+    );
+}
+
+/// Scenario B from the #1457 report: a PUT that omits `grant_types` but
+/// explicitly restates `response_types: []` (the state the server itself
+/// issued at registration) used to fail with `400 invalid_client_metadata`
+/// — `grant_types includes 'authorization_code' but response_types is
+/// missing 'code'` — naming a `grant_types` value the client never sent and
+/// the server fabricated. The PUT must now succeed and preserve the grant.
+#[tokio::test]
+async fn test_rfc7592_put_omitting_grant_types_keeps_stored_pair() {
+    let (app, state) = test_app().await;
+    let (client_id, token) = register_machine_client(&app).await;
+
+    let update_body = serde_json::json!({
+        "response_types": [],
+    });
+    let (status, body) = put_client_config(&app, &client_id, &token, &update_body).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a PUT omitting grant_types but restating response_types: [] must \
+         succeed, not 400 naming a fabricated authorization_code grant: {body}"
+    );
+    assert!(
+        !body.contains("authorization_code"),
+        "the rejection used to name a grant the client never sent: {body}"
+    );
+
+    let stored = db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup")
+        .expect("client must still exist");
+    assert_eq!(
+        stored.grant_types,
+        Some(vec!["client_credentials".to_string()]),
+        "omitting grant_types must preserve the stored value"
+    );
+    assert_eq!(
+        stored.response_types,
+        Some(vec![]),
+        "the explicitly-sent response_types: [] must replace"
+    );
+}
+
+/// Symmetric to Scenario B: a PUT that explicitly restates the registered
+/// `grant_types: ["client_credentials"]` but omits `response_types` must
+/// also succeed. Pre-fix the shared validator fabricated `['code']` for the
+/// omitted `response_types` and rejected the resulting "code without
+/// authorization_code" pair — the reverse check complaining about a
+/// response type the client never sent. Now the consistency check sees the
+/// effective pair (request's grant_types + stored response_types) and
+/// passes, and the stored response_types is preserved.
+#[tokio::test]
+async fn test_rfc7592_put_omitting_response_types_keeps_stored_pair() {
+    let (app, state) = test_app().await;
+    let (client_id, token) = register_machine_client(&app).await;
+
+    let update_body = serde_json::json!({
+        "grant_types": ["client_credentials"],
+    });
+    let (status, body) = put_client_config(&app, &client_id, &token, &update_body).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a PUT restating grant_types but omitting response_types must \
+         succeed, not 400 naming a fabricated 'code' response type: {body}"
+    );
+    assert!(
+        !body.contains("response_types includes 'code'"),
+        "the rejection used to blame a response type the client never sent: {body}"
+    );
+
+    let stored = db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup")
+        .expect("client must still exist");
+    assert_eq!(
+        stored.grant_types,
+        Some(vec!["client_credentials".to_string()]),
+        "the explicitly-sent grant_types must replace"
+    );
+    assert_eq!(
+        stored.response_types,
+        Some(vec![]),
+        "omitting response_types must preserve the stored value"
+    );
+}
+
+/// The preserve-on-omit fix is not `client_credentials`-specific. A
+/// `device_code` + `client_credentials` machine client omitting both grant
+/// fields (and omitting `redirect_uris` — a trivial rename PUT) must keep
+/// its grants. Pre-fix the materialized `authorization_code` default made
+/// `validate_redirect_uris` 400 demanding a redirect URI for a grant the
+/// client never declared; now the effective grant is the stored non-auth-code
+/// pair, redirect_uris is not required, and the PUT succeeds preserving the
+/// grants.
+#[tokio::test]
+async fn test_rfc7592_put_preserves_device_code_grants_on_omit() {
+    let (app, state) = test_app().await;
+
+    let reg_body = serde_json::json!({
+        "grant_types": [
+            "urn:ietf:params:oauth:grant-type:device_code",
+            "client_credentials"
+        ],
+        "response_types": [],
+        "client_name": "Device Code Machine Client",
+    });
+    let (status, body) = http_request(
+        &app,
+        "POST",
+        "/oauth/register",
+        Some(reg_body.to_string()),
+        &[("Content-Type", "application/json")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "registration failed: {body}");
+    let reg: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let client_id = reg["client_id"].as_str().expect("client_id").to_string();
+    let token = reg["registration_access_token"]
+        .as_str()
+        .expect("registration_access_token")
+        .to_string();
+
+    let update_body = serde_json::json!({
+        "client_name": "Renamed Device Code Client",
+    });
+    let (status, body) = put_client_config(&app, &client_id, &token, &update_body).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a partial PUT touching only client_name must succeed for a \
+         device_code+client_credentials client, not 400 demanding a \
+         redirect_uri for the fabricated authorization_code grant: {body}"
+    );
+
+    let put_json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        put_json["grant_types"],
+        serde_json::json!([
+            "urn:ietf:params:oauth:grant-type:device_code",
+            "client_credentials"
+        ]),
+        "the device_code + client_credentials grants must be echoed back \
+         preserved, not rewritten to ['authorization_code']: {body}"
+    );
+    assert_eq!(put_json["response_types"], serde_json::json!([]));
+
+    let stored = db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup")
+        .expect("client must still exist");
+    // RFC 7591 §2 places no ordering requirement on grant_types; compare as
+    // a sorted set so the assertion is robust against any storage round-trip.
+    let mut stored_grants = stored.grant_types.clone().unwrap_or_default();
+    stored_grants.sort();
+    assert_eq!(
+        stored_grants,
+        vec![
+            "client_credentials".to_string(),
+            "urn:ietf:params:oauth:grant-type:device_code".to_string(),
+        ],
+        "an omitted grant_types must preserve the stored pair, not be rewritten"
+    );
+    assert_eq!(stored.response_types, Some(vec![]));
+    assert_eq!(stored.name, "Renamed Device Code Client");
+}
+
+/// No-regression guard for the most common client shape: a default
+/// `authorization_code` client (registered by `register_dynamic_client`)
+/// that omits both grant fields on a PUT keeps its stored
+/// `["authorization_code"]` + `["code"]` pair. The bug used to be invisible
+/// here because the materialized defaults equal the stored values, so a
+/// partial PUT was observably a no-op for grants — but the contract still
+/// must hold: `Some(...)` is never persisted for an omitted field, so a
+/// `db::update_oauth_client_registration` change to a different default
+/// cannot silently leak onto existing rows.
+#[tokio::test]
+async fn test_rfc7592_put_preserves_auth_code_grants_on_default_client_omit() {
+    let (app, state) = test_app().await;
+    let (client_id, token) = register_dynamic_client(&app).await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"],
+        "client_name": "Updated Client",
+    });
+    let (status, body) = put_client_config(&app, &client_id, &token, &update_body).await;
+    assert_eq!(status, StatusCode::OK, "PUT failed: {body}");
+
+    let stored = db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup")
+        .expect("client must still exist");
+    assert_eq!(
+        stored.grant_types,
+        Some(vec!["authorization_code".to_string()]),
+        "an omitted grant_types must preserve the stored authorization_code \
+         pair — not re-derive and persist the registration default"
+    );
+    assert_eq!(
+        stored.response_types,
+        Some(vec!["code".to_string()]),
+        "an omitted response_types must preserve the stored 'code' value"
+    );
+    assert_eq!(
+        stored.redirect_uris,
+        vec!["https://example.com/callback".to_string()],
+        "an explicitly-sent field must still replace"
+    );
+    assert_eq!(stored.name, "Updated Client");
+}
+
+// ========================================================================
 // RFC 7592 §2.2/§2.3: the token is re-checked inside the write
 // ========================================================================
 
