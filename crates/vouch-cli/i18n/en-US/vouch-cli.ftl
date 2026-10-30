@@ -1566,6 +1566,11 @@ setup-ca-cargo-already-block =
 setup-ca-cargo-configured-block =
     Cargo configured for CodeArtifact registry '{ $name }'
     Configuration written to: { $path }
+cargo-config-both-exist-warning =
+    Note: both { $legacy } and { $modern } exist, so Cargo loads the extensionless
+    { $legacy } and ignores { $modern }. { -product } will read and write
+    { $legacy }. To consolidate, merge { $modern } into { $legacy }, or replace
+    { $legacy } with a symlink to { $modern }.
 setup-ca-pip-auto-block =
     pip will automatically call { -product } to obtain a fresh CodeArtifact
     token each time it needs to authenticate. No more 12-hour token expiry!
