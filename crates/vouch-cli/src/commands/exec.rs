@@ -11,6 +11,7 @@ use super::credential::cache;
 use crate::client::VouchClient;
 use crate::integrations::aws::codeartifact::CodeArtifactToken;
 use crate::integrations::aws::redshift::RedshiftCredentials;
+use crate::integrations::aws::{AwsConfig, RoleTarget};
 use crate::server_url::ServerUrl;
 use vouch_common::GitHubTokenRequest;
 
@@ -68,15 +69,22 @@ impl std::fmt::Debug for AwsEnvCredentials {
 }
 
 /// Fetch AWS credentials (cache-first) and extract environment variable values.
+///
+/// Chains through the `--via` recorded by the profile that targets `role_arn`,
+/// if any: neither `exec` nor `env` has a `--via` flag.
 pub(crate) async fn fetch_aws_credentials(
     server: &ServerUrl,
     role_arn: &str,
 ) -> Result<AwsEnvCredentials> {
+    let via = AwsConfig::load()
+        .ok()
+        .and_then(|config| config.find_vouch_profile_for_role(role_arn))
+        .and_then(|profile| profile.via);
     let data = super::credential::aws::get_aws_credentials(
         server,
-        crate::integrations::aws::RoleTarget {
+        RoleTarget {
             arn: role_arn,
-            via: None,
+            via: via.as_deref(),
         },
     )
     .await?;
