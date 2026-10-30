@@ -282,12 +282,12 @@ jobs:
           path: |
             ~/.cargo/bin/cargo-cyclonedx
             ~/.cargo/bin/cargo-cyclonedx.exe
-          key: ${{ runner.os }}-${{ runner.arch }}-cargo-bin-cyclonedx-v0.5.6
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-bin-cyclonedx-v0.5.9
 
       - name: Install cargo-cyclonedx
         if: runner.os != 'Linux' && steps.cache-cargo-bin.outputs.cache-hit != 'true'
         shell: bash
-        run: cargo install cargo-cyclonedx --version 0.5.6
+        run: cargo install cargo-cyclonedx --version 0.5.9
 
       - name: Set up Docker Buildx
         if: runner.os == 'Linux'

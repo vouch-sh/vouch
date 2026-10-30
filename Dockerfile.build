@@ -4,7 +4,7 @@
 # Used by docker-bake.hcl targets (ci, cli, server, reproduce).
 # The existing Dockerfile (server Docker image) is NOT replaced by this file.
 
-FROM rust:1.99.0-alpine AS base
+FROM rust:1.99.1-alpine AS base
 RUN apk add --no-cache musl-dev pkgconfig cmake make go clang linux-headers \
     openssl-dev openssl-libs-static perl eudev-dev
 ENV AWS_LC_FIPS_SYS_CC=clang
@@ -39,7 +39,7 @@ RUN cargo build --profile "${CARGO_PROFILE}" --locked --target "${TARGET}" ${CAR
 
 # Generate SBOM if requested
 RUN if [ "${GENERATE_SBOM}" = "true" ]; then \
-      cargo install cargo-cyclonedx --version 0.5.6 \
+      cargo install cargo-cyclonedx --version 0.5.9 \
       && cargo cyclonedx --target "${TARGET}" --format json; \
     fi
 
