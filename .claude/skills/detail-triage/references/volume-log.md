@@ -45,6 +45,7 @@ judgement columns come from the batch's record in `.local/`.
 | 2026-10-16 | 2 | 2 | 0 | 0 | 0 | 2 of 2 | #1831 amended (citation RFC 7519 §4.1.7); #1830 superseded by class fix #1832 (every grant carries `resource`/`authorization_details`; RFC 9396 §5 type gate; `ErrorDescription` for RFC 6749 §5.2's charset) | 0 | 0 (not requested) |
 | 2026-10-19 | 1 | 1 | 0 | 1 | 1 | 1 of 1 | #1838/#1839 closed not planned: contradicts the 10-16 no-rolling-deploy decision | 0 exact; recurrence of a recorded decision | 1 requested (`rcr_f5eda781…`), replaces `rule_5bc7d013`; not synced |
 | 2026-10-23 | 11 | 11 | 1 | 0 | 0 | 4 of 11 | 5 merged as-is (#1859, #1862, #1864, #1866, #1867); #1860 amended on its branch (new tests parsed `Cli` without `ENV_LOCK`, raced on Windows); 5 superseded by signed rebuilds (#1858→#1872 guard dropped, #1861→#1873 `JsonBody` on `ValidJson`, #1863→#1874 citations fixed and RFC 8693 §6 rows kept, #1865→#1875, #1868→#1876); dead-code #1869 closed; deps #1870 first (tokio, ctutils, crypto-bigint and zstd ignores) | 1 of 11 (#1852 extends the 10-16 token-param guardrail residue) | 0 (user: none) |
+| 2026-10-30 | 5 | 5 | 0 | 0 | 0 | 4 of 5 | #1893 merged as-is; #1890 amended (`ConfigLocation`, the ignored-file note moved from `default_path` to setup, comments trimmed); #1894 amended (displaced uv defaults marked `explicit = true`); #1891 closed with #1886 (conformant: RFC 7592 §2.2 MUST + RFC 7591 §2 default), follow-up #1895 (update params made non-optional, omission test); #1892 superseded by class fix #1896 (`RoleTarget` through every STS exchange) | 0 | 0 (not requested) |
 
 Batches before 2026-08-20 have no record, so only their counted columns exist:
 run the script. `escape-unaware-delimiter-normalization` exists on Detail's side
@@ -1129,3 +1130,30 @@ queue run). All twelve PRs merged the same day; #1860's Windows failure was a re
 - When a test file is named for one RFC and cites another, the citation must use "Section N"; a
   bare § after "RFC NNNN" is attributed to both specs. Check every prune's dropped rows against
   the test's subject, not against the ratchet's message.
+
+## 2026-10-30
+
+Five findings, each with a fix PR, all blamed on PRs from February to July (#18, #142, #207,
+#214, #601). This is backlog excavation. October: n 66, median 107d, p90 235d, `<30d` 19.
+
+Classes: one (#1887, a profile's recorded `--via` dropped by every command that resolves its role
+from a profile, not only the console #1892 fixed). Fixed by #1896: `RoleTarget { arn, via }`
+replaces the bare role ARN in `StsRequest` and `get_aws_credentials`, and the exchange fallback
+destructures `via`, so ignoring it fails `unused_variables`. #1888's three DPoP `htu` sites were
+all covered by its own PR. The other three findings were isolated.
+
+Review: #1894's fix cleared the displaced uv default but left it a plain index. uv docs: "The
+default index is always treated as lowest priority, regardless of its position". The former
+default therefore outranked CodeArtifact. Real uv against two local indexes confirmed it: a
+package both indexes carry resolved from the mirror. The PR's own end-to-end check used a package
+only CodeArtifact had, so it could not see this. #1886 described the conformant behavior as a
+violation: `main` followed RFC 7592 §2.2's MUST (omitted means deleted, and RFC 7591 §2 supplies
+`authorization_code`), while #1891 chose the section's MAY. #1893's acceptance of both listener
+URIs is looser than RFC 9449 §4.3 item 9; the user accepted that, so it is residue.
+
+### Process
+
+- An end-to-end check of a precedence fix needs an input both candidates can serve. Inputs only
+  one side carries pass under either ordering.
+- A finding that names a spec violation can be the conformant reading. Quote the MUST before
+  sizing the fix; #1886 would have replaced a MUST with a MAY.
