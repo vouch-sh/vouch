@@ -1566,7 +1566,7 @@ setup-ca-cargo-already-block =
 setup-ca-cargo-configured-block =
     Cargo configured for CodeArtifact registry '{ $name }'
     Configuration written to: { $path }
-cargo-config-both-exist-warning =
+setup-ca-cargo-config-ignored =
     Note: both { $legacy } and { $modern } exist, so Cargo loads the extensionless
     { $legacy } and ignores { $modern }. { -product } will read and write
     { $legacy }. To consolidate, merge { $modern } into { $legacy }, or replace

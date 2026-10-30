@@ -14,8 +14,8 @@
 //! field, which this provider ignores. `main.rs` dispatches `--cargo-plugin`
 //! here before clap parses.
 //!
-//! Usage: configure Cargo to use this provider for one registry in
-//! `~/.cargo/config.toml`:
+//! Usage: configure Cargo to use this provider for one registry in its
+//! config file (`$CARGO_HOME/config.toml`):
 //!
 //! ```toml
 //! [registries.my-registry]
