@@ -395,16 +395,43 @@ fn setup_uv(ca_host: &str, repository: &str) -> Result<()> {
 
 /// Write uv's configuration file, at the path [`uv_config_path`] resolves.
 ///
-/// Loads the existing uv.toml (if any) via `toml_edit` to preserve other
-/// settings, then sets `keyring-provider = "subprocess"` and adds (or
-/// updates) a CodeArtifact index entry.
+/// Thin wrapper that resolves the config path and delegates to
+/// [`write_uv_config_at`].
 fn write_uv_config(index_url: &str, repository: &str) -> Result<()> {
     let config_path = uv_config_path()?;
-    create_parent_dir(&config_path)?;
+    write_uv_config_at(&config_path, index_url, repository)
+}
+
+/// Add (or update) the CodeArtifact `[[index]]` entry in the uv config at
+/// `config_path`, making it the sole `default` index.
+///
+/// Loads the existing uv.toml (if any) via `toml_edit` to preserve other
+/// settings, sets `keyring-provider = "subprocess"`, and adds (or updates)
+/// a CodeArtifact index entry.
+///
+/// uv uses the first `[[index]]` marked `default = true` and ignores the
+/// rest, so every other default is displaced. Clearing the flag alone is not
+/// enough: uv docs, *Indexes*: "The default index is always treated as
+/// lowest priority, regardless of its position in the list of indexes", so a
+/// displaced index would be consulted before CodeArtifact and serve any
+/// package it also carries. Each displaced index is marked `explicit = true`
+/// instead, which limits it to packages pinned to it in `tool.uv.sources`,
+/// and the user is told which ones changed.
+///
+/// Factored out of [`write_uv_config`] so the default-clearing logic and
+/// error propagation are testable against a temp file without setting
+/// `UV_CONFIG_FILE` (`std::env::set_var` is `unsafe` under edition 2024 and
+/// the workspace denies `unsafe_code`).
+fn write_uv_config_at(
+    config_path: &std::path::Path,
+    index_url: &str,
+    repository: &str,
+) -> Result<()> {
+    create_parent_dir(config_path)?;
 
     // Load existing config or create new
     let content = if config_path.exists() {
-        std::fs::read_to_string(&config_path).with_context(|| {
+        std::fs::read_to_string(config_path).with_context(|| {
             vouch_cli::tr_args!(
                 "setup-ca-err-read",
                 path = config_path.display().to_string()
@@ -434,18 +461,36 @@ fn write_uv_config(index_url: &str, repository: &str) -> Result<()> {
         );
     }
 
+    // Displaced indexes, by name (or URL when unnamed), reported after the
+    // write succeeds.
+    let mut displaced_defaults: Vec<String> = Vec::new();
+
     if let Some(array) = doc
         .get_mut("index")
         .and_then(|i| i.as_array_of_tables_mut())
     {
-        // Look for an existing entry with our name
+        // Entries that are not defaults keep the priority the user gave them.
         let mut found = false;
         for table in array.iter_mut() {
-            if table.get("name").and_then(|v| v.as_str()) == Some(&index_name) {
+            let is_ours = table.get("name").and_then(|v| v.as_str()) == Some(&index_name);
+            if is_ours {
                 table.insert("url", toml_edit::value(index_url));
                 table.insert("default", toml_edit::value(true));
                 found = true;
-                break;
+            } else if table
+                .get("default")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                if let Some(label) = table
+                    .get("name")
+                    .or_else(|| table.get("url"))
+                    .and_then(|v| v.as_str())
+                {
+                    displaced_defaults.push(label.to_string());
+                }
+                table.remove("default");
+                table.insert("explicit", toml_edit::value(true));
             }
         }
         if !found {
@@ -458,7 +503,7 @@ fn write_uv_config(index_url: &str, repository: &str) -> Result<()> {
     }
 
     let serialized = doc.to_string();
-    fs::atomic_write_secure(&config_path, serialized.as_bytes()).with_context(|| {
+    fs::atomic_write_secure(config_path, serialized.as_bytes()).with_context(|| {
         vouch_cli::tr_args!(
             "setup-ca-err-write",
             path = config_path.display().to_string()
@@ -469,6 +514,14 @@ fn write_uv_config(index_url: &str, repository: &str) -> Result<()> {
         "setup-ca-uv-wrote",
         path = config_path.display().to_string()
     );
+
+    for name in &displaced_defaults {
+        vouch_cli::tr_println!(
+            "setup-ca-uv-replaced-default",
+            name = name.as_str(),
+            path = config_path.display().to_string(),
+        );
+    }
 
     Ok(())
 }
@@ -1416,6 +1469,454 @@ mod tests {
             "a directory should fail to read, not succeed: {result:?}",
         );
         // The directory is still a directory — no file was written over it.
+        assert!(config_path.is_dir(), "the directory must be left untouched");
+    }
+
+    // =========================================================================
+    // write_uv_config_at tests
+    //
+    // uv honors only the first `default = true` index, and the default is
+    // always lowest priority, so every displaced default must become
+    // `explicit` or it would be consulted before CodeArtifact.
+    //
+    // The testable seam takes the config path directly: `write_uv_config`
+    // resolves it via `UV_CONFIG_FILE` / XDG, which is `unsafe` to set in
+    // tests under edition 2024 (the workspace denies `unsafe_code`).
+    // =========================================================================
+
+    /// CodeArtifact index URL / repo / name shared across the uv tests.
+    const UV_CA_URL: &str = "https://aws@my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com/pypi/my-repo/simple/";
+    const UV_CA_REPO: &str = "my-repo";
+    const UV_CA_NAME: &str = "codeartifact-my-repo";
+
+    /// Count `[[index]]` entries marked `default = true` in a uv.toml document.
+    fn uv_count_defaults(doc: &toml_edit::DocumentMut) -> usize {
+        doc.get("index")
+            .and_then(|i| i.as_array_of_tables())
+            .map_or(0, |array| {
+                array
+                    .iter()
+                    .filter(|t| t.get("default").and_then(|v| v.as_bool()).unwrap_or(false))
+                    .count()
+            })
+    }
+
+    /// Return the name of the single default index, or `None` if there is not
+    /// exactly one. Used to assert "the CodeArtifact index is the sole default".
+    fn uv_sole_default_name(doc: &toml_edit::DocumentMut) -> Option<String> {
+        let array = doc.get("index").and_then(|i| i.as_array_of_tables())?;
+        let mut defaults = array
+            .iter()
+            .filter(|t| t.get("default").and_then(|v| v.as_bool()).unwrap_or(false));
+        let first = defaults.next()?;
+        if defaults.next().is_some() {
+            return None;
+        }
+        first.get("name").and_then(|v| v.as_str()).map(String::from)
+    }
+
+    /// Whether an `[[index]]` table is marked `explicit = true`.
+    fn uv_is_explicit(table: &toml_edit::Table) -> bool {
+        table
+            .get("explicit")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    }
+
+    /// Borrow the `[[index]]` table whose `name` equals `name`.
+    fn uv_index<'d>(doc: &'d toml_edit::DocumentMut, name: &str) -> &'d toml_edit::Table {
+        doc.get("index")
+            .and_then(|i| i.as_array_of_tables())
+            .and_then(|array| {
+                array
+                    .iter()
+                    .find(|t| t.get("name").and_then(|v| v.as_str()) == Some(name))
+            })
+            .expect("test fixture: expected [[index]] entry not found in config")
+    }
+
+    /// A pre-existing default index must have its `default` flag cleared so the
+    /// CodeArtifact index becomes the sole/effective default.
+    #[test]
+    fn uv_setup_clears_preexisting_default_so_codeartifact_is_sole_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("uv.toml");
+        let original = "\
+keyring-provider = \"subprocess\"
+
+[[index]]
+name = \"corporate-mirror\"
+url = \"https://mirror.example.com/simple/\"
+default = true
+";
+        std::fs::write(&config_path, original).unwrap();
+
+        write_uv_config_at(&config_path, UV_CA_URL, UV_CA_REPO).unwrap();
+
+        let on_disk = std::fs::read_to_string(&config_path).unwrap();
+        let doc = on_disk.parse::<toml_edit::DocumentMut>().unwrap();
+
+        // Exactly one default remains — the CodeArtifact index.
+        assert_eq!(
+            uv_count_defaults(&doc),
+            1,
+            "only one default may exist: {on_disk}"
+        );
+        assert_eq!(uv_sole_default_name(&doc).as_deref(), Some(UV_CA_NAME));
+
+        // The corporate mirror keeps its name/url but loses `default = true`.
+        let mirror = uv_index(&doc, "corporate-mirror");
+        assert_eq!(
+            mirror.get("default").and_then(|v| v.as_bool()),
+            None,
+            "pre-existing `default = true` must be cleared: {on_disk}",
+        );
+        assert!(
+            uv_is_explicit(mirror),
+            "a displaced default must be explicit, or uv consults it before CodeArtifact: {on_disk}",
+        );
+        assert_eq!(
+            mirror.get("url").and_then(|v| v.as_str()),
+            Some("https://mirror.example.com/simple/"),
+        );
+
+        // The CodeArtifact entry is the sole default with the fresh url.
+        let ca = uv_index(&doc, UV_CA_NAME);
+        assert_eq!(ca.get("url").and_then(|v| v.as_str()), Some(UV_CA_URL));
+        assert_eq!(ca.get("default").and_then(|v| v.as_bool()), Some(true));
+
+        // The pre-existing keyring-provider is preserved.
+        assert_eq!(
+            doc.get("keyring-provider").and_then(|v| v.as_str()),
+            Some("subprocess"),
+        );
+    }
+
+    /// The update path (CodeArtifact entry already present) also clears other
+    /// defaults and refreshes the CodeArtifact url in place.
+    #[test]
+    fn uv_setup_update_path_clears_other_defaults_and_refreshes_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("uv.toml");
+        let original = format!(
+            "\
+[[index]]
+name = \"corporate-mirror\"
+url = \"https://mirror.example.com/simple/\"
+default = true
+
+[[index]]
+name = \"{UV_CA_NAME}\"
+url = \"https://old.example.com/simple/\"
+default = false
+"
+        );
+        std::fs::write(&config_path, original).unwrap();
+
+        write_uv_config_at(&config_path, UV_CA_URL, UV_CA_REPO).unwrap();
+
+        let on_disk = std::fs::read_to_string(&config_path).unwrap();
+        let doc = on_disk.parse::<toml_edit::DocumentMut>().unwrap();
+
+        assert_eq!(
+            uv_count_defaults(&doc),
+            1,
+            "only one default may exist: {on_disk}"
+        );
+        assert_eq!(uv_sole_default_name(&doc).as_deref(), Some(UV_CA_NAME));
+
+        // The CodeArtifact entry was updated in place: fresh url, now default.
+        let ca = uv_index(&doc, UV_CA_NAME);
+        assert_eq!(ca.get("url").and_then(|v| v.as_str()), Some(UV_CA_URL));
+        assert_eq!(ca.get("default").and_then(|v| v.as_bool()), Some(true));
+
+        // The corporate mirror lost its default; exactly one CodeArtifact entry.
+        let mirror = uv_index(&doc, "corporate-mirror");
+        assert_eq!(mirror.get("default").and_then(|v| v.as_bool()), None);
+        assert!(uv_is_explicit(mirror), "{on_disk}");
+        let array = doc
+            .get("index")
+            .and_then(|i| i.as_array_of_tables())
+            .unwrap();
+        let ca_count = array
+            .iter()
+            .filter(|t| t.get("name").and_then(|v| v.as_str()) == Some(UV_CA_NAME))
+            .count();
+        assert_eq!(ca_count, 1, "update path must not duplicate the entry");
+    }
+
+    /// A pristine config (no file) yields a single CodeArtifact default and
+    /// `keyring-provider = "subprocess"`.
+    #[test]
+    fn uv_setup_fresh_config_makes_codeartifact_the_sole_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("uv.toml");
+
+        write_uv_config_at(&config_path, UV_CA_URL, UV_CA_REPO).unwrap();
+
+        let on_disk = std::fs::read_to_string(&config_path).unwrap();
+        let doc = on_disk.parse::<toml_edit::DocumentMut>().unwrap();
+
+        assert_eq!(uv_count_defaults(&doc), 1);
+        assert_eq!(uv_sole_default_name(&doc).as_deref(), Some(UV_CA_NAME));
+        assert_eq!(
+            doc.get("keyring-provider").and_then(|v| v.as_str()),
+            Some("subprocess"),
+        );
+        let ca = uv_index(&doc, UV_CA_NAME);
+        assert_eq!(ca.get("url").and_then(|v| v.as_str()), Some(UV_CA_URL));
+    }
+
+    /// Multiple pre-existing defaults are all cleared; CodeArtifact is the
+    /// single remaining default.
+    #[test]
+    fn uv_setup_clears_multiple_preexisting_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("uv.toml");
+        let original = "\
+[[index]]
+name = \"mirror-a\"
+url = \"https://a.example.com/simple/\"
+default = true
+
+[[index]]
+name = \"mirror-b\"
+url = \"https://b.example.com/simple/\"
+default = true
+";
+        std::fs::write(&config_path, original).unwrap();
+
+        write_uv_config_at(&config_path, UV_CA_URL, UV_CA_REPO).unwrap();
+
+        let on_disk = std::fs::read_to_string(&config_path).unwrap();
+        let doc = on_disk.parse::<toml_edit::DocumentMut>().unwrap();
+
+        assert_eq!(
+            uv_count_defaults(&doc),
+            1,
+            "all pre-existing defaults cleared: {on_disk}"
+        );
+        assert_eq!(uv_sole_default_name(&doc).as_deref(), Some(UV_CA_NAME));
+
+        assert_eq!(
+            uv_index(&doc, "mirror-a")
+                .get("default")
+                .and_then(|v| v.as_bool()),
+            None,
+        );
+        assert_eq!(
+            uv_index(&doc, "mirror-b")
+                .get("default")
+                .and_then(|v| v.as_bool()),
+            None,
+        );
+        assert!(uv_is_explicit(uv_index(&doc, "mirror-a")), "{on_disk}");
+        assert!(uv_is_explicit(uv_index(&doc, "mirror-b")), "{on_disk}");
+    }
+
+    /// Running setup twice is idempotent: still exactly one default (the
+    /// CodeArtifact index) and no duplicated CodeArtifact entry.
+    #[test]
+    fn uv_setup_is_idempotent_keeping_a_sole_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("uv.toml");
+
+        write_uv_config_at(&config_path, UV_CA_URL, UV_CA_REPO).unwrap();
+        write_uv_config_at(&config_path, UV_CA_URL, UV_CA_REPO).unwrap();
+
+        let on_disk = std::fs::read_to_string(&config_path).unwrap();
+        let doc = on_disk.parse::<toml_edit::DocumentMut>().unwrap();
+
+        assert_eq!(uv_count_defaults(&doc), 1);
+        assert_eq!(uv_sole_default_name(&doc).as_deref(), Some(UV_CA_NAME));
+
+        let array = doc
+            .get("index")
+            .and_then(|i| i.as_array_of_tables())
+            .unwrap();
+        let ca_count = array
+            .iter()
+            .filter(|t| t.get("name").and_then(|v| v.as_str()) == Some(UV_CA_NAME))
+            .count();
+        assert_eq!(ca_count, 1, "second run must not append a duplicate entry");
+        assert_eq!(array.len(), 1, "only the CodeArtifact index should remain");
+    }
+
+    /// Idempotency in the presence of an other index: re-running setup keeps
+    /// the other index and keeps CodeArtifact as the sole default.
+    #[test]
+    fn uv_setup_idempotent_with_other_index_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("uv.toml");
+        let original = "\
+[[index]]
+name = \"corporate-mirror\"
+url = \"https://mirror.example.com/simple/\"
+default = true
+";
+        std::fs::write(&config_path, original).unwrap();
+
+        write_uv_config_at(&config_path, UV_CA_URL, UV_CA_REPO).unwrap();
+        write_uv_config_at(&config_path, UV_CA_URL, UV_CA_REPO).unwrap();
+
+        let on_disk = std::fs::read_to_string(&config_path).unwrap();
+        let doc = on_disk.parse::<toml_edit::DocumentMut>().unwrap();
+
+        assert_eq!(uv_count_defaults(&doc), 1);
+        assert_eq!(uv_sole_default_name(&doc).as_deref(), Some(UV_CA_NAME));
+        // The corporate mirror is still present, still not a default.
+        assert_eq!(
+            uv_index(&doc, "corporate-mirror")
+                .get("default")
+                .and_then(|v| v.as_bool()),
+            None,
+        );
+        assert!(
+            uv_is_explicit(uv_index(&doc, "corporate-mirror")),
+            "{on_disk}"
+        );
+        let array = doc
+            .get("index")
+            .and_then(|i| i.as_array_of_tables())
+            .unwrap();
+        assert_eq!(array.len(), 2, "both indexes preserved, nothing duplicated");
+    }
+
+    /// uv does not require `name`; an unnamed default is displaced the same way.
+    #[test]
+    fn uv_setup_marks_unnamed_default_explicit() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("uv.toml");
+        std::fs::write(
+            &config_path,
+            "[[index]]\nurl = \"https://mirror.example.com/simple/\"\ndefault = true\n",
+        )
+        .unwrap();
+
+        write_uv_config_at(&config_path, UV_CA_URL, UV_CA_REPO).unwrap();
+
+        let on_disk = std::fs::read_to_string(&config_path).unwrap();
+        let doc = on_disk.parse::<toml_edit::DocumentMut>().unwrap();
+        let unnamed = doc
+            .get("index")
+            .and_then(|i| i.as_array_of_tables())
+            .and_then(|array| array.iter().find(|t| t.get("name").is_none()))
+            .expect("unnamed index kept");
+        assert!(unnamed.get("default").is_none(), "{on_disk}");
+        assert!(uv_is_explicit(unnamed), "{on_disk}");
+        assert_eq!(uv_sole_default_name(&doc).as_deref(), Some(UV_CA_NAME));
+    }
+
+    /// A non-default index keeps the priority the user gave it: only
+    /// displaced defaults change.
+    #[test]
+    fn uv_setup_preserves_explicit_default_false_on_other_indexes() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("uv.toml");
+        let original = "\
+[[index]]
+name = \"explicit-nondefault\"
+url = \"https://explicit.example.com/simple/\"
+default = false
+";
+        std::fs::write(&config_path, original).unwrap();
+
+        write_uv_config_at(&config_path, UV_CA_URL, UV_CA_REPO).unwrap();
+
+        let on_disk = std::fs::read_to_string(&config_path).unwrap();
+        let doc = on_disk.parse::<toml_edit::DocumentMut>().unwrap();
+
+        let other = uv_index(&doc, "explicit-nondefault");
+        assert_eq!(
+            other.get("default").and_then(|v| v.as_bool()),
+            Some(false),
+            "an explicit `default = false` must be preserved, not removed: {on_disk}",
+        );
+        assert_eq!(
+            other.get("url").and_then(|v| v.as_str()),
+            Some("https://explicit.example.com/simple/"),
+        );
+        assert!(!uv_is_explicit(other), "{on_disk}");
+        // CodeArtifact is still the sole default.
+        assert_eq!(uv_count_defaults(&doc), 1);
+        assert_eq!(uv_sole_default_name(&doc).as_deref(), Some(UV_CA_NAME));
+    }
+
+    /// Unrelated top-level settings (e.g. `pip` table) and `keyring-provider`
+    /// are preserved alongside the index management.
+    #[test]
+    fn uv_setup_preserves_unrelated_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("uv.toml");
+        let original = "\
+pip = { only-build = [\"my-pkg\"] }
+
+[[index]]
+name = \"corporate-mirror\"
+url = \"https://mirror.example.com/simple/\"
+default = true
+";
+        std::fs::write(&config_path, original).unwrap();
+
+        write_uv_config_at(&config_path, UV_CA_URL, UV_CA_REPO).unwrap();
+
+        let on_disk = std::fs::read_to_string(&config_path).unwrap();
+        let doc = on_disk.parse::<toml_edit::DocumentMut>().unwrap();
+
+        // The unrelated `pip` table survives the edit.
+        assert!(
+            doc.get("pip").is_some(),
+            "unrelated top-level settings must be preserved: {on_disk}",
+        );
+        assert_eq!(uv_count_defaults(&doc), 1);
+        assert_eq!(uv_sole_default_name(&doc).as_deref(), Some(UV_CA_NAME));
+    }
+
+    /// A malformed uv.toml surfaces a parse error naming the file and leaves
+    /// its bytes untouched — the default-clearing fix must not paper over a
+    /// corrupt config with a silent overwrite.
+    #[test]
+    fn uv_setup_propagates_parse_error_and_leaves_file_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("uv.toml");
+        // Unclosed array-of-tables header — confirmed invalid TOML by
+        // toml_edit refusing to parse it.
+        let original = "[[index\nname = \"oops\"\n";
+        std::fs::write(&config_path, original).unwrap();
+
+        let result = write_uv_config_at(&config_path, UV_CA_URL, UV_CA_REPO);
+
+        assert!(
+            result.is_err(),
+            "malformed uv.toml should error, not succeed and overwrite: {result:?}",
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains(&config_path.display().to_string()),
+            "error should name the offending file: {err}",
+        );
+        let on_disk = std::fs::read_to_string(&config_path).unwrap();
+        assert_eq!(on_disk, original, "malformed config must be left untouched");
+        assert!(
+            !on_disk.contains(UV_CA_NAME),
+            "no index entry should have been written to a malformed config",
+        );
+    }
+
+    /// An existing config that is present but unreadable (the path is a
+    /// directory) surfaces a read error instead of being clobbered.
+    #[test]
+    fn uv_setup_propagates_read_error_for_directory_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("uv.toml");
+        std::fs::create_dir(&config_path).unwrap();
+
+        let result = write_uv_config_at(&config_path, UV_CA_URL, UV_CA_REPO);
+
+        assert!(
+            result.is_err(),
+            "a directory should fail to read, not succeed: {result:?}",
+        );
         assert!(config_path.is_dir(), "the directory must be left untouched");
     }
 }
