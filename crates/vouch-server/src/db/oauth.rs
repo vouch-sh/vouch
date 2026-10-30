@@ -1958,8 +1958,8 @@ pub(super) mod test_helpers {
 /// dropping the value silently.
 pub struct UpdateClientRegistrationParams<'a> {
     pub redirect_uris: &'a [String],
-    pub grant_types: Option<&'a [String]>,
-    pub response_types: Option<&'a [String]>,
+    pub grant_types: &'a [String],
+    pub response_types: &'a [String],
     /// RFC 7591 §2 key material, in whichever of the two forms was supplied.
     pub keys: Option<&'a ClientKeys>,
     pub registration_access_token_hash: &'a str,
@@ -2051,12 +2051,8 @@ pub async fn update_oauth_client_registration(
                 return Err(());
             }
             data.redirect_uris = params.redirect_uris.to_vec();
-            if let Some(gt) = params.grant_types {
-                data.grant_types = Some(gt.to_vec());
-            }
-            if let Some(rt) = params.response_types {
-                data.response_types = Some(rt.to_vec());
-            }
+            data.grant_types = Some(params.grant_types.to_vec());
+            data.response_types = Some(params.response_types.to_vec());
             // RFC 7592: PUT is a full replacement — clear fields not present.
             let (jwks, jwks_uri) = client_keys_to_stored(params.keys);
             data.jwks = jwks;

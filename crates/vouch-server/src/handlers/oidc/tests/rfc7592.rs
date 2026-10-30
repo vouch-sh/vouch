@@ -715,6 +715,53 @@ async fn test_rfc7592_put_omitting_client_name_reverts_to_default() {
     );
 }
 
+#[tokio::test]
+async fn test_rfc7592_put_omitting_grant_types_applies_registration_default() {
+    // RFC 7592 §2.2: "Omitted fields MUST be treated as null or empty values
+    // by the server, indicating the client's request to delete them from the
+    // client's registration." With `grant_types` deleted, RFC 7591 §2 applies:
+    // "If omitted, the default behavior is that the client will use only the
+    // "authorization_code" Grant Type."
+    let (app, state) = test_app().await;
+    let token = "omitted-grant-types-token";
+    let client_id = make_legacy_dynamic_client(
+        &state,
+        &["client_credentials"],
+        &[],
+        db::OAuthClientType::Service,
+        &[],
+        token,
+    )
+    .await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"]
+    });
+    let (status, body) = http_request(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(update_body.to_string()),
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "PUT failed: {body}");
+
+    let stored = db::get_oauth_client_by_client_id(&state.store, &client_id)
+        .await
+        .expect("lookup")
+        .expect("client exists");
+    assert_eq!(
+        stored.grant_types,
+        Some(vec!["authorization_code".to_string()]),
+        "an omitted grant_types is deleted and takes the RFC 7591 default"
+    );
+    assert_eq!(stored.response_types, Some(vec!["code".to_string()]));
+}
+
 // ========================================================================
 // RFC 7592 §2.2 full replacement — every metadata field with a dedicated
 // column, and the fields a PUT may not change.
@@ -4613,8 +4660,8 @@ async fn test_rfc7592_misdirected_revoke_does_not_lock_out_concurrent_rotation_e
                     &current_hash,
                     &UpdateClientRegistrationParams {
                         redirect_uris: &redirect_uris,
-                        grant_types: None,
-                        response_types: None,
+                        grant_types: &[],
+                        response_types: &[],
                         keys: None,
                         registration_access_token_hash: &new_hash,
                         registration_metadata: None,
