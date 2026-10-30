@@ -168,15 +168,24 @@ async fn get_idc_console_creds(server: &ServerUrl, args: &ConsoleArgs) -> Result
 
 /// Obtain console credentials via the STS role path.
 async fn get_sts_console_creds(server: &ServerUrl, args: ConsoleArgs) -> Result<ConsoleCreds> {
-    // Resolve role ARN from explicit arg or from ~/.aws/config
-    let role_arn = match args.role {
-        Some(r) => r,
+    // Resolve role ARN from explicit arg or from ~/.aws/config. When the role
+    // is resolved from a Vouch profile, default `--via` to the management-role
+    // chain the profile already records — `vouch setup aws` writes
+    // `--via <management_role>` into the `credential_process` line for
+    // member-account roles, and dropping that default makes multi-org setups
+    // fail with `aws-err-no-org-covers-account` for every such profile (the
+    // user would have to re-type the very ARN setup persisted). An explicit
+    // `--via` on the command line keeps precedence over the profile default.
+    // When `--role` is supplied it conflicts with `--profile`, so no profile is
+    // resolved and `via` is just the CLI flag (no recorded chain to recover).
+    let (role_arn, via) = match args.role {
+        Some(r) => (r, args.via),
         None => {
-            aws::resolve_vouch_profile(
+            let resolved = aws::resolve_vouch_profile(
                 args.profile.as_deref(),
                 aws::ProfileOverride::ProfileOrRole,
-            )?
-            .role_arn
+            )?;
+            (resolved.role_arn, args.via.or(resolved.via))
         }
     };
 
@@ -189,8 +198,7 @@ async fn get_sts_console_creds(server: &ServerUrl, args: ConsoleArgs) -> Result<
     // unconfigured management role fails fast with a Vouch error instead of an
     // opaque AWS AccessDenied at the STS call.
     let vouch_config = Config::load()?;
-    let management_role =
-        resolve_management_role_for(&vouch_config, &role_arn, args.via.as_deref())?;
+    let management_role = resolve_management_role_for(&vouch_config, &role_arn, via.as_deref())?;
 
     let agent_source = detect_agent_source();
     let result = exchange_for_sts_credentials(StsRequest {
@@ -514,6 +522,65 @@ mod tests {
                 AwsCommands::Console(ref c) if c.role.is_some() && c.account.is_none()
             ),
             "expected STS-path Console args with role set and account unset"
+        );
+    }
+
+    /// `--profile` and `--via` coexist: the profile supplies the role (and a
+    /// recorded `--via` default) while an explicit `--via` overrides the
+    /// profile's recorded chain. `--via` conflicts only with the IdC-only
+    /// flags, not with `--profile`, so the manual-workaround invocation
+    /// `vouch aws console --profile <member> --via <mgmt>` must keep parsing —
+    /// and the fix's default path uses the same flag pair without it.
+    #[test]
+    fn console_allows_profile_with_via_for_sts_path() {
+        let cli = TestCli::try_parse_from([
+            "vouch",
+            "console",
+            "--profile",
+            "member",
+            "--via",
+            "arn:aws:iam::111111111111:role/vouch/Mgmt",
+        ])
+        .unwrap();
+        assert!(
+            matches!(
+                cli.cmd,
+                AwsCommands::Console(ref c)
+                    if c.profile.as_deref() == Some("member")
+                        && c.via.as_deref()
+                            == Some("arn:aws:iam::111111111111:role/vouch/Mgmt")
+                        && c.role.is_none()
+                        && c.account.is_none()
+            ),
+            "expected STS-path Console args with profile + via and no IdC flags"
+        );
+    }
+
+    /// `--role` and `--via` coexist for an explicit STS role with a chain
+    /// supplied on the command line (no profile resolved, so no recorded
+    /// `--via` default applies). `--via` must not conflict with `--role`.
+    #[test]
+    fn console_allows_role_with_via_for_sts_path() {
+        let cli = TestCli::try_parse_from([
+            "vouch",
+            "console",
+            "--role",
+            "arn:aws:iam::999999999999:role/member",
+            "--via",
+            "arn:aws:iam::111111111111:role/vouch/Mgmt",
+        ])
+        .unwrap();
+        assert!(
+            matches!(
+                cli.cmd,
+                AwsCommands::Console(ref c)
+                    if c.role.as_deref() == Some("arn:aws:iam::999999999999:role/member")
+                        && c.via.as_deref()
+                            == Some("arn:aws:iam::111111111111:role/vouch/Mgmt")
+                        && c.profile.is_none()
+                        && c.account.is_none()
+            ),
+            "expected STS-path Console args with role + via and no profile/IdC flags"
         );
     }
 }

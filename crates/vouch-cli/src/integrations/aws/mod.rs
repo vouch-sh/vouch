@@ -148,9 +148,10 @@ fn named_vouch_profile(config: &AwsConfig, name: &str) -> anyhow::Result<VouchPr
     };
 
     match CredentialProcessLine::parse(&credential_process) {
-        Some(CredentialProcessLine::Role { role_arn, via: _ }) => Ok(VouchProfile {
+        Some(CredentialProcessLine::Role { role_arn, via }) => Ok(VouchProfile {
             name: name.to_string(),
             role_arn,
+            via,
         }),
         Some(CredentialProcessLine::IdentityCenter {
             application_arn: _,
@@ -692,6 +693,139 @@ credential_process = vouch credential aws --role arn:aws:iam::222222222222:role/
         )
         .expect("falls through to the sole profile");
         assert_eq!(resolved.name, "vouch-demo");
+    }
+
+    // =========================================================================
+    // Profile-recorded `--via` preservation
+    //
+    // `vouch setup aws` writes `--via <management_role>` into each
+    // member-account profile's `credential_process`. Profile resolution must
+    // carry that recorded chain onto the returned `VouchProfile.via`, so
+    // consumers (notably `vouch aws console`) can default to it instead of
+    // discarding it and erroring in multi-org setups. These are regression
+    // guards for the `via: _` discard at the two extraction sites
+    // (`vouch_profiles_with_role`, `named_vouch_profile`).
+    // =========================================================================
+
+    /// A named member-account profile resolves carrying its recorded `--via`.
+    #[test]
+    fn named_profile_resolves_with_recorded_via() {
+        let aws = load_config(
+            r#"
+[profile member]
+credential_process = vouch credential aws --role arn:aws:iam::999999999999:role/member --via arn:aws:iam::111111111111:role/vouch/Mgmt
+"#,
+        );
+        let resolved =
+            select_vouch_profile(&aws, Some("member"), None, ProfileOverride::ProfileOrRole)
+                .expect("named profile resolves");
+        assert_eq!(resolved.role_arn, "arn:aws:iam::999999999999:role/member");
+        assert_eq!(
+            resolved.via.as_deref(),
+            Some("arn:aws:iam::111111111111:role/vouch/Mgmt"),
+            "recorded --via must survive name-based resolution"
+        );
+    }
+
+    /// A named direct (non-chained) profile resolves with `via == None`.
+    #[test]
+    fn named_profile_resolves_via_none_when_direct() {
+        let aws = load_config(
+            r#"
+[profile direct]
+credential_process = vouch credential aws --role arn:aws:iam::123456789012:role/MyRole
+"#,
+        );
+        let resolved =
+            select_vouch_profile(&aws, Some("direct"), None, ProfileOverride::ProfileOrRole)
+                .expect("named profile resolves");
+        assert!(resolved.via.is_none());
+    }
+
+    /// `via: _` at the env-profile extraction site must not reappear: a profile
+    /// reached through `AWS_PROFILE` carries its recorded `--via`.
+    #[test]
+    fn aws_profile_env_resolves_with_recorded_via() {
+        let aws = load_config(
+            r#"
+[profile member]
+credential_process = vouch credential aws --role arn:aws:iam::999:role/member --via arn:aws:iam::111:role/Mgmt
+"#,
+        );
+        let resolved =
+            select_vouch_profile(&aws, None, Some("member"), ProfileOverride::ProfileOrRole)
+                .expect("AWS_PROFILE resolves the member profile");
+        assert_eq!(
+            resolved.via.as_deref(),
+            Some("arn:aws:iam::111:role/Mgmt"),
+            "env-profile resolution must preserve the recorded --via"
+        );
+    }
+
+    /// Auto-detection of the sole Vouch profile carries its `via` too — this
+    /// is the `vouch_profiles_with_role` extraction site reached when neither
+    /// `--profile` nor `AWS_PROFILE` names a profile.
+    #[test]
+    fn auto_detected_single_profile_carries_recorded_via() {
+        let aws = load_config(
+            r#"
+[profile member]
+credential_process = vouch credential aws --role arn:aws:iam::999:role/member --via arn:aws:iam::111:role/Mgmt
+"#,
+        );
+        let resolved = select_vouch_profile(&aws, None, None, ProfileOverride::ProfileOrRole)
+            .expect("sole profile auto-detects");
+        assert_eq!(
+            resolved.via.as_deref(),
+            Some("arn:aws:iam::111:role/Mgmt"),
+            "auto-detection through vouch_profiles_with_role must preserve --via"
+        );
+    }
+
+    /// The bug end-to-end at the resolution layer: a member-account profile
+    /// (account 999) under a 2-org config resolves only when the profile's
+    /// recorded `--via` is fed to `resolve_management_role_for`. With `None`
+    /// (the old behavior, where `via` was discarded) the multi-org resolver
+    /// errors `aws-err-no-org-covers-account`; with the profile's `via` it
+    /// returns the management role the profile encodes. This is exactly the
+    /// computation `vouch aws console` now performs: resolve the profile, then
+    /// feed `resolved.via` to the resolver.
+    #[test]
+    fn profile_recorded_via_resolves_member_role_in_multi_org() {
+        use crate::commands::credential::aws::resolve_management_role_for;
+        use crate::config::{AwsOrganization, Config};
+
+        let member_role = "arn:aws:iam::999999999999:role/member";
+        let mgmt_arn = "arn:aws:iam::111111111111:role/vouch/Mgmt";
+        // Two orgs in different accounts; the member account (999) matches
+        // neither management account, so account disambiguation cannot find it.
+        let mut vouch_cfg = Config::default();
+        vouch_cfg.append_aws_org(AwsOrganization {
+            management_role: mgmt_arn.to_string(),
+            identity_center: None,
+        });
+        vouch_cfg.append_aws_org(AwsOrganization {
+            management_role: "arn:aws:iam::222222111111:role/vouch/Mgmt".to_string(),
+            identity_center: None,
+        });
+
+        // The bug: with no `via`, the resolver cannot map the member account
+        // to an org and errors with `aws-err-no-org-covers-account`.
+        let err = resolve_management_role_for(&vouch_cfg, member_role, None).unwrap_err();
+        assert!(
+            err.to_string().contains("999999999999"),
+            "no-coverage error should name the member account: {err}"
+        );
+        assert!(
+            err.to_string().contains("--via"),
+            "no-coverage error should recommend --via: {err}"
+        );
+
+        // The fix: the profile's recorded `--via` makes the resolver succeed,
+        // returning the very management role the profile encodes.
+        let resolved = resolve_management_role_for(&vouch_cfg, member_role, Some(mgmt_arn))
+            .expect("recorded via resolves the member role");
+        assert_eq!(resolved.as_deref(), Some(mgmt_arn));
     }
 
     #[test]

@@ -30,6 +30,12 @@ pub(crate) struct VouchProfile {
     pub name: String,
     /// Role ARN extracted from the profile's `credential_process`.
     pub role_arn: String,
+    /// Management-role ARN the profile's `credential_process` records for
+    /// chaining (`--via`), preserved from the parsed line so commands that
+    /// resolve a profile use the chain `vouch setup aws` already wrote. `None`
+    /// for direct (non-chained) profiles. An explicit CLI `--via` keeps
+    /// precedence over this default at the call site.
+    pub via: Option<String>,
 }
 
 /// AWS config file parser and writer.
@@ -126,9 +132,10 @@ impl AwsConfig {
                 continue;
             };
             match line {
-                CredentialProcessLine::Role { role_arn, via: _ } => profiles.push(VouchProfile {
+                CredentialProcessLine::Role { role_arn, via } => profiles.push(VouchProfile {
                     name: profile.name,
                     role_arn,
+                    via,
                 }),
                 CredentialProcessLine::IdentityCenter {
                     application_arn: _,
@@ -605,6 +612,84 @@ aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
         let config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
 
         assert!(config.vouch_profiles_with_role().is_empty());
+    }
+
+    /// A member-account profile written by `vouch setup aws` records the
+    /// management-role chain as `--via <management_role>` in its
+    /// `credential_process`. `vouch_profiles_with_role` must carry that `via`
+    /// onto the returned `VouchProfile`; dropping it (the bug) made every
+    /// profile-resolution consumer lose the chain the profile already encodes.
+    #[test]
+    fn test_vouch_profiles_with_role_preserves_recorded_via() {
+        let content = r#"
+[profile member]
+credential_process = vouch credential aws --role arn:aws:iam::999999999999:role/member --via arn:aws:iam::111111111111:role/vouch/Mgmt
+"#;
+        let file = create_temp_config(content);
+        let config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
+
+        let profiles = config.vouch_profiles_with_role();
+        assert_eq!(profiles.len(), 1);
+        let profile = profiles.first().unwrap();
+        assert_eq!(profile.name, "member");
+        assert_eq!(profile.role_arn, "arn:aws:iam::999999999999:role/member");
+        assert_eq!(
+            profile.via.as_deref(),
+            Some("arn:aws:iam::111111111111:role/vouch/Mgmt"),
+            "recorded --via must survive profile resolution, not be discarded"
+        );
+    }
+
+    /// A direct (single-account) profile records no `--via`; `via` must be
+    /// `None`, not `Some("")` or a stale value.
+    #[test]
+    fn test_vouch_profiles_with_role_via_none_for_direct_profile() {
+        let content = r#"
+[profile direct]
+credential_process = vouch credential aws --role arn:aws:iam::123456789012:role/MyRole
+"#;
+        let file = create_temp_config(content);
+        let config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
+
+        let profiles = config.vouch_profiles_with_role();
+        assert_eq!(profiles.len(), 1);
+        assert!(profiles.first().unwrap().via.is_none());
+    }
+
+    /// Each profile keeps its own `via`; a mix of chained and direct profiles
+    /// must not have one profile's `via` bleed into another (per-profile chain).
+    #[test]
+    fn test_vouch_profiles_with_role_keeps_per_profile_via() {
+        let content = r#"
+[profile mgmt-a]
+credential_process = vouch credential aws --role arn:aws:iam::111:role/MgmtA
+
+[profile member-a]
+credential_process = vouch credential aws --role arn:aws:iam::999:role/Member --via arn:aws:iam::111:role/MgmtA
+
+[profile member-b]
+credential_process = vouch credential aws --role arn:aws:iam::888:role/Member --via arn:aws:iam::222:role/MgmtB
+"#;
+        let file = create_temp_config(content);
+        let config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
+
+        let profiles = config.vouch_profiles_with_role();
+        assert_eq!(profiles.len(), 3);
+        let mgmt_a = profiles
+            .iter()
+            .find(|p| p.name == "mgmt-a")
+            .expect("mgmt-a present");
+        assert!(mgmt_a.via.is_none(), "mgmt-a is a direct profile");
+        let member_a = profiles
+            .iter()
+            .find(|p| p.name == "member-a")
+            .expect("member-a present");
+        assert_eq!(member_a.via.as_deref(), Some("arn:aws:iam::111:role/MgmtA"));
+        let member_b = profiles
+            .iter()
+            .find(|p| p.name == "member-b")
+            .expect("member-b present");
+        assert_eq!(member_b.via.as_deref(), Some("arn:aws:iam::222:role/MgmtB"));
     }
 
     #[test]
