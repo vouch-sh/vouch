@@ -1242,8 +1242,8 @@ async fn test_revoke_registration_access_token_does_not_clobber_concurrently_rot
                 &old_hash,
                 &UpdateClientRegistrationParams {
                     redirect_uris: &redirect_uris,
-                    grant_types: None,
-                    response_types: None,
+                    grant_types: &[],
+                    response_types: &[],
                     keys: None,
                     registration_access_token_hash: &new_hash,
                     registration_metadata: None,

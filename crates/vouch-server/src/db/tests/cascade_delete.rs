@@ -1677,8 +1677,8 @@ async fn test_rfc7592_put_racing_owner_offboarding_is_rejected() {
             &reg_hash,
             &UpdateClientRegistrationParams {
                 redirect_uris: &attacker_uris,
-                grant_types: None,
-                response_types: None,
+                grant_types: &[],
+                response_types: &[],
                 keys: None,
                 registration_access_token_hash: &rotated,
                 registration_metadata: None,

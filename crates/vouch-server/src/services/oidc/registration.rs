@@ -2039,8 +2039,8 @@ pub async fn update_client_configuration(
         &hash_token(registration_access_token),
         &UpdateClientRegistrationParams {
             redirect_uris: &redirect_uris,
-            grant_types: Some(&validated.grant_types),
-            response_types: Some(&validated.response_types),
+            grant_types: &validated.grant_types,
+            response_types: &validated.response_types,
             keys: keys.as_ref(),
             registration_access_token_hash: &new_reg_token_hash,
             registration_metadata: Some(&registration_metadata),

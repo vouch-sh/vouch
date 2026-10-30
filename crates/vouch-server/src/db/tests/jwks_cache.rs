@@ -83,8 +83,8 @@ async fn test_update_oauth_client_jwks_uri_clears_cache() {
         "presented-hash",
         &UpdateClientRegistrationParams {
             redirect_uris: &[],
-            grant_types: None,
-            response_types: None,
+            grant_types: &[],
+            response_types: &[],
             keys: Some(&ClientKeys::Uri(
                 "https://rotated.example.com/jwks".to_string(),
             )),
