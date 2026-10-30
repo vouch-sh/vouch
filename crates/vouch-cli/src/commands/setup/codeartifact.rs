@@ -79,7 +79,7 @@ pub(crate) async fn run(
     // Derive the domain suffix from the role ARN's partition so China and
     // GovCloud get the right host. Propagate a resolution failure rather than
     // defaulting: a silent fall back to amazonaws.com writes an unreachable
-    // registry URL into pip.conf / .cargo/config.toml and only fails later.
+    // registry URL into pip.conf / the Cargo config and only fails later.
     let anchor = resolve_vouch_profile(resolved.profile.as_deref(), ProfileOverride::Profile)?;
     let domain_suffix = domain_suffix_from_role_arn(&anchor.role_arn)?;
 
@@ -109,7 +109,7 @@ pub(crate) async fn run(
 /// Propagates a [`parse_role_arn`] failure (malformed ARN, unrecognized
 /// partition, non-IAM-role resource) instead of defaulting to
 /// `amazonaws.com`. A silent fall back would write an unreachable registry
-/// URL into `pip.conf` / `.cargo/config.toml` that only fails later during a
+/// URL into `pip.conf` / the Cargo config that only fails later during a
 /// package fetch, so the error is surfaced here with the offending ARN.
 fn domain_suffix_from_role_arn(role_arn: &str) -> Result<&'static str> {
     let arn = parse_role_arn(role_arn)
@@ -119,7 +119,7 @@ fn domain_suffix_from_role_arn(role_arn: &str) -> Result<&'static str> {
 
 /// Configure Cargo for CodeArtifact.
 ///
-/// Sets up `~/.cargo/config.toml` with Vouch as the credential provider
+/// Sets up the Cargo config file with Vouch as the credential provider
 /// for a named registry pointing to a CodeArtifact Cargo repository.
 /// Cargo uses the credential provider protocol, so tokens are fetched
 /// automatically on each operation — no static token embedding needed.
@@ -140,10 +140,17 @@ fn setup_cargo(ca_host: &str, repository: &str) -> Result<()> {
     Ok(())
 }
 
-/// Configure Cargo registry in ~/.cargo/config.toml.
+/// Configure the Cargo registry in the config file Cargo loads.
 fn configure_cargo_registry(registry_name: &str, index_url: &str, vouch_path: &str) -> Result<()> {
-    let config_path = CargoConfig::default_path()?;
-    configure_cargo_registry_at(&config_path, registry_name, index_url, vouch_path)
+    let location = CargoConfig::default_path()?;
+    if let Some(ignored) = &location.ignored {
+        vouch_cli::tr_eprintln!(
+            "setup-ca-cargo-config-ignored",
+            legacy = location.path.display().to_string(),
+            modern = ignored.display().to_string(),
+        );
+    }
+    configure_cargo_registry_at(&location.path, registry_name, index_url, vouch_path)
 }
 
 /// Add a CodeArtifact registry entry to the Cargo config at `config_path`.
@@ -152,14 +159,12 @@ fn configure_cargo_registry(registry_name: &str, index_url: &str, vouch_path: &s
 /// credential provider and index URL, and atomically saves it.
 ///
 /// Propagates read/parse errors from an existing config file instead of
-/// discarding its contents: a malformed or unreadable `~/.cargo/config.toml`
-/// must surface an error and leave the file untouched, matching the pip and
-/// uv flows in this command and matching Cargo itself. The missing-file case
-/// is handled inside [`CargoConfig::load_from`], which returns an empty
-/// document when the path does not exist, so the destructive fallback that
-/// previously swallowed load errors and wrote a minimal config over the real
-/// file is gone: the only way to reach `save()` now is a successfully parsed
-/// (or brand-new) document.
+/// discarding its contents: a malformed or unreadable Cargo config must
+/// surface an error and leave the file untouched, matching the pip and uv
+/// flows in this command and matching Cargo itself. The missing-file case is
+/// handled inside [`CargoConfig::load_from`], which returns an empty document
+/// when the path does not exist, so `save()` is reached only with a
+/// successfully parsed (or brand-new) document.
 ///
 /// Factored out of [`configure_cargo_registry`] so the error-propagation is
 /// testable against a temp file without mutating `CARGO_HOME`
@@ -890,7 +895,7 @@ mod tests {
     //
     // The helper MUST propagate parse failures rather than silently fall back
     // to "amazonaws.com" — a wrong suffix writes an unreachable CodeArtifact
-    // URL into pip.conf / .cargo/config.toml that only fails later.
+    // URL into pip.conf / the Cargo config that only fails later.
     // =========================================================================
 
     #[test]
@@ -1343,12 +1348,9 @@ mod tests {
     // =========================================================================
     // configure_cargo_registry_at tests
     //
-    // Regression coverage for the silent-overwrite bug: when the existing
-    // ~/.cargo/config.toml fails to parse (or cannot be read), setup must
-    // surface the error and leave the file untouched, matching the pip/uv
-    // flows and matching Cargo itself. Previously the load error was swallowed
-    // and `save()` atomically overwrote the file with only the new registry
-    // table, destroying [build], [net], [source] and other registries' tokens.
+    // When the existing Cargo config fails to parse (or cannot be read), setup
+    // must surface the error and leave the file untouched, matching the pip/uv
+    // flows and Cargo itself; overwriting it would drop every other table.
     //
     // The testable seam takes the config path directly: `configure_cargo_registry`
     // resolves the path via `CARGO_HOME`, which is `unsafe` to set in tests

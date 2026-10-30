@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-//! Cargo config file (~/.cargo/config.toml) parsing utilities.
+//! Cargo config file (`$CARGO_HOME/config` or `$CARGO_HOME/config.toml`)
+//! parsing utilities.
 //!
 //! Uses proper TOML parsing instead of fragile string manipulation.
 //! This preserves existing configuration when adding/modifying settings.
@@ -12,7 +13,7 @@ use vouch_common::{fs, paths};
 
 /// Cargo config file parser and writer.
 ///
-/// Uses toml_edit to properly parse and modify ~/.cargo/config.toml files,
+/// Uses toml_edit to properly parse and modify the Cargo config file,
 /// preserving existing sections, keys, and formatting when making changes.
 pub(crate) struct CargoConfig {
     doc: DocumentMut,
@@ -20,12 +21,9 @@ pub(crate) struct CargoConfig {
 }
 
 impl CargoConfig {
-    /// Load Cargo config from the default path.
-    ///
-    /// Checks `$CARGO_HOME/config.toml` first, then falls back to `~/.cargo/config.toml`.
+    /// Load the Cargo config file Cargo itself loads; see [`Self::default_path`].
     pub(crate) fn load() -> Result<Self> {
-        let path = Self::default_path()?;
-        Self::load_from(path)
+        Self::load_from(Self::default_path()?.path)
     }
 
     /// Load Cargo config from a specific path.
@@ -154,18 +152,19 @@ impl CargoConfig {
         &self.path
     }
 
-    /// Get the default Cargo config path.
+    /// Locate the Cargo config file in `$CARGO_HOME` (default `~/.cargo`).
     ///
-    /// Checks `$CARGO_HOME/config.toml` first, then falls back to `~/.cargo/config.toml`.
-    pub(crate) fn default_path() -> Result<PathBuf> {
-        // Check for CARGO_HOME environment variable
-        if let Ok(cargo_home) = std::env::var("CARGO_HOME") {
-            return Ok(PathBuf::from(cargo_home).join("config.toml"));
-        }
-
-        // Default to ~/.cargo/config.toml
-        let home = paths::home_dir().context(tr!("err-could-not-determine-home-directory"))?;
-        Ok(home.join(".cargo").join("config.toml"))
+    /// Follows Cargo's precedence. The Cargo Book, *Configuration →
+    /// Hierarchical structure*: "Cargo also reads config files without the
+    /// `.toml` extension, such as `.cargo/config`. ... If both files exist,
+    /// Cargo will use the file without the extension." When neither exists,
+    /// `config.toml` is chosen and created on [`Self::save`].
+    pub(crate) fn default_path() -> Result<ConfigLocation> {
+        let cargo_home = cargo_dir()?;
+        Ok(config_path_in(
+            &cargo_home.join("config"),
+            &cargo_home.join("config.toml"),
+        ))
     }
 
     /// Convert a command array to a TOML array.
@@ -190,6 +189,84 @@ impl CargoConfig {
     fn value_array_contains_vouch(arr: &Array) -> bool {
         arr.iter()
             .any(|val| val.as_str().is_some_and(|s| s.contains("vouch")))
+    }
+}
+
+/// The Cargo config file Cargo loads, and the `config.toml` beside it that
+/// Cargo ignores, if any.
+pub(crate) struct ConfigLocation {
+    /// The file to read and write.
+    pub(crate) path: PathBuf,
+    /// A distinct `config.toml` that Cargo ignores because an extensionless
+    /// `config` exists beside it.
+    pub(crate) ignored: Option<PathBuf>,
+}
+
+/// `$CARGO_HOME` when set, otherwise `~/.cargo`.
+fn cargo_dir() -> Result<PathBuf> {
+    if let Ok(cargo_home) = std::env::var("CARGO_HOME") {
+        return Ok(PathBuf::from(cargo_home));
+    }
+    let home = paths::home_dir().context(tr!("err-could-not-determine-home-directory"))?;
+    Ok(home.join(".cargo"))
+}
+
+/// Choose between the extensionless `legacy` and `modern` (`config.toml`)
+/// with Cargo's precedence.
+///
+/// When the two names are one file, the real file is returned:
+/// [`CargoConfig::save`] renames a temp file over the path it is given, which
+/// would replace a symlink with a regular file.
+///
+/// Takes both paths so tests need not set `CARGO_HOME` (`std::env::set_var`
+/// is `unsafe` under edition 2024).
+fn config_path_in(legacy: &Path, modern: &Path) -> ConfigLocation {
+    let path = if !legacy.exists() {
+        modern
+    } else if !modern.exists() {
+        legacy
+    } else if !same_file(legacy, modern) {
+        return ConfigLocation {
+            path: legacy.to_path_buf(),
+            ignored: Some(modern.to_path_buf()),
+        };
+    } else if is_symlink(legacy) {
+        modern
+    } else {
+        // `config.toml` is the symlink, or the two are hardlinked; a rename
+        // cannot preserve a hardlink either way.
+        legacy
+    };
+    ConfigLocation {
+        path: path.to_path_buf(),
+        ignored: None,
+    }
+}
+
+/// Whether `path` is itself a symlink (does not follow the link).
+fn is_symlink(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
+}
+
+/// Whether `a` and `b` refer to the same file.
+///
+/// Follows symlinks. On Unix, `(st_dev, st_ino)` also catches hardlinks;
+/// elsewhere the canonical paths are compared.
+fn same_file(a: &Path, b: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match (std::fs::metadata(a), std::fs::metadata(b)) {
+            (Ok(ma), Ok(mb)) => ma.dev() == mb.dev() && ma.ino() == mb.ino(),
+            _ => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        match (std::fs::metadata(a), std::fs::metadata(b)) {
+            (Ok(_), Ok(_)) => std::fs::canonicalize(a).ok() == std::fs::canonicalize(b).ok(),
+            _ => false,
+        }
     }
 }
 
@@ -394,9 +471,7 @@ credential-provider = ["/usr/local/bin/vouch"]
     // `load_from` returns an empty document for a *missing* file, but must
     // return Err for a *present* file that fails to parse or cannot be read.
     // The CodeArtifact setup flow relies on this to avoid silently overwriting
-    // a malformed/unreadable ~/.cargo/config.toml. These cover the parse- and
-    // read-failure paths that the original tests (valid config + missing file)
-    // never exercised — see <bug report>.
+    // a malformed or unreadable Cargo config.
     // =========================================================================
 
     #[test]
@@ -431,5 +506,323 @@ credential-provider = ["/usr/local/bin/vouch"]
             err.to_string().contains(&path.display().to_string()),
             "read error should name the file: {err}",
         );
+    }
+
+    // Cargo Book, Configuration → Hierarchical structure: "If both files
+    // exist, Cargo will use the file without the extension."
+
+    /// Build the two candidate config paths inside `dir`, mirroring `default_path`.
+    fn candidates(dir: &std::path::Path) -> (PathBuf, PathBuf) {
+        (dir.join("config"), dir.join("config.toml"))
+    }
+
+    #[test]
+    fn config_path_uses_config_toml_when_neither_exists() {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let (legacy, modern) = candidates(dir.path());
+        let ConfigLocation { path, ignored } = config_path_in(&legacy, &modern);
+        assert_eq!(path, modern, "config.toml is Cargo's recommended new name");
+        assert!(ignored.is_none(), "no note when neither file exists");
+    }
+
+    #[test]
+    fn config_path_uses_config_toml_when_only_modern_exists() {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let (legacy, modern) = candidates(dir.path());
+        std::fs::write(&modern, "").expect("write config.toml");
+        let ConfigLocation { path, ignored } = config_path_in(&legacy, &modern);
+        assert_eq!(path, modern);
+        assert!(ignored.is_none(), "no legacy file means no split");
+    }
+
+    #[test]
+    fn config_path_uses_legacy_when_only_legacy_exists() {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let (legacy, modern) = candidates(dir.path());
+        std::fs::write(&legacy, "").expect("write legacy config");
+        let ConfigLocation { path, ignored } = config_path_in(&legacy, &modern);
+        assert_eq!(path, legacy, "Cargo loads `config` when it is the only one");
+        assert!(ignored.is_none(), "only one file exists — nothing is split");
+        assert!(
+            !modern.exists(),
+            "must not create config.toml just by resolving"
+        );
+    }
+
+    #[test]
+    fn config_path_prefers_legacy_and_warns_when_both_exist_distinct() {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let (legacy, modern) = candidates(dir.path());
+        std::fs::write(&legacy, "legacy").expect("write legacy config");
+        std::fs::write(&modern, "modern").expect("write config.toml");
+        let ConfigLocation { path, ignored } = config_path_in(&legacy, &modern);
+        assert_eq!(
+            path, legacy,
+            "Cargo loads `config` and ignores `config.toml`"
+        );
+        assert_eq!(
+            ignored.as_ref(),
+            Some(&modern),
+            "a split Cargo silently ignores must be surfaced"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_path_treats_symlinked_config_as_same_file() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let (legacy, modern) = candidates(dir.path());
+        std::fs::write(&modern, "").expect("write config.toml");
+        symlink(&modern, &legacy).expect("symlink config -> config.toml");
+        // One file under two names: nothing is ignored, and the real file
+        // is returned so `save()` keeps the symlink.
+        let ConfigLocation { path, ignored } = config_path_in(&legacy, &modern);
+        assert_eq!(
+            path, modern,
+            "write the real file so the `config -> config.toml` symlink survives"
+        );
+        assert!(
+            ignored.is_none(),
+            "a symlinked pair is a single file, not a split"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_path_writes_real_file_for_reverse_symlink() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let (legacy, modern) = candidates(dir.path());
+        std::fs::write(&legacy, "").expect("write legacy config (real file)");
+        symlink(&legacy, &modern).expect("symlink config.toml -> config");
+        // `config.toml` is now a symlink to `config`. `config` is the real
+        // file Cargo loads; returning `legacy` keeps the `config.toml` symlink.
+        let ConfigLocation { path, ignored } = config_path_in(&legacy, &modern);
+        assert_eq!(
+            path, legacy,
+            "write the real file (`config`) so the `config.toml -> config` symlink survives"
+        );
+        assert!(ignored.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_path_treats_hardlinked_pair_as_same_file() {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let (legacy, modern) = candidates(dir.path());
+        std::fs::write(&modern, "").expect("write config.toml");
+        std::fs::hard_link(&modern, &legacy).expect("hardlink config -> config.toml");
+        let ConfigLocation { path, ignored } = config_path_in(&legacy, &modern);
+        assert_eq!(path, legacy);
+        assert!(ignored.is_none(), "a hardlinked pair is a single file");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn same_file_detects_symlinked_pair() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let (legacy, modern) = candidates(dir.path());
+        std::fs::write(&modern, "").expect("write config.toml");
+        symlink(&modern, &legacy).expect("symlink");
+        assert!(same_file(&legacy, &modern));
+        assert!(same_file(&modern, &legacy), "symmetric");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn same_file_detects_hardlinked_pair() {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let (legacy, modern) = candidates(dir.path());
+        std::fs::write(&modern, "").expect("write config.toml");
+        std::fs::hard_link(&modern, &legacy).expect("hardlink");
+        assert!(same_file(&legacy, &modern));
+    }
+
+    #[test]
+    fn same_file_false_for_distinct_files() {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let (legacy, modern) = candidates(dir.path());
+        std::fs::write(&legacy, "a").expect("write legacy");
+        std::fs::write(&modern, "b").expect("write modern");
+        assert!(!same_file(&legacy, &modern));
+    }
+
+    // The setup flow: resolve with `config_path_in`, then load, edit, save.
+
+    #[test]
+    fn setup_writes_to_legacy_config_that_cargo_loads() {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let (legacy, modern) = candidates(dir.path());
+        std::fs::write(&legacy, "[build]\njobs = 4\n").expect("write legacy config");
+
+        // What `configure_cargo_registry` would resolve via `default_path`.
+        let ConfigLocation { path, ignored } = config_path_in(&legacy, &modern);
+        assert_eq!(path, legacy);
+        assert!(
+            ignored.is_none(),
+            "only the legacy file exists, so no split note"
+        );
+
+        let mut config = CargoConfig::load_from(path).unwrap();
+        config.set_registry_provider("codeartifact-test", &["/usr/local/bin/vouch"]);
+        config.set_registry_index(
+            "codeartifact-test",
+            "sparse+https://my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com/cargo/test/",
+        );
+        config.save().unwrap();
+
+        // The file Cargo loads holds the entry, and no `config.toml` appears.
+        let written = std::fs::read_to_string(&legacy).unwrap();
+        assert!(
+            written.contains("codeartifact-test"),
+            "entry in legacy config"
+        );
+        assert!(written.contains("vouch"), "provider references vouch");
+        assert!(written.contains("jobs = 4"), "existing config is preserved");
+        assert!(!modern.exists(), "config.toml must not be created");
+
+        // `vouch status` reads the same file and sees the registry as served.
+        let reloaded = CargoConfig::load_from(legacy).unwrap();
+        assert!(reloaded.has_registry_vouch("codeartifact-test"));
+        assert_eq!(
+            reloaded.get_registry_index("codeartifact-test").as_deref(),
+            Some(
+                "sparse+https://my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com/cargo/test/"
+            ),
+        );
+    }
+
+    #[test]
+    fn setup_writes_to_config_toml_when_no_legacy_file() {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let (legacy, modern) = candidates(dir.path());
+        // neither exists
+        let ConfigLocation { path, ignored } = config_path_in(&legacy, &modern);
+        assert_eq!(path, modern, "config.toml is the recommended new name");
+        assert!(ignored.is_none());
+
+        let mut config = CargoConfig::load_from(path).unwrap();
+        config.set_registry_provider("codeartifact-test", &["/usr/local/bin/vouch"]);
+        config.save().unwrap();
+
+        assert!(modern.exists(), "config.toml created on save");
+        assert!(!legacy.exists(), "legacy config not created");
+        let written = std::fs::read_to_string(&modern).unwrap();
+        assert!(written.contains("vouch"));
+    }
+
+    #[test]
+    fn setup_writes_to_legacy_when_both_exist_distinct() {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let (legacy, modern) = candidates(dir.path());
+        std::fs::write(&legacy, "[build]\njobs = 4\n").expect("write legacy");
+        std::fs::write(&modern, "[build]\njobs = 8\n").expect("write modern");
+
+        let ConfigLocation { path, ignored } = config_path_in(&legacy, &modern);
+        assert_eq!(
+            path, legacy,
+            "Cargo loads `config` and ignores `config.toml`"
+        );
+        assert_eq!(ignored.as_ref(), Some(&modern));
+
+        let mut config = CargoConfig::load_from(path).unwrap();
+        config.set_registry_provider("codeartifact-test", &["/usr/local/bin/vouch"]);
+        config.save().unwrap();
+
+        // The edit lands in the legacy file (what Cargo loads); the stale
+        // `config.toml` is left untouched so no silent divergence is created.
+        let legacy_written = std::fs::read_to_string(&legacy).unwrap();
+        assert!(
+            legacy_written.contains("vouch"),
+            "entry written to legacy config"
+        );
+        let modern_written = std::fs::read_to_string(&modern).unwrap();
+        assert!(
+            !modern_written.contains("vouch"),
+            "config.toml (ignored by Cargo) must not be the one written",
+        );
+        assert_eq!(
+            modern_written, "[build]\njobs = 8\n",
+            "config.toml unchanged"
+        );
+    }
+
+    // `save()` renames a temp file over its path, so writing through the
+    // symlink would replace it with a regular file.
+    #[cfg(unix)]
+    #[test]
+    fn setup_preserves_config_symlink_pointing_at_config_toml() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let (legacy, modern) = candidates(dir.path());
+        std::fs::write(&modern, "[build]\njobs = 4\n").expect("write config.toml");
+        symlink(&modern, &legacy).expect("symlink config -> config.toml");
+
+        let ConfigLocation { path, ignored } = config_path_in(&legacy, &modern);
+        assert_eq!(path, modern, "write the real file, not the symlink");
+        assert!(ignored.is_none());
+
+        let mut config = CargoConfig::load_from(path).unwrap();
+        config.set_registry_provider("codeartifact-test", &["/usr/local/bin/vouch"]);
+        config.save().unwrap();
+
+        // The symlink must still be a symlink (atomic rename wrote through to
+        // `config.toml`, not over `config`).
+        assert!(is_symlink(&legacy), "`config` must still be a symlink");
+        assert_eq!(
+            std::fs::read_link(&legacy).unwrap(),
+            modern,
+            "symlink target unchanged",
+        );
+
+        // Both names see the new content: Cargo loads `config` (following the
+        // symlink to `config.toml`), and `config.toml` is the file that was
+        // written.
+        let via_legacy = std::fs::read_to_string(&legacy).unwrap();
+        let via_modern = std::fs::read_to_string(&modern).unwrap();
+        assert!(via_legacy.contains("vouch"), "entry visible via symlink");
+        assert!(via_modern.contains("vouch"), "entry written to config.toml");
+        assert!(
+            via_modern.contains("jobs = 4"),
+            "pre-existing config preserved"
+        );
+        assert_eq!(via_legacy, via_modern, "both names see the same content");
+    }
+
+    // Round-trips the vouch registry set through an extensionless `config`.
+    mod roundtrip {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            /// Adding a vouch provider for an arbitrary registry name, saving
+            /// to the legacy `config` path `config_path_in` selects, and
+            /// reloading preserves the registry as vouch-served.
+            #[test]
+            fn vouch_registry_survives_legacy_round_trip(
+                registry in "[a-z][a-z0-9-]{0,30}",
+            ) {
+                let dir = tempfile::tempdir().unwrap();
+                let (legacy, modern) = candidates(dir.path());
+                std::fs::write(&legacy, "").unwrap();
+
+                let ConfigLocation { path, ignored } = config_path_in(&legacy, &modern);
+                prop_assert!(path == legacy, "only legacy exists → select legacy");
+                prop_assert!(ignored.is_none());
+
+                let mut config = CargoConfig::load_from(path).unwrap();
+                config.set_registry_provider(&registry, &["/usr/local/bin/vouch"]);
+                config.save().unwrap();
+
+                // `config.toml` must not have been created as a side effect.
+                prop_assert!(!modern.exists(), "config.toml must not be created");
+
+                let reloaded = CargoConfig::load_from(legacy).unwrap();
+                prop_assert!(reloaded.has_registry_vouch(&registry));
+                prop_assert_eq!(reloaded.vouch_registries(), vec![registry]);
+            }
+        }
     }
 }
