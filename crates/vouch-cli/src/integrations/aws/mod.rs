@@ -293,15 +293,15 @@ pub(crate) fn resolve_region_with_fallback(role_arn: &str) -> anyhow::Result<Str
     let profile_name = AwsConfig::load().ok().and_then(|config| {
         config
             .find_vouch_profile_for_role(role_arn)
+            .map(|profile| profile.name)
             // A chained role, or an Identity Center profile (which names no
             // role), matches nothing above. Borrowing the region of the only
             // Vouch profile is still unambiguous, and beats silently dropping
             // to the partition default in a region-restricted account.
             .or_else(|| match config.find_all_vouch_profiles().as_slice() {
-                [only] => Some(only.clone()),
+                [only] => Some(only.name.clone()),
                 _ => None,
             })
-            .map(|profile| profile.name)
     });
 
     if let Some(r) = find_region(None, profile_name.as_deref())? {
@@ -318,8 +318,8 @@ pub(crate) fn resolve_region_with_fallback(role_arn: &str) -> anyhow::Result<Str
 #[derive(Debug)]
 pub(crate) struct ResolvedRole {
     pub role_arn: String,
-    /// The `--via` recorded in the profile the role came from; `None` for an
-    /// explicit `--role`.
+    /// The `--via` recorded in the profile that targets the role, whether the
+    /// role came from that profile or from an explicit `--role`.
     pub via: Option<String>,
     pub region: String,
 }
@@ -337,8 +337,9 @@ impl ResolvedRole {
 ///
 /// This is the standard resolution pattern used by credential commands
 /// that need both a role and region (EKS, RDS, Redshift). It:
-/// 1. Uses the `--role` flag if provided, otherwise resolves a Vouch profile
-///    (from `AWS_PROFILE` or the only one configured) along with its `--via`
+/// 1. Uses the `--role` flag if provided, with the `--via` recorded by the
+///    profile that targets it; otherwise resolves a Vouch profile (from
+///    `AWS_PROFILE` or the only one configured) along with its `--via`
 /// 2. Resolves the region from `--region`, that same profile, or env vars
 ///
 /// Every caller exposes only `--role` (no `--profile` flag), so an
@@ -357,17 +358,22 @@ pub(crate) fn resolve_role_and_region(
         // that role, falling back to the only Vouch profile when the role is not
         // in ~/.aws/config at all (a chained or cross-account ARN) — otherwise
         // a single-profile user who passes --role loses their configured region.
+        // The via comes only from the profile targeting the role: the fallback
+        // profile's via belongs to a different role.
         Some(r) => {
-            let owning = AwsConfig::load()
+            let (owning, via) = match AwsConfig::load()
                 .ok()
                 .and_then(|config| config.find_vouch_profile_for_role(r))
-                .map(|profile| profile.name)
-                .or_else(|| {
+            {
+                Some(profile) => (Some(profile.name), profile.via),
+                None => (
                     resolve_vouch_profile(None, ProfileOverride::Role)
                         .ok()
-                        .map(|p| p.name)
-                });
-            (owning, r.to_string(), None)
+                        .map(|p| p.name),
+                    None,
+                ),
+            };
+            (owning, r.to_string(), via)
         }
         None => {
             let resolved = resolve_vouch_profile(None, ProfileOverride::Role)?;
@@ -844,6 +850,15 @@ credential_process = vouch credential aws --role arn:aws:iam::999:role/member --
         let target = profile.target();
         let resolved = resolve_management_role_for(&vouch_cfg, target.arn, target.via)
             .expect("recorded via resolves the member role");
+        assert_eq!(resolved.as_deref(), Some(mgmt_arn));
+
+        // An explicit role ARN (`credential eks --role`, `exec --role`) finds
+        // the same profile by role and resolves through its recorded `--via`.
+        let owning = aws
+            .find_vouch_profile_for_role(member_role)
+            .expect("member profile targets the role");
+        let resolved = resolve_management_role_for(&vouch_cfg, member_role, owning.via.as_deref())
+            .expect("recorded via resolves an explicit member role");
         assert_eq!(resolved.as_deref(), Some(mgmt_arn));
     }
 

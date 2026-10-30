@@ -171,7 +171,15 @@ async fn get_sts_console_creds(server: &ServerUrl, args: ConsoleArgs) -> Result<
     // Resolve the role from the explicit arg or from ~/.aws/config. An
     // explicit --via wins over the one recorded in the profile.
     let (role_arn, via) = match args.role {
-        Some(r) => (r, args.via),
+        Some(r) => {
+            let via = args.via.or_else(|| {
+                aws::AwsConfig::load()
+                    .ok()
+                    .and_then(|config| config.find_vouch_profile_for_role(&r))
+                    .and_then(|profile| profile.via)
+            });
+            (r, via)
+        }
         None => {
             let profile = aws::resolve_vouch_profile(
                 args.profile.as_deref(),

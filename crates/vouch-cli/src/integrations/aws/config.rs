@@ -200,26 +200,13 @@ impl AwsConfig {
     }
 
     /// Find an existing vouch profile that targets a specific role ARN.
+    ///
+    /// When several profiles target the role, the first in file order wins.
     #[must_use]
-    pub(crate) fn find_vouch_profile_for_role(&self, role_arn: &str) -> Option<AwsProfile> {
-        self.find_all_vouch_profiles().into_iter().find(|p| {
-            match p
-                .credential_process
-                .as_deref()
-                .and_then(CredentialProcessLine::parse)
-            {
-                Some(CredentialProcessLine::Role {
-                    role_arn: existing,
-                    via: _,
-                }) => existing == role_arn,
-                Some(CredentialProcessLine::IdentityCenter {
-                    application_arn: _,
-                    account: _,
-                    permission_set: _,
-                })
-                | None => false,
-            }
-        })
+    pub(crate) fn find_vouch_profile_for_role(&self, role_arn: &str) -> Option<VouchProfile> {
+        self.vouch_profiles_with_role()
+            .into_iter()
+            .find(|p| p.role_arn == role_arn)
     }
 
     /// Get the next available vouch profile name.
@@ -1119,6 +1106,36 @@ credential_process = vouch credential aws --role arn:aws:iam::222:role/Staging
             .find_vouch_profile_for_role("arn:aws:iam::222:role/Staging")
             .expect("should find profile for role");
         assert_eq!(found.name, "vouch-2");
+    }
+
+    /// An explicit `--role` that a chained profile targets resolves with the
+    /// `--via` that profile records.
+    #[test]
+    fn test_find_vouch_profile_for_role_carries_recorded_via() {
+        let content = r#"
+[profile mgmt]
+credential_process = vouch credential aws --role arn:aws:iam::111:role/vouch/Mgmt
+
+[profile member]
+credential_process = vouch credential aws --role arn:aws:iam::999:role/Member --via arn:aws:iam::111:role/vouch/Mgmt
+"#;
+        let file = create_temp_config(content);
+        let config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
+
+        let member = config
+            .find_vouch_profile_for_role("arn:aws:iam::999:role/Member")
+            .expect("member profile targets the role");
+        assert_eq!(member.name, "member");
+        assert_eq!(
+            member.via.as_deref(),
+            Some("arn:aws:iam::111:role/vouch/Mgmt")
+        );
+
+        let mgmt = config
+            .find_vouch_profile_for_role("arn:aws:iam::111:role/vouch/Mgmt")
+            .expect("mgmt profile targets the role");
+        assert_eq!(mgmt.name, "mgmt");
+        assert!(mgmt.via.is_none(), "a direct profile records no via");
     }
 
     #[test]
