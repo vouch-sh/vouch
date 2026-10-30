@@ -1584,6 +1584,11 @@ setup-ca-uv-auto-block =
     Note: If you also use pip, run `{ -cmd } setup codeartifact --tool pip` to
     configure pip separately (uv does not read pip.conf).
 setup-ca-uv-wrote = Wrote uv config: { $path }
+setup-ca-uv-replaced-default =
+    Note: The existing index { $name } in { $path } was previously marked
+    `default`. uv uses the first `default` index for ordinary package
+    resolution, so vouch cleared it to make the CodeArtifact index the
+    sole default.
 setup-ca-npm-block =
     Registry URL: { $url }
 
