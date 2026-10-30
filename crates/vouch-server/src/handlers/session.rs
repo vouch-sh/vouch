@@ -180,12 +180,17 @@ async fn extract_resource_token(
         }
         (AuthScheme::DPoP, Some(cnf)) => {
             // Validate DPoP proof header against cnf.jkt
-            let full_uri = format!("{}{}", config.base_url, uri);
+            let accepted_uris = dpop::build_accepted_uris(
+                &config.base_url,
+                uri,
+                config.tls_configured(),
+                config.mtls_port,
+            );
             let validated = dpop::validate_dpop_at_resource(
                 &token,
                 headers,
                 method,
-                &full_uri,
+                &accepted_uris,
                 &state.store,
                 config.dpop_max_age_seconds,
                 arrival,

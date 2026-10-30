@@ -395,6 +395,64 @@ async fn test_dpop_nonce_serves_repeated_requests_until_it_expires() {
     }
 }
 
+/// RFC 9449 §7.1 + RFC 8705 §5: a DPoP-bound first-party token presented at
+/// a `/v1/*` resource over the DPoP scheme must validate when the proof's
+/// `htu` targets the advertised mTLS-alias URL. Discovery advertises
+/// `mtls_endpoint_aliases` (same paths on `mtls_port`) when TLS is configured;
+/// `normalize_uri` cannot equate the alias port to the canonical one, so the
+/// resource handler's `build_accepted_uris` must list both — the fix is not
+/// userinfo-specific. TLS is enabled here via the live `ArcSwap` config.
+#[tokio::test]
+async fn test_dpop_v1_resource_accepts_mtls_alias_htu_when_tls_configured() {
+    use std::sync::Arc;
+
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "v1-alias-htu@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (key, jwk) = generate_dpop_key_pair();
+    let jkt = dpop_jkt(&jwk);
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Dpop(&jkt),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let mut new_config = (**state.config()).clone();
+    new_config.tls_cert = Some("/tmp/fake-cert.pem".to_string());
+    new_config.tls_key = Some(secrecy::SecretString::from("/tmp/fake-key.pem".to_string()));
+    state.config.store(Arc::new(new_config));
+
+    let config = state.config();
+    let mut alias_url = url::Url::parse(&config.base_url).expect("base_url parses");
+    let _set = alias_url.set_port(Some(config.mtls_port));
+    let resource_alias_uri = format!(
+        "{}{}",
+        alias_url.as_str().trim_end_matches('/'),
+        "/api/v1/applications"
+    );
+
+    let proof = create_dpop_proof(&key, &jwk, "GET", &resource_alias_uri, None, Some(&token));
+    let auth = format!("DPoP {token}");
+    let (status, body) = http_get(
+        &app,
+        "/api/v1/applications",
+        &[("Authorization", &auth), ("DPoP", &proof)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "DPoP proof targeting the advertised mTLS-alias /v1/* URL must be accepted: {body}"
+    );
+}
+
 /// RFC 9449 retry flow at a resource endpoint: a request with a nonce the
 /// server does not know yields `use_dpop_nonce` and a fresh nonce, and
 /// retrying with that nonce succeeds.
