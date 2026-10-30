@@ -314,6 +314,16 @@ pub(crate) fn resolve_region_with_fallback(role_arn: &str) -> anyhow::Result<Str
     Ok(default.to_string())
 }
 
+/// The Vouch profile in `~/.aws/config` that targets `role_arn`, if any.
+///
+/// Lets an explicit role ARN pick up the `--via` its profile records. An
+/// unreadable config counts as no profile, as it does for region lookup.
+pub(crate) fn vouch_profile_for_role(role_arn: &str) -> Option<VouchProfile> {
+    AwsConfig::load()
+        .ok()
+        .and_then(|config| config.find_vouch_profile_for_role(role_arn))
+}
+
 /// A role and region resolved by [`resolve_role_and_region`].
 #[derive(Debug)]
 pub(crate) struct ResolvedRole {
@@ -361,10 +371,7 @@ pub(crate) fn resolve_role_and_region(
         // The via comes only from the profile targeting the role: the fallback
         // profile's via belongs to a different role.
         Some(r) => {
-            let (owning, via) = match AwsConfig::load()
-                .ok()
-                .and_then(|config| config.find_vouch_profile_for_role(r))
-            {
+            let (owning, via) = match vouch_profile_for_role(r) {
                 Some(profile) => (Some(profile.name), profile.via),
                 None => (
                     resolve_vouch_profile(None, ProfileOverride::Role)
