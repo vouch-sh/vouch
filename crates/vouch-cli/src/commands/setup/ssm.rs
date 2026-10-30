@@ -423,6 +423,7 @@ mod tests {
         let ssm_profile = SsmProfile::Vouch(aws::VouchProfile {
             name: "vouch-demo".to_string(),
             role_arn: "arn:aws:iam::222222222222:role/demo".to_string(),
+            via: None,
         });
         assert_eq!(ssm_profile.name(), "vouch-demo");
         assert_eq!(

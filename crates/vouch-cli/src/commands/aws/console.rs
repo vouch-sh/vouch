@@ -168,16 +168,21 @@ async fn get_idc_console_creds(server: &ServerUrl, args: &ConsoleArgs) -> Result
 
 /// Obtain console credentials via the STS role path.
 async fn get_sts_console_creds(server: &ServerUrl, args: ConsoleArgs) -> Result<ConsoleCreds> {
-    // Resolve role ARN from explicit arg or from ~/.aws/config
-    let role_arn = match args.role {
-        Some(r) => r,
+    // Resolve the role from the explicit arg or from ~/.aws/config. An
+    // explicit --via wins over the one recorded in the profile.
+    let (role_arn, via) = match args.role {
+        Some(r) => (r, args.via),
         None => {
-            aws::resolve_vouch_profile(
+            let profile = aws::resolve_vouch_profile(
                 args.profile.as_deref(),
                 aws::ProfileOverride::ProfileOrRole,
-            )?
-            .role_arn
+            )?;
+            (profile.role_arn, args.via.or(profile.via))
         }
+    };
+    let role = aws::RoleTarget {
+        arn: &role_arn,
+        via: via.as_deref(),
     };
 
     // Determine partition and region from role ARN
@@ -189,13 +194,12 @@ async fn get_sts_console_creds(server: &ServerUrl, args: ConsoleArgs) -> Result<
     // unconfigured management role fails fast with a Vouch error instead of an
     // opaque AWS AccessDenied at the STS call.
     let vouch_config = Config::load()?;
-    let management_role =
-        resolve_management_role_for(&vouch_config, &role_arn, args.via.as_deref())?;
+    let management_role = resolve_management_role_for(&vouch_config, role.arn, role.via)?;
 
     let agent_source = detect_agent_source();
     let result = exchange_for_sts_credentials(StsRequest {
         server,
-        role_arn: &role_arn,
+        role,
         region: &region,
         management_role: management_role.as_deref(),
         agent_source: agent_source.as_deref(),

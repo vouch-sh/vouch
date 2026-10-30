@@ -14,6 +14,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use crate::client::VouchClient;
 use crate::config::{AwsIdentityCenter, AwsOrganization, AwsOrgsConfig, Config};
 use crate::exit_code::{self, CliError};
+use crate::integrations::aws::RoleTarget;
 use crate::integrations::aws::sts::StsCredentials;
 use crate::integrations::aws::{self, identity_center, sts};
 use crate::server_url::ServerUrl;
@@ -159,7 +160,7 @@ pub(crate) struct StsExchangeResult {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct StsRequest<'a> {
     pub(crate) server: &'a ServerUrl,
-    pub(crate) role_arn: &'a str,
+    pub(crate) role: RoleTarget<'a>,
     pub(crate) region: &'a str,
     pub(crate) management_role: Option<&'a str>,
     pub(crate) agent_source: Option<&'a str>,
@@ -287,9 +288,9 @@ where
 /// management role, then `AssumeRole` into the target.
 ///
 /// External callers (EKS, RDS, etc.) pass `None` — the management role
-/// is resolved internally from vouch config so they get chaining for
-/// free. `get_aws_credentials` pre-resolves it to avoid a double config
-/// load.
+/// is resolved internally from vouch config and `role.via`, so they get
+/// chaining for free. `get_aws_credentials` pre-resolves it to avoid a
+/// double config load.
 ///
 /// When running inside an AI coding agent (detected via environment
 /// variables like `CLAUDECODE`, `CURSOR_AGENT`, etc.), automatically
@@ -302,7 +303,7 @@ pub(crate) async fn exchange_for_sts_credentials(req: StsRequest<'_>) -> Result<
 
     let StsRequest {
         server,
-        role_arn,
+        role: RoleTarget { arn: role_arn, via },
         region,
         management_role,
         agent_source,
@@ -317,7 +318,7 @@ pub(crate) async fn exchange_for_sts_credentials(req: StsRequest<'_>) -> Result<
         None => {
             resolved = Config::load()
                 .ok()
-                .map(|c| resolve_management_role_for(&c, role_arn, None))
+                .map(|c| resolve_management_role_for(&c, role_arn, via))
                 .transpose()?
                 .flatten();
             resolved.as_deref()
@@ -983,10 +984,10 @@ pub(crate) async fn get_idc_credentials(
 /// and uses it for both the cache key and credential exchange.
 pub(crate) async fn get_aws_credentials(
     server: &ServerUrl,
-    role_arn: &str,
+    role: RoleTarget<'_>,
 ) -> Result<serde_json::Value> {
     let vouch_config = Config::load()?;
-    let management_role = resolve_management_role_for(&vouch_config, role_arn, None)?;
+    let management_role = resolve_management_role_for(&vouch_config, role.arn, role.via)?;
 
     // Detect agent context BEFORE the cache lookup. Folding the source into
     // the cache key ensures agent and non-agent invocations never share a
@@ -994,7 +995,7 @@ pub(crate) async fn get_aws_credentials(
     // without ReadOnlyAccess / `vouch:AccessType=ai` tags (issue #398).
     let agent_source = detect_agent_source();
     let cache_key = build_cache_key(
-        role_arn,
+        role.arn,
         management_role.as_deref(),
         agent_source.as_deref(),
     );
@@ -1002,7 +1003,7 @@ pub(crate) async fn get_aws_credentials(
     let mgmt = management_role;
     let agent = agent_source;
     super::cache::get_or_fetch(&cache_key, "AWS credentials", || async move {
-        let output = fetch_and_assume(server, role_arn, mgmt.as_deref(), agent.as_deref()).await?;
+        let output = fetch_and_assume(server, role, mgmt.as_deref(), agent.as_deref()).await?;
         let expires_at = output.expiration.clone();
         Ok((output.to_json(), expires_at))
     })
@@ -1022,26 +1023,7 @@ pub(crate) async fn run(
     idc_application: Option<&str>,
 ) -> Result<()> {
     let data = if let Some(role_arn) = role {
-        // STS path: direct AssumeRoleWithWebIdentity (no management role) or
-        // management-role chain (chain_if_different_role returns Some).
-        let vouch_config = Config::load()?;
-        let management_role = resolve_management_role_for(&vouch_config, role_arn, via)?;
-
-        let agent_source = detect_agent_source();
-        let cache_key = build_cache_key(
-            role_arn,
-            management_role.as_deref(),
-            agent_source.as_deref(),
-        );
-        let mgmt = management_role;
-        let agent = agent_source;
-        super::cache::get_or_fetch(&cache_key, "AWS credentials", || async move {
-            let output =
-                fetch_and_assume(server, role_arn, mgmt.as_deref(), agent.as_deref()).await?;
-            let expires_at = output.expiration.clone();
-            Ok((output.to_json(), expires_at))
-        })
-        .await?
+        get_aws_credentials(server, RoleTarget { arn: role_arn, via }).await?
     } else {
         // Identity Center path
         let acct = account.context(tr!("err-account-is-required-identity-center-path"))?;
@@ -1062,15 +1044,15 @@ pub(crate) async fn run(
 /// with the pre-resolved management role.
 async fn fetch_and_assume(
     server: &ServerUrl,
-    role_arn: &str,
+    role: RoleTarget<'_>,
     mgmt_role: Option<&str>,
     agent_source: Option<&str>,
 ) -> Result<CredentialProcessOutput> {
-    let region = aws::resolve_region_with_fallback(role_arn)?;
+    let region = aws::resolve_region_with_fallback(role.arn)?;
 
     let result = exchange_for_sts_credentials(StsRequest {
         server,
-        role_arn,
+        role,
         region: &region,
         management_role: mgmt_role,
         agent_source,

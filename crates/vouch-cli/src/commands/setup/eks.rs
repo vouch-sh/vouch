@@ -53,12 +53,12 @@ async fn describe_cluster(
     server: &ServerUrl,
     cluster_name: &str,
     region: &str,
-    role_arn: &str,
+    role: aws::RoleTarget<'_>,
 ) -> Result<(String, String)> {
     let agent_source = detect_agent_source();
     let result = exchange_for_sts_credentials(StsRequest {
         server,
-        role_arn,
+        role,
         region,
         management_role: None,
         agent_source: agent_source.as_deref(),
@@ -126,22 +126,22 @@ pub(crate) async fn run(
     // Resolve profile, region, and role together so the kubeconfig records the
     // role belonging to the profile the user named.
     let vouch_profile = aws::resolve_vouch_profile(profile, aws::ProfileOverride::Profile)?;
-    let profile_name = vouch_profile.name;
-    let role_arn = vouch_profile.role_arn;
-    let region_name = aws::resolve_region(region, &profile_name, Some(&role_arn))?;
+    let profile_name = vouch_profile.name.as_str();
+    let role_arn = vouch_profile.role_arn.clone();
+    let region_name = aws::resolve_region(region, profile_name, Some(&role_arn))?;
 
     vouch_cli::tr_println!(
         "setup-eks-header-block",
         cluster = cluster_name,
         region = region_name.as_str(),
-        profile = profile_name.as_str(),
+        profile = profile_name,
     );
     println!();
 
     // Fetch cluster info from AWS using native SigV4 API call
     vouch_cli::tr_println!("setup-eks-fetching");
     let (endpoint, ca_data) =
-        describe_cluster(server, cluster_name, &region_name, &role_arn).await?;
+        describe_cluster(server, cluster_name, &region_name, vouch_profile.target()).await?;
 
     // Naming convention
     let user_name = format!("vouch-eks-{cluster_name}");
