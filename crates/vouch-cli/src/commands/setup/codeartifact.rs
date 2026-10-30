@@ -404,16 +404,14 @@ fn write_uv_config(index_url: &str, repository: &str) -> Result<()> {
 /// settings, sets `keyring-provider = "subprocess"`, and adds (or updates)
 /// a CodeArtifact index entry.
 ///
-/// uv uses the *first* `[[index]]` entry marked `default = true` in file
-/// order as the effective default for ordinary (implicit) resolution, and
-/// silently ignores any additional `default = true` entries — they are
-/// neither the default nor implicit, so they are reachable only via explicit
-/// `tool.uv.sources` pinning by name. Because vouch appends the CodeArtifact
-/// entry last, leaving a pre-existing `default = true` index in place would
-/// keep that older index as the effective default and leave CodeArtifact dead
-/// for ordinary resolution. This function therefore clears `default = true`
-/// from every other `[[index]]` entry so the CodeArtifact index is the sole
-/// default, and warns the user about each displaced default.
+/// uv uses the first `[[index]]` marked `default = true` and ignores the
+/// rest, so every other default is displaced. Clearing the flag alone is not
+/// enough: uv docs, *Indexes*: "The default index is always treated as
+/// lowest priority, regardless of its position in the list of indexes", so a
+/// displaced index would be consulted before CodeArtifact and serve any
+/// package it also carries. Each displaced index is marked `explicit = true`
+/// instead, which limits it to packages pinned to it in `tool.uv.sources`,
+/// and the user is told which ones changed.
 ///
 /// Factored out of [`write_uv_config`] so the default-clearing logic and
 /// error propagation are testable against a temp file without setting
@@ -458,21 +456,15 @@ fn write_uv_config_at(
         );
     }
 
-    // Names of pre-existing indexes we displaced by clearing their
-    // `default = true`, reported to the user after the write succeeds.
+    // Displaced indexes, by name (or URL when unnamed), reported after the
+    // write succeeds.
     let mut displaced_defaults: Vec<String> = Vec::new();
 
     if let Some(array) = doc
         .get_mut("index")
         .and_then(|i| i.as_array_of_tables_mut())
     {
-        // Update our entry in place (if present) and clear `default = true`
-        // from every other entry so the CodeArtifact index is the sole
-        // default. A single pass suffices: an entry is either ours (set the
-        // fresh url + `default = true`) or not ours (if it was a default,
-        // strip the flag and remember its name to warn the user). Entries
-        // marked `default = false` (or with no `default` key) are left
-        // untouched to minimize churn to the user's config.
+        // Entries that are not defaults keep the priority the user gave them.
         let mut found = false;
         for table in array.iter_mut() {
             let is_ours = table.get("name").and_then(|v| v.as_str()) == Some(&index_name);
@@ -485,10 +477,15 @@ fn write_uv_config_at(
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false)
             {
-                if let Some(name) = table.get("name").and_then(|v| v.as_str()) {
-                    displaced_defaults.push(name.to_string());
+                if let Some(label) = table
+                    .get("name")
+                    .or_else(|| table.get("url"))
+                    .and_then(|v| v.as_str())
+                {
+                    displaced_defaults.push(label.to_string());
                 }
                 table.remove("default");
+                table.insert("explicit", toml_edit::value(true));
             }
         }
         if !found {
@@ -513,8 +510,6 @@ fn write_uv_config_at(
         path = config_path.display().to_string()
     );
 
-    // Warn about any pre-existing defaults we displaced, so the user
-    // understands why their prior default index is no longer the default.
     for name in &displaced_defaults {
         vouch_cli::tr_println!(
             "setup-ca-uv-replaced-default",
@@ -1478,16 +1473,9 @@ mod tests {
     // =========================================================================
     // write_uv_config_at tests
     //
-    // Regression coverage for the duplicate-default bug: when a pre-existing
-    // uv.toml already contains an `[[index]]` marked `default = true`, setup
-    // must clear that flag from every other entry so the CodeArtifact index
-    // becomes the sole effective default. uv uses the *first* `default = true`
-    // index in file order for ordinary (implicit) resolution and silently
-    // ignores any additional default entries — they are neither the default
-    // nor implicit, so they are reachable only via explicit `tool.uv.sources`
-    // pinning by name. Because vouch appends the CodeArtifact entry last,
-    // leaving a pre-existing default in place kept the older index as the
-    // effective default and left CodeArtifact dead for ordinary resolution.
+    // uv honors only the first `default = true` index, and the default is
+    // always lowest priority, so every displaced default must become
+    // `explicit` or it would be consulted before CodeArtifact.
     //
     // The testable seam takes the config path directly: `write_uv_config`
     // resolves it via `UV_CONFIG_FILE` / XDG, which is `unsafe` to set in
@@ -1523,6 +1511,14 @@ mod tests {
             return None;
         }
         first.get("name").and_then(|v| v.as_str()).map(String::from)
+    }
+
+    /// Whether an `[[index]]` table is marked `explicit = true`.
+    fn uv_is_explicit(table: &toml_edit::Table) -> bool {
+        table
+            .get("explicit")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
     }
 
     /// Borrow the `[[index]]` table whose `name` equals `name`.
@@ -1572,6 +1568,10 @@ default = true
             mirror.get("default").and_then(|v| v.as_bool()),
             None,
             "pre-existing `default = true` must be cleared: {on_disk}",
+        );
+        assert!(
+            uv_is_explicit(mirror),
+            "a displaced default must be explicit, or uv consults it before CodeArtifact: {on_disk}",
         );
         assert_eq!(
             mirror.get("url").and_then(|v| v.as_str()),
@@ -1631,6 +1631,7 @@ default = false
         // The corporate mirror lost its default; exactly one CodeArtifact entry.
         let mirror = uv_index(&doc, "corporate-mirror");
         assert_eq!(mirror.get("default").and_then(|v| v.as_bool()), None);
+        assert!(uv_is_explicit(mirror), "{on_disk}");
         let array = doc
             .get("index")
             .and_then(|i| i.as_array_of_tables())
@@ -1707,6 +1708,8 @@ default = true
                 .and_then(|v| v.as_bool()),
             None,
         );
+        assert!(uv_is_explicit(uv_index(&doc, "mirror-a")), "{on_disk}");
+        assert!(uv_is_explicit(uv_index(&doc, "mirror-b")), "{on_disk}");
     }
 
     /// Running setup twice is idempotent: still exactly one default (the
@@ -1766,6 +1769,10 @@ default = true
                 .and_then(|v| v.as_bool()),
             None,
         );
+        assert!(
+            uv_is_explicit(uv_index(&doc, "corporate-mirror")),
+            "{on_disk}"
+        );
         let array = doc
             .get("index")
             .and_then(|i| i.as_array_of_tables())
@@ -1773,9 +1780,33 @@ default = true
         assert_eq!(array.len(), 2, "both indexes preserved, nothing duplicated");
     }
 
-    /// A non-ours entry explicitly marked `default = false` is left untouched:
-    /// the fix only strips actual defaults, minimizing churn to the user's
-    /// config and preserving their explicit non-default intent.
+    /// uv does not require `name`; an unnamed default is displaced the same way.
+    #[test]
+    fn uv_setup_marks_unnamed_default_explicit() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("uv.toml");
+        std::fs::write(
+            &config_path,
+            "[[index]]\nurl = \"https://mirror.example.com/simple/\"\ndefault = true\n",
+        )
+        .unwrap();
+
+        write_uv_config_at(&config_path, UV_CA_URL, UV_CA_REPO).unwrap();
+
+        let on_disk = std::fs::read_to_string(&config_path).unwrap();
+        let doc = on_disk.parse::<toml_edit::DocumentMut>().unwrap();
+        let unnamed = doc
+            .get("index")
+            .and_then(|i| i.as_array_of_tables())
+            .and_then(|array| array.iter().find(|t| t.get("name").is_none()))
+            .expect("unnamed index kept");
+        assert!(unnamed.get("default").is_none(), "{on_disk}");
+        assert!(uv_is_explicit(unnamed), "{on_disk}");
+        assert_eq!(uv_sole_default_name(&doc).as_deref(), Some(UV_CA_NAME));
+    }
+
+    /// A non-default index keeps the priority the user gave it: only
+    /// displaced defaults change.
     #[test]
     fn uv_setup_preserves_explicit_default_false_on_other_indexes() {
         let dir = tempfile::tempdir().unwrap();
@@ -1803,6 +1834,7 @@ default = false
             other.get("url").and_then(|v| v.as_str()),
             Some("https://explicit.example.com/simple/"),
         );
+        assert!(!uv_is_explicit(other), "{on_disk}");
         // CodeArtifact is still the sole default.
         assert_eq!(uv_count_defaults(&doc), 1);
         assert_eq!(uv_sole_default_name(&doc).as_deref(), Some(UV_CA_NAME));

@@ -1585,10 +1585,9 @@ setup-ca-uv-auto-block =
     configure pip separately (uv does not read pip.conf).
 setup-ca-uv-wrote = Wrote uv config: { $path }
 setup-ca-uv-replaced-default =
-    Note: The existing index { $name } in { $path } was previously marked
-    `default`. uv uses the first `default` index for ordinary package
-    resolution, so vouch cleared it to make the CodeArtifact index the
-    sole default.
+    Note: Index { $name } in { $path } was the default. It is now marked
+    `explicit`, so uv uses it only for packages pinned to it in
+    `tool.uv.sources`, and the CodeArtifact index is the default.
 setup-ca-npm-block =
     Registry URL: { $url }
 
