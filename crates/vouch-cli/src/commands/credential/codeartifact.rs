@@ -20,7 +20,7 @@ use crate::config::{CodeArtifactProfile, Config};
 use crate::integrations::aws::codeartifact::{
     CodeArtifactRegistry, CodeArtifactToken, get_authorization_token,
 };
-use crate::integrations::aws::{ProfileOverride, resolve_vouch_profile};
+use crate::integrations::aws::{ProfileOverride, RoleTarget, resolve_vouch_profile};
 use crate::server_url::ServerUrl;
 
 /// A CodeArtifact domain plus the AWS account that mints tokens for it.
@@ -236,8 +236,7 @@ pub(crate) async fn get_token(
     // cache on that optional field would let two invocations that resolve to
     // different accounts share an entry; the resolved role ARN is the value
     // that actually determines which account's token comes back.
-    let role_arn =
-        resolve_vouch_profile(target.profile.as_deref(), ProfileOverride::Profile)?.role_arn;
+    let profile = resolve_vouch_profile(target.profile.as_deref(), ProfileOverride::Profile)?;
 
     // Detect the agent context BEFORE the cache lookup and fold it into the
     // cache key so agent and non-agent invocations never share a cached
@@ -245,11 +244,11 @@ pub(crate) async fn get_token(
     // ReadOnlyAccess session policy / `vouch:AccessType=ai` tags
     // (issues #398, #426).
     let agent_source = aws::detect_agent_source();
-    let cache_key = build_cache_key(target, &role_arn, agent_source.as_deref());
+    let cache_key = build_cache_key(target, &profile.role_arn, agent_source.as_deref());
 
     let agent = agent_source;
     let data = cache::get_or_fetch(&cache_key, "CodeArtifact token", || async {
-        let token = fetch_token(server, target, &role_arn, agent.as_deref()).await?;
+        let token = fetch_token(server, target, profile.target(), agent.as_deref()).await?;
         let expires_at = jiff::Timestamp::from_second(token.expiration)
             .map_or_else(|_| cache::default_expiry(), |ts| ts.to_string());
         let data = serde_json::json!({
@@ -298,12 +297,12 @@ fn build_cache_key(target: &CodeArtifactTarget, role_arn: &str, agent: Option<&s
 async fn fetch_token(
     server: &ServerUrl,
     target: &CodeArtifactTarget,
-    role_arn: &str,
+    role: RoleTarget<'_>,
     agent_source: Option<&str>,
 ) -> Result<CodeArtifactToken> {
     let result = exchange_for_sts_credentials(StsRequest {
         server,
-        role_arn,
+        role,
         region: &target.region,
         management_role: None,
         agent_source,

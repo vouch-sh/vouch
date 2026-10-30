@@ -105,7 +105,7 @@ async fn get_credential(profile: Option<&str>, opt_in: InsecureOptIn) -> Result<
         );
         return Ok(());
     }
-    let creds = get_sts_credentials(&vouch_profile.role_arn, opt_in).await?;
+    let creds = get_sts_credentials(vouch_profile.target(), opt_in).await?;
     let signed = sign_request(&creds, &signing_host, &canonical_path, region);
 
     let stdout = std::io::stdout();
@@ -159,7 +159,7 @@ pub(crate) async fn run_remote_helper(
     // the role's partition; a cross-partition pair is guaranteed an opaque
     // 403 from CodeCommit at git time, so fail now with a clear message.
     aws::validate_region_for_role(&region, &vouch_profile.role_arn)?;
-    let creds = get_sts_credentials(&vouch_profile.role_arn, opt_in).await?;
+    let creds = get_sts_credentials(vouch_profile.target(), opt_in).await?;
     let signed = sign_request(&creds, &hostname, &path, &region);
 
     // Percent-encode credentials for URL embedding
@@ -178,7 +178,10 @@ pub(crate) async fn run_remote_helper(
 /// duplicating the OIDC → STS logic, and wraps it with the agent credential
 /// cache. The role is resolved by the caller so both CodeCommit flows can
 /// validate the target region's partition against it before signing anything.
-async fn get_sts_credentials(role_arn: &str, opt_in: InsecureOptIn) -> Result<StsCredentials> {
+async fn get_sts_credentials(
+    role: aws::RoleTarget<'_>,
+    opt_in: InsecureOptIn,
+) -> Result<StsCredentials> {
     let session = session::resolve_session(opt_in).await.map_err(|e| {
         if ServerUrlError::is_in(&e) {
             e
@@ -187,7 +190,7 @@ async fn get_sts_credentials(role_arn: &str, opt_in: InsecureOptIn) -> Result<St
         }
     })?;
 
-    let data = super::aws::get_aws_credentials(&session.server_url, role_arn).await?;
+    let data = super::aws::get_aws_credentials(&session.server_url, role).await?;
 
     // Extract STS credentials from the cached JSON
     let access_key_id = data

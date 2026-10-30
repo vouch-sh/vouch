@@ -72,7 +72,14 @@ pub(crate) async fn fetch_aws_credentials(
     server: &ServerUrl,
     role_arn: &str,
 ) -> Result<AwsEnvCredentials> {
-    let data = super::credential::aws::get_aws_credentials(server, role_arn).await?;
+    let data = super::credential::aws::get_aws_credentials(
+        server,
+        crate::integrations::aws::RoleTarget {
+            arn: role_arn,
+            via: None,
+        },
+    )
+    .await?;
 
     let access_key_id = data
         .get("AccessKeyId")

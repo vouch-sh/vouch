@@ -241,12 +241,12 @@ async fn get_ecr_credential(
     registry_url: &str,
     profile: Option<&str>,
 ) -> Result<DockerCredential> {
-    let role_arn = resolve_vouch_profile(profile, ProfileOverride::Profile)?.role_arn;
+    let profile = resolve_vouch_profile(profile, ProfileOverride::Profile)?;
 
     let agent_source = aws::detect_agent_source();
     let result = exchange_for_sts_credentials(StsRequest {
         server,
-        role_arn: &role_arn,
+        role: profile.target(),
         region,
         management_role: None,
         agent_source: agent_source.as_deref(),

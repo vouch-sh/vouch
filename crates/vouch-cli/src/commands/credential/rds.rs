@@ -71,7 +71,8 @@ pub(crate) async fn fetch_rds_token(
 
     let hostname_region = extract_region_from_rds_hostname(hostname);
     let effective_region = region.or(hostname_region);
-    let (role_arn, region_name) = aws::resolve_role_and_region(role, effective_region, None)?;
+    let resolved = aws::resolve_role_and_region(role, effective_region)?;
+    let (role_arn, region_name) = (resolved.role_arn.as_str(), resolved.region.as_str());
 
     // Detect agent context BEFORE the cache lookup. Folding the source into
     // the cache key ensures agent and non-agent invocations never share a
@@ -82,8 +83,8 @@ pub(crate) async fn fetch_rds_token(
         hostname,
         port,
         username,
-        &region_name,
-        &role_arn,
+        region_name,
+        role_arn,
         agent.as_deref(),
     );
     let data = cache::get_or_fetch(&key, "RDS token", || async {
@@ -92,8 +93,8 @@ pub(crate) async fn fetch_rds_token(
             hostname,
             port,
             username,
-            &region_name,
-            &role_arn,
+            region_name,
+            resolved.target(),
             agent.as_deref(),
         )
         .await?;
@@ -117,12 +118,12 @@ async fn generate_rds_token(
     port: u16,
     username: &str,
     region: &str,
-    role_arn: &str,
+    role: aws::RoleTarget<'_>,
     agent_source: Option<&str>,
 ) -> Result<String> {
     let result = exchange_for_sts_credentials(StsRequest {
         server,
-        role_arn,
+        role,
         region,
         management_role: None,
         agent_source,

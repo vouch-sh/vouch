@@ -79,21 +79,22 @@ pub(crate) async fn fetch_cached_redshift_credentials(
         validate_sigv4_input(name, "database name")?;
     }
 
-    let (role_arn, region_name) = aws::resolve_role_and_region(role, region, None)?;
+    let resolved = aws::resolve_role_and_region(role, region)?;
+    let (role_arn, region_name) = (resolved.role_arn.as_str(), resolved.region.as_str());
 
     // Detect agent context BEFORE the cache lookup. Folding the source into
     // the cache key ensures agent and non-agent invocations never share a
     // cached entry, which would otherwise hand the agent credentials minted
     // without ReadOnlyAccess / `vouch:AccessType=ai` tags (issue #426).
     let agent = detect_agent_source();
-    let key = cache_key(target, db_name, &region_name, &role_arn, agent.as_deref());
+    let key = cache_key(target, db_name, region_name, role_arn, agent.as_deref());
     let data = cache::get_or_fetch(&key, "Redshift credentials", || async {
         let creds = fetch_redshift_credentials(
             server,
             target,
             db_name,
-            &region_name,
-            &role_arn,
+            region_name,
+            resolved.target(),
             agent.as_deref(),
         )
         .await?;
@@ -156,12 +157,12 @@ async fn fetch_redshift_credentials(
     target: &RedshiftTarget<'_>,
     db_name: Option<&str>,
     region: &str,
-    role_arn: &str,
+    role: aws::RoleTarget<'_>,
     agent_source: Option<&str>,
 ) -> Result<RedshiftCredentials> {
     let result = exchange_for_sts_credentials(StsRequest {
         server,
-        role_arn,
+        role,
         region,
         management_role: None,
         agent_source,
