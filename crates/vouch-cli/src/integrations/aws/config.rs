@@ -200,6 +200,8 @@ impl AwsConfig {
     }
 
     /// Find an existing vouch profile that targets a specific role ARN.
+    ///
+    /// When several profiles target the role, the first in file order wins.
     #[must_use]
     pub(crate) fn find_vouch_profile_for_role(&self, role_arn: &str) -> Option<VouchProfile> {
         self.vouch_profiles_with_role()
