@@ -164,12 +164,17 @@ pub(crate) async fn userinfo(
         let Some(cnf) = dpop_cnf else {
             return DpopChallenge::binding(PossessionError::NotDpopBound).into_oauth_response();
         };
-        let full_uri = format!("{}/oauth/userinfo", config.base_url);
+        let accepted_uris = dpop::build_accepted_uris(
+            &config.base_url,
+            "/oauth/userinfo",
+            config.tls_configured(),
+            config.mtls_port,
+        );
         let proof = match dpop::validate_dpop_at_resource(
             &token,
             &headers,
             method.as_str(),
-            &full_uri,
+            &accepted_uris,
             &state.store,
             config.dpop_max_age_seconds,
             arrival,

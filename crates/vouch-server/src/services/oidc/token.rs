@@ -1286,17 +1286,12 @@ pub async fn validate_dpop_if_present(
     // the DPoP proof with htu pointing to either the canonical endpoint
     // or the mtls_endpoint_aliases URL (RFC 8705 Section 4).
     let config = state.config();
-    let canonical_uri = format!("{}{}", config.base_url, uri);
-    let mut accepted_uris = vec![canonical_uri.clone()];
-    if config.tls_configured()
-        && let Ok(mut url) = url::Url::parse(&config.base_url)
-    {
-        // url::Url::set_port returns Result<(), ()>; failure means non-special URL,
-        // already validated upstream.
-        let _set = url.set_port(Some(config.mtls_port));
-        let mtls_uri = format!("{}{}", url.as_str().trim_end_matches('/'), uri);
-        accepted_uris.push(mtls_uri);
-    }
+    let accepted_uris = dpop::build_accepted_uris(
+        &config.base_url,
+        uri,
+        config.tls_configured(),
+        config.mtls_port,
+    );
 
     // Validate the DPoP proof
     match dpop::validate_dpop_proof(

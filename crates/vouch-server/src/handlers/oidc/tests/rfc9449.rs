@@ -1824,6 +1824,154 @@ async fn test_rfc9449_userinfo_mtls_and_dpop_combined_succeeds() {
     );
 }
 
+/// RFC 9449 §7.1 + RFC 8705 §5: a DPoP-bound token must validate at the
+/// userinfo endpoint when the proof's `htu` targets the *advertised* mTLS-alias
+/// URL (`mtls_endpoint_aliases.userinfo_endpoint`, same path on `mtls_port`).
+/// Discovery advertises the alias when TLS is configured; `normalize_uri`
+/// elides only default ports, so the alias port is not equated to the canonical
+/// one — both URIs must be accepted or a discovery-following client is
+/// rejected with `invalid_dpop_proof`. TLS is enabled here via the live
+/// `ArcSwap` config (the builder re-snapshots per request).
+#[tokio::test]
+async fn test_rfc9449_userinfo_dpop_accepts_mtls_alias_htu_when_tls_configured() {
+    use std::sync::Arc;
+
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "userinfo-alias-htu@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+
+    let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
+    let jkt = dpop_jkt(&dpop_jwk);
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Dpop(&jkt),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // The mTLS alias is advertised only when TLS is fully configured (cert AND key).
+    let mut new_config = (**state.config()).clone();
+    new_config.tls_cert = Some("/tmp/fake-cert.pem".to_string());
+    new_config.tls_key = Some(secrecy::SecretString::from("/tmp/fake-key.pem".to_string()));
+    state.config.store(Arc::new(new_config));
+
+    // The advertised alias userinfo URL: base_url with its port replaced by
+    // `mtls_port`, plus the same `/oauth/userinfo` path.
+    let config = state.config();
+    let mut alias_url = url::Url::parse(&config.base_url).expect("base_url parses");
+    let _set = alias_url.set_port(Some(config.mtls_port));
+    let userinfo_alias_uri = format!(
+        "{}{}",
+        alias_url.as_str().trim_end_matches('/'),
+        "/oauth/userinfo"
+    );
+
+    // Proof signed with `htu` = the advertised alias URL, NOT the canonical one.
+    let proof = create_dpop_proof(
+        &dpop_key,
+        &dpop_jwk,
+        "GET",
+        &userinfo_alias_uri,
+        None,
+        Some(&token),
+    );
+
+    let (status, body) = http_get(
+        &app,
+        "/oauth/userinfo",
+        &[
+            ("Authorization", &format!("DPoP {token}")),
+            ("DPoP", &proof),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "DPoP proof targeting the advertised mTLS-alias userinfo URL must be accepted: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        json["email"].as_str(),
+        Some("userinfo-alias-htu@example.com")
+    );
+}
+
+/// Companion to the above: when TLS is *not* configured the alias is not
+/// advertised, so a proof whose `htu` carries the `mtls_port` must still be
+/// rejected with `invalid_dpop_proof` (the canonical-only path). Guards
+/// against the alias being accepted where it is not advertised.
+#[tokio::test]
+async fn test_rfc9449_userinfo_dpop_rejects_mtls_alias_htu_when_tls_not_configured() {
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "userinfo-alias-htu-notls@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+
+    let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
+    let jkt = dpop_jkt(&dpop_jwk);
+    let token = create_test_session_with(
+        &state,
+        TestSessionSpec {
+            user_id: &user.id,
+            email: &user.email,
+            auth_id: Some(&auth_id),
+            binding: TestBinding::Dpop(&jkt),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // Default test harness has no TLS → the alias is not advertised.
+    let config = state.config();
+    let mut alias_url = url::Url::parse(&config.base_url).expect("base_url parses");
+    let _set = alias_url.set_port(Some(config.mtls_port));
+    let userinfo_alias_uri = format!(
+        "{}{}",
+        alias_url.as_str().trim_end_matches('/'),
+        "/oauth/userinfo"
+    );
+
+    let proof = create_dpop_proof(
+        &dpop_key,
+        &dpop_jwk,
+        "GET",
+        &userinfo_alias_uri,
+        None,
+        Some(&token),
+    );
+
+    let (status, body) = http_get(
+        &app,
+        "/oauth/userinfo",
+        &[
+            ("Authorization", &format!("DPoP {token}")),
+            ("DPoP", &proof),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "DPoP proof targeting the unadvertised mTLS-alias userinfo URL must be rejected: {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(json["error"], "invalid_dpop_proof");
+    assert!(
+        json["error_description"]
+            .as_str()
+            .unwrap_or("")
+            .contains("htu claim mismatch"),
+        "error_description must name the htu mismatch: {body}"
+    );
+}
+
 /// RFC 6750 §2.2 + RFC 9449 §7.1: The POST body `access_token` parameter is a
 /// Bearer-only transport mechanism. A DPoP-bound token sent via the POST body
 /// must be rejected with 401 because the body transport implies the Bearer

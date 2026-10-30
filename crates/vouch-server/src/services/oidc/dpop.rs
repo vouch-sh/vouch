@@ -882,6 +882,39 @@ pub async fn validate_dpop_proof(
     .await
 }
 
+/// Build the URIs a DPoP proof `htu` claim may target: the canonical
+/// `base_url + path` and, when TLS is configured, the mTLS-alias URI advertised
+/// as `mtls_endpoint_aliases` (RFC 8705 Section 5) — `base_url` with its port
+/// replaced by `mtls_port`, plus the same `path`.
+///
+/// RFC 8705 Section 5 directs clients that hold an mTLS credential to use the
+/// alias endpoints, and RFC 9449 has the client set `htu` to the request URI.
+/// A client following discovery therefore signs a proof whose `htu` is the
+/// alias URL, which [`normalize_uri`] cannot equate to the canonical form
+/// since it elides only default ports. Both URIs are accepted so a proof
+/// targeting the advertised alias is not rejected with `invalid_dpop_proof`.
+///
+/// `path` is the request path with a leading `/` (e.g. `/oauth/userinfo`),
+/// appended verbatim to `base_url` and to the mTLS base. The canonical URI is
+/// always present; the alias is added only when TLS is configured and `base_url`
+/// parses to a URL that accepts a port.
+pub(crate) fn build_accepted_uris(
+    base_url: &str,
+    path: &str,
+    tls_configured: bool,
+    mtls_port: u16,
+) -> Vec<String> {
+    let canonical = format!("{base_url}{path}");
+    let mut uris = vec![canonical];
+    if tls_configured && let Ok(mut url) = url::Url::parse(base_url) {
+        // url::Url::set_port returns Result<(), ()>; failure means a
+        // non-special URL, already validated upstream.
+        let _set = url.set_port(Some(mtls_port));
+        uris.push(format!("{}{}", url.as_str().trim_end_matches('/'), path));
+    }
+    uris
+}
+
 /// Validate a DPoP proof at a resource endpoint (e.g., userinfo).
 ///
 /// This also validates the `ath` claim (access token hash) per RFC 9449
@@ -891,29 +924,35 @@ pub async fn validate_dpop_proof(
 /// Fails with [`DpopError::MissingProof`] when the request has no `DPoP`
 /// header and [`DpopError::MultipleProofs`] when it has more than one.
 ///
+/// `accepted_uris` carries every URI a proof `htu` may target — the canonical
+/// request URI and, when TLS is configured, the mTLS-alias URI advertised as
+/// `mtls_endpoint_aliases` (RFC 8705 Section 5). Build it with
+/// [`build_accepted_uris`] so a proof targeting the advertised alias is not
+/// rejected. The underlying [`validate_dpop_claims`] compares `htu` against
+/// every entry.
+///
 /// # Arguments
 /// * `access_token` - The access token from the `Authorization: DPoP` header
 /// * `headers` - The request headers carrying the `DPoP` proof
 /// * `method` - HTTP method of the request
-/// * `uri` - Full request URI
-/// * `pool` - Database pool for nonce and JTI persistence
+/// * `accepted_uris` - URIs a proof `htu` may target (canonical + mTLS alias)
+/// * `store` - Document store for nonce and JTI persistence
 /// * `config_max_age` - Maximum allowed proof age in seconds
 pub async fn validate_dpop_at_resource(
     access_token: &str,
     headers: &HeaderMap,
     method: &str,
-    uri: &str,
+    accepted_uris: &[String],
     store: &DocumentStore,
     config_max_age: i64,
     arrival: ArrivalTime,
 ) -> Result<ValidatedDpopProof, DpopError> {
     let proof = DpopProofHeader::from_headers(headers)?.ok_or(DpopError::MissingProof)?;
     let expected_ath = compute_access_token_hash(access_token);
-    let accepted_uris = vec![uri.to_string()];
     validate_dpop_common(
         proof,
         method,
-        &accepted_uris,
+        accepted_uris,
         store,
         config_max_age,
         Some(&expected_ath),
@@ -1097,6 +1136,50 @@ mod tests {
             },
         );
         assert!(matches!(result, Err(DpopError::UriMismatch)));
+    }
+
+    // RFC 8705 §5 / RFC 9449 §4.2: a proof `htu` may target either the
+    // canonical endpoint or the advertised `mtls_endpoint_aliases` URL.
+    // `build_accepted_uris` lists both so a discovery-following client's proof
+    // is not rejected with `invalid_dpop_proof` for using the alias.
+    #[test]
+    fn test_build_accepted_uris_canonical_only_when_tls_not_configured() {
+        let uris = build_accepted_uris("https://example.com", "/oauth/userinfo", false, 8443);
+        assert_eq!(uris, vec!["https://example.com/oauth/userinfo".to_string()]);
+    }
+
+    #[test]
+    fn test_build_accepted_uris_includes_mtls_alias_when_tls_configured() {
+        let uris = build_accepted_uris("https://example.com", "/oauth/userinfo", true, 8443);
+        assert_eq!(
+            uris,
+            vec![
+                "https://example.com/oauth/userinfo".to_string(),
+                "https://example.com:8443/oauth/userinfo".to_string(),
+            ]
+        );
+    }
+
+    // An explicit port on `base_url` is replaced (not appended) in the alias.
+    #[test]
+    fn test_build_accepted_uris_alias_replaces_existing_port() {
+        let uris = build_accepted_uris("https://example.com:443", "/oauth/token", true, 8443);
+        assert_eq!(
+            uris,
+            vec![
+                "https://example.com:443/oauth/token".to_string(),
+                "https://example.com:8443/oauth/token".to_string(),
+            ]
+        );
+    }
+
+    // A `base_url` the URL parser rejects cannot yield an alias, but the
+    // canonical URI is still returned so the caller decides — matching the
+    // token-endpoint behavior this helper replaces.
+    #[test]
+    fn test_build_accepted_uris_unparseable_base_url_yields_canonical_only() {
+        let uris = build_accepted_uris("not a url", "/oauth/userinfo", true, 8443);
+        assert_eq!(uris, vec!["not a url/oauth/userinfo".to_string()]);
     }
 
     #[test]
@@ -2109,7 +2192,7 @@ mod tests {
             access_token,
             &headers,
             method,
-            uri,
+            &[uri.to_string()],
             &store,
             CONFIG_MAX_AGE,
             test_arrival(),
@@ -2155,7 +2238,7 @@ mod tests {
             access_token,
             &headers,
             method,
-            uri,
+            &[uri.to_string()],
             &store,
             CONFIG_MAX_AGE,
             test_arrival(),
