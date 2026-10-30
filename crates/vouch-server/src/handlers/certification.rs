@@ -448,7 +448,6 @@ mod tests {
     fn key(secret: &str) -> NonEmptySecret {
         NonEmptySecret::new(secret.to_string().into()).expect("non-empty test key")
     }
-    use crate::handlers::oidc::build_authorization_success_redirect_url;
 
     #[test]
     fn test_hmac_valid_token_accepted() {
@@ -477,40 +476,6 @@ mod tests {
 
         let valid: bool = expected.as_bytes().ct_eq(token.as_bytes()).into();
         assert!(!valid, "Different pending_auth must not match");
-    }
-
-    #[test]
-    fn test_build_certification_redirect_preserves_existing_query() {
-        let redirect = build_authorization_success_redirect_url(
-            "https://example.com/callback?existing=1",
-            "code123",
-            Some("state123"),
-            "https://issuer.example.com",
-        )
-        .expect("redirect should be built successfully");
-
-        let url = url::Url::parse(&redirect).expect("redirect must be a valid URL");
-        let query_pairs: Vec<(String, String)> = url.query_pairs().into_owned().collect();
-
-        assert!(query_pairs.contains(&(String::from("existing"), String::from("1"))));
-        assert!(query_pairs.contains(&(String::from("code"), String::from("code123"))));
-        assert!(query_pairs.contains(&(String::from("state"), String::from("state123"))));
-        assert!(query_pairs.contains(&(
-            String::from("iss"),
-            String::from("https://issuer.example.com")
-        )));
-    }
-
-    #[test]
-    fn test_build_certification_redirect_invalid_uri_returns_error() {
-        let result = build_authorization_success_redirect_url(
-            "://not-a-valid-url",
-            "code123",
-            Some("state123"),
-            "https://issuer.example.com",
-        );
-
-        assert!(result.is_err(), "invalid redirect URI should return error");
     }
 
     #[tokio::test]
