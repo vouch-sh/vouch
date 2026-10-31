@@ -214,31 +214,34 @@ fn cargo_dir() -> Result<PathBuf> {
 /// Choose between the extensionless `legacy` and `modern` (`config.toml`)
 /// with Cargo's precedence.
 ///
-/// When the two names are one file, the real file is returned:
 /// [`CargoConfig::save`] renames a temp file over the path it is given, which
-/// would replace a symlink with a regular file.
+/// would replace a symlink with a regular file. So whenever the selected path
+/// is (or points through) a symlink, the real file is returned instead: the
+/// two-names-one-file case picks the non-symlink name, and the one-file-only
+/// case resolves the symlink to its target — e.g. a dotfiles-managed
+/// `~/.cargo/config` symlinked outside `$CARGO_HOME` — so the link survives.
 ///
 /// Takes both paths so tests need not set `CARGO_HOME` (`std::env::set_var`
 /// is `unsafe` under edition 2024).
 fn config_path_in(legacy: &Path, modern: &Path) -> ConfigLocation {
     let path = if !legacy.exists() {
-        modern
+        resolve_if_symlink(modern)
     } else if !modern.exists() {
-        legacy
+        resolve_if_symlink(legacy)
     } else if !same_file(legacy, modern) {
         return ConfigLocation {
             path: legacy.to_path_buf(),
             ignored: Some(modern.to_path_buf()),
         };
     } else if is_symlink(legacy) {
-        modern
+        modern.to_path_buf()
     } else {
         // `config.toml` is the symlink, or the two are hardlinked; a rename
         // cannot preserve a hardlink either way.
-        legacy
+        legacy.to_path_buf()
     };
     ConfigLocation {
-        path: path.to_path_buf(),
+        path,
         ignored: None,
     }
 }
@@ -246,6 +249,24 @@ fn config_path_in(legacy: &Path, modern: &Path) -> ConfigLocation {
 /// Whether `path` is itself a symlink (does not follow the link).
 fn is_symlink(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
+}
+
+/// Resolve `path` to its real target when it is a symlink, so an atomic
+/// rename writes through the real file and the link survives.
+///
+/// [`CargoConfig::save`] renames a temp file over `path`, which would replace
+/// a symlink with a regular file; canonicalizing first points the write at
+/// the link's target instead. Returns `path` unchanged for regular files
+/// (no symlink to clobber) and falls back to `path` on resolution failure
+/// (a broken symlink would already have failed the caller's `exists()` check,
+/// so this only races a target going away mid-call).
+fn resolve_if_symlink(path: &Path) -> PathBuf {
+    if is_symlink(path)
+        && let Ok(real) = std::fs::canonicalize(path)
+    {
+        return real;
+    }
+    path.to_path_buf()
 }
 
 /// Whether `a` and `b` refer to the same file.
@@ -789,6 +810,179 @@ credential-provider = ["/usr/local/bin/vouch"]
             "pre-existing config preserved"
         );
         assert_eq!(via_legacy, via_modern, "both names see the same content");
+    }
+
+    // A dotfiles setup: `~/.cargo/config` is a symlink to a file managed
+    // outside `$CARGO_HOME`, with no sibling `config.toml`. Only the legacy
+    // name exists, so the both-files symlink guard above does not engage;
+    // `config_path_in` must still resolve the link so `save()` does not
+    // replace it with a regular file. Symmetric for a `config.toml` symlink.
+
+    #[cfg(unix)]
+    #[test]
+    fn config_path_resolves_symlinked_legacy_when_only_legacy_exists() {
+        use std::os::unix::fs::symlink;
+        let cargo_dir = tempfile::tempdir().expect("failed to create cargo dir");
+        let dotfiles_dir = tempfile::tempdir().expect("failed to create dotfiles dir");
+        let (legacy, modern) = candidates(cargo_dir.path());
+        let dotfiles_file = dotfiles_dir.path().join("cargo-config");
+        std::fs::write(&dotfiles_file, "[build]\njobs = 4\n").expect("write dotfiles source");
+        symlink(&dotfiles_file, &legacy).expect("symlink config -> dotfiles file");
+
+        let ConfigLocation { path, ignored } = config_path_in(&legacy, &modern);
+        assert_eq!(
+            path,
+            std::fs::canonicalize(&dotfiles_file).unwrap(),
+            "resolve the symlink so `save()` writes the real file, not the link",
+        );
+        assert!(
+            ignored.is_none(),
+            "only one candidate exists — nothing is split",
+        );
+        assert!(
+            !modern.exists(),
+            "must not create config.toml just by resolving",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_path_resolves_symlinked_modern_when_only_modern_exists() {
+        use std::os::unix::fs::symlink;
+        let cargo_dir = tempfile::tempdir().expect("failed to create cargo dir");
+        let dotfiles_dir = tempfile::tempdir().expect("failed to create dotfiles dir");
+        let (legacy, modern) = candidates(cargo_dir.path());
+        let dotfiles_file = dotfiles_dir.path().join("cargo-config.toml");
+        std::fs::write(&dotfiles_file, "[build]\njobs = 4\n").expect("write dotfiles source");
+        symlink(&dotfiles_file, &modern).expect("symlink config.toml -> dotfiles file");
+
+        let ConfigLocation { path, ignored } = config_path_in(&legacy, &modern);
+        assert_eq!(
+            path,
+            std::fs::canonicalize(&dotfiles_file).unwrap(),
+            "resolve the symlink so `save()` writes the real file, not the link",
+        );
+        assert!(
+            ignored.is_none(),
+            "only one candidate exists — nothing is split"
+        );
+        assert!(
+            !legacy.exists(),
+            "must not create a legacy config just by resolving",
+        );
+    }
+
+    // `save()` renames a temp file over its path, so writing through a
+    // symlink would replace it with a regular file — the bug fixed here.
+    #[cfg(unix)]
+    #[test]
+    fn setup_preserves_config_symlink_pointing_at_dotfiles_file() {
+        use std::os::unix::fs::symlink;
+        let cargo_dir = tempfile::tempdir().expect("failed to create cargo dir");
+        let dotfiles_dir = tempfile::tempdir().expect("failed to create dotfiles dir");
+        let (legacy, modern) = candidates(cargo_dir.path());
+        let dotfiles_file = dotfiles_dir.path().join("cargo-config");
+        std::fs::write(&dotfiles_file, "[build]\njobs = 4\n").expect("write dotfiles source");
+        symlink(&dotfiles_file, &legacy).expect("symlink config -> dotfiles file");
+
+        // The real setup sequence: resolve → load → edit → save.
+        let ConfigLocation { path, ignored } = config_path_in(&legacy, &modern);
+        assert!(
+            is_symlink(&legacy),
+            "precondition: legacy is a symlink before save",
+        );
+        assert!(ignored.is_none());
+
+        let mut config = CargoConfig::load_from(path).unwrap();
+        config.set_registry_provider("codeartifact-test", &["/usr/local/bin/vouch"]);
+        config.save().unwrap();
+
+        // The symlink must survive the atomic rename, and the dotfiles
+        // source file — not a new regular file at `~/.cargo/config` — must
+        // hold the vouch entry.
+        assert!(
+            is_symlink(&legacy),
+            "`config` must still be a symlink after save",
+        );
+        assert_eq!(
+            std::fs::read_link(&legacy).unwrap(),
+            dotfiles_file,
+            "symlink target unchanged",
+        );
+
+        let via_legacy = std::fs::read_to_string(&legacy).unwrap();
+        let via_dotfiles = std::fs::read_to_string(&dotfiles_file).unwrap();
+        assert!(
+            via_legacy.contains("vouch"),
+            "entry visible via the symlink"
+        );
+        assert!(
+            via_dotfiles.contains("vouch"),
+            "entry landed in the dotfiles source file the symlink points at",
+        );
+        assert!(
+            via_dotfiles.contains("jobs = 4"),
+            "pre-existing dotfiles config preserved",
+        );
+        assert_eq!(via_legacy, via_dotfiles, "symlink still follows the source");
+        assert!(
+            !modern.exists(),
+            "config.toml must not be created as a side effect",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn setup_preserves_config_toml_symlink_pointing_at_dotfiles_file() {
+        use std::os::unix::fs::symlink;
+        let cargo_dir = tempfile::tempdir().expect("failed to create cargo dir");
+        let dotfiles_dir = tempfile::tempdir().expect("failed to create dotfiles dir");
+        let (legacy, modern) = candidates(cargo_dir.path());
+        let dotfiles_file = dotfiles_dir.path().join("cargo-config.toml");
+        std::fs::write(&dotfiles_file, "[build]\njobs = 4\n").expect("write dotfiles source");
+        symlink(&dotfiles_file, &modern).expect("symlink config.toml -> dotfiles file");
+        // Symmetric to the legacy case: only `config.toml` exists and it is a
+        // symlink to a dotfiles-managed file outside `$CARGO_HOME`.
+        let ConfigLocation { path, ignored } = config_path_in(&legacy, &modern);
+        assert!(
+            is_symlink(&modern),
+            "precondition: modern is a symlink before save"
+        );
+        assert!(ignored.is_none());
+
+        let mut config = CargoConfig::load_from(path).unwrap();
+        config.set_registry_provider("codeartifact-test", &["/usr/local/bin/vouch"]);
+        config.save().unwrap();
+
+        assert!(
+            is_symlink(&modern),
+            "`config.toml` must still be a symlink after save",
+        );
+        assert_eq!(
+            std::fs::read_link(&modern).unwrap(),
+            dotfiles_file,
+            "symlink target unchanged",
+        );
+
+        let via_modern = std::fs::read_to_string(&modern).unwrap();
+        let via_dotfiles = std::fs::read_to_string(&dotfiles_file).unwrap();
+        assert!(
+            via_modern.contains("vouch"),
+            "entry visible via the symlink"
+        );
+        assert!(
+            via_dotfiles.contains("vouch"),
+            "entry landed in the dotfiles source file the symlink points at",
+        );
+        assert!(
+            via_dotfiles.contains("jobs = 4"),
+            "pre-existing dotfiles config preserved",
+        );
+        assert_eq!(via_modern, via_dotfiles, "symlink still follows the source");
+        assert!(
+            !legacy.exists(),
+            "a legacy config must not be created as a side effect",
+        );
     }
 
     // Round-trips the vouch registry set through an extensionless `config`.
