@@ -731,6 +731,7 @@ credential-provider = ["/usr/local/bin/vouch"]
         );
     }
 
+    #[cfg(unix)]
     fn is_symlink(path: &std::path::Path) -> bool {
         std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
     }
