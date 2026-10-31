@@ -280,7 +280,7 @@ fn create_dir_owner_only(dir: &Path) -> std::io::Result<()> {
     unsafe_code,
     reason = "libc::getuid is always safe with no side effects"
 )]
-fn current_uid() -> u32 {
+pub(crate) fn current_uid() -> u32 {
     // SAFETY: getuid() reads the process's real UID with no side effects.
     unsafe { libc::getuid() }
 }

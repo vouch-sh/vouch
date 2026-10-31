@@ -6,11 +6,14 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
+use crate::paths;
+
 /// Unix file permission mode for atomic writes.
 ///
 /// On non-Unix platforms, this value is accepted but ignored.
 pub enum FileMode {
-    /// Use default permissions (no explicit chmod).
+    /// Keep an existing file's mode; a new file is owner-only (0o600 on Unix).
     Default,
     /// Restrictive: owner read/write only (0o600 on Unix).
     Secure,
@@ -26,6 +29,10 @@ pub enum FileMode {
 /// On Unix, sets file permissions on the temp file before the rename
 /// so the file is never visible with incorrect permissions.
 ///
+/// A hardlinked file is split: the rename gives this name a new file and
+/// leaves the other names on the old one, as npm's `write-file-atomic` and
+/// Docker's config writer do.
+///
 /// When `path` is a symlink, the file at the end of the link is replaced and
 /// the link is kept (see [`write_target`]).
 fn atomic_write_impl(path: &Path, content: &[u8], mode: FileMode) -> Result<()> {
@@ -38,18 +45,41 @@ fn atomic_write_impl(path: &Path, content: &[u8], mode: FileMode) -> Result<()> 
     fs::create_dir_all(parent)
         .with_context(|| format!("failed to create directory {}", parent.display()))?;
 
+    // `tempfile` creates the file `0o600`, so no write is ever visible with
+    // broader permissions. Ownership and mode then follow Docker's config
+    // writer: the replacement takes the existing file's owner and mode, and a
+    // new file stays `0o600`. `Secure` keeps `0o600` even when the existing
+    // file was broader.
     let mut tmp = tempfile::NamedTempFile::new_in(parent)
         .with_context(|| format!("failed to create temp file in {}", parent.display()))?;
 
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let unix_mode = match mode {
-            FileMode::Default => None,
-            FileMode::Secure => Some(0o600),
-        };
-        if let Some(m) = unix_mode {
-            fs::set_permissions(tmp.path(), fs::Permissions::from_mode(m))?;
+    if let Ok(old) = fs::metadata(&target) {
+        use std::os::unix::fs::{MetadataExt, fchown};
+        let new = tmp.as_file().metadata()?;
+        if (old.uid(), old.gid()) != (new.uid(), new.gid()) {
+            match fchown(tmp.as_file(), Some(old.uid()), Some(old.gid())) {
+                Ok(()) => {}
+                // A non-root user cannot give a file away, so it keeps the
+                // writer's ownership.
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::Unsupported
+                        || (paths::current_uid() != 0
+                            && matches!(
+                                e.kind(),
+                                std::io::ErrorKind::PermissionDenied
+                                    | std::io::ErrorKind::InvalidInput
+                            )) => {}
+                Err(e) => {
+                    return Err(e).with_context(|| {
+                        format!("failed to copy the owner of {}", target.display())
+                    });
+                }
+            }
+        }
+        // After the chown, which clears setuid and setgid bits.
+        if let FileMode::Default = mode {
+            fs::set_permissions(tmp.path(), old.permissions())?;
         }
     }
 
@@ -181,6 +211,93 @@ mod tests {
         atomic_write(&path, b"new")?;
         assert_eq!(fs::read(&path)?, b"new");
         assert!(!fs::symlink_metadata(&path)?.file_type().is_symlink());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn mode_of(path: &Path) -> Result<u32> {
+        use std::os::unix::fs::PermissionsExt;
+        Ok(fs::metadata(path)?.permissions().mode() & 0o7777)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_atomic_write_keeps_existing_mode() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("config");
+        fs::write(&path, b"old")?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640))?;
+
+        atomic_write(&path, b"new")?;
+
+        assert_eq!(mode_of(&path)?, 0o640, "the rewrite keeps the file's mode");
+        Ok(())
+    }
+
+    // A new file is owner-only, as Docker creates `~/.docker/config.json`: a
+    // config that later gains credentials must not start out world-readable.
+    #[cfg(unix)]
+    #[test]
+    fn test_atomic_write_new_file_is_owner_only() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("config");
+
+        atomic_write(&path, b"new")?;
+
+        assert_eq!(mode_of(&path)?, 0o600);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_atomic_write_secure_overrides_existing_mode() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("token");
+        fs::write(&path, b"old")?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644))?;
+
+        atomic_write_secure(&path, b"new")?;
+
+        assert_eq!(mode_of(&path)?, 0o600);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_atomic_write_keeps_mode_through_symlink() -> Result<()> {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let dir = tempfile::tempdir()?;
+        let source = dir.path().join("aws-config");
+        fs::write(&source, b"old")?;
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o644))?;
+        let link = dir.path().join("config");
+        symlink(&source, &link)?;
+
+        atomic_write(&link, b"new")?;
+
+        assert_eq!(mode_of(&source)?, 0o644);
+        Ok(())
+    }
+
+    // The rename gives this name a new file; another hardlink keeps the old
+    // contents, as with npm's `write-file-atomic` and Docker's config writer.
+    #[cfg(unix)]
+    #[test]
+    fn test_atomic_write_splits_hardlink() -> Result<()> {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("config");
+        fs::write(&path, b"old")?;
+        let other = dir.path().join("other");
+        fs::hard_link(&path, &other)?;
+
+        atomic_write(&path, b"new")?;
+
+        assert_eq!(fs::read(&path)?, b"new");
+        assert_eq!(fs::read(&other)?, b"old");
+        assert_eq!(fs::metadata(&other)?.nlink(), 1);
         Ok(())
     }
 
