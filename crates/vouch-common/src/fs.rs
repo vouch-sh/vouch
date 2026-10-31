@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Atomic, permission-aware file writes shared across the CLI and agent.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use std::fs;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Unix file permission mode for atomic writes.
 ///
@@ -25,8 +25,14 @@ pub enum FileMode {
 /// Creates parent directories if they don't exist.
 /// On Unix, sets file permissions on the temp file before the rename
 /// so the file is never visible with incorrect permissions.
+///
+/// When `path` is a symlink, the file at the end of the link is replaced and
+/// the link is kept (see [`write_target`]).
 fn atomic_write_impl(path: &Path, content: &[u8], mode: FileMode) -> Result<()> {
-    let parent = path.parent().context("file path has no parent directory")?;
+    let target = write_target(path)?;
+    let parent = target
+        .parent()
+        .context("file path has no parent directory")?;
 
     // create_dir_all is idempotent — no existence check needed.
     fs::create_dir_all(parent)
@@ -61,10 +67,41 @@ fn atomic_write_impl(path: &Path, content: &[u8], mode: FileMode) -> Result<()> 
         .sync_all()
         .with_context(|| format!("failed to sync temp file for {}", path.display()))?;
 
-    tmp.persist(path)
-        .with_context(|| format!("failed to persist temp file to {}", path.display()))?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the sanctioned rename: `target` is the end of the symlink chain"
+    )]
+    tmp.persist(&target)
+        .with_context(|| format!("failed to persist temp file to {}", target.display()))?;
 
     Ok(())
+}
+
+/// Linux's `MAXSYMLINKS`: a longer chain is treated as a loop.
+const MAX_SYMLINK_HOPS: usize = 40;
+
+/// The file a write to `path` replaces: `path` itself, or the end of its
+/// symlink chain.
+///
+/// A rename over a symlink replaces the link, so a dotfile managed by stow,
+/// chezmoi, or home-manager would become a regular file and stop tracking its
+/// source. A dangling link resolves to the path it names, so the write creates
+/// that file, as `std::fs::write` does.
+fn write_target(path: &Path) -> Result<PathBuf> {
+    let mut target = path.to_path_buf();
+    for _ in 0..MAX_SYMLINK_HOPS {
+        let is_link = fs::symlink_metadata(&target).is_ok_and(|m| m.file_type().is_symlink());
+        if !is_link {
+            return Ok(target);
+        }
+        let link = fs::read_link(&target)
+            .with_context(|| format!("failed to read symlink {}", target.display()))?;
+        target = match target.parent() {
+            Some(dir) => dir.join(link),
+            None => link,
+        };
+    }
+    bail!("too many levels of symbolic links at {}", path.display())
 }
 
 /// Atomically write content to a file.
@@ -133,6 +170,130 @@ mod tests {
         let path = dir.path().join("cert.pub");
         write_secure_file(&path, "ssh-ed25519 AAAA...\n")?;
         assert_eq!(fs::read_to_string(&path)?, "ssh-ed25519 AAAA...\n");
+        Ok(())
+    }
+
+    #[test]
+    fn test_atomic_write_replaces_regular_file() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("config");
+        fs::write(&path, b"old")?;
+        atomic_write(&path, b"new")?;
+        assert_eq!(fs::read(&path)?, b"new");
+        assert!(!fs::symlink_metadata(&path)?.file_type().is_symlink());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn assert_link(link: &Path, points_at: &Path) -> Result<()> {
+        assert!(
+            fs::symlink_metadata(link)?.file_type().is_symlink(),
+            "{} must still be a symlink",
+            link.display()
+        );
+        assert_eq!(fs::read_link(link)?, points_at, "link target unchanged");
+        Ok(())
+    }
+
+    // A dotfiles manager links `~/.ssh/config` into a repository. The write
+    // lands in the repository file and the link survives.
+    #[cfg(unix)]
+    #[test]
+    fn test_atomic_write_keeps_absolute_symlink() -> Result<()> {
+        use std::os::unix::fs::symlink;
+        let home = tempfile::tempdir()?;
+        let dotfiles = tempfile::tempdir()?;
+        let source = dotfiles.path().join("ssh-config");
+        fs::write(&source, b"old")?;
+        let link = home.path().join("config");
+        symlink(&source, &link)?;
+
+        atomic_write(&link, b"new")?;
+
+        assert_link(&link, &source)?;
+        assert_eq!(fs::read(&source)?, b"new");
+        Ok(())
+    }
+
+    // A relative link target is relative to the link's directory, not the
+    // process's working directory.
+    #[cfg(unix)]
+    #[test]
+    fn test_atomic_write_secure_keeps_relative_symlink() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir()?;
+        fs::create_dir(dir.path().join("dotfiles"))?;
+        let source = dir.path().join("dotfiles").join("npmrc");
+        fs::write(&source, b"old")?;
+        let link = dir.path().join(".npmrc");
+        symlink(Path::new("dotfiles/npmrc"), &link)?;
+
+        atomic_write_secure(&link, b"new")?;
+
+        assert_link(&link, Path::new("dotfiles/npmrc"))?;
+        assert_eq!(fs::read(&source)?, b"new");
+        let mode = fs::metadata(&source)?.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "secure mode applies to the real file");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_atomic_write_follows_symlink_chain() -> Result<()> {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir()?;
+        let source = dir.path().join("real");
+        fs::write(&source, b"old")?;
+        let middle = dir.path().join("middle");
+        symlink(&source, &middle)?;
+        let link = dir.path().join("config");
+        symlink(&middle, &link)?;
+
+        atomic_write(&link, b"new")?;
+
+        assert_link(&link, &middle)?;
+        assert_link(&middle, &source)?;
+        assert_eq!(fs::read(&source)?, b"new");
+        Ok(())
+    }
+
+    // A dangling link names the file to create, as `std::fs::write` treats it.
+    #[cfg(unix)]
+    #[test]
+    fn test_atomic_write_creates_dangling_symlink_target() -> Result<()> {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir()?;
+        let source = dir.path().join("dotfiles").join("aws-config");
+        let link = dir.path().join("config");
+        symlink(&source, &link)?;
+
+        atomic_write(&link, b"new")?;
+
+        assert_link(&link, &source)?;
+        assert_eq!(fs::read(&source)?, b"new");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_atomic_write_rejects_symlink_loop() -> Result<()> {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir()?;
+        let a = dir.path().join("a");
+        let b = dir.path().join("b");
+        symlink(&b, &a)?;
+        symlink(&a, &b)?;
+
+        let err = atomic_write(&a, b"new").err().context("a loop must fail")?;
+
+        assert!(
+            err.to_string()
+                .contains("too many levels of symbolic links"),
+            "{err}"
+        );
+        assert_link(&a, &b)?;
+        assert_link(&b, &a)?;
         Ok(())
     }
 }
