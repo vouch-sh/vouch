@@ -46,6 +46,7 @@ judgement columns come from the batch's record in `.local/`.
 | 2026-10-19 | 1 | 1 | 0 | 1 | 1 | 1 of 1 | #1838/#1839 closed not planned: contradicts the 10-16 no-rolling-deploy decision | 0 exact; recurrence of a recorded decision | 1 requested (`rcr_f5eda781…`), replaces `rule_5bc7d013`; not synced |
 | 2026-10-23 | 11 | 11 | 1 | 0 | 0 | 4 of 11 | 5 merged as-is (#1859, #1862, #1864, #1866, #1867); #1860 amended on its branch (new tests parsed `Cli` without `ENV_LOCK`, raced on Windows); 5 superseded by signed rebuilds (#1858→#1872 guard dropped, #1861→#1873 `JsonBody` on `ValidJson`, #1863→#1874 citations fixed and RFC 8693 §6 rows kept, #1865→#1875, #1868→#1876); dead-code #1869 closed; deps #1870 first (tokio, ctutils, crypto-bigint and zstd ignores) | 1 of 11 (#1852 extends the 10-16 token-param guardrail residue) | 0 (user: none) |
 | 2026-10-30 | 5 | 5 | 0 | 0 | 0 | 4 of 5 | #1893 merged as-is; #1890 amended (`ConfigLocation`, the ignored-file note moved from `default_path` to setup, comments trimmed); #1894 amended (displaced uv defaults marked `explicit = true`); #1891 closed with #1886 (conformant: RFC 7592 §2.2 MUST + RFC 7591 §2 default), follow-up #1895 (update params made non-optional, omission test); #1892 superseded by class fix #1896 (`RoleTarget` through every STS exchange) | 0 | 0 (not requested) |
+| 2026-10-31 | 1 | 1 | 0 | 1 | 1 | 1 of 1 | #1903 superseded by a class fix in `vouch_common::fs::atomic_write` (follows the symlink chain; a dangling link creates its target); Cargo `is_symlink` branch removed; `disallowed_methods` rename ban in cli/agent/common | 3 | 1 requested (`rcr_1a8b7ce3`) |
 
 Batches before 2026-08-20 have no record, so only their counted columns exist:
 run the script. `escape-unaware-delimiter-normalization` exists on Detail's side
@@ -1157,3 +1158,23 @@ URIs is looser than RFC 9449 §4.3 item 9; the user accepted that, so it is resi
   one side carries pass under either ordering.
 - A finding that names a spec violation can be the conformant reading. Quote the MUST before
   sizing the fix; #1886 would have replaced a MUST with a MAY.
+
+## 2026-10-31
+
+One finding (#1902) and one fix PR (#1903), blamed on #1890, Detail's Cargo PR that we amended
+and merged the day before. This is self-caused: #1890 added the legacy-only branch, and the
+symlink check covered only the both-exist branch. October: n 67, median 105d, `<30d` 20.
+
+Class: every `atomic_write` into a user dotfile replaced a symlink with a regular file
+(ssh config and known_hosts, aws, docker, npm, pip, uv, openai, cargo); only Cargo had any
+handling. The fix is in `vouch_common::fs::atomic_write_impl`, which now resolves the link chain
+and renames over the real file, with a dangling link creating its target. #1903 is superseded.
+Guardrail: a `disallowed_methods` ban on `std::fs::rename` and tempfile `persist`, raised to
+`warn` in the CLI, agent, and vouch-common roots. That cost an `#[expect]` on 28 CLI and agent
+clock reads, because the lint is shared with the server's `Timestamp::now` ban. There are also
+behavioral tests in `vouch-common`. Rule request `rcr_1a8b7ce3`.
+
+### Process
+
+- A symlink-preservation fix scoped to one caller of a shared writer is an instance. Check the
+  writer itself: the rename happens there, so the fix belongs there.
