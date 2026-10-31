@@ -86,6 +86,10 @@ pub fn compute_clock_skew(headers: &reqwest::header::HeaderMap) -> Option<(u64, 
     let date_str = headers.get("date").and_then(|v| v.to_str().ok())?;
     let server_zoned = jiff::fmt::rfc2822::parse(date_str).ok()?;
     let server_secs = server_zoned.timestamp().as_second();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the CLI has no request clock; this reads local wall time"
+    )]
     let local_secs = jiff::Timestamp::now().as_second();
     let skew = server_secs.saturating_sub(local_secs).unsigned_abs();
     let local_behind = local_secs < server_secs;

@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Shared types for vouch CLI and server.
 
+// File replacement goes through `vouch_common::fs::atomic_write`, which keeps
+// symlinks. `disallowed_methods` is configured in `.clippy.toml` and left at
+// `allow` workspace-wide; this is where it is switched on.
+#![warn(clippy::disallowed_methods)]
+
 pub mod aaguid;
 pub(crate) mod api;
 pub mod aws;

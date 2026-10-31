@@ -77,6 +77,10 @@ impl IntegrationCheck for SshIntegration {
         };
 
         let valid_before = cert.valid_before();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the CLI has no request clock; this reads local wall time"
+        )]
         let now_unix = jiff::Timestamp::now().as_second();
         let valid_before_i64 = i64::try_from(valid_before).unwrap_or(i64::MAX);
 

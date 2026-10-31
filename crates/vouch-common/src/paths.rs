@@ -280,7 +280,7 @@ fn create_dir_owner_only(dir: &Path) -> std::io::Result<()> {
     unsafe_code,
     reason = "libc::getuid is always safe with no side effects"
 )]
-fn current_uid() -> u32 {
+pub(crate) fn current_uid() -> u32 {
     // SAFETY: getuid() reads the process's real UID with no side effects.
     unsafe { libc::getuid() }
 }
@@ -295,6 +295,10 @@ fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {
     if let Some(parent) = to.parent() {
         prepare_private_dir(parent)?;
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a move between XDG directories, not a replace of a user file"
+    )]
     match std::fs::rename(from, to) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => {

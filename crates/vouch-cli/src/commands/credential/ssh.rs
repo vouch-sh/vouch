@@ -67,6 +67,10 @@ pub(crate) fn ensure_keypair(key_path: &Path) -> Result<KeypairAction> {
             new_path = %pub_path.display(),
             "Migrating SSH public key to new location"
         );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "a move to the new name, guarded by `!pub_path.exists()`; nothing is replaced"
+        )]
         std::fs::rename(&old_pub_path, &pub_path).with_context(|| {
             format!(
                 "failed to migrate public key {} to {}",
@@ -185,6 +189,10 @@ fn check_existing_certificate(
 
     let valid_before = cert.valid_before();
     let valid_before_i64 = i64::try_from(valid_before).unwrap_or(i64::MAX);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the CLI has no request clock; this reads local wall time"
+    )]
     let now_unix = jiff::Timestamp::now().as_second();
 
     if valid_before_i64 <= now_unix {

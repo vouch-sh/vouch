@@ -198,6 +198,10 @@ fn cache_key(
 
 /// Compute cache expiry: 14 minutes from now (1 minute safety margin).
 fn rds_cache_expiry() -> Result<String> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the CLI has no request clock; this reads local wall time"
+    )]
     let expires = jiff::Timestamp::now()
         .checked_add(jiff::SignedDuration::from_mins(RDS_CACHE_VALIDITY_MINUTES))
         .context(tr!("err-failed-compute-rds-token-cache-expiry"))?;

@@ -128,6 +128,10 @@ impl DpopProofBuilder {
     /// # Errors
     ///
     /// Returns [`FapiError::JwtSigning`] if serialization or signing fails.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the CLI has no request clock; this reads local wall time"
+    )]
     pub fn build(self, key: &ClientKey) -> Result<String, FapiError> {
         let jwk = key.public_jwk()?;
 

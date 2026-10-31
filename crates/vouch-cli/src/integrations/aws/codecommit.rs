@@ -79,6 +79,10 @@ pub(crate) fn sign_request(
     path: &str,
     region: &str,
 ) -> CodeCommitCredentials {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the CLI has no request clock; this reads local wall time"
+    )]
     let now = jiff::Timestamp::now();
     let timestamp = format_codecommit_timestamp(now);
     let date_stamp = sigv4::format_date_stamp(now);

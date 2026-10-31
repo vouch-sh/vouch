@@ -86,6 +86,10 @@ struct AuditRecord {
 /// (`$XDG_STATE_HOME/vouch/audit.log`).
 ///
 /// Best-effort: failures are logged at debug level and never block the agent.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the agent has no request clock; this reads local wall time"
+)]
 pub(crate) fn log_event(event: AuditEvent) {
     let record = AuditRecord {
         timestamp: jiff::Timestamp::now().to_string(),
@@ -119,6 +123,10 @@ fn write_event(record: &AuditRecord) -> std::io::Result<()> {
     {
         let rotated = dir.join("audit.log.1");
         // Best-effort rotation; failure is non-fatal and is shadowed by the next write.
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "rotation moves the log aside; it does not replace a file"
+        )]
         let _rotated = std::fs::rename(&log_path, &rotated);
     }
 

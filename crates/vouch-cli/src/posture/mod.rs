@@ -21,6 +21,10 @@ use vouch_common::posture::{DevicePosture, OperatingSystem};
 /// Runs all available detection checks for the current platform.
 /// Any check that fails simply produces `None` for that field.
 #[must_use]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the CLI has no request clock; this reads local wall time"
+)]
 pub fn collect() -> DevicePosture {
     let mut posture = DevicePosture::new();
 

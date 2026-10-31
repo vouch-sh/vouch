@@ -219,6 +219,10 @@ fn read_boot_uptime() -> Option<u64> {
     let sec_str = output.split("sec = ").nth(1)?.split(',').next()?.trim();
 
     let boot_secs: i64 = sec_str.parse().ok()?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the CLI has no request clock; this reads local wall time"
+    )]
     let now_secs = jiff::Timestamp::now().as_second();
     let uptime = now_secs.saturating_sub(boot_secs);
 

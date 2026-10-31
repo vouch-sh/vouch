@@ -109,6 +109,10 @@ pub(crate) fn is_network_error(err: &anyhow::Error) -> bool {
 
 /// Build a default expiry timestamp (1 hour from now) for tokens that don't
 /// include an explicit expiration.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the CLI has no request clock; this reads local wall time"
+)]
 pub(crate) fn default_expiry() -> String {
     jiff::Timestamp::now()
         .checked_add(jiff::SignedDuration::from_hours(1))
