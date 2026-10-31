@@ -57,6 +57,10 @@ fn build_exec_credential(token: &str, expiration: &str) -> Result<serde_json::Va
 /// Compute the expiration timestamp as RFC 3339 from a TTL in seconds.
 fn expiration_rfc3339(expires_in: u64) -> Result<String> {
     let ttl = i64::try_from(expires_in).unwrap_or(3600);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the CLI has no request clock; this reads local wall time"
+    )]
     let expires = jiff::Timestamp::now()
         .checked_add(jiff::SignedDuration::from_secs(ttl))
         .context(tr!("err-failed-compute-kubernetes-token-expiration"))?;

@@ -211,6 +211,10 @@ pub(crate) async fn resolve_token() -> Result<SecretString> {
 /// Best-effort: a failure leaves the agent as it was, and the caller uses the
 /// config session regardless.
 #[cfg(unix)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the CLI has no request clock; this reads local wall time"
+)]
 async fn restore_agent_session(session: &ResolvedSession) {
     if AgentClient::connect().await.is_err() {
         return;

@@ -33,6 +33,10 @@ impl CertificateMetadata {
 
     /// Check if the certificate has expired.
     pub fn is_expired(&self) -> bool {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the agent has no request clock; this reads local wall time"
+        )]
         let now = Timestamp::now();
         self.expires_at < now
     }

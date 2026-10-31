@@ -295,6 +295,10 @@ fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {
     if let Some(parent) = to.parent() {
         prepare_private_dir(parent)?;
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a move between XDG directories, not a replace of a user file"
+    )]
     match std::fs::rename(from, to) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => {

@@ -91,6 +91,10 @@ impl ClientAssertionBuilder {
     ///
     /// Returns [`FapiError::JwtSigning`] if signing fails.
     pub fn build(self, key: &ClientKey) -> Result<ClientAssertion, FapiError> {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the CLI has no request clock; this reads local wall time"
+        )]
         let now = jiff::Timestamp::now().as_second();
 
         let mut header = Header::new(Algorithm::ES256);

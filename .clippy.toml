@@ -17,6 +17,18 @@ disallowed-methods = [
     # Each decoder states, in an `#[expect]`, how its temporal claims are judged
     # instead (normally `crypto::validity::ValidityWindow` at the request's arrival).
     { path = "jsonwebtoken::decode", reason = "judge `exp`/`nbf` with `crypto::validity::ValidityWindow` at `ArrivalTime`, then add an `#[expect]` naming how" },
+    # A rename over a symlink replaces the link, so a dotfile managed by stow,
+    # chezmoi, or home-manager becomes a regular file. `vouch_common::fs::atomic_write`
+    # follows the link and renames over the real file. The level is raised in
+    # the CLI, agent, and vouch-common crate roots as well as vouch-server's;
+    # there, each `jiff::Timestamp::now` carries an `#[expect]` saying the
+    # binary has no request clock.
+    { path = "std::fs::rename", reason = "to replace a file, use `vouch_common::fs::atomic_write`, which keeps symlinks; `#[expect]` a move that is not a replace" },
+    { path = "tokio::fs::rename", allow-invalid = true, reason = "to replace a file, use `vouch_common::fs::atomic_write`, which keeps symlinks; `#[expect]` a move that is not a replace" },
+    { path = "tempfile::NamedTempFile::persist", reason = "use `vouch_common::fs::atomic_write`, which keeps symlinks" },
+    { path = "tempfile::NamedTempFile::persist_noclobber", reason = "use `vouch_common::fs::atomic_write`, which keeps symlinks" },
+    { path = "tempfile::TempPath::persist", reason = "use `vouch_common::fs::atomic_write`, which keeps symlinks" },
+    { path = "tempfile::TempPath::persist_noclobber", reason = "use `vouch_common::fs::atomic_write`, which keeps symlinks" },
 ]
 
 # Items from our own crates are brought in with `use`, not spelled inline as

@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Vouch agent daemon binary.
 
+// File replacement goes through `vouch_common::fs::atomic_write`, which keeps
+// symlinks. `disallowed_methods` is configured in `.clippy.toml` and left at
+// `allow` workspace-wide; this is where it is switched on. Clock reads carry an
+// `#[expect]`: a client has no request instant to anchor to.
+#![warn(clippy::disallowed_methods)]
+
 // Avoid musl's default allocator due to lackluster performance
 // https://nickb.dev/blog/default-musl-allocator-considered-harmful-to-performance
 #[cfg(target_env = "musl")]

@@ -116,6 +116,10 @@ impl SigV4SigningInput<'_> {
     ///
     /// Shared by every `sign_and_send_*` helper.
     #[must_use]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the CLI has no request clock; this reads local wall time"
+    )]
     fn sign(&self) -> SignedSigV4 {
         self.sign_at(jiff::Timestamp::now())
     }
@@ -563,6 +567,10 @@ pub(crate) fn build_presigned_url(params: &PresignedUrlParams<'_>) -> String {
         .unwrap_or(endpoint)
         .trim_end_matches('/');
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the CLI has no request clock; this reads local wall time"
+    )]
     let now = jiff::Timestamp::now();
     let amz_date = format_amz_date(now);
     let date_stamp = format_date_stamp(now);

@@ -339,6 +339,10 @@ pub(crate) async fn exchange(
 /// applying [`REFRESH_MARGIN_SECS`] of safety margin so we never hand out a
 /// token about to die. Falls back to [`super::cache::default_expiry`] when
 /// the provider omits `expires_in`.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the CLI has no request clock; this reads local wall time"
+)]
 fn cache_expiry(expires_in: Option<u64>) -> String {
     let Some(secs) = expires_in else {
         return super::cache::default_expiry();

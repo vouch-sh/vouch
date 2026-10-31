@@ -1,6 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Vouch CLI - Hardware-backed identity for developers.
 
+// File replacement goes through `vouch_common::fs::atomic_write`, which keeps
+// symlinks. `disallowed_methods` is configured in `.clippy.toml` and left at
+// `allow` workspace-wide; this is where it is switched on. Clock reads carry an
+// `#[expect]`: a client has no request instant to anchor to.
+#![warn(clippy::disallowed_methods)]
+// Tests build fixtures and stamp clocks freely; the non-test build still lints
+// every production site.
+#![cfg_attr(
+    test,
+    expect(
+        clippy::disallowed_methods,
+        reason = "tests build fixtures and stamp clocks; the lint targets production code"
+    )
+)]
 #![expect(
     clippy::print_stdout,
     clippy::print_stderr,

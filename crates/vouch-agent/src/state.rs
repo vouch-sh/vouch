@@ -31,6 +31,10 @@ pub struct Session {
 
 impl Session {
     /// Create a new session.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the agent has no request clock; this reads local wall time"
+    )]
     pub fn new(token: SecretString, user_email: String, expires_at: Timestamp) -> Self {
         Self {
             token,
@@ -56,6 +60,10 @@ impl Session {
     }
 
     /// Check if the session has expired.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the agent has no request clock; this reads local wall time"
+    )]
     pub fn is_expired(&self) -> bool {
         Timestamp::now() >= self.expires_at
     }
@@ -67,6 +75,10 @@ impl Session {
         reason = "duration since now is non-negative and bounded by session lifetime (< 24h, fits u64)"
     )]
     pub fn expires_in_seconds(&self) -> u64 {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the agent has no request clock; this reads local wall time"
+        )]
         let now = Timestamp::now();
         if now >= self.expires_at {
             return 0;
@@ -192,6 +204,10 @@ impl std::fmt::Debug for CachedCredential {
 
 impl CachedCredential {
     /// Create a new cached credential from a JSON value.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the agent has no request clock; this reads local wall time"
+    )]
     pub fn new(data: serde_json::Value, expires_at: Timestamp) -> Self {
         Self {
             data: SecretString::from(data.to_string()),
@@ -214,6 +230,10 @@ impl CachedCredential {
     }
 
     /// Check if this cached credential is still valid (not expired).
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the agent has no request clock; this reads local wall time"
+    )]
     pub fn is_valid(&self) -> bool {
         Timestamp::now() < self.expires_at
     }

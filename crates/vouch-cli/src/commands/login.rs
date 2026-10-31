@@ -538,6 +538,10 @@ async fn ensure_client_registered(client: &VouchClient, fapi_key: &ClientKey) ->
                         Ok(true) => {
                             // Cache the verification timestamp; cache write
                             // failures are non-fatal — next login revalidates.
+                            #[expect(
+                                clippy::disallowed_methods,
+                                reason = "the CLI has no request clock; this reads local wall time"
+                            )]
                             let now = jiff::Timestamp::now().to_string();
                             let _cached = Config::modify(|cfg| {
                                 cfg.set_server_url(&base_url);
@@ -605,6 +609,10 @@ fn recently_verified(verified_at: Option<&str>) -> bool {
     let Ok(ts) = s.parse::<jiff::Timestamp>() else {
         return false;
     };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the CLI has no request clock; this reads local wall time"
+    )]
     let elapsed = jiff::Timestamp::now().duration_since(ts);
     elapsed.as_secs() < 86_400
 }
@@ -620,6 +628,10 @@ fn resolve_expiry(expires_at: Option<&str>, expires_in: u64) -> String {
         return s.to_string();
     }
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the CLI has no request clock; this reads local wall time"
+    )]
     let ts = jiff::Timestamp::now()
         .checked_add(jiff::SignedDuration::from_secs(expiry_offset_seconds(
             expires_in,
@@ -679,6 +691,10 @@ fn format_expiry(expires_at: &str) -> String {
         return expires_at.to_string();
     };
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the CLI has no request clock; this reads local wall time"
+    )]
     let secs = ts.duration_since(jiff::Timestamp::now()).as_secs().max(0);
     // 60 is non-zero; unwrap_or arm is unreachable.
     let remaining = jiff::SignedDuration::from_mins(secs.checked_div(60).unwrap_or(0));

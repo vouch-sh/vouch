@@ -7,10 +7,11 @@
 //! - Checking if agent is already running
 
 use std::fs;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::PathBuf;
 use std::process;
 
+use vouch_common::fs::atomic_write;
 use vouch_common::paths;
 
 use crate::error::{AgentError, Result};
@@ -98,31 +99,11 @@ fn is_process_running(_pid: i32) -> bool {
 
 /// Write the current PID to the PID file atomically.
 ///
-/// Writes to a temporary file first, then renames to the final path
-/// to prevent TOCTOU races with concurrent readers.
+/// Uses [`atomic_write`] so a concurrent reader never sees a partial PID.
 pub fn write_pid_file() -> Result<()> {
     let pid_path = pid_file_path()?;
-
-    // Ensure parent directory exists
-    if let Some(parent) = pid_path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| AgentError::Config(format!("Failed to create cache directory: {e}")))?;
-    }
-
-    let pid = process::id();
-
-    // Write to a temp file in the same directory, then rename atomically
-    let tmp_path = pid_path.with_added_extension("tmp");
-    let mut file = fs::File::create(&tmp_path)
-        .map_err(|e| AgentError::Config(format!("Failed to create temp PID file: {e}")))?;
-
-    write!(file, "{pid}")
-        .map_err(|e| AgentError::Config(format!("Failed to write temp PID file: {e}")))?;
-
-    fs::rename(&tmp_path, &pid_path)
-        .map_err(|e| AgentError::Config(format!("Failed to rename PID file: {e}")))?;
-
-    Ok(())
+    atomic_write(&pid_path, process::id().to_string().as_bytes())
+        .map_err(|e| AgentError::Config(format!("Failed to write PID file: {e:#}")))
 }
 
 /// Remove the PID file.

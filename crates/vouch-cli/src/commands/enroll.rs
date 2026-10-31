@@ -403,6 +403,10 @@ pub(super) fn expiry_offset_seconds(expires_in: u64) -> i64 {
 }
 
 /// Compute absolute session expiry from an `expires_in` TTL.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the CLI has no request clock; this reads local wall time"
+)]
 fn compute_session_expires_at(expires_in: u64) -> jiff::Timestamp {
     jiff::Timestamp::now()
         .checked_add(jiff::SignedDuration::from_secs(expiry_offset_seconds(
