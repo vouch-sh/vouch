@@ -644,6 +644,7 @@ fn test_append_aws_org_replaces_existing() {
         identity_center: Some(AwsIdentityCenter {
             application_arn: "arn:aws:sso::111:application/x/y".to_string(),
             region: "us-east-1".to_string(),
+            account_access_tenant_id: None,
         }),
     });
     let orgs = &config.aws().unwrap().organizations;
@@ -660,6 +661,7 @@ fn test_append_aws_org_preserves_identity_center_on_merge() {
         identity_center: Some(AwsIdentityCenter {
             application_arn: "arn:aws:sso::111:application/x/y".to_string(),
             region: "us-east-1".to_string(),
+            account_access_tenant_id: None,
         }),
     });
 
@@ -675,6 +677,91 @@ fn test_append_aws_org_preserves_identity_center_on_merge() {
     let idc = orgs[0].identity_center.as_ref().expect("IdC preserved");
     assert_eq!(idc.application_arn, "arn:aws:sso::111:application/x/y");
     assert_eq!(idc.region, "us-east-1");
+}
+
+fn org_with_idc(application_arn: &str, tenant: Option<&str>) -> AwsOrganization {
+    AwsOrganization {
+        management_role: "arn:aws:iam::111:role/Mgmt".to_string(),
+        identity_center: Some(AwsIdentityCenter {
+            application_arn: application_arn.to_string(),
+            region: "us-east-1".to_string(),
+            account_access_tenant_id: tenant.map(str::to_string),
+        }),
+    }
+}
+
+fn stored_tenant(config: &Config) -> Option<String> {
+    config
+        .aws()?
+        .organizations
+        .first()?
+        .identity_center
+        .as_ref()?
+        .account_access_tenant_id
+        .clone()
+}
+
+#[test]
+fn test_set_account_access_tenant_matches_application() {
+    let mut config = Config::default();
+    config.append_aws_org(org_with_idc("arn:aws:sso::111:application/x/y", None));
+
+    assert!(!config.set_account_access_tenant("arn:aws:sso::111:application/x/other", "aa-1"));
+    assert_eq!(stored_tenant(&config), None);
+
+    assert!(config.set_account_access_tenant("arn:aws:sso::111:application/x/y", "aa-1"));
+    assert_eq!(stored_tenant(&config).as_deref(), Some("aa-1"));
+}
+
+#[test]
+fn test_set_account_access_tenant_without_aws_config() {
+    let mut config = Config::default();
+    assert!(!config.set_account_access_tenant("arn:aws:sso::111:application/x/y", "aa-1"));
+}
+
+#[test]
+fn test_append_aws_org_keeps_tenant_for_same_application() {
+    // Re-running `vouch setup aws --identity-center-application` with the
+    // same application must not drop the tenant discovery saved.
+    let mut config = Config::default();
+    config.append_aws_org(org_with_idc(
+        "arn:aws:sso::111:application/x/y",
+        Some("aa-1"),
+    ));
+    config.append_aws_org(org_with_idc("arn:aws:sso::111:application/x/y", None));
+    assert_eq!(stored_tenant(&config).as_deref(), Some("aa-1"));
+}
+
+#[test]
+fn test_append_aws_org_drops_tenant_for_different_application() {
+    let mut config = Config::default();
+    config.append_aws_org(org_with_idc(
+        "arn:aws:sso::111:application/x/y",
+        Some("aa-1"),
+    ));
+    config.append_aws_org(org_with_idc("arn:aws:sso::111:application/x/z", None));
+    assert_eq!(stored_tenant(&config), None);
+}
+
+#[test]
+fn test_identity_center_tenant_round_trip_and_legacy_absence() {
+    let legacy = r#"{"application_arn":"arn:aws:sso::111:application/x/y","region":"us-east-1"}"#;
+    let idc: AwsIdentityCenter = serde_json::from_str(legacy).unwrap();
+    assert_eq!(idc.account_access_tenant_id, None);
+    assert!(
+        !serde_json::to_string(&idc)
+            .unwrap()
+            .contains("account_access_tenant_id"),
+        "an absent tenant is not written"
+    );
+
+    let with_tenant = AwsIdentityCenter {
+        account_access_tenant_id: Some("aa-1".to_string()),
+        ..idc
+    };
+    let json = serde_json::to_string(&with_tenant).unwrap();
+    let parsed: AwsIdentityCenter = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed.account_access_tenant_id.as_deref(), Some("aa-1"));
 }
 
 // -----------------------------------------------------------------

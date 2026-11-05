@@ -172,8 +172,32 @@ impl Partition {
         self,
         region: &str,
     ) -> Result<String, AccountAccessEndpointError> {
+        self.account_access_host("account-access", region)
+    }
+
+    /// Account access runtime (`account-access-runtime`) endpoint, which
+    /// lists a user's entitled roles and vends their credentials.
+    ///
+    /// Same availability as [`Partition::account_access_endpoint`]:
+    /// dualstack `.api.aws` only, commercial partition only.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for every partition other than [`Partition::Aws`].
+    pub fn account_access_runtime_endpoint(
+        self,
+        region: &str,
+    ) -> Result<String, AccountAccessEndpointError> {
+        self.account_access_host("account-access-runtime", region)
+    }
+
+    fn account_access_host(
+        self,
+        prefix: &str,
+        region: &str,
+    ) -> Result<String, AccountAccessEndpointError> {
         match self {
-            Self::Aws => Ok(format!("https://account-access.{region}.api.aws")),
+            Self::Aws => Ok(format!("https://{prefix}.{region}.api.aws")),
             Self::AwsCn
             | Self::AwsUsGov
             | Self::AwsEusc
@@ -660,6 +684,26 @@ mod tests {
         assert_eq!(
             Partition::Aws.account_access_endpoint("us-east-1").unwrap(),
             "https://account-access.us-east-1.api.aws"
+        );
+    }
+
+    #[test]
+    fn test_account_access_runtime_endpoint_commercial_dualstack_only() {
+        assert_eq!(
+            Partition::Aws
+                .account_access_runtime_endpoint("us-east-1")
+                .unwrap(),
+            "https://account-access-runtime.us-east-1.api.aws"
+        );
+        assert!(
+            Partition::AwsUsGov
+                .account_access_runtime_endpoint("us-gov-west-1")
+                .is_err()
+        );
+        assert!(
+            Partition::AwsEusc
+                .account_access_runtime_endpoint("eusc-de-east-1")
+                .is_err()
         );
     }
 

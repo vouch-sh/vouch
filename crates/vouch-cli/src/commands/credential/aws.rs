@@ -977,6 +977,79 @@ pub(crate) async fn get_idc_credentials(
     .await
 }
 
+/// The Identity Center instance whose account access manager tenant should
+/// be tried first for roles chained through `management_role`: the one
+/// configured on that management role's org, when discovery saved a tenant
+/// for it.
+///
+/// Always `None` for a detected AI agent (`agent_source`): the account
+/// access runtime API takes no session policy, so its credentials cannot be
+/// downscoped, and agents stay on the role chain where `ReadOnlyAccess`
+/// applies.
+pub(crate) fn account_access_identity_center<'a>(
+    vouch_config: &'a Config,
+    management_role: &str,
+    agent_source: Option<&str>,
+) -> Option<&'a AwsIdentityCenter> {
+    if agent_source.is_some() {
+        return None;
+    }
+    vouch_config
+        .aws()?
+        .organizations
+        .iter()
+        .find(|org| org.management_role == management_role)?
+        .identity_center
+        .as_ref()
+        .filter(|idc| idc.account_access_tenant_id.is_some())
+}
+
+/// Try to vend `role_arn` through account access manager before the role
+/// chain, for an `idc` chosen by [`account_access_identity_center`] (which
+/// excludes AI agents).
+///
+/// Uses the account access runtime API with the Identity Center token from
+/// the TTI exchange; the role session is named after the token's `sub`, as
+/// on the chain path, so CloudTrail shows one session identity per person.
+///
+/// Returns `None`, meaning "use the role chain", on any failure: a role the
+/// user is not entitled to, a trust policy without the account access
+/// manager statement, or an application without the `account_access`
+/// scopes. The failure is debug-logged; the chain's own error is the one
+/// the user sees if it fails too.
+pub(crate) async fn try_account_access_credentials(
+    http_client: &reqwest::Client,
+    server: &ServerUrl,
+    management_role: &str,
+    idc: &AwsIdentityCenter,
+    role_arn: &str,
+) -> Option<StsCredentials> {
+    use crate::integrations::aws::account_access_runtime::RuntimeClient;
+
+    let tenant_id = idc.account_access_tenant_id.as_deref()?;
+    let attempt = async {
+        let session = assume_management_role(http_client, server, management_role).await?;
+        let idc_token = exchange_idc_access_token(http_client, idc, &session).await?;
+        RuntimeClient::new(
+            http_client.clone(),
+            &idc.region,
+            tenant_id.to_string(),
+            idc_token,
+        )?
+        .get_role_credentials(role_arn, &session.role_session_name)
+        .await
+    };
+    match attempt.await {
+        Ok(creds) => Some(creds),
+        Err(err) => {
+            tracing::debug!(
+                "account access manager did not vend {role_arn}; using the role chain: {err:#}"
+            );
+            None
+        }
+    }
+}
+
 /// Get cached AWS credentials, fetching fresh ones if needed.
 ///
 /// Shared entry point for `vouch credential aws --role`, `vouch credential
@@ -1000,9 +1073,31 @@ pub(crate) async fn get_aws_credentials(
         agent_source.as_deref(),
     );
 
+    let account_access = management_role
+        .as_deref()
+        .and_then(|m| account_access_identity_center(&vouch_config, m, agent_source.as_deref()))
+        .cloned();
     let mgmt = management_role;
     let agent = agent_source;
     super::cache::get_or_fetch(&cache_key, "AWS credentials", || async move {
+        if let (Some(m), Some(idc)) = (mgmt.as_deref(), account_access.as_ref()) {
+            let http_client =
+                http::credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
+                    .context(tr!("err-failed-create-http-client"))?;
+            if let Some(creds) =
+                try_account_access_credentials(&http_client, server, m, idc, role.arn).await
+            {
+                let output = CredentialProcessOutput {
+                    version: 1,
+                    access_key_id: creds.access_key_id,
+                    secret_access_key: creds.secret_access_key,
+                    session_token: creds.session_token,
+                    expiration: creds.expiration.to_string(),
+                };
+                let expires_at = output.expiration.clone();
+                return Ok((output.to_json(), expires_at));
+            }
+        }
         let output = fetch_and_assume(server, role, mgmt.as_deref(), agent.as_deref()).await?;
         let expires_at = output.expiration.clone();
         Ok((output.to_json(), expires_at))
@@ -1672,6 +1767,7 @@ mod tests {
                 identity_center: idc_opt.map(|(arn, region)| AwsIdentityCenter {
                     application_arn: arn.to_string(),
                     region: region.to_string(),
+                    account_access_tenant_id: None,
                 }),
             });
         }
@@ -1841,6 +1937,7 @@ mod tests {
         let idc = AwsIdentityCenter {
             application_arn: APP1.to_string(),
             region: "us-east-1".to_string(),
+            account_access_tenant_id: None,
         };
         let result = obtain_identity_center_token(
             &http_client,
@@ -1861,5 +1958,50 @@ mod tests {
             ),
             "expected ConfigError(aws-err-agent-idc-unsupported), got: {err}"
         );
+    }
+
+    // --- account_access_identity_center -----------------------------------------
+
+    fn config_with_tenant(tenant: Option<&str>) -> Config {
+        let mut cfg = make_idc_config(&[(MGMT1, Some((APP1, "us-east-1"))), (MGMT2, None)]);
+        if let Some(tenant) = tenant {
+            assert!(cfg.set_account_access_tenant(APP1, tenant));
+        }
+        cfg
+    }
+
+    #[test]
+    fn account_access_is_tried_when_the_org_has_a_saved_tenant() {
+        let cfg = config_with_tenant(Some("aa-1"));
+        let idc = account_access_identity_center(&cfg, MGMT1, None).unwrap();
+        assert_eq!(idc.application_arn, APP1);
+    }
+
+    #[test]
+    fn account_access_is_skipped_without_a_saved_tenant() {
+        let cfg = config_with_tenant(None);
+        assert!(account_access_identity_center(&cfg, MGMT1, None).is_none());
+    }
+
+    #[test]
+    fn account_access_is_skipped_for_an_org_without_identity_center() {
+        let cfg = config_with_tenant(Some("aa-1"));
+        assert!(account_access_identity_center(&cfg, MGMT2, None).is_none());
+    }
+
+    #[test]
+    fn account_access_is_skipped_for_an_unknown_management_role() {
+        let cfg = config_with_tenant(Some("aa-1"));
+        assert!(
+            account_access_identity_center(&cfg, "arn:aws:iam::999:role/Other", None).is_none()
+        );
+    }
+
+    /// Account access manager credentials cannot be downscoped, so an AI
+    /// agent stays on the role chain, where `ReadOnlyAccess` applies.
+    #[test]
+    fn account_access_is_never_tried_for_an_ai_agent() {
+        let cfg = config_with_tenant(Some("aa-1"));
+        assert!(account_access_identity_center(&cfg, MGMT1, Some("claude-code")).is_none());
     }
 }

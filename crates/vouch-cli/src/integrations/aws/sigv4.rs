@@ -237,30 +237,36 @@ async fn send_signed_request(
         .context(tr!("err-failed-send-aws-api-request"))?;
 
     if !response.status().is_success() {
-        let status = response.status();
-        // json-protocol services carry the error code in this header;
-        // capture it before the body is consumed.
-        let header_code = response
-            .headers()
-            .get("x-amzn-errortype")
-            .and_then(|value| value.to_str().ok())
-            .map(normalize_aws_error_code);
-        let response_body = response.text().await.unwrap_or_default();
-        let code = header_code.or_else(|| parse_aws_error_code(&response_body));
-        let truncated = truncate_error_body(&response_body, 500);
-        return Err(CliError::AwsApi {
-            service: service.to_string(),
-            status,
-            code,
-            detail: truncated.to_string(),
-        }
-        .into());
+        return Err(aws_api_error(response, service).await.into());
     }
 
     response
         .text()
         .await
         .context(tr!("err-failed-read-aws-api-response-body"))
+}
+
+/// Map a non-2xx AWS response to [`CliError::AwsApi`], with the error code
+/// parsed and the body truncated so account IDs and ARNs are not
+/// over-exposed. Shared by signed requests and bearer-token APIs.
+pub(crate) async fn aws_api_error(response: reqwest::Response, service: &str) -> CliError {
+    let status = response.status();
+    // json-protocol services carry the error code in this header; capture it
+    // before the body is consumed.
+    let header_code = response
+        .headers()
+        .get("x-amzn-errortype")
+        .and_then(|value| value.to_str().ok())
+        .map(normalize_aws_error_code);
+    let response_body = response.text().await.unwrap_or_default();
+    let code = header_code.or_else(|| parse_aws_error_code(&response_body));
+    let truncated = truncate_error_body(&response_body, 500);
+    CliError::AwsApi {
+        service: service.to_string(),
+        status,
+        code,
+        detail: truncated.to_string(),
+    }
 }
 
 /// Parse the AWS error code from a non-2xx response body.

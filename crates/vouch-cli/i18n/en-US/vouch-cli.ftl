@@ -741,6 +741,10 @@ aws-err-agent-idc-unsupported =
     AI-agent credential issuance is not supported on the Identity Center path
     (permission-set credentials cannot be downscoped).
     Use an STS role instead: '{ -cmd } credential aws --role <arn>'.
+aws-err-aam-runtime-unauthorized =
+    Account access manager rejected the Identity Center token. In IAM Identity Center,
+    open Applications → Vouch → Trusted applications → AWS account access and select
+    account_access:assume and account_access:read_only.
 
 aws-err-via-not-found =
     No organization found with management role '{ $management_role }'.
@@ -1167,6 +1171,12 @@ setup-aws-entitlements-trust-remediation =
     Also verify the management role { $management_role } has an IAM policy allowing:
 
     { $policy }
+
+    AWS returns the same denial when the role does not currently exist (for example, infrastructure that is provisioned on demand).
+setup-aws-entitlements-aam-trust-remediation =
+    Account access manager could not issue credentials for this role. Check that you are still entitled to it, and ask an administrator to add this statement to the role's trust-policy Statement array:
+
+    { $statement }
 
     AWS returns the same denial when the role does not currently exist (for example, infrastructure that is provisioned on demand).
 setup-aws-entitlements-rerun-hint = Re-run '{ -cmd } setup aws --discover' once access is granted to add the profile.
@@ -1742,6 +1752,8 @@ err-failed-get-redshift-serverless-credentials = failed to get Redshift Serverle
 err-failed-get-ssh-certificate = failed to get SSH certificate
 err-failed-list-aam-applications = failed to list account access manager applications
 err-failed-list-aam-entitlements = failed to list account access manager entitlements
+err-failed-list-aam-runtime-roles = failed to list account access manager roles
+err-failed-get-aam-runtime-role-credentials = failed to get account access manager role credentials
 err-failed-list-group-memberships = failed to list Identity Center group memberships
 err-failed-list-idc-instances = failed to list Identity Center instances
 err-failed-list-sso-accounts = failed to list SSO accounts

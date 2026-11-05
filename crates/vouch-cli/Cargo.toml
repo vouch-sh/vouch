@@ -114,3 +114,4 @@ optional = true
 
 [dev-dependencies]
 proptest = { workspace = true, features = ["std"] }
+wiremock = { workspace = true }

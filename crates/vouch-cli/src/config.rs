@@ -69,6 +69,11 @@ pub(crate) struct AwsIdentityCenter {
     pub application_arn: String,
     /// AWS region where this IdC instance is hosted (e.g., `us-east-1`).
     pub region: String,
+    /// Account access manager tenant (`aa-…`), saved by `vouch setup aws
+    /// --discover` when the account access runtime API accepts this
+    /// application's tokens. Entitled-role profiles need it to vend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_access_tenant_id: Option<String>,
 }
 
 /// CLI configuration stored in `$XDG_CONFIG_HOME/vouch/config.json`
@@ -652,12 +657,43 @@ impl Config {
             .iter_mut()
             .find(|o| o.management_role == org.management_role)
         {
-            if org.identity_center.is_some() {
-                existing.identity_center = org.identity_center;
+            if let Some(mut incoming) = org.identity_center {
+                // The tenant belongs to the application; re-storing the same
+                // application keeps the tenant discovery saved for it.
+                if let Some(current) = existing.identity_center.take()
+                    && current.application_arn == incoming.application_arn
+                    && incoming.account_access_tenant_id.is_none()
+                {
+                    incoming.account_access_tenant_id = current.account_access_tenant_id;
+                }
+                existing.identity_center = Some(incoming);
             }
         } else {
             orgs.organizations.push(org);
         }
+    }
+
+    /// Record the account access manager tenant for the Identity Center
+    /// instance with `application_arn` (in memory; call `save()`).
+    ///
+    /// Returns whether an instance matched.
+    pub(crate) fn set_account_access_tenant(
+        &mut self,
+        application_arn: &str,
+        tenant_id: &str,
+    ) -> bool {
+        let Some(orgs) = self.aws.as_mut() else {
+            return false;
+        };
+        for org in &mut orgs.organizations {
+            if let Some(idc) = org.identity_center.as_mut()
+                && idc.application_arn == application_arn
+            {
+                idc.account_access_tenant_id = Some(tenant_id.to_string());
+                return true;
+            }
+        }
+        false
     }
 
     // =====================================================================

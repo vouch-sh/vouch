@@ -5,6 +5,7 @@
 //! - `sts` - AWS STS (Security Token Service) utilities
 
 pub(crate) mod account_access;
+pub(crate) mod account_access_runtime;
 pub(crate) mod codeartifact;
 pub(crate) mod codecommit;
 pub(crate) mod config;
