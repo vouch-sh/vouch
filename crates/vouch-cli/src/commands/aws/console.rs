@@ -10,14 +10,15 @@ use serde::Deserialize;
 use vouch_cli::{tr, tr_args, tr_eprintln, tr_println};
 
 use crate::commands::credential::aws::{
-    StsRequest, detect_agent_source, exchange_for_sts_credentials, resolve_identity_center,
-    resolve_management_role_for,
+    StsRequest, account_access_identity_center, detect_agent_source, exchange_for_sts_credentials,
+    resolve_identity_center, resolve_management_role_for, try_account_access_credentials,
 };
 use crate::config::Config;
 use crate::exit_code::CliError;
 use crate::integrations::aws;
 use crate::server_url::ServerUrl;
 use vouch_common::aws::Partition;
+use vouch_common::http::credential_client;
 
 /// Arguments for `vouch aws console`.
 #[derive(clap::Args)]
@@ -99,7 +100,6 @@ struct SigninTokenResponse {
 async fn get_idc_console_creds(server: &ServerUrl, args: &ConsoleArgs) -> Result<ConsoleCreds> {
     use crate::commands::credential::aws::{detect_agent_source, obtain_identity_center_token};
     use crate::integrations::aws::sso_portal::get_role_credentials;
-    use vouch_common::http::credential_client;
 
     // Block AI agents early (fast-fail before config load): permission-set
     // credentials cannot be downscoped.
@@ -202,6 +202,24 @@ async fn get_sts_console_creds(server: &ServerUrl, args: ConsoleArgs) -> Result<
     let management_role = resolve_management_role_for(&vouch_config, role.arn, role.via)?;
 
     let agent_source = detect_agent_source();
+    if let Some(m) = management_role.as_deref()
+        && let Some(idc) = account_access_identity_center(&vouch_config, m, agent_source.as_deref())
+    {
+        let http_client = credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
+            .context(tr!("err-failed-create-http-client"))?;
+        if let Some(creds) =
+            try_account_access_credentials(&http_client, server, m, idc, role.arn).await
+        {
+            return Ok(ConsoleCreds {
+                access_key_id: creds.access_key_id,
+                secret_access_key: creds.secret_access_key,
+                session_token: creds.session_token,
+                partition,
+                http_client,
+            });
+        }
+    }
+
     let result = exchange_for_sts_credentials(StsRequest {
         server,
         role,

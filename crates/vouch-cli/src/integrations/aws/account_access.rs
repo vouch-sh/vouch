@@ -54,6 +54,16 @@ struct ListApplicationsResponse {
 #[serde(rename_all = "camelCase")]
 struct ApplicationSummary {
     application_arn: Option<String>,
+    tenant_id: Option<String>,
+}
+
+/// One account access manager application from `ListApplications`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AamApplication {
+    /// `arn:aws:account-access:{region}:{account}:application/{id}`.
+    pub application_arn: String,
+    /// The `aa-…` tenant the account access runtime API is scoped to.
+    pub tenant_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -113,6 +123,10 @@ fn list_entitlements_body(
     body
 }
 
+/// Backoff schedule for `ThrottlingException` retries, shared by the
+/// account access control plane and runtime clients.
+pub(super) const THROTTLE_BACKOFF_MS: [u64; 3] = [200, 400, 800];
+
 /// Shared request context for account-access calls, retrying throttled
 /// requests with bounded backoff — the service's TPS limits are unpublished
 /// and discovery fans out one query per principal.
@@ -124,15 +138,12 @@ struct AccountAccessClient<'a> {
 }
 
 impl AccountAccessClient<'_> {
-    /// Backoff schedule for `ThrottlingException` retries.
-    const BACKOFF_MS: [u64; 3] = [200, 400, 800];
-
     async fn post_with_throttle_retry(
         &self,
         path: &str,
         body: &serde_json::Value,
     ) -> Result<String> {
-        let mut backoff = Self::BACKOFF_MS.iter();
+        let mut backoff = THROTTLE_BACKOFF_MS.iter();
         loop {
             let result = sign_and_send_json_post(
                 self.http_client,
@@ -160,14 +171,14 @@ impl AccountAccessClient<'_> {
     }
 }
 
-/// List account access manager application ARNs (one per org in practice).
+/// List account access manager applications (one per org in practice).
 ///
 /// Paginates automatically with a 100-page safety cap.
 pub(crate) async fn list_applications(
     http_client: &reqwest::Client,
     region: &str,
     creds: &StsCredentials,
-) -> Result<Vec<String>> {
+) -> Result<Vec<AamApplication>> {
     let endpoint = Partition::from_region(region).account_access_endpoint(region)?;
     let client = AccountAccessClient {
         http_client,
@@ -198,7 +209,10 @@ pub(crate) async fn list_applications(
 
         for application in resp.applications {
             if let Some(application_arn) = application.application_arn {
-                applications.push(application_arn);
+                applications.push(AamApplication {
+                    application_arn,
+                    tenant_id: application.tenant_id,
+                });
             }
         }
 
@@ -363,6 +377,12 @@ mod tests {
         assert_eq!(
             arns,
             vec!["arn:aws:account-access:us-east-1:1:application/x"]
+        );
+        assert_eq!(
+            resp.applications
+                .first()
+                .and_then(|a| a.tenant_id.as_deref()),
+            Some("aa-1")
         );
     }
 

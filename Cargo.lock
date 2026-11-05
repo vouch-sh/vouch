@@ -7502,6 +7502,7 @@ dependencies = [
  "windows",
  "windows-native-keyring-store",
  "winresource",
+ "wiremock",
  "zeroize",
 ]
 
