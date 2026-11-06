@@ -458,7 +458,13 @@ jobs:
           for sbom in $(find . -maxdepth 3 -name "*_cdx.json" -o -name "*.cdx.json" 2>/dev/null | grep -v "^./target/"); do
             base=$(basename "${sbom}")
             dest="vouch-v${VERSION}-${TARGET}-${base}"
-            cp "${sbom}" "${dest}"
+            # cargo-cyclonedx omits serialNumber when SOURCE_DATE_EPOCH is set,
+            # and actions/attest rejects a CycloneDX SBOM without one. Derive a
+            # UUID from the file's content so the SBOM stays reproducible.
+            # git hash-object is the one hasher present on every runner OS.
+            h=$(git hash-object "${sbom}")
+            serial="urn:uuid:${h:0:8}-${h:8:4}-8${h:13:3}-a${h:17:3}-${h:20:12}"
+            jq --arg s "${serial}" '.serialNumber //= $s' "${sbom}" > "${dest}"
             # Use vouch-cli SBOM as the main one for attestation (always present)
             if [[ "${base}" == *"vouch-cli"* ]] || [[ "${base}" == *"vouch_cli"* ]]; then
               MAIN_SBOM="${dest}"
@@ -586,7 +592,10 @@ jobs:
           for sbom in $(find . -maxdepth 3 -name "*_cdx.json" -o -name "*.cdx.json" 2>/dev/null | grep -v "^./target/"); do
             base=$(basename "${sbom}")
             dest="vouch-v${VERSION}-${TARGET}-${base}"
-            cp "${sbom}" "${dest}"
+            # Same serialNumber derivation as the CLI job; see the comment there.
+            h=$(git hash-object "${sbom}")
+            serial="urn:uuid:${h:0:8}-${h:8:4}-8${h:13:3}-a${h:17:3}-${h:20:12}"
+            jq --arg s "${serial}" '.serialNumber //= $s' "${sbom}" > "${dest}"
             if [[ "${base}" == *"vouch-server"* ]] || [[ "${base}" == *"vouch_server"* ]]; then
               MAIN_SBOM="${dest}"
             fi
