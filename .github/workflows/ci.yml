@@ -50,7 +50,7 @@ jobs:
       - name: Setup Rust toolchain
         run: rustup show
       - name: Setup Rust cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           prefix-key: "v2"
           shared-key: "clippy-${{ runner.os }}"
@@ -91,7 +91,7 @@ jobs:
       - name: Setup Rust toolchain
         run: rustup show
       - name: Setup Rust cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           prefix-key: "v2"
           shared-key: "debug-${{ runner.os }}"
@@ -167,7 +167,7 @@ jobs:
           rustup show
           rustup target add ${{ matrix.target }}
       - name: Setup Rust cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           prefix-key: "v2"
           shared-key: "release-${{ matrix.target }}"
@@ -279,7 +279,7 @@ jobs:
           cache-db: true
 
       - name: Upload scan results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
         continue-on-error: true
         with:
           sarif_file: ${{ steps.grype.outputs.sarif }}
