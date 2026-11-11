@@ -42,6 +42,16 @@ ignore = [
     # line is adopted across the workspace.
     # https://rustsec.org/advisories/RUSTSEC-2026-0387
     "RUSTSEC-2026-0387",
+    # Bundled SQLite before 3.54.0 can return uninitialized page-cache memory
+    # when it opens a database together with a crafted `-wal` file whose page
+    # size differs. The fix is libsqlite3-sys 0.39, but sqlx-sqlite 0.9.0 (the
+    # latest sqlx) requires libsqlite3-sys < 0.38, so no upgrade is reachable.
+    # Only vouch-server links SQLite, as the development backend, and it opens
+    # only the database named by its own VOUCH_DATABASE_URL; production runs on
+    # PostgreSQL / Aurora DSQL. Exposure needs an attacker who can write that
+    # database's files. Remove when sqlx allows libsqlite3-sys >= 0.39.
+    # https://rustsec.org/advisories/RUSTSEC-2026-0459
+    "RUSTSEC-2026-0459",
 ]
 
 [licenses]
