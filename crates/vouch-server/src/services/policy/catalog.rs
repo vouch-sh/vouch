@@ -802,7 +802,7 @@ pub(crate) fn field_reference_groups() -> Vec<FieldRefGroup> {
                 .map(|f| FieldRefRow {
                     name: f.name,
                     type_label: type_label(f.kind),
-                    sample: record.get(f.name).map(render_value).unwrap_or_default(),
+                    sample: record.get(f.name).map_or_default(render_value),
                 })
                 .collect(),
         })

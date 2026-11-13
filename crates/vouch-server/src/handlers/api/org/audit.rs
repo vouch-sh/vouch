@@ -296,14 +296,11 @@ fn serialize_line(event: &AuditEvent, format_ocsf: bool) -> Result<String, Servi
 /// drop them (and `format=ocsf`) on page 2, and would paginate forward
 /// even for a request that explicitly paginated backward with `before`.
 fn build_link_url(uri: &axum::http::Uri, cursor: &str, cursor_param: &str) -> String {
-    let mut pairs: Vec<(String, String)> = uri
-        .query()
-        .map(|q| {
-            url::form_urlencoded::parse(q.as_bytes())
-                .into_owned()
-                .collect()
-        })
-        .unwrap_or_default();
+    let mut pairs: Vec<(String, String)> = uri.query().map_or_default(|q| {
+        url::form_urlencoded::parse(q.as_bytes())
+            .into_owned()
+            .collect()
+    });
     pairs.retain(|(k, _)| k != "after" && k != "before");
     pairs.push((cursor_param.to_string(), cursor.to_string()));
     let query = url::form_urlencoded::Serializer::new(String::new())

@@ -40,7 +40,6 @@ inquire = { workspace = true, features = ["crossterm"] }
 jiff = { workspace = true, features = ["std", "serde", "tz-system"] }
 jsonwebtoken = { workspace = true, features = ["aws_lc_rs"] }
 keyring-core = { workspace = true }
-mimalloc = { workspace = true, features = ["secure"] }
 open = { workspace = true }
 reqwest = { workspace = true, features = ["json", "rustls", "form", "query"] }
 roxmltree = { workspace = true, features = ["std"] }
@@ -111,6 +110,10 @@ features = ["std"]
 workspace = true
 features = ["util"]
 optional = true
+
+# Only the musl builds install it as the global allocator (see main.rs).
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc = { workspace = true, features = ["secure"] }
 
 [dev-dependencies]
 proptest = { workspace = true, features = ["std"] }

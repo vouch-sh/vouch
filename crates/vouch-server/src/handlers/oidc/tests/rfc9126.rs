@@ -819,9 +819,7 @@ async fn create_par_request_with_prompt(
     let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
     let challenge = sha256_base64url(verifier);
 
-    let prompt_param = prompt
-        .map(|p| format!("&prompt={}", urlencoding::encode(p)))
-        .unwrap_or_default();
+    let prompt_param = prompt.map_or_default(|p| format!("&prompt={}", urlencoding::encode(p)));
 
     let body = format!(
         "response_type=code\

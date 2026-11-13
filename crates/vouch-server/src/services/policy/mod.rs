@@ -269,7 +269,7 @@ enum DecisionKind<'a> {
 }
 
 fn ip_string(ip: Option<std::net::IpAddr>) -> String {
-    ip.map(|addr| addr.to_string()).unwrap_or_default()
+    ip.map_or_default(|addr| addr.to_string())
 }
 
 fn decision_event(kind: &DecisionKind<'_>, user_id: &str, org_id: &str, ts: i64) -> Event {

@@ -30,7 +30,6 @@ ed25519-dalek = { workspace = true }
 i18n-embed = { workspace = true, features = ["fluent-system", "rust-embed"] }
 i18n-embed-fl = { workspace = true }
 jiff = { workspace = true, features = ["std", "serde", "tz-system"] }
-mimalloc = { workspace = true, features = ["secure"] }
 rust-embed = { workspace = true }
 secrecy = { workspace = true, features = ["serde"] }
 serde = { workspace = true, features = ["std", "derive"] }
@@ -49,6 +48,10 @@ zeroize = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
+
+# Only the musl builds install it as the global allocator (see main.rs).
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc = { workspace = true, features = ["secure"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

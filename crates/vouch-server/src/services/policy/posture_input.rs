@@ -112,11 +112,7 @@ pub(crate) fn posture_fields(posture: &DevicePosture) -> BTreeMap<String, Value>
     let mut record: BTreeMap<String, Value> = BTreeMap::new();
     record.insert(
         "os".to_string(),
-        Value::String(
-            os.as_ref()
-                .map(|o| o.as_str().to_string())
-                .unwrap_or_default(),
-        ),
+        Value::String(os.as_ref().map_or_default(|o| o.as_str().to_string())),
     );
     record.insert(
         "os_version".to_string(),

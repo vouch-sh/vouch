@@ -808,8 +808,7 @@ async fn test_rfc9470_multiple_prompt_values_accepted_at_authorize() {
     let location = response
         .headers
         .get("Location")
-        .map(|l| l.to_str().expect("Valid UTF-8").to_string())
-        .unwrap_or_default();
+        .map_or_default(|l| l.to_str().expect("Valid UTF-8").to_string());
     assert!(
         !location.contains("error="),
         "prompt=\"login consent\" must not be rejected: {} {location}",

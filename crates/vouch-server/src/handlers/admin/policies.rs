@@ -216,10 +216,7 @@ pub(crate) async fn toggle_preconfigured_policy(
         .await
         .map_err(|e| ServiceError::Internal(format!("Failed to load posture config: {e}")))?;
 
-    let mut active_slugs = config
-        .as_ref()
-        .map(|c| c.active_slugs.clone())
-        .unwrap_or_default();
+    let mut active_slugs = config.as_ref().map_or_default(|c| c.active_slugs.clone());
 
     let already_active = active_slugs.iter().any(|s| s == &slug);
 

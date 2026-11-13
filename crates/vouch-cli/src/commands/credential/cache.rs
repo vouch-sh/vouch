@@ -116,8 +116,7 @@ pub(crate) fn is_network_error(err: &anyhow::Error) -> bool {
 pub(crate) fn default_expiry() -> String {
     jiff::Timestamp::now()
         .checked_add(jiff::SignedDuration::from_hours(1))
-        .map(|ts| ts.to_string())
-        .unwrap_or_default()
+        .map_or_default(|ts| ts.to_string())
 }
 
 #[cfg(test)]
