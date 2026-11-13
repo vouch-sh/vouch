@@ -13,7 +13,7 @@ readme = "../../README.md"
 workspace = true
 
 [features]
-test-utils = ["ed25519-dalek/rand_core", "axum", "tower"]
+test-utils = ["dep:ciborium", "dep:ed25519-dalek", "ed25519-dalek/rand_core", "axum", "tower"]
 
 [lib]
 path = "src/lib.rs"
@@ -28,11 +28,9 @@ path = "src/main.rs"
 [dependencies]
 anyhow = { workspace = true, features = ["std"] }
 base64 = { workspace = true, features = ["std"] }
-ciborium = { workspace = true }
 clap = { workspace = true, features = ["std", "derive", "env", "help", "usage", "error-context", "suggestions", "color"] }
 clap_complete = { workspace = true }
 gethostname = { workspace = true }
-ed25519-dalek = { workspace = true }
 hex = { workspace = true, features = ["std"] }
 i18n-embed = { workspace = true, features = ["fluent-system", "rust-embed"] }
 i18n-embed-fl = { workspace = true }
@@ -43,7 +41,6 @@ keyring-core = { workspace = true }
 open = { workspace = true }
 reqwest = { workspace = true, features = ["json", "rustls", "form", "query"] }
 roxmltree = { workspace = true, features = ["std"] }
-rpassword = { workspace = true }
 rust-embed = { workspace = true }
 rust-ini = { workspace = true }
 # Direct dependency only to enable prefer-post-quantum: reqwest builds its rustls
@@ -92,6 +89,17 @@ windows = { workspace = true, features = [
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 aws-lc-rs = { workspace = true }
 
+# The CTAP2 PIN prompt (fido2/unix.rs) and `vouch diag` are compiled out on
+# Windows, which goes through WebAuthn instead.
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+ciborium = { workspace = true }
+rpassword = { workspace = true }
+
+# Elsewhere only the test-utils mock FIDO2 device builds CBOR.
+[target.'cfg(target_os = "windows")'.dependencies.ciborium]
+workspace = true
+optional = true
+
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
 vouch-agent = { workspace = true }
@@ -100,6 +108,11 @@ vouch-agent = { workspace = true }
 [dependencies.axum]
 workspace = true
 features = ["json", "tokio", "http1", "form", "query"]
+optional = true
+
+# Signs assertions for the test-utils mock FIDO2 device.
+[dependencies.ed25519-dalek]
+workspace = true
 optional = true
 
 [dependencies.http]
@@ -116,5 +129,7 @@ optional = true
 mimalloc = { workspace = true, features = ["secure"] }
 
 [dev-dependencies]
+# Unit tests build CBOR fixtures on every platform (see fido2/mod.rs).
+ciborium = { workspace = true }
 proptest = { workspace = true, features = ["std"] }
 wiremock = { workspace = true }
