@@ -94,8 +94,7 @@ async fn describe_cluster(
     let ca_data = parsed
         .cluster
         .certificate_authority
-        .map(|ca| ca.data)
-        .unwrap_or_default();
+        .map_or_default(|ca| ca.data);
 
     Ok((parsed.cluster.endpoint, ca_data))
 }

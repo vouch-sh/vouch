@@ -268,9 +268,7 @@ pub(crate) fn sync_scope_locale<R>(ctx: I18nContext, f: impl FnOnce() -> R) -> R
 
 /// Negotiate an [`I18nContext`] from an optional `Accept-Language` header value.
 pub(crate) fn negotiate(accept_language: Option<&str>) -> I18nContext {
-    let requested = accept_language
-        .map(parse_accept_language)
-        .unwrap_or_default();
+    let requested = accept_language.map_or_default(parse_accept_language);
     let loader = vouch_i18n::select_loader(&LOADER, &requested);
     let lang = loader.current_language().to_string();
     I18nContext {

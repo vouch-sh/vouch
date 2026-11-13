@@ -2386,7 +2386,7 @@ mod tests {
             let Some(row) = doc.lines().find(|line| line.starts_with(&row_start)) else {
                 continue;
             };
-            let documented = row.split('|').nth(3).map(str::trim).unwrap_or_default();
+            let documented = row.split('|').nth(3).map_or_default(str::trim);
             if documented != format!("`{default}`") {
                 mismatches.push(format!("{env}: code `{default}`, docs {documented}"));
             }

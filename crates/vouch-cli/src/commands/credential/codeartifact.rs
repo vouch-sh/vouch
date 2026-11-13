@@ -141,15 +141,13 @@ pub(crate) fn resolve_codeartifact_params(
         ca_config
             .and_then(|c| c.domain_profiles.get(name))
             .ok_or_else(|| {
-                let available = ca_config
-                    .map(|c| {
-                        c.domain_profiles
-                            .keys()
-                            .map(String::as_str)
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    })
-                    .unwrap_or_default();
+                let available = ca_config.map_or_default(|c| {
+                    c.domain_profiles
+                        .keys()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                });
                 if available.is_empty() {
                     anyhow::anyhow!(
                         "CodeArtifact domain profile '{name}' not found. \

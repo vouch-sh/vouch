@@ -1021,7 +1021,7 @@ mod tests {
         org_id: &str,
     ) -> Result<Vec<AdditionalDomain>> {
         let doc = store.get::<OrganizationDoc>(org_id).await?;
-        Ok(doc.map(|d| d.data.additional_domains).unwrap_or_default())
+        Ok(doc.map_or_default(|d| d.data.additional_domains))
     }
 
     #[tokio::test]

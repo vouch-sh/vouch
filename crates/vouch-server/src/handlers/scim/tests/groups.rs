@@ -1559,15 +1559,12 @@ async fn put_group_json(
 }
 
 fn member_ids(group: &serde_json::Value) -> Vec<String> {
-    let mut ids: Vec<String> = group["members"]
-        .as_array()
-        .map(|members| {
-            members
-                .iter()
-                .filter_map(|member| member["value"].as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
+    let mut ids: Vec<String> = group["members"].as_array().map_or_default(|members| {
+        members
+            .iter()
+            .filter_map(|member| member["value"].as_str().map(String::from))
+            .collect()
+    });
     ids.sort();
     ids
 }

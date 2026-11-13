@@ -59,7 +59,6 @@ jsonwebtoken = { workspace = true, features = ["aws_lc_rs"] }
 maxminddb = { workspace = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
-mimalloc = { workspace = true, features = ["secure"] }
 opentelemetry = { workspace = true, features = ["trace"] }
 opentelemetry-otlp = { workspace = true, features = ["trace", "grpc-tonic", "tls-aws-lc"] }
 opentelemetry_sdk = { workspace = true, features = ["rt-tokio", "trace"] }
@@ -111,6 +110,10 @@ zeroize = { workspace = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 aws-lc-rs = { workspace = true, features = ["fips"] }
 rustls = { workspace = true, features = ["fips"] }
+
+# Only the musl builds install it as the global allocator (see main.rs).
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc = { workspace = true, features = ["secure"] }
 
 [dev-dependencies]
 proptest = { workspace = true, features = ["std"] }

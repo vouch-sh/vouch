@@ -524,7 +524,7 @@ async fn fetch_s3_raw(client: &S3Client, source: &S3ConfigSource) -> Result<(Vec
             )
         })?;
 
-    let etag = response.e_tag().map(|s| s.to_string()).unwrap_or_default();
+    let etag = response.e_tag().map_or_default(|s| s.to_string());
 
     let body = response
         .body

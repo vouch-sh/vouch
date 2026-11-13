@@ -123,8 +123,7 @@ impl Handshake for MtlsHandshake {
             .get_ref()
             .1
             .peer_certificates()
-            .map(|certs| certs.iter().map(|cert| cert.to_vec()).collect())
-            .unwrap_or_default();
+            .map_or_default(|certs| certs.iter().map(|cert| cert.to_vec()).collect());
         Ok((
             tls_stream,
             PeerClientCert {
@@ -860,9 +859,7 @@ mod tests {
             .route(
                 "/client-ip",
                 get(|info: ClientInfo| async move {
-                    info.client_ip()
-                        .map(|ip| ip.to_string())
-                        .unwrap_or_default()
+                    info.client_ip().map_or_default(|ip| ip.to_string())
                 }),
             )
             .with_state(state)
@@ -974,8 +971,7 @@ mod tests {
                             "{} {} {} {leaf_matches}",
                             peer.peer_addr.ip(),
                             info.client_ip()
-                                .map(|ip| ip.to_string())
-                                .unwrap_or_default(),
+                                .map_or_default(|ip| ip.to_string()),
                             peer.peer_chain_der.len(),
                         )
                     },
