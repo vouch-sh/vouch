@@ -127,6 +127,8 @@ skip = [
     { crate = "hashbrown@0.16.1", reason = "governor/sqlx use hashbrown 0.16" },
     # heck version split (clap_derive vs other derive macros)
     { crate = "heck:>=0.4,<0.5", reason = "some derive macros still on heck 0.4" },
+    # itertools version split (prost-derive 0.14.6 moved to 0.15; cedar-policy is on 0.14)
+    { crate = "itertools:>=0.14,<0.15", reason = "cedar-policy (via dogwood-language) still on itertools 0.14" },
     # rand 0.9 vs 0.10 (a pinned 0.9.4 skip went stale when 0.9.5 shipped)
     { crate = "rand:>=0.9,<0.10", reason = "some crates still on rand 0.9" },
     { crate = "rand_core:>=0.6,<0.7", reason = "rand 0.8 ecosystem" },
