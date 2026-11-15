@@ -1,0 +1,36 @@
+name: Verify workflow lockfile
+
+# Fails when .github/workflows/actions.lock is out of sync with the workflows
+# or a locked commit no longer verifies upstream. The lockfile pins every
+# action, including transitive ones, to a commit; `uses:` lines carry the
+# release tag. After changing any `uses:` line, run `gh actions-lock` and
+# commit the workflow and the lockfile together.
+
+on:
+  push:
+    paths:
+      - ".github/workflows/**"
+  pull_request:
+    paths:
+      - ".github/workflows/**"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify Lockfile
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read  # checkout the workflows and the lockfile
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install gh-actions-lock
+        run: gh extension install github/gh-actions-lock --pin v0.4.1
+      - name: Verify lockfile
+        run: gh actions-lock --verify

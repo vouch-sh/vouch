@@ -26,7 +26,7 @@ jobs:
       # GITHUB_TOKEN can only delete from it after the package grants this
       # repo the Admin role: package settings -> Manage Actions access.
       - name: Clean vouch-build-cache (Kamal deploy cache)
-        uses: actions/delete-package-versions@e5bc658cc4c965c472efe991f8beea3981499c55 # v5.0.0
+        uses: actions/delete-package-versions@v5.0.0
         with:
           package-name: vouch-build-cache
           package-type: container
