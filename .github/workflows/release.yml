@@ -624,7 +624,7 @@ jobs:
         uses: actions/checkout@v7.0.1
         with: # zizmor: ignore[artipacked] — credentials required for git push
           repository: vouch-sh/homebrew-tap
-          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          ssh-key: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
           path: homebrew-tap
 
       - name: Update formula
@@ -716,7 +716,7 @@ jobs:
         uses: actions/checkout@v7.0.1
         with: # zizmor: ignore[artipacked] — credentials required for git push
           repository: vouch-sh/packages
-          token: ${{ secrets.PACKAGES_REPO_TOKEN }}
+          ssh-key: ${{ secrets.PACKAGES_DEPLOY_KEY }}
           path: packages-repo
 
       - name: Import GPG key

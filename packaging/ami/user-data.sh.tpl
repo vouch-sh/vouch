@@ -67,7 +67,7 @@ echo "Downloaded ${RPM_NAME}"
 #
 # The fingerprint is the trust anchor: the key is fetched over the network, so
 # pinning the fingerprint is what makes a substituted key useless.
-VOUCH_GPG_FPR="E43BAE80FF24FBA161CC580966761B8F3EC7055B"
+VOUCH_GPG_FPR="52133F4A919439241EB3327F304E6BF825C30470"
 curl -sfL "https://raw.githubusercontent.com/vouch-sh/packages/main/gpg/vouch.asc" \
   -o /tmp/vouch-packages.asc
 FETCHED_FPR=$(gpg --show-keys --with-colons /tmp/vouch-packages.asc | awk -F: '/^fpr:/{print $10; exit}')
