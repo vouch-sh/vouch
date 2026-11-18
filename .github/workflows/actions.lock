@@ -17,7 +17,7 @@ workflows:
         - 'docker/build-push-action@v7.4.0'
         - 'docker/setup-buildx-action@v4.4.1'
         - 'embarkstudios/cargo-deny-action@v2.1.1'
-        - 'github/codeql-action@v4.39.1'
+        - 'github/codeql-action@v4.39.3'
         - 'swatinem/rust-cache@v2.9.3'
     '.github/workflows/docs.yml':
         - 'actions/checkout@v7.0.1'
@@ -37,7 +37,7 @@ workflows:
         - 'docker/bake-action@v7.5.0'
         - 'docker/setup-buildx-action@v4.4.1'
         - 'embarkstudios/cargo-deny-action@v2.1.1'
-        - 'softprops/action-gh-release@v3.0.3'
+        - 'softprops/action-gh-release@v3.0.4'
     '.github/workflows/reusable-build.yml':
         - 'actions/attest@v4.2.2'
         - 'actions/cache@v6.1.0'
@@ -47,7 +47,7 @@ workflows:
         - 'azure/setup-helm@v5.0.1'
         - 'docker/bake-action@v7.5.0'
         - 'docker/build-push-action@v7.4.0'
-        - 'docker/login-action@v4.7.0'
+        - 'docker/login-action@v4.8.0'
         - 'docker/metadata-action@v6.2.0'
         - 'docker/setup-buildx-action@v4.4.1'
         - 'skeeto/aas-sign@v1.1.1'
@@ -141,9 +141,9 @@ dependencies:
         commit: 'sha1-c3c9e263c25d99ce0380d002d59b67737d91b0dc'
         owner_id: 5429470
         repo_id: 241092383
-    'docker/login-action@v4.7.0':
-        ref: 'v4.7.0'
-        commit: 'sha1-81c6f93d4bc991e510b342a00b419b3bb4efc5c6'
+    'docker/login-action@v4.8.0':
+        ref: 'v4.8.0'
+        commit: 'sha1-8aa5831fb8d48d8f76594c7ddde61ae58019f550'
         owner_id: 5429470
         repo_id: 287743349
     'docker/metadata-action@v6.2.0':
@@ -161,9 +161,9 @@ dependencies:
         commit: 'sha1-3c6349835b2b7b196a839186cb8b78e02f7b5f25'
         owner_id: 44887257
         repo_id: 228054692
-    'github/codeql-action@v4.39.1':
-        ref: 'v4.39.1'
-        commit: 'sha1-9b3254085494b55a0f7c4c2b3d2d52cc712ce370'
+    'github/codeql-action@v4.39.3':
+        ref: 'v4.39.3'
+        commit: 'sha1-33d7b85da1a04171e211befe2c739303b9a4c066'
         owner_id: 9919
         repo_id: 259445878
     'helm/chart-testing-action@v2.9.0':
@@ -184,9 +184,9 @@ dependencies:
         commit: 'sha1-058700fb89886acfce8d1cc511d69a11eb8f9862'
         owner_id: 29988
         repo_id: 1213024231
-    'softprops/action-gh-release@v3.0.3':
-        ref: 'v3.0.3'
-        commit: 'sha1-efb35369e0ad2afab669f228072c1b0d510eae64'
+    'softprops/action-gh-release@v3.0.4':
+        ref: 'v3.0.4'
+        commit: 'sha1-8a0cd651e5b2365bd640854a3fa5dfc70e4875f3'
         owner_id: 2242
         repo_id: 204253808
     'swatinem/rust-cache@v2.9.3':
