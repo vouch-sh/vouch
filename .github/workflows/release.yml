@@ -726,7 +726,7 @@ jobs:
           echo "$GPG_PRIVATE_KEY" | gpg --batch --import
 
       - name: Install packaging tools
-        run: sudo apt-get update && sudo apt-get install -y dpkg-dev createrepo-c
+        run: sudo apt-get update && sudo apt-get install -y apt-utils dpkg-dev createrepo-c
 
       - name: Update APT repository
         env:
