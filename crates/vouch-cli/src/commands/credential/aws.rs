@@ -1091,7 +1091,10 @@ pub(crate) async fn try_account_access_credentials(
         .await
     };
     match attempt.await {
-        Ok(creds) => Some(creds),
+        Ok(creds) => {
+            tracing::debug!("account access manager vended {role_arn}");
+            Some(creds)
+        }
         Err(err) => {
             tracing::debug!(
                 "account access manager did not vend {role_arn}; using the role chain: {err:#}"
