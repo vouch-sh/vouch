@@ -261,6 +261,117 @@ pub(crate) async fn assume_role(req: AssumeRoleRequest<'_>) -> Result<StsCredent
     parse_sts_xml_response(&body)
 }
 
+/// Parameters for the SigV4 `GetScopedCredentials` call.
+pub(crate) struct ScopedCredentialsRequest<'a> {
+    pub http_client: &'a reqwest::Client,
+    /// Region of the STS endpoint to call. The API is regional only: "The
+    /// `GetScopedCredentials` API is not available on the AWS STS Global
+    /// endpoint."
+    pub region: &'a str,
+    /// The temporary credentials to narrow. IAM user and root credentials
+    /// are refused by AWS.
+    pub source_creds: &'a StsCredentials,
+    /// Scope-down policy document, at most
+    /// [`SCOPE_DOWN_POLICY_MAX_CHARS`] characters.
+    pub policy: &'a str,
+    /// Free text AWS logs to CloudTrail with the call.
+    pub description: &'a str,
+}
+
+/// AWS limit on the `Policy` parameter of `GetScopedCredentials`: the API
+/// reference gives its length as 1 to 2048 characters.
+///
+/// <https://docs.aws.amazon.com/STS/latest/APIReference/API_GetScopedCredentials.html>
+pub(crate) const SCOPE_DOWN_POLICY_MAX_CHARS: usize = 2048;
+
+/// AWS limit on the `ScopedSessionDescription` parameter (2 to 256
+/// characters).
+const SCOPED_SESSION_DESCRIPTION_MAX_CHARS: usize = 256;
+
+/// Call AWS STS `GetScopedCredentials` to narrow existing temporary
+/// credentials with a scope-down policy.
+///
+/// The returned credentials keep the caller's session identity and expiry;
+/// their permissions are the caller's intersected with `policy`. Used where
+/// credentials come from an API that takes no session policy (Identity
+/// Center permission sets, account access manager).
+///
+/// # Errors
+///
+/// Fails when the calling session lacks `sts:GetScopedCredentials`, when
+/// AWS rejects the policy, or when the response does not report at least one
+/// scope-down policy in effect. Callers must treat every error as "no
+/// credentials": the unscoped input must never be handed out in its place.
+///
+/// <https://docs.aws.amazon.com/STS/latest/APIReference/API_GetScopedCredentials.html>
+pub(crate) async fn get_scoped_credentials(
+    req: ScopedCredentialsRequest<'_>,
+) -> Result<StsCredentials> {
+    use crate::integrations::aws::sigv4::sign_and_send_form_post;
+
+    // AWS would reject it anyway; failing here names the cause.
+    if req.policy.chars().count() > SCOPE_DOWN_POLICY_MAX_CHARS {
+        anyhow::bail!(tr!("err-sts-scope-down-policy-too-long"));
+    }
+
+    let domain_suffix = Partition::from_region(req.region).dns_suffix();
+    let endpoint = format!("https://sts.{}.{domain_suffix}/", req.region);
+    let description = scoped_session_description(req.description);
+
+    let params: Vec<(&str, &str)> = vec![
+        ("Action", "GetScopedCredentials"),
+        ("Version", "2011-06-15"),
+        ("Policy", req.policy),
+        ("ScopedSessionDescription", &description),
+    ];
+
+    let body = sign_and_send_form_post(
+        req.http_client,
+        &endpoint,
+        "sts",
+        req.region,
+        req.source_creds,
+        &params,
+    )
+    .await
+    .context(tr!("err-failed-call-aws-sts-getscopedcredentials"))?;
+
+    // Refuse a response that does not confirm the policy took effect, so a
+    // success that scoped nothing can never be mistaken for a restriction.
+    if scoped_policies_count(&body)? == 0 {
+        anyhow::bail!(tr!("err-sts-scoped-policy-not-applied"));
+    }
+
+    parse_sts_xml_response(&body)
+}
+
+/// Fit free text to the `ScopedSessionDescription` constraints: characters
+/// outside printable ASCII are dropped (the documented pattern also admits
+/// tab, newline, and Latin-1, none of which a description needs), and the
+/// result is capped at the documented maximum.
+fn scoped_session_description(text: &str) -> String {
+    let cleaned: String = text
+        .chars()
+        .filter(|c| c.is_ascii_graphic() || *c == ' ')
+        .take(SCOPED_SESSION_DESCRIPTION_MAX_CHARS)
+        .collect();
+    // The documented minimum is 2 characters.
+    if cleaned.chars().count() < 2 {
+        return "vouch".to_string();
+    }
+    cleaned
+}
+
+/// Read `ScopedPoliciesCount` from a `GetScopedCredentials` response.
+fn scoped_policies_count(xml: &str) -> Result<u32> {
+    let doc = roxmltree::Document::parse(xml).context(tr!("err-failed-parse-sts-xml-response"))?;
+    doc.descendants()
+        .find(|n| n.has_tag_name("ScopedPoliciesCount"))
+        .and_then(|n| n.text())
+        .and_then(|t| t.trim().parse::<u32>().ok())
+        .with_context(|| tr_args!("err-missing-sts-response", tag = "ScopedPoliciesCount"))
+}
+
 /// Parse AWS STS XML response using `roxmltree`.
 fn parse_sts_xml_response(xml: &str) -> Result<StsCredentials> {
     let doc = roxmltree::Document::parse(xml).context(tr!("err-failed-parse-sts-xml-response"))?;
@@ -276,7 +387,10 @@ fn parse_sts_xml_response(xml: &str) -> Result<StsCredentials> {
             .children()
             .find(|n| n.has_tag_name(tag))
             .and_then(|n| n.text())
-            .map(String::from)
+            // Credential values never contain whitespace; a pretty-printed
+            // response may wrap them in it.
+            .map(|t| t.split_whitespace().collect::<String>())
+            .filter(|t| !t.is_empty())
             .with_context(|| tr_args!("err-missing-sts-response", tag = tag))
     };
 
@@ -421,5 +535,73 @@ mod tests {
         assert!(debug.contains("[REDACTED]"));
         assert!(debug.contains("AKIAIOSFODNN7EXAMPLE"));
         assert!(debug.contains("2024-01-15T18:30:45"));
+    }
+
+    // =========================================================================
+    // GetScopedCredentials
+    // =========================================================================
+
+    /// The sample response from the `GetScopedCredentials` API reference,
+    /// including its line-wrapped `SessionToken`.
+    const SCOPED_SAMPLE: &str = r#"
+<GetScopedCredentialsResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+  <GetScopedCredentialsResult>
+    <Credentials>
+      <AccessKeyId>ASIAIOSFODNN7EXAMPLE</AccessKeyId>
+      <SecretAccessKey>wJalrXUtnFEMI/K7MDENG/bPxRfiCYzEXAMPLEKEY</SecretAccessKey>
+      <SessionToken>
+       AQoDYXdzEPT//////////wEXAMPLEtc764bNrC9SAPBSM22wDOk4x4HIZ8j4FZTwdQW
+       +scqKmlzm8FDrypNC9Yjc8fPOLn9FX9KSYvKTr4rvx3iSIlTJabIQwj2ICCR/oLxBA==
+      </SessionToken>
+      <Expiration>2019-11-09T13:34:41Z</Expiration>
+    </Credentials>
+    <ScopedPoliciesCount>1</ScopedPoliciesCount>
+    <SessionInfo>
+      <ScopedSessionId>AROAEXAMPLEID:example-session</ScopedSessionId>
+      <Arn>arn:aws:sts::123456789012:assumed-role/example-role/example-session</Arn>
+    </SessionInfo>
+    <SourceIdentity>example-source-identity</SourceIdentity>
+  </GetScopedCredentialsResult>
+  <ResponseMetadata>
+    <RequestId>c6104cbe-af31-11e0-8154-cbc7ccf896c7</RequestId>
+  </ResponseMetadata>
+</GetScopedCredentialsResponse>"#;
+
+    #[test]
+    fn scoped_sample_response_parses_with_the_wrapped_token_joined() {
+        use secrecy::ExposeSecret;
+
+        let creds = parse_sts_xml_response(SCOPED_SAMPLE).unwrap();
+        assert_eq!(creds.access_key_id, "ASIAIOSFODNN7EXAMPLE");
+        assert_eq!(
+            creds.session_token.expose_secret(),
+            "AQoDYXdzEPT//////////wEXAMPLEtc764bNrC9SAPBSM22wDOk4x4HIZ8j4FZTwdQW\
+             +scqKmlzm8FDrypNC9Yjc8fPOLn9FX9KSYvKTr4rvx3iSIlTJabIQwj2ICCR/oLxBA=="
+        );
+        assert_eq!(scoped_policies_count(SCOPED_SAMPLE).unwrap(), 1);
+    }
+
+    #[test]
+    fn scoped_policies_count_is_required() {
+        let without = SCOPED_SAMPLE.replace("<ScopedPoliciesCount>1</ScopedPoliciesCount>", "");
+        assert!(scoped_policies_count(&without).is_err());
+        let zero = SCOPED_SAMPLE.replace(
+            "<ScopedPoliciesCount>1</ScopedPoliciesCount>",
+            "<ScopedPoliciesCount>0</ScopedPoliciesCount>",
+        );
+        assert_eq!(scoped_policies_count(&zero).unwrap(), 0);
+    }
+
+    #[test]
+    fn scoped_session_description_fits_the_documented_constraints() {
+        assert_eq!(
+            scoped_session_description("vouch AI agent: claude-code/2.1.120/agent"),
+            "vouch AI agent: claude-code/2.1.120/agent"
+        );
+        // Control characters and non-ASCII are dropped.
+        assert_eq!(scoped_session_description("a\u{7}b\né"), "ab");
+        // Too short after cleaning falls back to a fixed label.
+        assert_eq!(scoped_session_description("\u{1}"), "vouch");
+        assert_eq!(scoped_session_description(&"x".repeat(400)).len(), 256);
     }
 }

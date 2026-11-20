@@ -737,10 +737,16 @@ arg-aws-console-permission-set-help = IAM Identity Center permission-set name.
 arg-aws-console-via-help = Management role ARN to chain through when multiple organizations are configured (STS role path only; not valid with --account/--permission-set).
 arg-aws-console-idc-application-help = Identity Center application ARN to use when multiple IdC instances are configured (Identity Center path only; requires --account).
 
-aws-err-agent-idc-unsupported =
-    AI-agent credential issuance is not supported on the Identity Center path
-    (permission-set credentials cannot be downscoped).
-    Use an STS role instead: '{ -cmd } credential aws --role <arn>'.
+aws-err-agent-admin-unsupported =
+    This operation uses unrestricted management-role credentials and cannot run
+    under an AI agent. Run it yourself, outside the agent.
+aws-err-agent-scope-down-failed =
+    Could not restrict these credentials for an AI agent, so none were issued.
+    Credentials from this path are narrowed to read-only with AWS STS
+    GetScopedCredentials, which the role or permission set must allow:
+    add 'sts:GetScopedCredentials' to its permissions and check that no
+    service control policy denies it.
+    Alternatively use an STS role: '{ -cmd } credential aws --role <arn>'.
 aws-err-aam-runtime-unauthorized =
     Account access manager rejected the Identity Center token. In IAM Identity Center,
     open Applications → Vouch → Trusted applications → AWS account access and select
@@ -1720,6 +1726,9 @@ err-failed-build-dpop-proof-with-nonce = failed to build DPoP proof with nonce
 err-failed-build-request = failed to build request
 err-failed-call-aws-sts = failed to call AWS STS
 err-failed-call-aws-sts-assumerole = failed to call AWS STS AssumeRole
+err-failed-call-aws-sts-getscopedcredentials = failed to call AWS STS GetScopedCredentials
+err-sts-scope-down-policy-too-long = scope-down policy exceeds the 2,048-character AWS STS limit
+err-sts-scoped-policy-not-applied = AWS STS did not confirm that the scope-down policy was applied
 err-failed-call-codeartifact-getauthorizationtoken = failed to call CodeArtifact GetAuthorizationToken
 err-failed-call-ecr-getauthorizationtoken = failed to call ECR GetAuthorizationToken
 err-failed-call-redshift-getclustercredentialswithiam = failed to call Redshift GetClusterCredentialsWithIAM

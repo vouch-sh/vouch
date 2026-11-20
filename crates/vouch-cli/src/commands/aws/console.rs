@@ -10,8 +10,8 @@ use serde::Deserialize;
 use vouch_cli::{tr, tr_args, tr_eprintln, tr_println};
 
 use crate::commands::credential::aws::{
-    StsRequest, account_access_identity_center, detect_agent_source, exchange_for_sts_credentials,
-    resolve_identity_center, resolve_management_role_for, try_account_access_credentials,
+    StsRequest, account_access_identity_center, detect_agent_source, resolve_identity_center,
+    resolve_management_role_for, vend_role_credentials,
 };
 use crate::config::Config;
 use crate::exit_code::CliError;
@@ -98,14 +98,13 @@ struct SigninTokenResponse {
 
 /// Obtain console credentials via the Identity Center path.
 async fn get_idc_console_creds(server: &ServerUrl, args: &ConsoleArgs) -> Result<ConsoleCreds> {
-    use crate::commands::credential::aws::{detect_agent_source, obtain_identity_center_token};
-    use crate::integrations::aws::sso_portal::get_role_credentials;
+    use crate::commands::credential::aws::{
+        obtain_identity_center_token, vend_permission_set_credentials,
+    };
 
-    // Block AI agents early (fast-fail before config load): permission-set
-    // credentials cannot be downscoped.
-    if detect_agent_source().is_some() {
-        return Err(CliError::ConfigError(tr!("aws-err-agent-idc-unsupported")).into());
-    }
+    // An agent's permission-set credentials are narrowed to read-only before
+    // they reach the federation endpoint.
+    let agent_source = detect_agent_source();
 
     let account_id = args
         .account
@@ -142,16 +141,23 @@ async fn get_idc_console_creds(server: &ServerUrl, args: &ConsoleArgs) -> Result
     let http_client = credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
         .context(tr!("err-failed-create-http-client"))?;
 
-    let idc_token = obtain_identity_center_token(&http_client, server, &management_role, idc)
-        .await
-        .with_context(|| tr!("aws-console-err-aws-credentials"))?;
-
-    let creds = get_role_credentials(
+    let idc_token = obtain_identity_center_token(
         &http_client,
-        &idc.region,
+        server,
+        &management_role,
+        idc,
+        agent_source.as_deref(),
+    )
+    .await
+    .with_context(|| tr!("aws-console-err-aws-credentials"))?;
+
+    let creds = vend_permission_set_credentials(
+        &http_client,
+        idc,
         &idc_token,
         account_id,
         permission_set,
+        agent_source.as_deref(),
     )
     .await
     .with_context(|| tr!("aws-console-err-aws-credentials"))?;
@@ -202,31 +208,20 @@ async fn get_sts_console_creds(server: &ServerUrl, args: ConsoleArgs) -> Result<
     let management_role = resolve_management_role_for(&vouch_config, role.arn, role.via)?;
 
     let agent_source = detect_agent_source();
-    if let Some(m) = management_role.as_deref()
-        && let Some(idc) = account_access_identity_center(&vouch_config, m, agent_source.as_deref())
-    {
-        let http_client = credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
-            .context(tr!("err-failed-create-http-client"))?;
-        if let Some(creds) =
-            try_account_access_credentials(&http_client, server, m, idc, role.arn).await
-        {
-            return Ok(ConsoleCreds {
-                access_key_id: creds.access_key_id,
-                secret_access_key: creds.secret_access_key,
-                session_token: creds.session_token,
-                partition,
-                http_client,
-            });
-        }
-    }
+    let account_access = management_role
+        .as_deref()
+        .and_then(|m| account_access_identity_center(&vouch_config, m));
 
-    let result = exchange_for_sts_credentials(StsRequest {
-        server,
-        role,
-        region: &region,
-        management_role: management_role.as_deref(),
-        agent_source: agent_source.as_deref(),
-    })
+    let result = vend_role_credentials(
+        StsRequest {
+            server,
+            role,
+            region: &region,
+            management_role: management_role.as_deref(),
+            agent_source: agent_source.as_deref(),
+        },
+        account_access,
+    )
     .await
     .with_context(|| tr!("aws-console-err-aws-credentials"))?;
 
@@ -317,7 +312,6 @@ pub(crate) async fn run(server: &ServerUrl, args: ConsoleArgs) -> Result<()> {
 mod tests {
     use super::*;
     use crate::commands::aws::AwsCommands;
-    use crate::commands::credential::aws::test_support::ENV_LOCK;
     use clap::Parser;
 
     /// Parses `ConsoleArgs` through the real `AwsCommands` enum.
@@ -325,51 +319,6 @@ mod tests {
     struct TestCli {
         #[command(subcommand)]
         cmd: AwsCommands,
-    }
-
-    // Agent-block test --------------------------------------------------------
-    //
-    // The agent check fires as the very first statement in `get_idc_console_creds`,
-    // before Config::load or any network I/O, so the test does not need real
-    // server/config state.
-
-    #[tokio::test]
-    #[expect(
-        unsafe_code,
-        reason = "env mutation to trigger agent detection in an isolated test; var is restored after assertion"
-    )]
-    async fn agent_block_in_get_idc_console_creds_fires_before_config_load() {
-        let _guard = ENV_LOCK.lock().await;
-        // SAFETY: agent check is the first statement; Config::load is never reached.
-        unsafe {
-            std::env::set_var("CLAUDECODE", "1");
-        }
-        let args = ConsoleArgs {
-            role: None,
-            profile: None,
-            account: Some("111111111111".to_string()),
-            permission_set: Some("Admin".to_string()),
-            via: None,
-            idc_application: None,
-        };
-        let result = get_idc_console_creds(
-            &ServerUrl::parse("https://example.com", false).unwrap(),
-            &args,
-        )
-        .await;
-        // SAFETY: env var restored regardless of assertion outcome.
-        unsafe {
-            std::env::remove_var("CLAUDECODE");
-        }
-        // `.err().unwrap()` avoids the `T: Debug` bound that `.unwrap_err()` requires.
-        let err = result.err().unwrap();
-        assert!(
-            matches!(
-                err.downcast_ref::<CliError>(),
-                Some(CliError::ConfigError(_))
-            ),
-            "expected ConfigError(aws-err-agent-idc-unsupported), got: {err}"
-        );
     }
 
     #[test]
