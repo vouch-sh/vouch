@@ -30,9 +30,24 @@ use super::sts::{ScopedCredentialsRequest, StsCredentials, get_scoped_credential
 /// Action-name patterns an AI agent keeps, on any service.
 const AGENT_READ_ACTIONS: &[&str] = &["*:Get*", "*:List*", "*:Describe*", "*:BatchGet*"];
 
-/// Read-shaped actions that return secret values, denied explicitly because
-/// `*:Get*` would otherwise match them.
-const AGENT_DENIED_ACTIONS: &[&str] = &["secretsmanager:GetSecretValue"];
+/// Read-shaped actions that return a secret value, a token or credentials,
+/// denied explicitly because the patterns in [`AGENT_READ_ACTIONS`] would
+/// otherwise match them. Each name is as listed in the AWS Service
+/// Authorization Reference for its service.
+const AGENT_DENIED_ACTIONS: &[&str] = &[
+    "secretsmanager:GetSecretValue",
+    "secretsmanager:BatchGetSecretValue",
+    "ecr:GetAuthorizationToken",
+    "ecr-public:GetAuthorizationToken",
+    "codeartifact:GetAuthorizationToken",
+    // Bearer tokens for CodeArtifact and ECR Public are minted through this.
+    "sts:GetServiceBearerToken",
+    "redshift:GetClusterCredentials",
+    "redshift:GetClusterCredentialsWithIAM",
+    "redshift:GetIdentityCenterAuthToken",
+    "redshift-serverless:GetCredentials",
+    "redshift-serverless:GetIdentityCenterAuthToken",
+];
 
 /// The scope-down policy document applied to an AI agent's credentials.
 ///
@@ -147,12 +162,24 @@ mod tests {
         }
     }
 
-    /// `*:Get*` matches `secretsmanager:GetSecretValue`; the explicit deny
-    /// takes it back. Nothing allowed matches `kms:Decrypt` or `sts:Assume*`.
+    /// The read patterns match these secret- and credential-returning
+    /// actions; the explicit deny takes them back. Nothing allowed matches
+    /// `kms:Decrypt` or `sts:Assume*`.
     #[test]
     fn policy_withholds_secret_values_and_decryption() {
         assert_eq!(statement("Deny")["Resource"], "*");
-        assert!(actions("Deny").contains(&"secretsmanager:GetSecretValue".to_string()));
+        let denied = actions("Deny");
+        for action in [
+            "secretsmanager:GetSecretValue",
+            "secretsmanager:BatchGetSecretValue",
+            "ecr:GetAuthorizationToken",
+            "codeartifact:GetAuthorizationToken",
+            "sts:GetServiceBearerToken",
+            "redshift:GetClusterCredentials",
+            "redshift-serverless:GetCredentials",
+        ] {
+            assert!(denied.iter().any(|d| d == action), "{action} is not denied");
+        }
         for action in actions("Allow") {
             let (_, name) = action.split_once(':').unwrap();
             let verb = name.strip_suffix('*').unwrap();
