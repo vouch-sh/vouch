@@ -740,13 +740,14 @@ arg-aws-console-idc-application-help = Identity Center application ARN to use wh
 aws-err-agent-admin-unsupported =
     This operation uses unrestricted management-role credentials and cannot run
     under an AI agent. Run it yourself, outside the agent.
+aws-err-agent-scope-down-denied =
+    Could not restrict these credentials for an AI agent, so none were issued.
+    Identity Center permission-set credentials are narrowed to read-only with
+    AWS STS GetScopedCredentials, which the permission set must allow: add
+    'sts:GetScopedCredentials' to it and check that no service control policy
+    denies it. An IAM role reached through the role chain needs no change.
 aws-err-agent-scope-down-failed =
     Could not restrict these credentials for an AI agent, so none were issued.
-    Credentials from this path are narrowed to read-only with AWS STS
-    GetScopedCredentials, which the role or permission set must allow:
-    add 'sts:GetScopedCredentials' to its permissions and check that no
-    service control policy denies it.
-    Alternatively use an STS role: '{ -cmd } credential aws --role <arn>'.
 aws-err-aam-runtime-unauthorized =
     Account access manager rejected the Identity Center token. In IAM Identity Center,
     open Applications → Vouch → Trusted applications → AWS account access and select
@@ -1727,8 +1728,6 @@ err-failed-build-request = failed to build request
 err-failed-call-aws-sts = failed to call AWS STS
 err-failed-call-aws-sts-assumerole = failed to call AWS STS AssumeRole
 err-failed-call-aws-sts-getscopedcredentials = failed to call AWS STS GetScopedCredentials
-err-sts-scope-down-policy-too-long = scope-down policy exceeds the 2,048-character AWS STS limit
-err-sts-scoped-policy-not-applied = AWS STS did not confirm that the scope-down policy was applied
 err-failed-call-codeartifact-getauthorizationtoken = failed to call CodeArtifact GetAuthorizationToken
 err-failed-call-ecr-getauthorizationtoken = failed to call ECR GetAuthorizationToken
 err-failed-call-redshift-getclustercredentialswithiam = failed to call Redshift GetClusterCredentialsWithIAM
@@ -1852,6 +1851,8 @@ err-server-returned-invalid-oidc-token = server returned invalid OIDC token
 err-server-url-has-no-host = server URL has no host
 err-sso-portal-returned-an-out-range-credential-expirati = SSO Portal returned an out-of-range credential expiration
 err-step-up-re-authentication-failed = step-up re-authentication failed
+err-sts-scope-down-policy-too-long = scope-down policy exceeds the { $max }-character AWS STS limit
+err-sts-scoped-policy-not-applied = AWS STS did not confirm that the scope-down policy was applied
 err-vouch-is-not-enrolled-run-vouch-enroll-set-up-authen = vouch is not enrolled - run 'vouch enroll' to set up authentication
 err-webauthn-buffer-length-exceeds-usize = WebAuthn buffer length exceeds usize
 err- = { $e }

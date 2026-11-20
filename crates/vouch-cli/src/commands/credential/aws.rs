@@ -612,7 +612,7 @@ fn agent_session_policies(agent_source: Option<&str>) -> AgentSessionPolicies {
         };
     }
     AgentSessionPolicies {
-        session_policy_names: &["ReadOnlyAccess"],
+        session_policy_names: &[aws::agent_scope::AGENT_MANAGED_POLICY],
         mgmt_hop_policy: Some(serde_json::json!({
             "Version": "2012-10-17",
             "Statement": [{
@@ -793,12 +793,13 @@ pub(crate) struct ManagementRoleSession {
 }
 
 /// Assume the org's management role with full (unrestricted) credentials
-/// via `AssumeRoleWithWebIdentity`, for admin-plane discovery.
+/// via `AssumeRoleWithWebIdentity`.
 ///
-/// Blocks AI agents: the session is handed back to the caller unrestricted,
-/// and discovery should not run under an agent. The credential paths, which
-/// keep the session in-process and narrow what they finally vend, use
-/// [`assume_management_role_for`] instead.
+/// Blocks AI agents: the session is handed back unrestricted, for
+/// admin-plane discovery and account access manager, neither of which runs
+/// under an agent. The permission-set path, which keeps the session inside
+/// [`vend_permission_set_credentials`] and narrows what it vends, calls
+/// [`assume_management_role_for`] directly.
 pub(crate) async fn assume_management_role(
     http_client: &reqwest::Client,
     server: &ServerUrl,
@@ -810,16 +811,9 @@ pub(crate) async fn assume_management_role(
     assume_management_role_for(http_client, server, management_role, None).await
 }
 
-/// Assume the org's management role for a credential exchange, with no
-/// agent block.
-///
-/// The returned session is unrestricted even for an agent, so callers must
-/// use it only for the Identity Center token exchange and must narrow the
-/// credentials they vend from it (see
-/// [`aws::agent_scope::scope_credentials_for_agent`]). When `agent_source`
-/// is set it is sent as the DPoP source claim, so the management-role
-/// session carries the `vouch:AccessType=ai` / `vouch:Agent` tags in
-/// CloudTrail.
+/// Assume the org's management role, sending `agent_source` as the DPoP
+/// source claim so an agent's management-role session carries the
+/// `vouch:AccessType=ai` / `vouch:Agent` tags in CloudTrail.
 async fn assume_management_role_for(
     http_client: &reqwest::Client,
     server: &ServerUrl,
@@ -902,35 +896,21 @@ pub(crate) async fn exchange_idc_access_token(
     Ok(exchange.access_token)
 }
 
-/// Obtain an IAM Identity Center access token via the trusted-token-issuer
-/// (TTI) exchange.
+/// Vend Identity Center permission-set credentials through the
+/// trusted-token-issuer (TTI) exchange, narrowed to the agent read-only
+/// policy when `agent_source` is set.
 ///
 /// Called by `credential aws --account/--permission-set` and `aws console`
-/// (IdC path). The token buys full permission-set credentials whoever asks,
-/// so a caller passing `agent_source` must narrow what it vends with
-/// [`aws::agent_scope::scope_credentials_for_agent`].
-pub(crate) async fn obtain_identity_center_token(
+/// (IdC path). `GetRoleCredentials` takes no session policy, so an agent's
+/// credentials are restricted afterwards with `GetScopedCredentials`. If
+/// that fails the agent gets an error, never the full permission-set
+/// credentials. The management-role session and the IdC token both stay
+/// inside this function, so no caller can vend from them unscoped.
+pub(crate) async fn vend_permission_set_credentials(
     http_client: &reqwest::Client,
     server: &ServerUrl,
     management_role: &str,
     idc: &AwsIdentityCenter,
-    agent_source: Option<&str>,
-) -> Result<secrecy::SecretString> {
-    let session =
-        assume_management_role_for(http_client, server, management_role, agent_source).await?;
-    exchange_idc_access_token(http_client, idc, &session).await
-}
-
-/// Vend Identity Center permission-set credentials, narrowed to the agent
-/// read-only policy when `agent_source` is set.
-///
-/// `GetRoleCredentials` takes no session policy, so an agent's credentials
-/// are restricted afterwards with `GetScopedCredentials`. If that fails the
-/// agent gets an error, never the full permission-set credentials.
-pub(crate) async fn vend_permission_set_credentials(
-    http_client: &reqwest::Client,
-    idc: &AwsIdentityCenter,
-    idc_token: &SecretString,
     account_id: &str,
     permission_set: &str,
     agent_source: Option<&str>,
@@ -938,10 +918,13 @@ pub(crate) async fn vend_permission_set_credentials(
     use crate::integrations::aws::agent_scope::scope_credentials_for_agent;
     use crate::integrations::aws::sso_portal::get_role_credentials;
 
+    let session =
+        assume_management_role_for(http_client, server, management_role, agent_source).await?;
+    let idc_token = exchange_idc_access_token(http_client, idc, &session).await?;
     let creds = get_role_credentials(
         http_client,
         &idc.region,
-        idc_token,
+        &idc_token,
         account_id,
         permission_set,
     )
@@ -980,8 +963,7 @@ pub(crate) async fn get_idc_credentials(
 ) -> Result<serde_json::Value> {
     use vouch_common::http::credential_client;
 
-    // Detect the agent context before the cache lookup; see
-    // `build_idc_cache_key`.
+    // Detected before the cache lookup; see `build_idc_cache_key`.
     let agent_source = detect_agent_source();
 
     let vouch_config = Config::load()?;
@@ -1021,19 +1003,11 @@ pub(crate) async fn get_idc_credentials(
         let http_client = credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
             .context(tr!("err-failed-create-http-client"))?;
 
-        let idc_token = obtain_identity_center_token(
+        let creds = vend_permission_set_credentials(
             &http_client,
             server,
             &management_role,
             &idc,
-            agent_source.as_deref(),
-        )
-        .await?;
-
-        let creds = vend_permission_set_credentials(
-            &http_client,
-            &idc,
-            &idc_token,
             &account_id,
             &permission_set,
             agent_source.as_deref(),
@@ -1059,13 +1033,18 @@ pub(crate) async fn get_idc_credentials(
 /// configured on that management role's org, when discovery saved a tenant
 /// for it.
 ///
-/// Whether and when it is tried depends on the caller: see
-/// [`vend_role_credentials`], which puts the role chain first for an AI
-/// agent.
+/// Always `None` for a detected AI agent (`agent_source`): the account
+/// access runtime API takes no session policy, so its credentials cannot be
+/// downscoped, and agents stay on the role chain where `ReadOnlyAccess`
+/// applies.
 pub(crate) fn account_access_identity_center<'a>(
     vouch_config: &'a Config,
     management_role: &str,
+    agent_source: Option<&str>,
 ) -> Option<&'a AwsIdentityCenter> {
+    if agent_source.is_some() {
+        return None;
+    }
     vouch_config
         .aws()?
         .organizations
@@ -1076,122 +1055,49 @@ pub(crate) fn account_access_identity_center<'a>(
         .filter(|idc| idc.account_access_tenant_id.is_some())
 }
 
-/// Try to vend `role_arn` through account access manager, for an `idc`
-/// chosen by [`account_access_identity_center`].
+/// Try to vend `role_arn` through account access manager before the role
+/// chain, for an `idc` chosen by [`account_access_identity_center`] (which
+/// excludes AI agents).
 ///
 /// Uses the account access runtime API with the Identity Center token from
 /// the TTI exchange; the role session is named after the token's `sub`, as
 /// on the chain path, so CloudTrail shows one session identity per person.
 ///
-/// The runtime API takes no session policy, so when `agent_source` is set
-/// the vended credentials are narrowed to the agent read-only policy
-/// with `GetScopedCredentials` before they are returned.
-///
-/// Returns `None`, meaning "account access manager is not the way", on any
-/// failure: a role the user is not entitled to, a trust policy without the
-/// account access manager statement, an application without the
-/// `account_access` scopes, or, for an agent, a role that may not call
-/// `GetScopedCredentials`. An agent therefore never receives unscoped
-/// credentials from here. The failure is debug-logged; the role chain's own
-/// error is the one the user sees.
+/// Returns `None`, meaning "use the role chain", on any failure: a role the
+/// user is not entitled to, a trust policy without the account access
+/// manager statement, or an application without the `account_access`
+/// scopes. The failure is debug-logged; the chain's own error is the one
+/// the user sees if it fails too.
 pub(crate) async fn try_account_access_credentials(
     http_client: &reqwest::Client,
     server: &ServerUrl,
     management_role: &str,
     idc: &AwsIdentityCenter,
     role_arn: &str,
-    agent_source: Option<&str>,
 ) -> Option<StsCredentials> {
     use crate::integrations::aws::account_access_runtime::RuntimeClient;
-    use crate::integrations::aws::agent_scope::scope_credentials_for_agent;
 
     let tenant_id = idc.account_access_tenant_id.as_deref()?;
     let attempt = async {
-        let session =
-            assume_management_role_for(http_client, server, management_role, agent_source).await?;
+        let session = assume_management_role(http_client, server, management_role).await?;
         let idc_token = exchange_idc_access_token(http_client, idc, &session).await?;
-        let creds = RuntimeClient::new(
+        RuntimeClient::new(
             http_client.clone(),
             &idc.region,
             tenant_id.to_string(),
             idc_token,
         )?
         .get_role_credentials(role_arn, &session.role_session_name)
-        .await?;
-        match agent_source {
-            Some(source) => {
-                scope_credentials_for_agent(http_client, &idc.region, &creds, source).await
-            }
-            None => Ok(creds),
-        }
+        .await
     };
     match attempt.await {
         Ok(creds) => Some(creds),
         Err(err) => {
-            tracing::debug!("account access manager did not vend {role_arn}: {err:#}");
+            tracing::debug!(
+                "account access manager did not vend {role_arn}; using the role chain: {err:#}"
+            );
             None
         }
-    }
-}
-
-/// Vend credentials for an IAM role through whichever of account access
-/// manager and the role chain applies.
-///
-/// `account_access` is the instance from [`account_access_identity_center`],
-/// when one is configured for `req.management_role`.
-///
-/// A person gets account access manager first and the role chain as the
-/// fallback. An AI agent gets the reverse: the role chain first, because its
-/// `ReadOnlyAccess` session policy and `vouch:AccessType=ai` tags are the
-/// stronger restriction, and account access manager (narrowed with
-/// `GetScopedCredentials`) only for a role the chain cannot reach. Either
-/// way the role chain's error is the one reported when both fail.
-pub(crate) async fn vend_role_credentials(
-    req: StsRequest<'_>,
-    account_access: Option<&AwsIdentityCenter>,
-) -> Result<StsExchangeResult> {
-    let account_access = req.management_role.zip(account_access);
-    let via_account_access =
-        async |agent_source: Option<&str>| -> Result<Option<StsExchangeResult>> {
-            let Some((management_role, idc)) = account_access else {
-                return Ok(None);
-            };
-            let http_client =
-                http::credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
-                    .context(tr!("err-failed-create-http-client"))?;
-            let Some(credentials) = try_account_access_credentials(
-                &http_client,
-                req.server,
-                management_role,
-                idc,
-                req.role.arn,
-                agent_source,
-            )
-            .await
-            else {
-                return Ok(None);
-            };
-            let domain_suffix = sts::parse_role_arn(req.role.arn)?.partition.dns_suffix();
-            Ok(Some(StsExchangeResult {
-                http_client,
-                credentials,
-                domain_suffix,
-            }))
-        };
-
-    let Some(agent_source) = req.agent_source else {
-        if let Some(result) = via_account_access(None).await? {
-            return Ok(result);
-        }
-        return exchange_for_sts_credentials(req).await;
-    };
-
-    match exchange_for_sts_credentials(req).await {
-        Ok(result) => Ok(result),
-        Err(chain_err) => match via_account_access(Some(agent_source)).await {
-            Ok(Some(result)) => Ok(result),
-            Ok(None) | Err(_) => Err(chain_err),
-        },
     }
 }
 
@@ -1220,19 +1126,30 @@ pub(crate) async fn get_aws_credentials(
 
     let account_access = management_role
         .as_deref()
-        .and_then(|m| account_access_identity_center(&vouch_config, m))
+        .and_then(|m| account_access_identity_center(&vouch_config, m, agent_source.as_deref()))
         .cloned();
     let mgmt = management_role;
     let agent = agent_source;
     super::cache::get_or_fetch(&cache_key, "AWS credentials", || async move {
-        let output = fetch_and_assume(
-            server,
-            role,
-            mgmt.as_deref(),
-            agent.as_deref(),
-            account_access.as_ref(),
-        )
-        .await?;
+        if let (Some(m), Some(idc)) = (mgmt.as_deref(), account_access.as_ref()) {
+            let http_client =
+                http::credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
+                    .context(tr!("err-failed-create-http-client"))?;
+            if let Some(creds) =
+                try_account_access_credentials(&http_client, server, m, idc, role.arn).await
+            {
+                let output = CredentialProcessOutput {
+                    version: 1,
+                    access_key_id: creds.access_key_id,
+                    secret_access_key: creds.secret_access_key,
+                    session_token: creds.session_token,
+                    expiration: creds.expiration.to_string(),
+                };
+                let expires_at = output.expiration.clone();
+                return Ok((output.to_json(), expires_at));
+            }
+        }
+        let output = fetch_and_assume(server, role, mgmt.as_deref(), agent.as_deref()).await?;
         let expires_at = output.expiration.clone();
         Ok((output.to_json(), expires_at))
     })
@@ -1269,27 +1186,23 @@ pub(crate) async fn run(
 
 /// Fetch an OIDC token and exchange it for STS credentials.
 ///
-/// Resolves the AWS region, then calls [`vend_role_credentials`] with the
-/// pre-resolved management role and account access manager instance.
+/// Resolves the AWS region, then calls `exchange_for_sts_credentials`
+/// with the pre-resolved management role.
 async fn fetch_and_assume(
     server: &ServerUrl,
     role: RoleTarget<'_>,
     mgmt_role: Option<&str>,
     agent_source: Option<&str>,
-    account_access: Option<&AwsIdentityCenter>,
 ) -> Result<CredentialProcessOutput> {
     let region = aws::resolve_region_with_fallback(role.arn)?;
 
-    let result = vend_role_credentials(
-        StsRequest {
-            server,
-            role,
-            region: &region,
-            management_role: mgmt_role,
-            agent_source,
-        },
-        account_access,
-    )
+    let result = exchange_for_sts_credentials(StsRequest {
+        server,
+        role,
+        region: &region,
+        management_role: mgmt_role,
+        agent_source,
+    })
     .await?;
     let creds = &result.credentials;
     Ok(CredentialProcessOutput {
@@ -2026,8 +1939,9 @@ mod tests {
     // Sets an env var to simulate an agent environment. The agent check is the
     // first statement, before any network I/O, so no server state is needed.
 
-    /// Admin-plane discovery gets the management-role session back
-    /// unrestricted, so it stays closed to agents.
+    /// Admin-plane discovery and account access manager get the
+    /// management-role session back unrestricted, so they stay closed to
+    /// agents.
     #[tokio::test]
     #[expect(
         unsafe_code,
@@ -2086,25 +2000,35 @@ mod tests {
     #[test]
     fn account_access_is_tried_when_the_org_has_a_saved_tenant() {
         let cfg = config_with_tenant(Some("aa-1"));
-        let idc = account_access_identity_center(&cfg, MGMT1).unwrap();
+        let idc = account_access_identity_center(&cfg, MGMT1, None).unwrap();
         assert_eq!(idc.application_arn, APP1);
     }
 
     #[test]
     fn account_access_is_skipped_without_a_saved_tenant() {
         let cfg = config_with_tenant(None);
-        assert!(account_access_identity_center(&cfg, MGMT1).is_none());
+        assert!(account_access_identity_center(&cfg, MGMT1, None).is_none());
     }
 
     #[test]
     fn account_access_is_skipped_for_an_org_without_identity_center() {
         let cfg = config_with_tenant(Some("aa-1"));
-        assert!(account_access_identity_center(&cfg, MGMT2).is_none());
+        assert!(account_access_identity_center(&cfg, MGMT2, None).is_none());
     }
 
     #[test]
     fn account_access_is_skipped_for_an_unknown_management_role() {
         let cfg = config_with_tenant(Some("aa-1"));
-        assert!(account_access_identity_center(&cfg, "arn:aws:iam::999:role/Other").is_none());
+        assert!(
+            account_access_identity_center(&cfg, "arn:aws:iam::999:role/Other", None).is_none()
+        );
+    }
+
+    /// Account access manager credentials cannot be downscoped, so an AI
+    /// agent stays on the role chain, where `ReadOnlyAccess` applies.
+    #[test]
+    fn account_access_is_never_tried_for_an_ai_agent() {
+        let cfg = config_with_tenant(Some("aa-1"));
+        assert!(account_access_identity_center(&cfg, MGMT1, Some("claude-code")).is_none());
     }
 }

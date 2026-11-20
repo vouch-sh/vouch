@@ -87,6 +87,13 @@ pub(crate) struct WebIdentityRequest<'a> {
     pub session_policy: Option<&'a serde_json::Value>,
 }
 
+/// The regional STS endpoint. Every call here uses one: the global endpoint
+/// serves only the commercial partition, and `GetScopedCredentials` "is not
+/// available on the AWS STS Global endpoint".
+fn regional_endpoint(region: &str, domain_suffix: &str) -> String {
+    format!("https://sts.{region}.{domain_suffix}/")
+}
+
 /// Call AWS STS `AssumeRoleWithWebIdentity`.
 ///
 /// Uses regional STS endpoints to support all AWS partitions
@@ -95,7 +102,7 @@ pub(crate) async fn assume_role_with_web_identity(
     req: WebIdentityRequest<'_>,
 ) -> Result<StsCredentials> {
     // Use regional STS endpoint for the appropriate partition
-    let sts_url = format!("https://sts.{}.{}/", req.region, req.domain_suffix);
+    let sts_url = regional_endpoint(req.region, req.domain_suffix);
 
     let partition = Partition::from_region(req.region);
 
@@ -197,7 +204,7 @@ pub(crate) async fn assume_role(req: AssumeRoleRequest<'_>) -> Result<StsCredent
 
     let partition = Partition::from_region(req.region);
     let domain_suffix = partition.dns_suffix();
-    let endpoint = format!("https://sts.{}.{domain_suffix}/", req.region);
+    let endpoint = regional_endpoint(req.region, domain_suffix);
 
     // Bind owned values to variables first — sign_and_send_form_post takes &[(&str, &str)]
     // so all values must outlive the params slice. This pattern mirrors redshift.rs.
@@ -274,6 +281,9 @@ pub(crate) struct ScopedCredentialsRequest<'a> {
     /// Scope-down policy document, at most
     /// [`SCOPE_DOWN_POLICY_MAX_CHARS`] characters.
     pub policy: &'a str,
+    /// Lifetime of the scoped credentials. `None` inherits the source
+    /// session's expiry; a value past that expiry is rejected by AWS.
+    pub duration_seconds: Option<u32>,
     /// Free text AWS logs to CloudTrail with the call.
     pub description: &'a str,
 }
@@ -311,19 +321,26 @@ pub(crate) async fn get_scoped_credentials(
 
     // AWS would reject it anyway; failing here names the cause.
     if req.policy.chars().count() > SCOPE_DOWN_POLICY_MAX_CHARS {
-        anyhow::bail!(tr!("err-sts-scope-down-policy-too-long"));
+        anyhow::bail!(tr_args!(
+            "err-sts-scope-down-policy-too-long",
+            max = SCOPE_DOWN_POLICY_MAX_CHARS.to_string()
+        ));
     }
 
     let domain_suffix = Partition::from_region(req.region).dns_suffix();
-    let endpoint = format!("https://sts.{}.{domain_suffix}/", req.region);
+    let endpoint = regional_endpoint(req.region, domain_suffix);
     let description = scoped_session_description(req.description);
+    let duration = req.duration_seconds.map(|d| d.to_string());
 
-    let params: Vec<(&str, &str)> = vec![
+    let mut params: Vec<(&str, &str)> = vec![
         ("Action", "GetScopedCredentials"),
         ("Version", "2011-06-15"),
         ("Policy", req.policy),
         ("ScopedSessionDescription", &description),
     ];
+    if let Some(duration) = duration.as_deref() {
+        params.push(("DurationSeconds", duration));
+    }
 
     let body = sign_and_send_form_post(
         req.http_client,
@@ -336,13 +353,19 @@ pub(crate) async fn get_scoped_credentials(
     .await
     .context(tr!("err-failed-call-aws-sts-getscopedcredentials"))?;
 
-    // Refuse a response that does not confirm the policy took effect, so a
-    // success that scoped nothing can never be mistaken for a restriction.
-    if scoped_policies_count(&body)? == 0 {
+    ensure_scope_applied(&body)?;
+    parse_sts_xml_response(&body)
+}
+
+/// Refuse a `GetScopedCredentials` response that does not confirm a
+/// scope-down policy is in effect, so a success that scoped nothing can
+/// never be mistaken for a restriction. `ScopedPoliciesCount` "specifies the
+/// number of scope down policies applied to the session".
+fn ensure_scope_applied(xml: &str) -> Result<()> {
+    if scoped_policies_count(xml)? == 0 {
         anyhow::bail!(tr!("err-sts-scoped-policy-not-applied"));
     }
-
-    parse_sts_xml_response(&body)
+    Ok(())
 }
 
 /// Fit free text to the `ScopedSessionDescription` constraints: characters
@@ -387,10 +410,7 @@ fn parse_sts_xml_response(xml: &str) -> Result<StsCredentials> {
             .children()
             .find(|n| n.has_tag_name(tag))
             .and_then(|n| n.text())
-            // Credential values never contain whitespace; a pretty-printed
-            // response may wrap them in it.
-            .map(|t| t.split_whitespace().collect::<String>())
-            .filter(|t| !t.is_empty())
+            .map(String::from)
             .with_context(|| tr_args!("err-missing-sts-response", tag = tag))
     };
 
@@ -541,18 +561,16 @@ mod tests {
     // GetScopedCredentials
     // =========================================================================
 
-    /// The sample response from the `GetScopedCredentials` API reference,
-    /// including its line-wrapped `SessionToken`.
+    /// The sample response from the `GetScopedCredentials` API reference.
+    /// The page shows the `SessionToken` wrapped across lines for display;
+    /// it is joined here, as STS sends it.
     const SCOPED_SAMPLE: &str = r#"
 <GetScopedCredentialsResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
   <GetScopedCredentialsResult>
     <Credentials>
       <AccessKeyId>ASIAIOSFODNN7EXAMPLE</AccessKeyId>
       <SecretAccessKey>wJalrXUtnFEMI/K7MDENG/bPxRfiCYzEXAMPLEKEY</SecretAccessKey>
-      <SessionToken>
-       AQoDYXdzEPT//////////wEXAMPLEtc764bNrC9SAPBSM22wDOk4x4HIZ8j4FZTwdQW
-       +scqKmlzm8FDrypNC9Yjc8fPOLn9FX9KSYvKTr4rvx3iSIlTJabIQwj2ICCR/oLxBA==
-      </SessionToken>
+      <SessionToken>AQoDYXdzEPT//////////wEXAMPLEtc764bNrC9SAPBSM22wDOk4x4HIZ8j4FZTwdQW+scqKmlzm8FDrypNC9Yjc8fPOLn9FX9KSYvKTr4rvx3iSIlTJabIQwj2ICCR/oLxBA==</SessionToken>
       <Expiration>2019-11-09T13:34:41Z</Expiration>
     </Credentials>
     <ScopedPoliciesCount>1</ScopedPoliciesCount>
@@ -568,7 +586,7 @@ mod tests {
 </GetScopedCredentialsResponse>"#;
 
     #[test]
-    fn scoped_sample_response_parses_with_the_wrapped_token_joined() {
+    fn scoped_sample_response_parses() {
         use secrecy::ExposeSecret;
 
         let creds = parse_sts_xml_response(SCOPED_SAMPLE).unwrap();
@@ -581,15 +599,38 @@ mod tests {
         assert_eq!(scoped_policies_count(SCOPED_SAMPLE).unwrap(), 1);
     }
 
-    #[test]
-    fn scoped_policies_count_is_required() {
-        let without = SCOPED_SAMPLE.replace("<ScopedPoliciesCount>1</ScopedPoliciesCount>", "");
-        assert!(scoped_policies_count(&without).is_err());
-        let zero = SCOPED_SAMPLE.replace(
+    fn with_scoped_count(count: &str) -> String {
+        SCOPED_SAMPLE.replace(
             "<ScopedPoliciesCount>1</ScopedPoliciesCount>",
-            "<ScopedPoliciesCount>0</ScopedPoliciesCount>",
+            &format!("<ScopedPoliciesCount>{count}</ScopedPoliciesCount>"),
+        )
+    }
+
+    #[test]
+    fn scope_applied_when_a_policy_is_reported() {
+        assert!(ensure_scope_applied(SCOPED_SAMPLE).is_ok());
+        assert!(ensure_scope_applied(&with_scoped_count("3")).is_ok());
+    }
+
+    /// A success that reports no scope-down policy must not be vended: the
+    /// credentials would carry the permission set's full access.
+    #[test]
+    fn scope_not_applied_when_the_count_is_zero() {
+        let err = ensure_scope_applied(&with_scoped_count("0")).unwrap_err();
+        assert!(
+            err.to_string().contains("did not confirm"),
+            "unexpected error: {err}"
         );
-        assert_eq!(scoped_policies_count(&zero).unwrap(), 0);
+    }
+
+    #[test]
+    fn scope_not_applied_when_the_count_is_missing_or_malformed() {
+        let without = SCOPED_SAMPLE.replace("<ScopedPoliciesCount>1</ScopedPoliciesCount>", "");
+        assert!(ensure_scope_applied(&without).is_err());
+        assert!(ensure_scope_applied(&with_scoped_count("")).is_err());
+        assert!(ensure_scope_applied(&with_scoped_count("-1")).is_err());
+        assert!(ensure_scope_applied(&with_scoped_count("one")).is_err());
+        assert!(ensure_scope_applied("not xml").is_err());
     }
 
     #[test]
