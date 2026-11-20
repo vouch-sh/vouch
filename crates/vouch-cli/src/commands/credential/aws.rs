@@ -922,7 +922,7 @@ pub(crate) async fn obtain_identity_center_token(
 }
 
 /// Vend Identity Center permission-set credentials, narrowed to the agent
-/// read-only allow-list when `agent_source` is set.
+/// read-only policy when `agent_source` is set.
 ///
 /// `GetRoleCredentials` takes no session policy, so an agent's credentials
 /// are restricted afterwards with `GetScopedCredentials`. If that fails the
@@ -1084,7 +1084,7 @@ pub(crate) fn account_access_identity_center<'a>(
 /// on the chain path, so CloudTrail shows one session identity per person.
 ///
 /// The runtime API takes no session policy, so when `agent_source` is set
-/// the vended credentials are narrowed to the agent read-only allow-list
+/// the vended credentials are narrowed to the agent read-only policy
 /// with `GetScopedCredentials` before they are returned.
 ///
 /// Returns `None`, meaning "account access manager is not the way", on any

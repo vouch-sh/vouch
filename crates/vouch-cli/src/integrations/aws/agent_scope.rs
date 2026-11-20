@@ -11,8 +11,14 @@
 //!
 //! That API accepts only an inline policy of at most 2,048 characters and no
 //! managed policy ARNs, so `ReadOnlyAccess` cannot be named here. The policy
-//! below is an allow-list of read actions for commonly used services. A
-//! service missing from it is denied to the agent, never writable.
+//! below allows the read-shaped action names (`Get*`, `List*`, `Describe*`,
+//! `BatchGet*`) on every service instead, using a wildcard service prefix so
+//! that no per-service list has to be maintained.
+//!
+//! AWS documents wildcards only in the action name, after the colon; whether
+//! a wildcard service prefix is accepted is not stated. If AWS rejects the
+//! policy, or accepts it and matches nothing, the agent is denied — it never
+//! receives more than the policy allows.
 //!
 //! <https://docs.aws.amazon.com/STS/latest/APIReference/API_GetScopedCredentials.html>
 
@@ -21,105 +27,39 @@ use vouch_cli::tr;
 
 use super::sts::{ScopedCredentialsRequest, StsCredentials, get_scoped_credentials};
 
-const DESCRIBE: &str = "Describe*";
-const GET: &str = "Get*";
-const LIST: &str = "List*";
-const BATCH_GET: &str = "BatchGet*";
+/// Action-name patterns an AI agent keeps, on any service.
+const AGENT_READ_ACTIONS: &[&str] = &["*:Get*", "*:List*", "*:Describe*", "*:BatchGet*"];
 
-/// Service prefix → read actions an AI agent keeps on scoped credentials.
-///
-/// Secrets stay out of reach: `secretsmanager` has no `Get*` (so no
-/// `GetSecretValue`), and `kms` has no `Decrypt`, which also keeps
-/// `SecureString` parameters and KMS-encrypted objects unreadable.
-/// `sts:GetScopedCredentials` is allowed so an agent can narrow these
-/// credentials further for a sub-agent; that call can only reduce access.
-const AGENT_READ_ACTIONS: &[(&str, &[&str])] = &[
-    ("acm", &[DESCRIBE, GET, LIST]),
-    ("apigateway", &["GET"]),
-    ("athena", &[GET, LIST, BATCH_GET]),
-    ("autoscaling", &[DESCRIBE]),
-    ("ce", &[GET, LIST]),
-    ("cloudformation", &[DESCRIBE, GET, LIST]),
-    ("cloudfront", &[GET, LIST]),
-    ("cloudtrail", &[DESCRIBE, GET, LIST, "LookupEvents"]),
-    ("cloudwatch", &[DESCRIBE, GET, LIST]),
-    ("codebuild", &[LIST, BATCH_GET]),
-    ("codecommit", &[GET, LIST, BATCH_GET, "GitPull"]),
-    ("codepipeline", &[GET, LIST]),
-    ("config", &[DESCRIBE, GET, LIST]),
-    (
-        "dynamodb",
-        &[DESCRIBE, GET, LIST, BATCH_GET, "Query", "Scan"],
-    ),
-    ("ec2", &[DESCRIBE, GET]),
-    (
-        "ecr",
-        &[
-            DESCRIBE,
-            GET,
-            LIST,
-            BATCH_GET,
-            "BatchCheckLayerAvailability",
-        ],
-    ),
-    ("ecs", &[DESCRIBE, LIST]),
-    ("eks", &[DESCRIBE, LIST]),
-    ("elasticache", &[DESCRIBE, LIST]),
-    ("elasticfilesystem", &[DESCRIBE]),
-    ("elasticloadbalancing", &[DESCRIBE]),
-    ("es", &[DESCRIBE, LIST, "ESHttpGet", "ESHttpHead"]),
-    ("events", &[DESCRIBE, LIST]),
-    ("glue", &[GET, LIST, BATCH_GET]),
-    ("iam", &[GET, LIST]),
-    ("kinesis", &[DESCRIBE, GET, LIST]),
-    ("kms", &[DESCRIBE, GET, LIST]),
-    ("lambda", &[GET, LIST]),
-    (
-        "logs",
-        &[
-            DESCRIBE,
-            GET,
-            LIST,
-            "FilterLogEvents",
-            "StartQuery",
-            "StopQuery",
-        ],
-    ),
-    ("organizations", &[DESCRIBE, LIST]),
-    ("rds", &[DESCRIBE, LIST]),
-    ("redshift", &[DESCRIBE]),
-    ("route53", &[GET, LIST]),
-    ("s3", &[GET, LIST]),
-    ("secretsmanager", &[DESCRIBE, LIST]),
-    ("servicequotas", &[GET, LIST]),
-    ("sns", &[GET, LIST]),
-    ("sqs", &[GET, LIST]),
-    ("ssm", &[DESCRIBE, GET, LIST]),
-    ("sso", &[DESCRIBE, GET, LIST]),
-    ("states", &[DESCRIBE, GET, LIST]),
-    ("sts", &["GetCallerIdentity", "GetScopedCredentials"]),
-    ("tag", &[GET]),
-    ("xray", &[GET, LIST, BATCH_GET]),
-];
+/// Read-shaped actions that return secret values, denied explicitly because
+/// `*:Get*` would otherwise match them.
+const AGENT_DENIED_ACTIONS: &[&str] = &["secretsmanager:GetSecretValue"];
 
 /// The scope-down policy document applied to an AI agent's credentials.
+///
+/// `kms:Decrypt` matches none of the allowed patterns, which also keeps
+/// `SecureString` parameters and KMS-encrypted objects unreadable.
+/// `sts:GetScopedCredentials` matches `*:Get*`, so an agent can narrow these
+/// credentials further for a sub-agent; that call can only reduce access.
 fn agent_scope_down_policy() -> String {
-    let actions: Vec<String> = AGENT_READ_ACTIONS
-        .iter()
-        .flat_map(|(service, verbs)| verbs.iter().map(move |verb| format!("{service}:{verb}")))
-        .collect();
     serde_json::json!({
         "Version": "2012-10-17",
-        "Statement": [{
-            "Effect": "Allow",
-            "Action": actions,
-            "Resource": "*"
-        }]
+        "Statement": [
+            {
+                "Effect": "Allow",
+                "Action": AGENT_READ_ACTIONS,
+                "Resource": "*"
+            },
+            {
+                "Effect": "Deny",
+                "Action": AGENT_DENIED_ACTIONS,
+                "Resource": "*"
+            }
+        ]
     })
     .to_string()
 }
 
-/// Narrow `credentials` to the agent read-only allow-list.
+/// Narrow `credentials` to the agent read-only policy.
 ///
 /// `region` selects the regional STS endpoint; the credentials themselves
 /// are not region-bound. `agent_source` is recorded in CloudTrail as the
@@ -161,9 +101,19 @@ mod tests {
     use super::*;
     use crate::integrations::aws::sts::SCOPE_DOWN_POLICY_MAX_CHARS;
 
-    fn policy_actions() -> Vec<String> {
+    fn statement(effect: &str) -> serde_json::Value {
         let policy: serde_json::Value = serde_json::from_str(&agent_scope_down_policy()).unwrap();
-        policy["Statement"][0]["Action"]
+        let statements = policy["Statement"].as_array().unwrap();
+        assert_eq!(statements.len(), 2);
+        statements
+            .iter()
+            .find(|s| s["Effect"] == effect)
+            .unwrap()
+            .clone()
+    }
+
+    fn actions(effect: &str) -> Vec<String> {
+        statement(effect)["Action"]
             .as_array()
             .unwrap()
             .iter()
@@ -172,7 +122,7 @@ mod tests {
     }
 
     /// AWS rejects a longer `Policy`, which would deny every agent on the
-    /// scoped paths, so adding a service must stay within the limit.
+    /// scoped paths.
     #[test]
     fn policy_fits_the_get_scoped_credentials_limit() {
         let len = agent_scope_down_policy().chars().count();
@@ -182,56 +132,32 @@ mod tests {
         );
     }
 
-    #[test]
-    fn policy_is_a_single_allow_statement_over_all_resources() {
-        let policy: serde_json::Value = serde_json::from_str(&agent_scope_down_policy()).unwrap();
-        let statements = policy["Statement"].as_array().unwrap();
-        assert_eq!(statements.len(), 1);
-        assert_eq!(statements[0]["Effect"], "Allow");
-        assert_eq!(statements[0]["Resource"], "*");
-        assert!(statements[0].get("NotAction").is_none());
-    }
-
-    /// Every action is service-prefixed and none is a service-wide or
-    /// write-shaped wildcard.
+    /// Every allowed pattern starts with a read verb, so no pattern can
+    /// match a write action or a whole service.
     #[test]
     fn policy_allows_only_read_shaped_actions() {
-        const WRITE_PREFIXES: &[&str] = &[
-            "Create",
-            "Delete",
-            "Put",
-            "Update",
-            "Modify",
-            "Terminate",
-            "Run",
-            "Attach",
-            "Detach",
-            "Assume",
-            "Send",
-            "Publish",
-            "Invoke",
-            "Tag",
-            "Untag",
-            "Set",
-            "Write",
-            "Decrypt",
-        ];
-        for action in policy_actions() {
-            let (service, verb) = action.split_once(':').unwrap();
-            assert!(!service.is_empty() && !service.contains('*'), "{action}");
-            assert!(!verb.is_empty() && !verb.starts_with('*'), "{action}");
-            assert!(
-                !WRITE_PREFIXES.iter().any(|w| verb.starts_with(w)),
-                "{action} is not a read action"
-            );
+        const READ_VERBS: &[&str] = &["Get", "List", "Describe", "BatchGet"];
+        let allow = statement("Allow");
+        assert_eq!(allow["Resource"], "*");
+        assert!(allow.get("NotAction").is_none());
+        for action in actions("Allow") {
+            let (_, name) = action.split_once(':').unwrap();
+            let verb = name.strip_suffix('*').unwrap();
+            assert!(READ_VERBS.contains(&verb), "{action} is not a read pattern");
         }
     }
 
+    /// `*:Get*` matches `secretsmanager:GetSecretValue`; the explicit deny
+    /// takes it back. Nothing allowed matches `kms:Decrypt` or `sts:Assume*`.
     #[test]
     fn policy_withholds_secret_values_and_decryption() {
-        let actions = policy_actions();
-        assert!(!actions.iter().any(|a| a == "secretsmanager:Get*"));
-        assert!(!actions.iter().any(|a| a.starts_with("kms:Decrypt")));
-        assert!(!actions.iter().any(|a| a.starts_with("sts:Assume")));
+        assert_eq!(statement("Deny")["Resource"], "*");
+        assert!(actions("Deny").contains(&"secretsmanager:GetSecretValue".to_string()));
+        for action in actions("Allow") {
+            let (_, name) = action.split_once(':').unwrap();
+            let verb = name.strip_suffix('*').unwrap();
+            assert!(!"Decrypt".starts_with(verb), "{action}");
+            assert!(!"AssumeRole".starts_with(verb), "{action}");
+        }
     }
 }
