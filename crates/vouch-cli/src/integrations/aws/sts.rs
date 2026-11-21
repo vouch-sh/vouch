@@ -87,13 +87,6 @@ pub(crate) struct WebIdentityRequest<'a> {
     pub session_policy: Option<&'a serde_json::Value>,
 }
 
-/// The regional STS endpoint. Every call here uses one: the global endpoint
-/// serves only the commercial partition, and `GetScopedCredentials` "is not
-/// available on the AWS STS Global endpoint".
-fn regional_endpoint(region: &str, domain_suffix: &str) -> String {
-    format!("https://sts.{region}.{domain_suffix}/")
-}
-
 /// Call AWS STS `AssumeRoleWithWebIdentity`.
 ///
 /// Uses regional STS endpoints to support all AWS partitions
@@ -102,7 +95,7 @@ pub(crate) async fn assume_role_with_web_identity(
     req: WebIdentityRequest<'_>,
 ) -> Result<StsCredentials> {
     // Use regional STS endpoint for the appropriate partition
-    let sts_url = regional_endpoint(req.region, req.domain_suffix);
+    let sts_url = format!("https://sts.{}.{}/", req.region, req.domain_suffix);
 
     let partition = Partition::from_region(req.region);
 
@@ -204,7 +197,7 @@ pub(crate) async fn assume_role(req: AssumeRoleRequest<'_>) -> Result<StsCredent
 
     let partition = Partition::from_region(req.region);
     let domain_suffix = partition.dns_suffix();
-    let endpoint = regional_endpoint(req.region, domain_suffix);
+    let endpoint = format!("https://sts.{}.{domain_suffix}/", req.region);
 
     // Bind owned values to variables first — sign_and_send_form_post takes &[(&str, &str)]
     // so all values must outlive the params slice. This pattern mirrors redshift.rs.
@@ -328,7 +321,7 @@ pub(crate) async fn get_scoped_credentials(
     }
 
     let domain_suffix = Partition::from_region(req.region).dns_suffix();
-    let endpoint = regional_endpoint(req.region, domain_suffix);
+    let endpoint = format!("https://sts.{}.{domain_suffix}/", req.region);
     let description = scoped_session_description(req.description);
     let duration = req.duration_seconds.map(|d| d.to_string());
 
@@ -362,7 +355,14 @@ pub(crate) async fn get_scoped_credentials(
 /// never be mistaken for a restriction. `ScopedPoliciesCount` "specifies the
 /// number of scope down policies applied to the session".
 fn ensure_scope_applied(xml: &str) -> Result<()> {
-    if scoped_policies_count(xml)? == 0 {
+    let doc = roxmltree::Document::parse(xml).context(tr!("err-failed-parse-sts-xml-response"))?;
+    let count = doc
+        .descendants()
+        .find(|n| n.has_tag_name("ScopedPoliciesCount"))
+        .and_then(|n| n.text())
+        .and_then(|t| t.trim().parse::<u32>().ok())
+        .with_context(|| tr_args!("err-missing-sts-response", tag = "ScopedPoliciesCount"))?;
+    if count == 0 {
         anyhow::bail!(tr!("err-sts-scoped-policy-not-applied"));
     }
     Ok(())
@@ -383,16 +383,6 @@ fn scoped_session_description(text: &str) -> String {
         return "vouch".to_string();
     }
     cleaned
-}
-
-/// Read `ScopedPoliciesCount` from a `GetScopedCredentials` response.
-fn scoped_policies_count(xml: &str) -> Result<u32> {
-    let doc = roxmltree::Document::parse(xml).context(tr!("err-failed-parse-sts-xml-response"))?;
-    doc.descendants()
-        .find(|n| n.has_tag_name("ScopedPoliciesCount"))
-        .and_then(|n| n.text())
-        .and_then(|t| t.trim().parse::<u32>().ok())
-        .with_context(|| tr_args!("err-missing-sts-response", tag = "ScopedPoliciesCount"))
 }
 
 /// Parse AWS STS XML response using `roxmltree`.
@@ -596,7 +586,6 @@ mod tests {
             "AQoDYXdzEPT//////////wEXAMPLEtc764bNrC9SAPBSM22wDOk4x4HIZ8j4FZTwdQW\
              +scqKmlzm8FDrypNC9Yjc8fPOLn9FX9KSYvKTr4rvx3iSIlTJabIQwj2ICCR/oLxBA=="
         );
-        assert_eq!(scoped_policies_count(SCOPED_SAMPLE).unwrap(), 1);
     }
 
     fn with_scoped_count(count: &str) -> String {

@@ -612,7 +612,7 @@ fn agent_session_policies(agent_source: Option<&str>) -> AgentSessionPolicies {
         };
     }
     AgentSessionPolicies {
-        session_policy_names: &[aws::agent_scope::AGENT_MANAGED_POLICY],
+        session_policy_names: &["ReadOnlyAccess"],
         mgmt_hop_policy: Some(serde_json::json!({
             "Version": "2012-10-17",
             "Statement": [{
@@ -795,26 +795,12 @@ pub(crate) struct ManagementRoleSession {
 /// Assume the org's management role with full (unrestricted) credentials
 /// via `AssumeRoleWithWebIdentity`.
 ///
-/// Blocks AI agents: the session is handed back unrestricted, for
-/// admin-plane discovery and account access manager, neither of which runs
-/// under an agent. The permission-set path, which keeps the session inside
-/// [`vend_permission_set_credentials`] and narrows what it vends, calls
-/// [`assume_management_role_for`] directly.
+/// `agent_source` is sent as the DPoP source claim, so an agent's session
+/// carries the `vouch:AccessType=ai` / `vouch:Agent` tags. Only
+/// [`vend_permission_set_credentials`], which narrows what it vends, passes
+/// one. With `None` the session is handed back unrestricted, for admin-plane
+/// discovery and account access manager, so an AI agent is refused.
 pub(crate) async fn assume_management_role(
-    http_client: &reqwest::Client,
-    server: &ServerUrl,
-    management_role: &str,
-) -> Result<ManagementRoleSession> {
-    if detect_agent_source().is_some() {
-        return Err(CliError::ConfigError(tr!("aws-err-agent-admin-unsupported")).into());
-    }
-    assume_management_role_for(http_client, server, management_role, None).await
-}
-
-/// Assume the org's management role, sending `agent_source` as the DPoP
-/// source claim so an agent's management-role session carries the
-/// `vouch:AccessType=ai` / `vouch:Agent` tags in CloudTrail.
-async fn assume_management_role_for(
     http_client: &reqwest::Client,
     server: &ServerUrl,
     management_role: &str,
@@ -822,6 +808,10 @@ async fn assume_management_role_for(
 ) -> Result<ManagementRoleSession> {
     use crate::integrations::aws::sts::{WebIdentityRequest, assume_role_with_web_identity};
     use secrecy::ExposeSecret;
+
+    if agent_source.is_none() && detect_agent_source().is_some() {
+        return Err(CliError::ConfigError(tr!("aws-err-agent-admin-unsupported")).into());
+    }
 
     let region = aws::resolve_region_with_fallback(management_role)?;
     let mgmt_arn = sts::parse_role_arn(management_role)?;
@@ -896,16 +886,31 @@ pub(crate) async fn exchange_idc_access_token(
     Ok(exchange.access_token)
 }
 
-/// Vend Identity Center permission-set credentials through the
-/// trusted-token-issuer (TTI) exchange, narrowed to the agent read-only
-/// policy when `agent_source` is set.
+/// Obtain an IAM Identity Center access token via the trusted-token-issuer
+/// (TTI) exchange.
+///
+/// Private to [`vend_permission_set_credentials`], so an agent's token never
+/// leaves without its credentials being narrowed.
+async fn obtain_identity_center_token(
+    http_client: &reqwest::Client,
+    server: &ServerUrl,
+    management_role: &str,
+    idc: &AwsIdentityCenter,
+    agent_source: Option<&str>,
+) -> Result<secrecy::SecretString> {
+    let session =
+        assume_management_role(http_client, server, management_role, agent_source).await?;
+    exchange_idc_access_token(http_client, idc, &session).await
+}
+
+/// Vend Identity Center permission-set credentials, narrowed to the agent
+/// read-only policy when `agent_source` is set.
 ///
 /// Called by `credential aws --account/--permission-set` and `aws console`
 /// (IdC path). `GetRoleCredentials` takes no session policy, so an agent's
 /// credentials are restricted afterwards with `GetScopedCredentials`. If
 /// that fails the agent gets an error, never the full permission-set
-/// credentials. The management-role session and the IdC token both stay
-/// inside this function, so no caller can vend from them unscoped.
+/// credentials.
 pub(crate) async fn vend_permission_set_credentials(
     http_client: &reqwest::Client,
     server: &ServerUrl,
@@ -918,9 +923,9 @@ pub(crate) async fn vend_permission_set_credentials(
     use crate::integrations::aws::agent_scope::scope_credentials_for_agent;
     use crate::integrations::aws::sso_portal::get_role_credentials;
 
-    let session =
-        assume_management_role_for(http_client, server, management_role, agent_source).await?;
-    let idc_token = exchange_idc_access_token(http_client, idc, &session).await?;
+    let idc_token =
+        obtain_identity_center_token(http_client, server, management_role, idc, agent_source)
+            .await?;
     let creds = get_role_credentials(
         http_client,
         &idc.region,
@@ -1079,7 +1084,7 @@ pub(crate) async fn try_account_access_credentials(
 
     let tenant_id = idc.account_access_tenant_id.as_deref()?;
     let attempt = async {
-        let session = assume_management_role(http_client, server, management_role).await?;
+        let session = assume_management_role(http_client, server, management_role, None).await?;
         let idc_token = exchange_idc_access_token(http_client, idc, &session).await?;
         RuntimeClient::new(
             http_client.clone(),
@@ -1961,6 +1966,7 @@ mod tests {
             &http_client,
             &ServerUrl::parse("https://example.com", false).unwrap(),
             MGMT1,
+            None,
         )
         .await;
         // SAFETY: env var restored regardless of assertion outcome.

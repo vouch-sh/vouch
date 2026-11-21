@@ -3,7 +3,7 @@
 //! through an `AssumeRole*` call.
 //!
 //! On the role chain an agent's credentials carry the AWS managed
-//! [`AGENT_MANAGED_POLICY`] as a session policy. Identity Center
+//! `ReadOnlyAccess` policy as a session policy. Identity Center
 //! permission-set credentials come from `GetRoleCredentials`, which takes no
 //! session policy, so they are narrowed afterwards with AWS STS
 //! `GetScopedCredentials`.
@@ -40,10 +40,6 @@ use vouch_cli::tr;
 
 use super::sts::{ScopedCredentialsRequest, StsCredentials, get_scoped_credentials};
 use crate::exit_code::aws_access_denied;
-
-/// The AWS managed policy an AI agent's role-chain credentials carry as a
-/// session policy, and the policy [`agent_scope_down_policy`] approximates.
-pub(crate) const AGENT_MANAGED_POLICY: &str = "ReadOnlyAccess";
 
 /// Lifetime of an agent's scoped credentials, in seconds: the same hour the
 /// role chain vends.
