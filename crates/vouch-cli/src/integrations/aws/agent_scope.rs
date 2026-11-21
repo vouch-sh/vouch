@@ -9,36 +9,27 @@
 //! `GetScopedCredentials`.
 //!
 //! That API takes an inline `Policy` of at most 2,048 characters and no
-//! managed policy ARNs, so [`agent_scope_down_policy`] approximates
-//! `ReadOnlyAccess` instead of naming it. When `GetScopedCredentials` accepts
-//! a managed policy ARN, pass `ReadOnlyAccess` there and delete the
-//! approximation, so both paths grant exactly the same actions.
+//! managed policy ARNs, so `ReadOnlyAccess` cannot be named. It also rejects
+//! any wildcard in an action's service prefix (`*:Get*` fails with
+//! `MalformedPolicyDocument: Invalid service prefix for action '*:Get*'`,
+//! in `Action` and `NotAction` alike), so a read-only policy has to name
+//! each service, and only about 40 fit. [`agent_scope_down_policy`] covers
+//! the most widely used services; on any other service an agent on a
+//! permission set is refused, where the role chain would allow reads. When
+//! `GetScopedCredentials` accepts a managed policy ARN, pass
+//! `ReadOnlyAccess` there and delete this list, so both paths grant exactly
+//! the same actions.
 //!
-//! The approximation was built from `ReadOnlyAccess` v192 and the AWS
-//! service reference data, which classifies every action as read, list,
-//! write, permissions management, or tagging:
+//! For each listed service the policy grants only read patterns that
+//! `ReadOnlyAccess` v192 grants that service, so it is never broader than the
+//! role chain. The AWS service reference data classifies none of the
+//! actions they match as a write. A few reads that return credentials are
+//! denied even though `ReadOnlyAccess` allows them.
 //!
-//! - **Allow** the action-name verbs `ReadOnlyAccess` uses, on every
-//!   service, keeping only verbs whose matches AWS classifies as read or
-//!   list (a handful of exceptions are covered below). Verbs that also
-//!   match writes on some service (`Check*` matches
-//!   `license-manager:CheckoutLicense`, `Is*` matches
-//!   `acm-pca:IssueCertificate`, `Retrieve*`, `Test*`, `Generate*`) are left
-//!   out, so this policy is narrower than `ReadOnlyAccess` there.
-//! - **Deny** reads that return a secret, a token, credentials, or a
-//!   presigned URL, by name pattern so actions AWS adds later are covered
-//!   too. This also denies some that `ReadOnlyAccess` allows, such as
-//!   `ecr:GetAuthorizationToken` and `cognito-identity:GetCredentialsForIdentity`.
-//!
-//! `kms:Decrypt` matches no allowed verb, as in `ReadOnlyAccess`. That does
-//! not make `SecureString` parameters unreadable: the AWS managed `aws/ssm`
-//! key grants decryption to every principal in the account, and
-//! `ssm:GetParameter` is allowed here as it is in `ReadOnlyAccess`.
-//!
-//! AWS documents wildcards in the action name, after the colon; whether a
-//! wildcard service prefix is accepted is not stated. If AWS rejects the
-//! policy the agent is refused — it never receives more than the policy
-//! allows.
+//! `kms:Decrypt` is not allowed, as in `ReadOnlyAccess`. That does not make
+//! `SecureString` parameters unreadable: the AWS managed `aws/ssm` key grants
+//! decryption to every principal in the account, and `ssm:GetParameter` is
+//! allowed here as it is in `ReadOnlyAccess`.
 //!
 //! <https://docs.aws.amazon.com/STS/latest/APIReference/API_GetScopedCredentials.html>
 //! <https://docs.aws.amazon.com/aws-managed-policy/latest/reference/ReadOnlyAccess.html>
@@ -63,56 +54,108 @@ const AGENT_SESSION_SECONDS: u32 = 3600;
 /// (AWS rejects that with `InsufficientSessionLifetime`).
 const EXPIRY_MARGIN_SECONDS: i64 = 300;
 
-/// Action-name patterns an AI agent keeps, on any service.
+/// Actions an AI agent keeps on a permission set: for each listed service,
+/// the read patterns `ReadOnlyAccess` grants it. Every entry names its
+/// service; AWS rejects a wildcard prefix.
 const AGENT_READ_ACTIONS: &[&str] = &[
-    "*:Get*",
-    "*:List*",
-    "*:Describe*",
-    "*:BatchGet*",
-    "*:BatchDescribe*",
-    "*:Search*",
-    "*:Query*",
-    "*:Scan*",
-    "*:Lookup*",
-    "*:Select*",
-    "*:Filter*",
-    "*:View*",
-    "*:Simulate*",
-    "*:Estimate*",
+    "acm:Describe*",
+    "acm:Get*",
+    "acm:List*",
+    "application-autoscaling:Describe*",
+    "autoscaling:Describe*",
+    "cloudformation:Describe*",
+    "cloudformation:Get*",
+    "cloudformation:List*",
+    "cloudfront:Describe*",
+    "cloudfront:Get*",
+    "cloudfront:List*",
+    "cloudtrail:Describe*",
+    "cloudtrail:Get*",
+    "cloudtrail:List*",
+    "cloudtrail:LookupEvents",
+    "cloudwatch:Describe*",
+    "cloudwatch:Get*",
+    "cloudwatch:List*",
+    "codebuild:BatchGet*",
+    "codebuild:List*",
+    "codepipeline:Get*",
+    "codepipeline:List*",
+    "config:Describe*",
+    "config:Get*",
+    "config:List*",
+    "dynamodb:BatchGet*",
+    "dynamodb:Describe*",
+    "dynamodb:Get*",
+    "dynamodb:List*",
+    "dynamodb:Query",
+    "dynamodb:Scan",
+    "ec2:Describe*",
+    "ec2:Get*",
+    "ecr:BatchGet*",
+    "ecr:Describe*",
+    "ecr:Get*",
+    "ecr:List*",
+    "ecs:Describe*",
+    "ecs:List*",
+    "eks:Describe*",
+    "eks:List*",
+    "elasticache:Describe*",
+    "elasticache:List*",
+    "elasticloadbalancing:Describe*",
+    "events:Describe*",
+    "events:List*",
+    "firehose:Describe*",
+    "firehose:List*",
+    "health:Describe*",
+    "iam:Get*",
+    "iam:List*",
+    "kinesis:Describe*",
+    "kinesis:Get*",
+    "kinesis:List*",
+    "kms:Describe*",
+    "kms:Get*",
+    "kms:List*",
+    "lambda:Get*",
+    "lambda:List*",
+    "logs:Describe*",
+    "logs:FilterLogEvents",
+    "logs:Get*",
+    "logs:StartQuery",
+    "organizations:Describe*",
+    "organizations:List*",
+    "rds:Describe*",
+    "rds:List*",
+    "route53:Get*",
+    "route53:List*",
+    "s3:Get*",
+    "s3:List*",
+    "secretsmanager:Describe*",
+    "secretsmanager:List*",
+    "sns:Get*",
+    "sns:List*",
+    "sqs:Get*",
+    "sqs:List*",
+    "ssm:Describe*",
+    "ssm:Get*",
+    "ssm:List*",
+    "sso:Describe*",
+    "sso:Get*",
+    "sso:List*",
+    "states:Describe*",
+    "states:List*",
+    "tag:Get*",
+    "xray:BatchGet*",
+    "xray:Get*",
 ];
 
-/// Reads denied even though [`AGENT_READ_ACTIONS`] matches them: anything
-/// that returns a secret, a token, credentials, or a presigned URL, plus the
-/// few matching actions AWS classifies as writes.
+/// Reads [`AGENT_READ_ACTIONS`] matches that return credentials or a
+/// password. `ReadOnlyAccess` allows them; an agent does not need them.
 const AGENT_DENIED_ACTIONS: &[&str] = &[
-    "*:Get*Token*",
-    "*:Get*Credential*",
-    "*:Get*Password*",
-    "*:Get*Secret*",
-    "*:BatchGet*Secret*",
-    "*:Get*ApiKey*",
-    "*:*StreamKey*",
-    "*:Get*AuthCode*",
-    "*:Get*AccessDetails*",
-    "*:Get*PresignedUrl*",
-    "*:Get*EmbedUrl*",
-    "*:Get*LoginUrl*",
-    "*:Get*DownloadUrl*",
-    "*:Get*UploadUrl*",
-    "*:Get*SessionUrl*",
-    "*:Get*SessionEndpoint*",
-    // Backup data plane: reads of backed-up data, classified as writes.
-    "backup-storage:*",
-    // Creates an identity in the pool.
-    "cognito-identity:GetId",
-    // Returns connection passwords.
-    "glue:GetConnection*",
-    // Vends temporary access to Lake Formation data.
-    "lakeformation:GetDataAccess",
-    // Copies media into S3.
-    "social-messaging:GetWhatsAppMessageMedia",
-    // Takes a task off the activity queue.
-    "states:GetActivityTask",
+    "acm:GetAcmeExternalAccountBindingCredentials",
+    "cloudwatch:GetSpaceCredentials*",
+    "ec2:GetPasswordData",
+    "ecr:GetAuthorizationToken",
+    "ssm:GetAccessToken",
 ];
 
 /// The scope-down policy document applied to an AI agent's credentials.
@@ -271,16 +314,44 @@ mod tests {
             "dynamodb:Scan",
             "logs:FilterLogEvents",
             "cloudtrail:LookupEvents",
-            "config:SelectResourceConfig",
-            "iam:SimulatePrincipalPolicy",
-            "cloudformation:EstimateTemplateCost",
             "ssm:GetParameter",
             "lambda:GetFunction",
             "sqs:GetQueueUrl",
             "kms:DescribeKey",
-            "sts:GetCallerIdentity",
         ] {
             assert!(agent_may(action), "{action} should be allowed");
+        }
+    }
+
+    /// AWS rejects a wildcard service prefix: `GetScopedCredentials`
+    /// answered `*:Get*` with "MalformedPolicyDocument: Invalid service
+    /// prefix for action '*:Get*'" when tested against a live account.
+    #[test]
+    fn every_pattern_names_its_service() {
+        for action in actions("Allow").iter().chain(actions("Deny").iter()) {
+            let (service, name) = action.split_once(':').unwrap();
+            assert!(
+                !service.is_empty()
+                    && service
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'),
+                "{action} has no literal service prefix"
+            );
+            assert!(!name.is_empty(), "{action} has no action name");
+        }
+    }
+
+    /// Services outside the list are refused, even for reads the role
+    /// chain's `ReadOnlyAccess` allows.
+    #[test]
+    fn policy_refuses_unlisted_services() {
+        for action in [
+            "athena:GetQueryResults",
+            "glue:GetTable",
+            "bedrock:ListFoundationModels",
+            "sagemaker:ListModels",
+        ] {
+            assert!(!agent_may(action), "{action} should be refused");
         }
     }
 
