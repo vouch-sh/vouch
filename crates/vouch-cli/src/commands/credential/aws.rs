@@ -15,10 +15,14 @@ use crate::client::VouchClient;
 use crate::config::{AwsIdentityCenter, AwsOrganization, AwsOrgsConfig, Config};
 use crate::exit_code::{self, CliError};
 use crate::integrations::aws::RoleTarget;
-use crate::integrations::aws::sts::StsCredentials;
-use crate::integrations::aws::{self, identity_center, sts};
+use crate::integrations::aws::account_access_runtime::RuntimeClient;
+use crate::integrations::aws::sts::{
+    AssumeRoleRequest, StsCredentials, WebIdentityRequest, assume_role,
+    assume_role_with_web_identity, parse_role_arn,
+};
+use crate::integrations::aws::{self, agent_scope, identity_center, sso_portal, sts};
 use crate::server_url::ServerUrl;
-use vouch_common::http;
+use vouch_common::http::{self, credential_client};
 
 /// AWS credential process output format.
 /// See: https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-sourcing-external.html
@@ -297,10 +301,6 @@ where
 /// attaches `ReadOnlyAccess` session policy and sets a DPoP source
 /// claim for CloudTrail attribution.
 pub(crate) async fn exchange_for_sts_credentials(req: StsRequest<'_>) -> Result<StsExchangeResult> {
-    use crate::integrations::aws::sts::{
-        WebIdentityRequest, assume_role_with_web_identity, parse_role_arn,
-    };
-
     let StsRequest {
         server,
         role: RoleTarget { arn: role_arn, via },
@@ -472,11 +472,6 @@ struct ChainInputs<'a> {
 /// `AssumeRoleWithWebIdentity` into the management role (with an inline
 /// STS-only policy when agent-restricted), then `AssumeRole` into the target.
 async fn assume_role_via_management_chain(input: ChainInputs<'_>) -> Result<StsCredentials> {
-    use crate::integrations::aws::sts::{
-        AssumeRoleRequest, WebIdentityRequest, assume_role, assume_role_with_web_identity,
-        parse_role_arn,
-    };
-
     let mgmt_arn = parse_role_arn(input.mgmt_role_arn)?;
     let mgmt_domain_suffix = mgmt_arn.partition.dns_suffix();
 
@@ -806,9 +801,6 @@ pub(crate) async fn assume_management_role(
     management_role: &str,
     agent_source: Option<&str>,
 ) -> Result<ManagementRoleSession> {
-    use crate::integrations::aws::sts::{WebIdentityRequest, assume_role_with_web_identity};
-    use secrecy::ExposeSecret;
-
     if agent_source.is_none() && detect_agent_source().is_some() {
         return Err(CliError::ConfigError(tr!("aws-err-agent-admin-unsupported")).into());
     }
@@ -873,8 +865,6 @@ pub(crate) async fn exchange_idc_access_token(
     idc: &AwsIdentityCenter,
     session: &ManagementRoleSession,
 ) -> Result<SecretString> {
-    use secrecy::ExposeSecret;
-
     let exchange = identity_center::create_token_with_iam(
         http_client,
         &idc.region,
@@ -920,13 +910,10 @@ pub(crate) async fn vend_permission_set_credentials(
     permission_set: &str,
     agent_source: Option<&str>,
 ) -> Result<StsCredentials> {
-    use crate::integrations::aws::agent_scope::scope_credentials_for_agent;
-    use crate::integrations::aws::sso_portal::get_role_credentials;
-
     let idc_token =
         obtain_identity_center_token(http_client, server, management_role, idc, agent_source)
             .await?;
-    let creds = get_role_credentials(
+    let creds = sso_portal::get_role_credentials(
         http_client,
         &idc.region,
         &idc_token,
@@ -935,7 +922,9 @@ pub(crate) async fn vend_permission_set_credentials(
     )
     .await?;
     match agent_source {
-        Some(source) => scope_credentials_for_agent(http_client, &idc.region, &creds, source).await,
+        Some(source) => {
+            agent_scope::scope_credentials_for_agent(http_client, &idc.region, &creds, source).await
+        }
         None => Ok(creds),
     }
 }
@@ -966,8 +955,6 @@ pub(crate) async fn get_idc_credentials(
     idc_application_arn: Option<&str>,
     via: Option<&str>,
 ) -> Result<serde_json::Value> {
-    use vouch_common::http::credential_client;
-
     // Detected before the cache lookup; see `build_idc_cache_key`.
     let agent_source = detect_agent_source();
 
@@ -1080,8 +1067,6 @@ pub(crate) async fn try_account_access_credentials(
     idc: &AwsIdentityCenter,
     role_arn: &str,
 ) -> Option<StsCredentials> {
-    use crate::integrations::aws::account_access_runtime::RuntimeClient;
-
     let tenant_id = idc.account_access_tenant_id.as_deref()?;
     let attempt = async {
         let session = assume_management_role(http_client, server, management_role, None).await?;
