@@ -29,7 +29,10 @@ pub(crate) async fn get(cache_key: &str) -> Option<serde_json::Value> {
     {
         let mut client = AgentClient::connect().await.ok()?;
         match client.get_cached_credential(cache_key).await {
-            Ok(Some(cached)) => Some(cached.data()),
+            Ok(Some(cached)) => {
+                debug!("credential cache hit for {cache_key}");
+                Some(cached.data())
+            }
             Ok(None) => None,
             Err(e) => {
                 debug!("credential cache miss for {cache_key}: {e}");

@@ -15,10 +15,14 @@ use crate::client::VouchClient;
 use crate::config::{AwsIdentityCenter, AwsOrganization, AwsOrgsConfig, Config};
 use crate::exit_code::{self, CliError};
 use crate::integrations::aws::RoleTarget;
-use crate::integrations::aws::sts::StsCredentials;
-use crate::integrations::aws::{self, identity_center, sts};
+use crate::integrations::aws::account_access_runtime::RuntimeClient;
+use crate::integrations::aws::sts::{
+    AssumeRoleRequest, StsCredentials, WebIdentityRequest, assume_role,
+    assume_role_with_web_identity, parse_role_arn,
+};
+use crate::integrations::aws::{self, agent_scope, identity_center, sso_portal, sts};
 use crate::server_url::ServerUrl;
-use vouch_common::http;
+use vouch_common::http::{self, credential_client};
 
 /// AWS credential process output format.
 /// See: https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-sourcing-external.html
@@ -297,10 +301,6 @@ where
 /// attaches `ReadOnlyAccess` session policy and sets a DPoP source
 /// claim for CloudTrail attribution.
 pub(crate) async fn exchange_for_sts_credentials(req: StsRequest<'_>) -> Result<StsExchangeResult> {
-    use crate::integrations::aws::sts::{
-        WebIdentityRequest, assume_role_with_web_identity, parse_role_arn,
-    };
-
     let StsRequest {
         server,
         role: RoleTarget { arn: role_arn, via },
@@ -472,11 +472,6 @@ struct ChainInputs<'a> {
 /// `AssumeRoleWithWebIdentity` into the management role (with an inline
 /// STS-only policy when agent-restricted), then `AssumeRole` into the target.
 async fn assume_role_via_management_chain(input: ChainInputs<'_>) -> Result<StsCredentials> {
-    use crate::integrations::aws::sts::{
-        AssumeRoleRequest, WebIdentityRequest, assume_role, assume_role_with_web_identity,
-        parse_role_arn,
-    };
-
     let mgmt_arn = parse_role_arn(input.mgmt_role_arn)?;
     let mgmt_domain_suffix = mgmt_arn.partition.dns_suffix();
 
@@ -795,20 +790,19 @@ pub(crate) struct ManagementRoleSession {
 /// Assume the org's management role with full (unrestricted) credentials
 /// via `AssumeRoleWithWebIdentity`.
 ///
-/// Blocks AI agents: every caller feeds either the IdC portal path — whose
-/// permission-set credentials cannot be downscoped with inline session
-/// policies, and the vouch:AccessType=ai tag does not reliably propagate
-/// through it — or admin-plane discovery; neither should run under an agent.
+/// `agent_source` is sent as the DPoP source claim, so an agent's session
+/// carries the `vouch:AccessType=ai` / `vouch:Agent` tags. Only
+/// [`vend_permission_set_credentials`], which narrows what it vends, passes
+/// one. With `None` the session is handed back unrestricted, for admin-plane
+/// discovery and account access manager, so an AI agent is refused.
 pub(crate) async fn assume_management_role(
     http_client: &reqwest::Client,
     server: &ServerUrl,
     management_role: &str,
+    agent_source: Option<&str>,
 ) -> Result<ManagementRoleSession> {
-    use crate::integrations::aws::sts::{WebIdentityRequest, assume_role_with_web_identity};
-    use secrecy::ExposeSecret;
-
-    if detect_agent_source().is_some() {
-        return Err(CliError::ConfigError(tr!("aws-err-agent-idc-unsupported")).into());
+    if agent_source.is_none() && detect_agent_source().is_some() {
+        return Err(CliError::ConfigError(tr!("aws-err-agent-admin-unsupported")).into());
     }
 
     let region = aws::resolve_region_with_fallback(management_role)?;
@@ -823,7 +817,10 @@ pub(crate) async fn assume_management_role(
     // already accepts this token carrying the other AWS-namespaced claims it
     // does not consume (tags, source_identity) — observed behavior is that
     // unrecognized claims are ignored.
-    let client = VouchClient::new(server).await?;
+    let mut client = VouchClient::new(server).await?;
+    if let Some(source) = agent_source {
+        client.set_dpop_source(source);
+    }
     let token_response: OidcTokenResponse = client
         .get_authenticated(&aws_token_path(Some(management_role))?)
         .await
@@ -868,8 +865,6 @@ pub(crate) async fn exchange_idc_access_token(
     idc: &AwsIdentityCenter,
     session: &ManagementRoleSession,
 ) -> Result<SecretString> {
-    use secrecy::ExposeSecret;
-
     let exchange = identity_center::create_token_with_iam(
         http_client,
         &idc.region,
@@ -884,18 +879,72 @@ pub(crate) async fn exchange_idc_access_token(
 /// Obtain an IAM Identity Center access token via the trusted-token-issuer
 /// (TTI) exchange.
 ///
-/// Called by `credential aws --account/--permission-set` and `aws console`
-/// (IdC path). Blocks AI agents (via [`assume_management_role`]) —
-/// permission-set credentials cannot be downscoped — so caller credentials
-/// are always full (no `ReadOnlyAccess` policy, no DPoP source tag).
-pub(crate) async fn obtain_identity_center_token(
+/// Private to [`vend_permission_set_credentials`], so an agent's token never
+/// leaves without its credentials being narrowed.
+async fn obtain_identity_center_token(
     http_client: &reqwest::Client,
     server: &ServerUrl,
     management_role: &str,
     idc: &AwsIdentityCenter,
+    agent_source: Option<&str>,
 ) -> Result<secrecy::SecretString> {
-    let session = assume_management_role(http_client, server, management_role).await?;
+    let session =
+        assume_management_role(http_client, server, management_role, agent_source).await?;
     exchange_idc_access_token(http_client, idc, &session).await
+}
+
+/// Vend Identity Center permission-set credentials, narrowed to the agent
+/// read-only policy when `agent_source` is set.
+///
+/// Called by `credential aws --account/--permission-set` and `aws console`
+/// (IdC path). `GetRoleCredentials` takes no session policy, so an agent's
+/// credentials are restricted afterwards with `GetScopedCredentials`. If
+/// that fails the agent gets an error, never the full permission-set
+/// credentials.
+pub(crate) async fn vend_permission_set_credentials(
+    http_client: &reqwest::Client,
+    server: &ServerUrl,
+    management_role: &str,
+    idc: &AwsIdentityCenter,
+    account_id: &str,
+    permission_set: &str,
+    agent_source: Option<&str>,
+) -> Result<StsCredentials> {
+    let idc_token =
+        obtain_identity_center_token(http_client, server, management_role, idc, agent_source)
+            .await?;
+    let creds = sso_portal::get_role_credentials(
+        http_client,
+        &idc.region,
+        &idc_token,
+        account_id,
+        permission_set,
+    )
+    .await?;
+    match agent_source {
+        Some(source) => {
+            agent_scope::scope_credentials_for_agent(http_client, &idc.region, &creds, source).await
+        }
+        None => Ok(creds),
+    }
+}
+
+/// Build the cache key for Identity Center permission-set credentials.
+///
+/// The agent source is folded in for the same reason as in
+/// [`build_cache_key`]: an agent's entry holds narrowed credentials and a
+/// person's holds full ones, so the two must never share an entry (#398).
+fn build_idc_cache_key(
+    application_arn: &str,
+    account_id: &str,
+    permission_set: &str,
+    agent: Option<&str>,
+) -> String {
+    let suffix = match agent {
+        Some(src) => format!(":agent:{src}"),
+        None => String::new(),
+    };
+    format!("aws:idc:{application_arn}:{account_id}:{permission_set}{suffix}")
 }
 
 /// Get cached Identity Center credentials, fetching fresh ones if needed.
@@ -906,15 +955,8 @@ pub(crate) async fn get_idc_credentials(
     idc_application_arn: Option<&str>,
     via: Option<&str>,
 ) -> Result<serde_json::Value> {
-    use crate::integrations::aws::sso_portal::get_role_credentials;
-    use vouch_common::http::credential_client;
-
-    // Block AI agents early (fast-fail before config load): GetRoleCredentials
-    // returns full permission-set access that cannot be downscoped with inline
-    // session policies, and the vouch:AccessType=ai tag does not propagate.
-    if detect_agent_source().is_some() {
-        return Err(CliError::ConfigError(tr!("aws-err-agent-idc-unsupported")).into());
-    }
+    // Detected before the cache lookup; see `build_idc_cache_key`.
+    let agent_source = detect_agent_source();
 
     let vouch_config = Config::load()?;
     let aws_cfg = vouch_config
@@ -940,9 +982,11 @@ pub(crate) async fn get_idc_credentials(
     let management_role = org.management_role.clone();
 
     let idc = idc.clone();
-    let cache_key = format!(
-        "aws:idc:{}:{}:{}",
-        idc.application_arn, account_id, permission_set
+    let cache_key = build_idc_cache_key(
+        &idc.application_arn,
+        account_id,
+        permission_set,
+        agent_source.as_deref(),
     );
     let account_id = account_id.to_string();
     let permission_set = permission_set.to_string();
@@ -951,15 +995,14 @@ pub(crate) async fn get_idc_credentials(
         let http_client = credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
             .context(tr!("err-failed-create-http-client"))?;
 
-        let idc_token =
-            obtain_identity_center_token(&http_client, server, &management_role, &idc).await?;
-
-        let creds = get_role_credentials(
+        let creds = vend_permission_set_credentials(
             &http_client,
-            &idc.region,
-            &idc_token,
+            server,
+            &management_role,
+            &idc,
             &account_id,
             &permission_set,
+            agent_source.as_deref(),
         )
         .await?;
 
@@ -1024,11 +1067,9 @@ pub(crate) async fn try_account_access_credentials(
     idc: &AwsIdentityCenter,
     role_arn: &str,
 ) -> Option<StsCredentials> {
-    use crate::integrations::aws::account_access_runtime::RuntimeClient;
-
     let tenant_id = idc.account_access_tenant_id.as_deref()?;
     let attempt = async {
-        let session = assume_management_role(http_client, server, management_role).await?;
+        let session = assume_management_role(http_client, server, management_role, None).await?;
         let idc_token = exchange_idc_access_token(http_client, idc, &session).await?;
         RuntimeClient::new(
             http_client.clone(),
@@ -1040,7 +1081,10 @@ pub(crate) async fn try_account_access_credentials(
         .await
     };
     match attempt.await {
-        Ok(creds) => Some(creds),
+        Ok(creds) => {
+            tracing::debug!("account access manager vended {role_arn}");
+            Some(creds)
+        }
         Err(err) => {
             tracing::debug!(
                 "account access manager did not vend {role_arn}; using the role chain: {err:#}"
@@ -1883,81 +1927,58 @@ mod tests {
         assert_eq!(idc.application_arn, APP2);
     }
 
-    // Agent-block tests -------------------------------------------------------
+    // Agent-block test --------------------------------------------------------
     //
-    // These set an env var to simulate an agent environment. The agent check
-    // fires as the very first statement in each function, before any config
-    // load or network I/O, so the tests do not need real server/config state.
+    // Sets an env var to simulate an agent environment. The agent check is the
+    // first statement, before any network I/O, so no server state is needed.
 
+    /// Admin-plane discovery and account access manager get the
+    /// management-role session back unrestricted, so they stay closed to
+    /// agents.
     #[tokio::test]
     #[expect(
         unsafe_code,
         reason = "env mutation to trigger agent detection in an isolated test; var is restored after assertion"
     )]
-    async fn agent_block_in_get_idc_credentials_fires_before_config_load() {
-        let _guard = ENV_LOCK.lock().await;
-        // SAFETY: agent check is the first statement; Config::load is never reached.
-        unsafe {
-            std::env::set_var("CLAUDECODE", "1");
-        }
-        let result = get_idc_credentials(
-            &ServerUrl::parse("https://example.com", false).unwrap(),
-            "111111111111",
-            "Admin",
-            None,
-            None,
-        )
-        .await;
-        // SAFETY: env var restored regardless of assertion outcome.
-        unsafe {
-            std::env::remove_var("CLAUDECODE");
-        }
-        let err = result.unwrap_err();
-        assert!(
-            matches!(
-                err.downcast_ref::<CliError>(),
-                Some(CliError::ConfigError(_))
-            ),
-            "expected ConfigError(aws-err-agent-idc-unsupported), got: {err}"
-        );
-    }
-
-    #[tokio::test]
-    #[expect(
-        unsafe_code,
-        reason = "env mutation to trigger agent detection in an isolated test; var is restored after assertion"
-    )]
-    async fn agent_block_in_obtain_identity_center_token_fires_before_network() {
+    async fn agent_block_in_assume_management_role_fires_before_network() {
         let _guard = ENV_LOCK.lock().await;
         // SAFETY: agent check is the first statement; no disk or network I/O occurs.
         unsafe {
             std::env::set_var("CLAUDECODE", "1");
         }
         let http_client = reqwest::Client::new();
-        let idc = AwsIdentityCenter {
-            application_arn: APP1.to_string(),
-            region: "us-east-1".to_string(),
-            account_access_tenant_id: None,
-        };
-        let result = obtain_identity_center_token(
+        let result = assume_management_role(
             &http_client,
             &ServerUrl::parse("https://example.com", false).unwrap(),
             MGMT1,
-            &idc,
+            None,
         )
         .await;
         // SAFETY: env var restored regardless of assertion outcome.
         unsafe {
             std::env::remove_var("CLAUDECODE");
         }
-        let err = result.unwrap_err();
+        // `.err().unwrap()` avoids the `T: Debug` bound that `.unwrap_err()` requires.
+        let err = result.err().unwrap();
         assert!(
             matches!(
                 err.downcast_ref::<CliError>(),
                 Some(CliError::ConfigError(_))
             ),
-            "expected ConfigError(aws-err-agent-idc-unsupported), got: {err}"
+            "expected ConfigError(aws-err-agent-admin-unsupported), got: {err}"
         );
+    }
+
+    /// An agent's permission-set entry holds narrowed credentials and a
+    /// person's holds full ones; they must not share a cache entry (#398).
+    #[test]
+    fn idc_cache_key_separates_agents_from_people() {
+        let person = build_idc_cache_key(APP1, "111111111111", "Admin", None);
+        let agent = build_idc_cache_key(APP1, "111111111111", "Admin", Some("claude-code"));
+        let other = build_idc_cache_key(APP1, "111111111111", "Admin", Some("cursor"));
+        assert_eq!(person, format!("aws:idc:{APP1}:111111111111:Admin"));
+        assert_ne!(person, agent);
+        assert_ne!(agent, other);
     }
 
     // --- account_access_identity_center -----------------------------------------
