@@ -647,7 +647,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Helm
-        uses: azure/setup-helm@v5.0.1
+        uses: azure/setup-helm@v5.1.0
 
       - name: Log in to Container Registry
         uses: docker/login-action@v4.8.0
