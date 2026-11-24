@@ -250,6 +250,116 @@ pub struct OidcIdTokenClaims {
         skip_serializing_if = "Option::is_none"
     )]
     pub aws_roles: Option<Vec<String>>,
+    /// OIDC Core §2: "Time when the End-User authentication occurred",
+    /// in seconds since the epoch. Only set for AWS tokens, so an IAM OIDC
+    /// provider can map it as a trusted identity propagation runtime claim.
+    /// A target key ending in `IssueTime` requires an integer and also
+    /// yields the derived `Age` key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_time: Option<i64>,
+    /// Vouch session context for AWS trusted identity propagation. Only set
+    /// for AWS tokens. See [`VouchSessionContext`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vouch: Option<VouchSessionContext>,
+}
+
+/// The `vouch` claim on AWS tokens: one object nested one level, so an IAM
+/// OIDC provider can map its members with trusted identity propagation
+/// (TIP). IAM documents the shape: "To map a member of an object claim
+/// nested one level, use ` / ` as the source key. Arrays and deeper nesting
+/// are not supported."
+/// (<https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_providers_tip_federation_configure_oidc.html>).
+/// A customer maps `vouch/subject_type` with `SubjectTypeSourceKey` and
+/// `vouch/agent` as a runtime claim.
+///
+/// Both members come from the client's DPoP `source` claim, like the
+/// `vouch:AccessType` and `vouch:Agent` session tags. `workload` narrows
+/// the caller; `user` proves nothing. Policies deny on `workload` and never
+/// grant on `user`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct VouchSessionContext {
+    /// Always present: STS rejects a federation request whose mapped
+    /// Subject type source is absent.
+    pub subject_type: TipSubjectType,
+    /// The agent the client named. Absent for a human session or a blank
+    /// name; STS omits an absent optional runtime claim.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<TipClaimValue>,
+}
+
+impl VouchSessionContext {
+    /// Build the context from the DPoP proof's `source` claim. A claimed
+    /// source, even a blank one, makes the session a `workload`, matching
+    /// the `vouch:AccessType=ai` tag and the agent session policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AwsClaimError::TipValue`] when the agent name is one STS
+    /// would refuse as a TIP value.
+    pub fn from_dpop_source(source: Option<&str>) -> Result<Self, AwsClaimError> {
+        let agent = source
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| TipClaimValue::parse("vouch/agent", s))
+            .transpose()?;
+        let subject_type = if source.is_some() {
+            TipSubjectType::Workload
+        } else {
+            TipSubjectType::User
+        };
+        Ok(Self {
+            subject_type,
+            agent,
+        })
+    }
+}
+
+/// `aws:OriginIdentity/SubjectType`: "The value must be `user` or
+/// `workload`." (IAM, Configure TIP for an OIDC provider).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TipSubjectType {
+    /// A person at the keyboard.
+    User,
+    /// An AI agent acting for the person.
+    Workload,
+}
+
+/// A value STS accepts as a mapped trusted identity propagation source.
+///
+/// IAM, "Meet source-value requirements": each mapped value "must contain
+/// one value of no more than 128 characters" and "can contain letters,
+/// numbers, spaces, and the characters `_ . : / = + - @`". A present mapped
+/// value that breaks a rule fails the whole federation request with
+/// `InvalidIdentityToken`, so Vouch refuses it at issuance instead.
+/// "Letters" is read as ASCII, the narrower reading.
+/// (<https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_providers_tip_federation_context_keys.html>)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct TipClaimValue(String);
+
+impl TipClaimValue {
+    const MAX_LEN: usize = 128;
+
+    /// Accept `value`, with surrounding whitespace trimmed, for the claim
+    /// `key` if STS will accept it as a TIP value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AwsClaimError::TipValue`] naming the claim when the value
+    /// is empty, longer than 128 characters, or has a character STS refuses.
+    pub fn parse(key: &'static str, value: &str) -> Result<Self, AwsClaimError> {
+        let value = value.trim();
+        let allowed = |c: char| c.is_ascii_alphanumeric() || c == ' ' || "_.:/=+-@".contains(c);
+        let len = value.chars().count();
+        if (1..=Self::MAX_LEN).contains(&len) && value.chars().all(allowed) {
+            Ok(Self(value.to_owned()))
+        } else {
+            Err(AwsClaimError::TipValue {
+                key,
+                value: value.to_owned(),
+            })
+        }
+    }
 }
 
 /// AWS session tags claim structure (nested format).
@@ -386,6 +496,17 @@ pub enum AwsClaimError {
         /// The refused value.
         value: String,
     },
+    /// A trusted identity propagation claim value is outside what STS maps.
+    #[error(
+        "'{value}' cannot be the AWS token claim {key}: AWS allows only ASCII letters, \
+         digits, spaces, and _.:/=+-@ (1 to 128 characters)"
+    )]
+    TipValue {
+        /// The claim's TIP source key.
+        key: &'static str,
+        /// The refused value.
+        value: String,
+    },
 }
 
 /// Errors from building OIDC ID token claims.
@@ -407,6 +528,8 @@ pub struct OidcIdTokenClaimsBuilder {
     source_identity: Option<String>,
     aws_tags: Option<AwsSessionTags>,
     aws_roles: Option<Vec<String>>,
+    auth_time: Option<Timestamp>,
+    vouch: Option<VouchSessionContext>,
     valid_for_seconds: u64,
     /// Reference instant stamped onto `iat` and `exp`. Production callers
     /// pass the request's [`crate::arrival::ArrivalTime`] instant (via
@@ -433,6 +556,8 @@ impl OidcIdTokenClaimsBuilder {
             source_identity: None,
             aws_tags: None,
             aws_roles: None,
+            auth_time: None,
+            vouch: None,
             valid_for_seconds: 28800, // 8 hours default
             issued_at: None,
         }
@@ -550,6 +675,21 @@ impl OidcIdTokenClaimsBuilder {
         self
     }
 
+    /// Set the `auth_time` claim; `None` leaves it absent.
+    #[must_use]
+    pub fn auth_time(mut self, auth_time: Option<Timestamp>) -> Self {
+        self.auth_time = auth_time;
+        self
+    }
+
+    /// Set the `vouch` session-context claim for AWS trusted identity
+    /// propagation.
+    #[must_use]
+    pub fn vouch_context(mut self, context: VouchSessionContext) -> Self {
+        self.vouch = Some(context);
+        self
+    }
+
     /// Set the token validity period in seconds.
     #[must_use]
     pub fn valid_for_seconds(mut self, seconds: u64) -> Self {
@@ -622,6 +762,8 @@ impl OidcIdTokenClaimsBuilder {
             source_identity: self.source_identity,
             aws_tags: self.aws_tags,
             aws_roles: self.aws_roles,
+            auth_time: self.auth_time.map(Timestamp::as_second),
+            vouch: self.vouch,
         })
     }
 }
@@ -731,6 +873,94 @@ mod tests {
                 "{refused}"
             );
         }
+    }
+
+    // IAM, Meet source-value requirements: a mapped value "must contain one
+    // value of no more than 128 characters" and "can contain letters,
+    // numbers, spaces, and the characters `_ . : / = + - @`".
+    // https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_providers_tip_federation_context_keys.html
+    #[test]
+    fn test_tip_claim_value_matches_iam_source_value_requirements() {
+        let at_limit = "a".repeat(128);
+        let over_limit = "a".repeat(129);
+        for ok in [
+            "claude-code",
+            "claude-code/1.0",
+            "agent name",
+            "a_b.c:d/e=f+g-h@i",
+            &at_limit,
+        ] {
+            assert!(TipClaimValue::parse("vouch/agent", ok).is_ok(), "{ok}");
+        }
+        // A comma and `#` pass other STS fields but not a TIP value; `ü` is
+        // refused under the ASCII reading of "letters".
+        for refused in [
+            "",
+            "   ",
+            "a,b",
+            "a#b",
+            "o'malley",
+            "tab\there",
+            "jürgen",
+            &over_limit,
+        ] {
+            assert!(
+                matches!(
+                    TipClaimValue::parse("vouch/agent", refused),
+                    Err(AwsClaimError::TipValue {
+                        key: "vouch/agent",
+                        ..
+                    })
+                ),
+                "{refused}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_tip_claim_value_trims_surrounding_whitespace() {
+        assert_eq!(
+            TipClaimValue::parse("vouch/agent", " claude-code\t").unwrap(),
+            TipClaimValue::parse("vouch/agent", "claude-code").unwrap(),
+        );
+    }
+
+    // IAM, Configure TIP for an OIDC provider: the Subject type "value must
+    // be `user` or `workload`".
+    #[test]
+    fn test_vouch_session_context_subject_type() {
+        let cases = [
+            (None, serde_json::json!({ "subject_type": "user" })),
+            (
+                Some("claude-code"),
+                serde_json::json!({ "subject_type": "workload", "agent": "claude-code" }),
+            ),
+            // A claimed but blank source still attaches the agent session
+            // policy, so the session is a workload with no agent name.
+            (
+                Some("  "),
+                serde_json::json!({ "subject_type": "workload" }),
+            ),
+        ];
+        for (source, expected) in cases {
+            let context = VouchSessionContext::from_dpop_source(source).unwrap();
+            assert_eq!(
+                serde_json::to_value(&context).unwrap(),
+                expected,
+                "{source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_vouch_session_context_refuses_unmappable_agent() {
+        assert!(matches!(
+            VouchSessionContext::from_dpop_source(Some("agent,with,commas")),
+            Err(AwsClaimError::TipValue {
+                key: "vouch/agent",
+                ..
+            })
+        ));
     }
 
     /// A deterministic reference instant used by [`issued_at`](OidcIdTokenClaimsBuilder::issued_at)

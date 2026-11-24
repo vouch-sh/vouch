@@ -116,6 +116,7 @@ use crate::redact_email;
 use crate::services::auth::ValidatedResourceToken;
 use crate::services::oidc::{
     AwsClaimError, AwsSessionTags, AwsSourceIdentity, AwsTagValue, OidcIdTokenClaimsBuilder,
+    VouchSessionContext,
 };
 
 /// Error types for AWS integration operations.
@@ -232,6 +233,10 @@ fn build_aws_session_tags(
 /// - `iss`: Vouch issuer URL
 /// - `hardware_aaguid`: FIDO2 authenticator AAGUID (for hardware key verification)
 /// - `hd`: Google Workspace hosted domain (for domain-based access control)
+/// - `auth_time`: when the FIDO2 ceremony behind the session ran
+/// - `vouch`: `subject_type` (`user` or `workload`) and the claimed `agent`,
+///   for an IAM OIDC provider's trusted identity propagation mappings (see
+///   [`VouchSessionContext`])
 ///
 /// # Arguments
 /// * `issuer` - Issuer URL (`iss` and `aud`): the org's claimed issuer
@@ -267,12 +272,15 @@ pub(crate) async fn issue_aws_token(
         token.dpop_source.as_deref(),
     )?;
     let source_identity = AwsSourceIdentity::parse(user_email)?;
+    let vouch_context = VouchSessionContext::from_dpop_source(token.dpop_source.as_deref())?;
 
     // Build OIDC claims
     // For AWS, the audience is the issuer URL (AWS matches against the OIDC provider)
     let id_claims = OidcIdTokenClaimsBuilder::for_aws(issuer, user_email, source_identity)
         .hardware_aaguid(token.hardware_aaguid.clone())
         .hd(token.org_domain.clone())
+        .auth_time(token.auth_time)
+        .vouch_context(vouch_context)
         .aws_tags(aws_tags)
         .aws_role(pinned_role)
         .valid_for_seconds(expires_in)
@@ -853,5 +861,106 @@ mod tests {
             Some(1_700_000_000 + i64::try_from(SESSION_HOURS * 3600).expect("fits")),
             "exp must be `now.as_second() + session_hours * 3600`"
         );
+    }
+
+    // IAM, TIP for IAM federation: once a provider maps a source, "A missing
+    // required source or a present invalid mapped value causes AWS STS to
+    // reject the federation request with `InvalidIdentityToken`". Every AWS
+    // token therefore carries `vouch/subject_type`, so a provider mapping it
+    // as `SubjectTypeSourceKey` never fails a human session.
+    // https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_providers_tip_federation.html
+    #[tokio::test]
+    async fn test_vouch_context_marks_human_and_agent_sessions() {
+        let cases = [
+            (None, serde_json::json!({ "subject_type": "user" })),
+            (
+                Some("claude-code".to_string()),
+                serde_json::json!({ "subject_type": "workload", "agent": "claude-code" }),
+            ),
+        ];
+        for (source, expected) in cases {
+            let result = issue_aws_token(
+                BASE_URL,
+                SESSION_HOURS,
+                test_rsa_key(),
+                USER_EMAIL,
+                &test_token(None, None, source.clone()),
+                None,
+                test_now(),
+            )
+            .await
+            .expect("issue_aws_token should succeed");
+
+            let claims = decode_jwt_payload(result.id_token.expose_secret());
+            assert_eq!(claims["vouch"], expected, "{source:?}");
+        }
+    }
+
+    // IAM, Meet source-value requirements: "A present optional runtime claim
+    // that violates a requirement causes the federation request to fail."
+    // An agent name STS would refuse is refused at issuance with a reason.
+    #[tokio::test]
+    async fn test_aws_token_refused_for_unmappable_agent() {
+        let result = issue_aws_token(
+            BASE_URL,
+            SESSION_HOURS,
+            test_rsa_key(),
+            USER_EMAIL,
+            &test_token(None, None, Some("a".repeat(129))),
+            None,
+            test_now(),
+        )
+        .await;
+        assert!(
+            matches!(
+                result,
+                Err(AwsError::UnrepresentableClaim(
+                    AwsClaimError::TipValue { .. }
+                ))
+            ),
+            "{result:?}"
+        );
+    }
+
+    // IAM, Meet source-value requirements: "A claim mapped to a target key
+    // ending in `IssueTime`, with that capitalization, does not contain an
+    // integer" fails federation, so `auth_time` must be a JSON integer.
+    #[tokio::test]
+    async fn test_auth_time_is_an_integer_when_known() {
+        let auth_time = jiff::Timestamp::from_second(1_699_999_000).expect("in range");
+        let mut token = test_token(None, None, None);
+        token.auth_time = Some(auth_time);
+        let result = issue_aws_token(
+            BASE_URL,
+            SESSION_HOURS,
+            test_rsa_key(),
+            USER_EMAIL,
+            &token,
+            None,
+            test_now(),
+        )
+        .await
+        .expect("issue_aws_token should succeed");
+
+        let claims = decode_jwt_payload(result.id_token.expose_secret());
+        assert_eq!(claims["auth_time"], serde_json::json!(1_699_999_000));
+    }
+
+    #[tokio::test]
+    async fn test_auth_time_absent_when_unknown() {
+        let result = issue_aws_token(
+            BASE_URL,
+            SESSION_HOURS,
+            test_rsa_key(),
+            USER_EMAIL,
+            &test_token(None, None, None),
+            None,
+            test_now(),
+        )
+        .await
+        .expect("issue_aws_token should succeed");
+
+        let claims = decode_jwt_payload(result.id_token.expose_secret());
+        assert!(claims.get("auth_time").is_none(), "{claims}");
     }
 }
