@@ -542,14 +542,14 @@ jobs:
           case "$ARCH" in
             x86_64)
               BINARY="tailwindcss-linux-x64"
-              CHECKSUM="dc61b3ac6b8c9ca874c0cc4c57b2409791a64c5540404ca5f5367360babc313a"
+              CHECKSUM="e47695cee3f0d90623a91f3939b08bdee610eb5ad99340adff9d4145b284d6cc"
               ;;
             aarch64)
               BINARY="tailwindcss-linux-arm64"
-              CHECKSUM="55fd0b241214eff3de1e8ee4f22796662f2d2e7a49bcfca7477cfd0bac398195"
+              CHECKSUM="ffcd0d21dbd7c605dc12743ff0c0b47debc963c86b399674084c1c8f2c96ecad"
               ;;
           esac
-          curl -sLO "https://github.com/tailwindlabs/tailwindcss/releases/download/v4.3.3/${BINARY}"
+          curl -sLO "https://github.com/tailwindlabs/tailwindcss/releases/download/v4.3.5/${BINARY}"
           echo "${CHECKSUM}  ${BINARY}" | sha256sum -c -
           chmod +x "${BINARY}"
           cd crates/vouch-server && "../../${BINARY}" -i styles/input.css -o static/css/output.css --minify

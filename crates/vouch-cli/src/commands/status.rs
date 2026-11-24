@@ -379,9 +379,9 @@ fn print_expiry(expires_in: u64) -> Result<()> {
 
     let secs = i64::try_from(expires_in).context(tr!("err-expires-in-does-not-fit-in-i64"))?;
     let duration = jiff::SignedDuration::from_secs(secs);
-    let now = jiff::Zoned::now();
+    let now = jiff::ZonedDateTime::now();
     if let Ok(expiry_ts) = now.timestamp().checked_add(duration) {
-        let expiry = expiry_ts.to_zoned(now.time_zone().clone());
+        let expiry = expiry_ts.to_zoned_datetime(now.time_zone().clone());
         let value = format!("{} ({remaining})", expiry.strftime("%H:%M %Z"));
         println!("  {label:<LABEL_WIDTH$} {}", color_fn(&value));
     } else {

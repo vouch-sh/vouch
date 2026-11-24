@@ -50,7 +50,7 @@ impl std::fmt::Debug for CodeCommitCredentials {
 /// The `Z` only appears as a separator between timestamp and signature in the
 /// password output: `{timestamp}Z{hex_signature}`.
 fn format_codecommit_timestamp(now: jiff::Timestamp) -> String {
-    let dt = now.to_zoned(jiff::tz::TimeZone::UTC);
+    let dt = now.to_zoned_datetime(jiff::tz::TimeZone::UTC);
     format!(
         "{:04}{:02}{:02}T{:02}{:02}{:02}",
         dt.year(),

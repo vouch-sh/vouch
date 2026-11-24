@@ -17,7 +17,7 @@ use crate::exit_code::CliError;
 /// Format timestamp for AWS `X-Amz-Date` header (`YYYYMMDDTHHMMSSZ`).
 #[must_use]
 pub(crate) fn format_amz_date(ts: jiff::Timestamp) -> String {
-    let dt = ts.to_zoned(jiff::tz::TimeZone::UTC);
+    let dt = ts.to_zoned_datetime(jiff::tz::TimeZone::UTC);
     format!(
         "{:04}{:02}{:02}T{:02}{:02}{:02}Z",
         dt.year(),
@@ -32,7 +32,7 @@ pub(crate) fn format_amz_date(ts: jiff::Timestamp) -> String {
 /// Format timestamp for AWS date stamp (`YYYYMMDD`).
 #[must_use]
 pub(crate) fn format_date_stamp(ts: jiff::Timestamp) -> String {
-    let dt = ts.to_zoned(jiff::tz::TimeZone::UTC);
+    let dt = ts.to_zoned_datetime(jiff::tz::TimeZone::UTC);
     format!("{:04}{:02}{:02}", dt.year(), dt.month(), dt.day())
 }
 
