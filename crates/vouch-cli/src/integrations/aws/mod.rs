@@ -6,6 +6,7 @@
 
 pub(crate) mod account_access;
 pub(crate) mod account_access_runtime;
+pub(crate) mod agent_scope;
 pub(crate) mod codeartifact;
 pub(crate) mod codecommit;
 pub(crate) mod config;

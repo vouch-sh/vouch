@@ -668,7 +668,7 @@ async fn run_discover(
     let http_client = credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
         .context(tr!("err-failed-create-http-client"))?;
 
-    let mgmt_session = assume_management_role(&http_client, server, management_role).await?;
+    let mgmt_session = assume_management_role(&http_client, server, management_role, None).await?;
     let idc_token = exchange_idc_access_token(&http_client, idc, &mgmt_session)
         .await
         .context(tr!("err-failed-obtain-identity-center-token"))?;

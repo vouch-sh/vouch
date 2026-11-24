@@ -98,14 +98,7 @@ struct SigninTokenResponse {
 
 /// Obtain console credentials via the Identity Center path.
 async fn get_idc_console_creds(server: &ServerUrl, args: &ConsoleArgs) -> Result<ConsoleCreds> {
-    use crate::commands::credential::aws::{detect_agent_source, obtain_identity_center_token};
-    use crate::integrations::aws::sso_portal::get_role_credentials;
-
-    // Block AI agents early (fast-fail before config load): permission-set
-    // credentials cannot be downscoped.
-    if detect_agent_source().is_some() {
-        return Err(CliError::ConfigError(tr!("aws-err-agent-idc-unsupported")).into());
-    }
+    use crate::commands::credential::aws::vend_permission_set_credentials;
 
     let account_id = args
         .account
@@ -142,16 +135,16 @@ async fn get_idc_console_creds(server: &ServerUrl, args: &ConsoleArgs) -> Result
     let http_client = credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
         .context(tr!("err-failed-create-http-client"))?;
 
-    let idc_token = obtain_identity_center_token(&http_client, server, &management_role, idc)
-        .await
-        .with_context(|| tr!("aws-console-err-aws-credentials"))?;
-
-    let creds = get_role_credentials(
+    // An agent's permission-set credentials are narrowed to read-only before
+    // they reach the federation endpoint.
+    let creds = vend_permission_set_credentials(
         &http_client,
-        &idc.region,
-        &idc_token,
+        server,
+        &management_role,
+        idc,
         account_id,
         permission_set,
+        detect_agent_source().as_deref(),
     )
     .await
     .with_context(|| tr!("aws-console-err-aws-credentials"))?;
@@ -317,7 +310,6 @@ pub(crate) async fn run(server: &ServerUrl, args: ConsoleArgs) -> Result<()> {
 mod tests {
     use super::*;
     use crate::commands::aws::AwsCommands;
-    use crate::commands::credential::aws::test_support::ENV_LOCK;
     use clap::Parser;
 
     /// Parses `ConsoleArgs` through the real `AwsCommands` enum.
@@ -325,51 +317,6 @@ mod tests {
     struct TestCli {
         #[command(subcommand)]
         cmd: AwsCommands,
-    }
-
-    // Agent-block test --------------------------------------------------------
-    //
-    // The agent check fires as the very first statement in `get_idc_console_creds`,
-    // before Config::load or any network I/O, so the test does not need real
-    // server/config state.
-
-    #[tokio::test]
-    #[expect(
-        unsafe_code,
-        reason = "env mutation to trigger agent detection in an isolated test; var is restored after assertion"
-    )]
-    async fn agent_block_in_get_idc_console_creds_fires_before_config_load() {
-        let _guard = ENV_LOCK.lock().await;
-        // SAFETY: agent check is the first statement; Config::load is never reached.
-        unsafe {
-            std::env::set_var("CLAUDECODE", "1");
-        }
-        let args = ConsoleArgs {
-            role: None,
-            profile: None,
-            account: Some("111111111111".to_string()),
-            permission_set: Some("Admin".to_string()),
-            via: None,
-            idc_application: None,
-        };
-        let result = get_idc_console_creds(
-            &ServerUrl::parse("https://example.com", false).unwrap(),
-            &args,
-        )
-        .await;
-        // SAFETY: env var restored regardless of assertion outcome.
-        unsafe {
-            std::env::remove_var("CLAUDECODE");
-        }
-        // `.err().unwrap()` avoids the `T: Debug` bound that `.unwrap_err()` requires.
-        let err = result.err().unwrap();
-        assert!(
-            matches!(
-                err.downcast_ref::<CliError>(),
-                Some(CliError::ConfigError(_))
-            ),
-            "expected ConfigError(aws-err-agent-idc-unsupported), got: {err}"
-        );
     }
 
     #[test]
