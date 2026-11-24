@@ -604,6 +604,11 @@ struct AgentSessionPolicies {
 /// Build the session policies for an exchange: unrestricted normally,
 /// ReadOnlyAccess plus an STS-only management-hop policy when an AI agent
 /// is detected.
+///
+/// The management-hop policy allows `sts:SetContext` because, when the
+/// customer's IAM OIDC provider has trusted identity propagation enabled,
+/// the chained `AssumeRole` carries the session's identity context and STS
+/// refuses it unless the session policy allows that action.
 fn agent_session_policies(agent_source: Option<&str>) -> AgentSessionPolicies {
     if agent_source.is_none() {
         return AgentSessionPolicies {
@@ -620,7 +625,8 @@ fn agent_session_policies(agent_source: Option<&str>) -> AgentSessionPolicies {
                 "Action": [
                     "sts:AssumeRole",
                     "sts:TagSession",
-                    "sts:SetSourceIdentity"
+                    "sts:SetSourceIdentity",
+                    "sts:SetContext"
                 ],
                 "Resource": "*"
             }]
@@ -1334,6 +1340,42 @@ mod tests {
                 "Action": ["sts:AssumeRole", "sts:SetSourceIdentity", "sts:TagSession"],
                 "Resource": "arn:aws:iam::999999999999:role/target"
             })
+        );
+    }
+
+    /// A person's management hop carries no session policy, so the role's
+    /// own policy decides.
+    #[test]
+    fn test_agent_session_policies_unrestricted_for_a_person() {
+        let policies = agent_session_policies(None);
+        assert!(policies.session_policy_names.is_empty());
+        assert!(policies.mgmt_hop_policy.is_none());
+    }
+
+    /// An agent's management hop is limited to the STS actions the chain
+    /// needs. That includes sts:SetContext: with trusted identity
+    /// propagation enabled on the IAM OIDC provider, STS refused the chained
+    /// AssumeRole with "not authorized to perform: sts:SetContext" when the
+    /// session policy left it out.
+    #[test]
+    fn test_agent_session_policies_restrict_the_management_hop() {
+        let policies = agent_session_policies(Some("claude-code"));
+        assert_eq!(policies.session_policy_names, &["ReadOnlyAccess"]);
+        assert_eq!(
+            policies.mgmt_hop_policy,
+            Some(serde_json::json!({
+                "Version": "2012-10-17",
+                "Statement": [{
+                    "Effect": "Allow",
+                    "Action": [
+                        "sts:AssumeRole",
+                        "sts:TagSession",
+                        "sts:SetSourceIdentity",
+                        "sts:SetContext"
+                    ],
+                    "Resource": "*"
+                }]
+            }))
         );
     }
 
