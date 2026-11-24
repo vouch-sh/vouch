@@ -96,7 +96,7 @@ pub use authorization::{AuthorizationCodeParams, ValidatedAuthRequest, check_cli
 pub use authorization_details::AuthorizationDetails;
 pub use claims::{
     AwsClaimError, AwsSessionTags, AwsSourceIdentity, AwsTagValue, ClaimsBuildError, CnfClaim,
-    OidcIdTokenClaims, OidcIdTokenClaimsBuilder,
+    OidcIdTokenClaims, OidcIdTokenClaimsBuilder, VouchSessionContext,
 };
 pub use discovery::{OidcDiscoveryDocument, build_discovery_document, build_jwks};
 pub use dpop::{DpopError, ValidatedDpopProof};
