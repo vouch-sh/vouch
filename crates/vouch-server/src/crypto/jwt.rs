@@ -694,7 +694,7 @@ pub(crate) fn encode_state_token<T: Serialize>(
     jsonwebtoken::encode(
         &Header::from(jwt_type),
         claims,
-        &EncodingKey::from_secret(secret),
+        &EncodingKey::from_secret(secret)?,
     )
 }
 
@@ -733,7 +733,7 @@ pub(crate) fn decode_state_token<T: DeserializeOwned>(
         validate_aud: false,
         ..Validation::default()
     };
-    let data = jsonwebtoken::decode::<T>(token, &DecodingKey::from_secret(secret), &validation)?;
+    let data = jsonwebtoken::decode::<T>(token, &DecodingKey::from_secret(secret)?, &validation)?;
     // RFC 8725 §3.11: Validate typ header
     if data.header.typ.as_deref() != Some(jwt_type.as_header_str()) {
         return Err(jsonwebtoken::errors::Error::from(
@@ -1387,7 +1387,7 @@ mod tests {
         let token = encode(
             &Header::default(), // HS256 by default
             &claims,
-            &EncodingKey::from_secret(TEST_JWT_SECRET),
+            &EncodingKey::from_secret(TEST_JWT_SECRET).expect("non-empty test secret"),
         )
         .expect("encode");
 

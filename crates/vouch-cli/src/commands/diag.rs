@@ -778,7 +778,7 @@ fn export_fixture(
             description: "YubiKey diagnostic test fixture".to_string(),
             device_model,
             aaguid,
-            created_at: jiff::Zoned::now().to_string(),
+            created_at: jiff::ZonedDateTime::now().to_string(),
             rp_id: RP_ID.to_string(),
         },
         registration: RegistrationFixture {
